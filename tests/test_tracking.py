@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 from src.utils.player_detector import Detection, FakePlayerDetector, PlayerDetector
 from src.utils.team_classifier import FakeTeamClassifier, TeamClassifier
@@ -33,3 +34,22 @@ def test_fake_team_classifier_empty_input():
 
 def test_team_classifier_is_abstract():
     assert issubclass(FakeTeamClassifier, TeamClassifier)
+
+
+def test_clip_team_classifier_raises_before_fit():
+    from src.utils.team_classifier import CLIPTeamClassifier
+    clf = CLIPTeamClassifier()
+    with pytest.raises(RuntimeError, match="Call fit()"):
+        clf.classify([np.zeros((60, 40, 3), dtype=np.uint8)])
+
+
+def test_clip_team_classifier_fit_classify(monkeypatch):
+    from src.utils.team_classifier import CLIPTeamClassifier
+    clf = CLIPTeamClassifier(n_clusters=2)
+    clf._id_to_name = {0: "A", 1: "B"}
+    monkeypatch.setattr(clf, "_embed", lambda crops: np.random.default_rng(0).random((len(crops), 512)))
+    crops = [np.zeros((60, 40, 3), dtype=np.uint8) for _ in range(6)]
+    clf.fit(crops)
+    labels = clf.classify(crops)
+    assert len(labels) == 6
+    assert all(label in {"A", "B"} for label in labels)

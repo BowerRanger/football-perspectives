@@ -38,21 +38,26 @@ class CLIPTeamClassifier(TeamClassifier):
         # Cluster-ID → team name; 0 and 1 are teams, 2 is referee by default.
         # Caller can override by inspecting cluster centroids if needed.
         self._id_to_name: dict[int, str] = {0: "A", 1: "B", 2: "referee"}
+        self._processor = None
+        self._clip_model = None
 
-    def _embed(self, crops: list[np.ndarray]) -> "np.ndarray":
+    def _load_clip(self) -> None:
+        if self._processor is not None:
+            return
         from transformers import CLIPProcessor, CLIPModel  # lazy import
+        import torch
+        self._processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        self._clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        self._clip_model.eval()
+
+    def _embed(self, crops: list[np.ndarray]) -> np.ndarray:
         from PIL import Image
         import torch
-
-        if not hasattr(self, "_processor"):
-            self._processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-            self._model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-            self._model.eval()
-
+        self._load_clip()
         pil_images = [Image.fromarray(c[:, :, ::-1]) for c in crops]  # BGR → RGB
         inputs = self._processor(images=pil_images, return_tensors="pt", padding=True)
         with torch.no_grad():
-            feats = self._model.get_image_features(**inputs)
+            feats = self._clip_model.get_image_features(**inputs)
         return feats.numpy()
 
     def fit(self, crops: list[np.ndarray]) -> None:

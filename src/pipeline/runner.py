@@ -2,12 +2,13 @@ from pathlib import Path
 from src.pipeline.base import BaseStage
 from src.stages.segmentation import ShotSegmentationStage
 from src.stages.calibration import CameraCalibrationStage
+from src.stages.sync import TemporalSyncStage
 
 # Populated as stages are implemented; each entry is (canonical_name, StageClass)
-STAGE_ORDER: list[tuple[str, type[BaseStage] | None]] = [
+STAGE_ORDER: list[tuple[str, type[BaseStage]]] = [
     ("segmentation", ShotSegmentationStage),
     ("calibration", CameraCalibrationStage),
-    ("sync", None),           # placeholder — replaced in Task 9
+    ("sync", TemporalSyncStage),
 ]
 
 _ALIASES: dict[str, str] = {

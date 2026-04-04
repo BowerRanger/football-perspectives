@@ -17,7 +17,7 @@ def test_resolve_stages_all():
 
 def test_resolve_stages_from():
     names = resolve_stages("all", from_stage="calibration")
-    assert names == ["calibration", "sync"]
+    assert names == ["calibration", "sync", "tracking", "pose", "matching"]
 
 
 def test_resolve_stages_explicit():
@@ -30,3 +30,27 @@ def test_resolve_stages_from_numeric_alias():
     names_numeric = resolve_stages("all", from_stage="2")
     names_canonical = resolve_stages("all", from_stage="calibration")
     assert names_numeric == names_canonical
+
+
+def test_stage_order_includes_stages_4_to_6():
+    names = [name for name, _ in STAGE_ORDER]
+    assert "tracking" in names
+    assert "pose" in names
+    assert "matching" in names
+
+
+def test_aliases_include_stages_4_to_6():
+    from src.pipeline.runner import _ALIASES
+    assert _ALIASES["4"] == "tracking"
+    assert _ALIASES["5"] == "pose"
+    assert _ALIASES["6"] == "matching"
+
+
+def test_resolve_stages_from_tracking():
+    names = resolve_stages("all", from_stage="tracking")
+    assert names == ["tracking", "pose", "matching"]
+
+
+def test_resolve_stages_explicit_4_5():
+    names = resolve_stages("4,5", from_stage=None)
+    assert names == ["tracking", "pose"]

@@ -16,6 +16,8 @@ dependencies = [
     "ultralytics>=8.0",
     "tqdm>=4.66",
     "supervision>=0.20",
+    "transformers>=4.40",
+    "scikit-learn>=1.4",
 ]
 
 [project.optional-dependencies]

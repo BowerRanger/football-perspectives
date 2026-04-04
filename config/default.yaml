@@ -27,6 +27,10 @@ detection:
   ball_model: yolov8n
   confidence_threshold: 0.3
 
+tracking:
+  player_model: yolov8x.pt
+  confidence_threshold: 0.3
+
 pose_estimation:
   model_name: nielsr/vitpose-base-simple
   min_confidence: 0.3

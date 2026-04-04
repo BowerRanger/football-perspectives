@@ -3,18 +3,26 @@ from src.pipeline.base import BaseStage
 from src.stages.segmentation import ShotSegmentationStage
 from src.stages.calibration import CameraCalibrationStage
 from src.stages.sync import TemporalSyncStage
+from src.stages.tracking import PlayerTrackingStage
+from src.stages.pose import PoseEstimationStage
+from src.stages.matching import CrossViewMatchingStage
 
-# Populated as stages are implemented; each entry is (canonical_name, StageClass)
 STAGE_ORDER: list[tuple[str, type[BaseStage]]] = [
     ("segmentation", ShotSegmentationStage),
     ("calibration", CameraCalibrationStage),
     ("sync", TemporalSyncStage),
+    ("tracking", PlayerTrackingStage),
+    ("pose", PoseEstimationStage),
+    ("matching", CrossViewMatchingStage),
 ]
 
 _ALIASES: dict[str, str] = {
     "1": "segmentation",
     "2": "calibration",
     "3": "sync",
+    "4": "tracking",
+    "5": "pose",
+    "6": "matching",
 }
 
 
@@ -46,7 +54,6 @@ def run_pipeline(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     active = resolve_stages(stages, from_stage)
-    # Resolve numeric alias once so comparison works correctly
     from_stage_canonical = _ALIASES.get(from_stage, from_stage) if from_stage else None
     for name, StageClass in STAGE_ORDER:
         if name not in active:

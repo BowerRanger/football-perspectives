@@ -29,3 +29,5 @@ def test_fake_pose_estimator_keypoint_names():
 
 def test_pose_estimator_is_abstract():
     assert issubclass(FakePoseEstimator, PoseEstimator)
+    with pytest.raises(TypeError):
+        PoseEstimator()

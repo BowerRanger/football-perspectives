@@ -74,8 +74,9 @@ class ViTPoseEstimator(PoseEstimator):
         with torch.no_grad():
             outputs = self._model(**inputs)
 
-        heatmaps = outputs.last_hidden_state
-        if heatmaps.dim() == 4:
+        # ViTPose outputs heatmaps on outputs.heatmaps: (B, num_joints, H_out, W_out)
+        heatmaps = getattr(outputs, "heatmaps", None)
+        if heatmaps is not None and heatmaps.dim() == 4:
             _, J, H_out, W_out = heatmaps.shape
             crop_h, crop_w = crop.shape[:2]
             kps = []
@@ -89,5 +90,9 @@ class ViTPoseEstimator(PoseEstimator):
                 kps.append(Keypoint(name=COCO_KEYPOINT_NAMES[j], x=px, y=py, conf=conf))
             return kps
 
-        # Fallback: zero-confidence keypoints if model output shape is unexpected
+        import logging
+        logging.warning(
+            "ViTPoseEstimator: unexpected model output shape — returning zero-confidence keypoints. "
+            "Check model name and output attributes."
+        )
         return [Keypoint(name=name, x=0.0, y=0.0, conf=0.0) for name in COCO_KEYPOINT_NAMES]

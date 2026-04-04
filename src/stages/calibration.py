@@ -114,11 +114,14 @@ class CameraCalibrationStage(BaseStage):
         manifest_path = self.output_dir / "shots" / "shots_manifest.json"
         if not manifest_path.exists():
             return False
-        manifest = ShotsManifest.load(manifest_path)
-        return all(
-            (cal_dir / f"{shot.id}_calibration.json").exists()
-            for shot in manifest.shots
-        )
+        try:
+            manifest = ShotsManifest.load(manifest_path)
+            return all(
+                (cal_dir / f"{shot.id}_calibration.json").exists()
+                for shot in manifest.shots
+            )
+        except Exception:
+            return False
 
     def run(self) -> None:
         cal_dir = self.output_dir / "calibration"

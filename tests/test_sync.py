@@ -69,3 +69,16 @@ def test_project_ball_to_pitch_returns_2d():
     pitch_pos = project_ball_to_pitch(pixel, frame_cal)
     assert pitch_pos is not None
     assert np.allclose(pitch_pos, [30.0, 20.0], atol=0.1)
+
+
+def test_cross_correlate_unequal_lengths():
+    """Offset must be correct when trajectories have different lengths."""
+    # traj_a has pattern [1,3,5,3] at index 2 (length 12)
+    traj_a = np.zeros(12, dtype=float)
+    traj_a[2:6] = [1, 3, 5, 3]
+    # traj_b has same pattern at index 5 (length 10), lag = 3
+    traj_b = np.zeros(10, dtype=float)
+    traj_b[5:9] = [1, 3, 5, 3]
+    offset, confidence = cross_correlate_trajectories(traj_a, traj_b)
+    assert offset == 3
+    assert confidence > 0.7

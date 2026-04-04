@@ -45,30 +45,32 @@ def cross_correlate_trajectories(
 
     a = traj_a / norm_a
     b = traj_b / norm_b
-    # correlate(b, a): peak at index k -> b leads a by (k - (N-1)) frames
-    # positive result = traj_b lags traj_a
+    # correlate(b, a): peak at lag L means b[t] ~ a[t-L], so b lags a by L frames
+    # For correlate(b, a, "full"), the i-th lag = i - (len(a) - 1)
     corr = correlate(b, a, mode="full")
-    N = len(traj_a)
-    lags = np.arange(-(N - 1), N)
+    lags = np.arange(-(len(a) - 1), len(b))
     peak_idx = int(np.argmax(corr))
     offset = int(lags[peak_idx])
 
-    # Compute Pearson r of the aligned overlap as a robust confidence measure.
-    # offset > 0: traj_b lags traj_a -> traj_a[:N-offset] aligns with traj_b[offset:]
-    # offset < 0: traj_b leads traj_a -> traj_a[-offset:] aligns with traj_b[:N+offset]
+    # Compute Pearson r of the aligned overlap as confidence
+    # offset > 0: traj_b lags traj_a -> a[0:] aligns with b[offset:]
     if offset >= 0:
-        aligned_a = traj_a[: len(traj_a) - offset]
-        aligned_b = traj_b[offset:]
+        aligned_a = a[: len(a) - offset] if offset < len(a) else a[:0]
+        aligned_b = b[offset: offset + len(aligned_a)]
     else:
-        aligned_a = traj_a[-offset:]
-        aligned_b = traj_b[: len(traj_b) + offset]
+        aligned_b = b[: len(b) + offset] if -offset < len(b) else b[:0]
+        aligned_a = a[-offset: -offset + len(aligned_b)]
 
-    if len(aligned_a) < 2:
+    overlap = min(len(aligned_a), len(aligned_b))
+    aligned_a = aligned_a[:overlap]
+    aligned_b = aligned_b[:overlap]
+
+    if overlap < 2 or np.std(aligned_a) < 1e-8 or np.std(aligned_b) < 1e-8:
         return offset, 0.0
 
     r, _ = pearsonr(aligned_a, aligned_b)
-    confidence = min(1.0, max(0.0, float(r)))
-    return offset, confidence
+    confidence = float(max(0.0, r))
+    return offset, min(1.0, confidence)
 
 
 def _extract_ball_trajectory(

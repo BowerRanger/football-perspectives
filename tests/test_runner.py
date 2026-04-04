@@ -23,3 +23,10 @@ def test_resolve_stages_from():
 def test_resolve_stages_explicit():
     names = resolve_stages("1,3", from_stage=None)
     assert names == ["segmentation", "sync"]
+
+
+def test_resolve_stages_from_numeric_alias():
+    """--from-stage 2 should be equivalent to --from-stage calibration."""
+    names_numeric = resolve_stages("all", from_stage="2")
+    names_canonical = resolve_stages("all", from_stage="calibration")
+    assert names_numeric == names_canonical

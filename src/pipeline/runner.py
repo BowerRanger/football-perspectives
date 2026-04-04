@@ -46,6 +46,8 @@ def run_pipeline(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     active = resolve_stages(stages, from_stage)
+    # Resolve numeric alias once so comparison works correctly
+    from_stage_canonical = _ALIASES.get(from_stage, from_stage) if from_stage else None
     for name, StageClass in STAGE_ORDER:
         if name not in active:
             continue
@@ -53,7 +55,7 @@ def run_pipeline(
             print(f"  [SKIP] {name} (not yet implemented)")
             continue
         stage = StageClass(config=config, output_dir=output_dir, **stage_kwargs)
-        if stage.is_complete() and from_stage != _ALIASES.get(name, name):
+        if stage.is_complete() and from_stage_canonical != name:
             print(f"  [SKIP] {name} (cached)")
             continue
         print(f"  [RUN]  {name}")

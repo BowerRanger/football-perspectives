@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import cv2
@@ -88,6 +89,9 @@ class PlayerTrackingStage(BaseStage):
 
         clip_path = self.output_dir / clip_file
         cap = cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open clip: {clip_path}")
+
         byte_tracker = sv.ByteTrack()
 
         cal_map = {f.frame: f for f in calibration.frames} if calibration else {}
@@ -97,75 +101,79 @@ class PlayerTrackingStage(BaseStage):
         active_tracks: dict[int, Track] = {}
         frame_idx = 0
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if frame_idx in cal_map:
-                last_cal = cal_map[frame_idx]
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if frame_idx in cal_map:
+                    last_cal = cal_map[frame_idx]
 
-            detections = detector.detect(frame)
-            player_dets = [d for d in detections if d.class_name != "ball"]
+                detections = detector.detect(frame)
+                player_dets = [d for d in detections if d.class_name != "ball"]
 
-            if player_dets:
-                xyxy = np.array([list(d.bbox) for d in player_dets], dtype=np.float32)
-                confs = np.array([d.confidence for d in player_dets], dtype=np.float32)
-                class_ids = np.zeros(len(player_dets), dtype=int)
-                sv_dets = sv.Detections(
-                    xyxy=xyxy, confidence=confs, class_id=class_ids
-                )
-                tracked = byte_tracker.update_with_detections(sv_dets)
-
-                crops = []
-                for i in range(len(tracked)):
-                    x1, y1, x2, y2 = tracked.xyxy[i]
-                    crops.append(
-                        frame[max(0, int(y1)):int(y2), max(0, int(x1)):int(x2)]
+                if player_dets:
+                    xyxy = np.array([list(d.bbox) for d in player_dets], dtype=np.float32)
+                    confs = np.array([d.confidence for d in player_dets], dtype=np.float32)
+                    class_ids = np.zeros(len(player_dets), dtype=int)
+                    sv_dets = sv.Detections(
+                        xyxy=xyxy, confidence=confs, class_id=class_ids
                     )
-                team_labels = team_classifier.classify(crops) if crops else []
+                    tracked = byte_tracker.update_with_detections(sv_dets)
 
-                for i, tid in enumerate(tracked.tracker_id):
-                    if tid is None:
-                        continue
-                    x1, y1, x2, y2 = tracked.xyxy[i]
-                    conf = (
-                        float(tracked.confidence[i])
-                        if tracked.confidence is not None
-                        else 0.5
-                    )
-                    bbox = [float(x1), float(y1), float(x2), float(y2)]
-                    team = team_labels[i] if i < len(team_labels) else "unknown"
-
-                    foot_u, foot_v = _foot_centre((x1, y1, x2, y2))
-                    pitch_pos: list[float] | None = None
-                    if last_cal is not None:
-                        K = np.array(last_cal.intrinsic_matrix, dtype=np.float32)
-                        rvec = np.array(last_cal.rotation_vector, dtype=np.float32)
-                        tvec = np.array(last_cal.translation_vector, dtype=np.float32)
-                        try:
-                            pp = project_to_pitch(
-                                np.array([foot_u, foot_v]), K, rvec, tvec
-                            )
-                            pitch_pos = [float(pp[0]), float(pp[1])]
-                        except Exception:
-                            pass
-
-                    track_frame = TrackFrame(
-                        frame=frame_idx,
-                        bbox=bbox,
-                        confidence=conf,
-                        pitch_position=pitch_pos,
-                    )
-                    if tid not in active_tracks:
-                        active_tracks[tid] = Track(
-                            track_id=f"T{tid:03d}",
-                            class_name="player",
-                            team=team,
-                            frames=[],
+                    crops = []
+                    for i in range(len(tracked)):
+                        x1, y1, x2, y2 = tracked.xyxy[i]
+                        crops.append(
+                            frame[max(0, int(y1)):int(y2), max(0, int(x1)):int(x2)]
                         )
-                    active_tracks[tid].frames.append(track_frame)
+                    team_labels = team_classifier.classify(crops) if crops else []
 
-            frame_idx += 1
+                    for i, tid in enumerate(tracked.tracker_id):
+                        if tid is None:
+                            continue
+                        x1, y1, x2, y2 = tracked.xyxy[i]
+                        conf = (
+                            float(tracked.confidence[i])
+                            if tracked.confidence is not None
+                            else 0.5
+                        )
+                        bbox = [float(x1), float(y1), float(x2), float(y2)]
+                        team = team_labels[i] if i < len(team_labels) else "unknown"
 
-        cap.release()
+                        foot_u, foot_v = _foot_centre((x1, y1, x2, y2))
+                        pitch_pos: list[float] | None = None
+                        if last_cal is not None:
+                            K = np.array(last_cal.intrinsic_matrix, dtype=np.float32)
+                            rvec = np.array(last_cal.rotation_vector, dtype=np.float32)
+                            tvec = np.array(last_cal.translation_vector, dtype=np.float32)
+                            try:
+                                pp = project_to_pitch(
+                                    np.array([foot_u, foot_v]), K, rvec, tvec
+                                )
+                                pitch_pos = [float(pp[0]), float(pp[1])]
+                            except Exception as exc:
+                                logging.warning(
+                                    "pitch projection failed for %s frame %d: %s",
+                                    shot_id, frame_idx, exc,
+                                )
+
+                        track_frame = TrackFrame(
+                            frame=frame_idx,
+                            bbox=bbox,
+                            confidence=conf,
+                            pitch_position=pitch_pos,
+                        )
+                        if tid not in active_tracks:
+                            active_tracks[tid] = Track(
+                                track_id=f"T{tid:03d}",
+                                class_name="player",
+                                team=team,
+                                frames=[],
+                            )
+                        active_tracks[tid].frames.append(track_frame)
+
+                frame_idx += 1
+        finally:
+            cap.release()
         return TracksResult(shot_id=shot_id, tracks=list(active_tracks.values()))

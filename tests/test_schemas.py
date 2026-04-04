@@ -3,6 +3,9 @@ from pathlib import Path
 from src.schemas.shots import Shot, ShotsManifest
 from src.schemas.calibration import CameraFrame, CalibrationResult
 from src.schemas.sync_map import Alignment, SyncMap
+from src.schemas.tracks import TrackFrame, Track, TracksResult
+from src.schemas.poses import Keypoint, PlayerPoseFrame, PlayerPoses, PosesResult, COCO_KEYPOINT_NAMES
+from src.schemas.player_matches import PlayerView, MatchedPlayer, PlayerMatches
 
 def test_shots_manifest_round_trip(tmp_path):
     m = ShotsManifest(
@@ -67,10 +70,6 @@ def test_sync_map_round_trip(tmp_path):
     loaded = SyncMap.load(p)
     assert loaded.alignments[0].frame_offset == -47
 
-
-from src.schemas.tracks import TrackFrame, Track, TracksResult
-from src.schemas.poses import Keypoint, PlayerPoseFrame, PlayerPoses, PosesResult, COCO_KEYPOINT_NAMES
-from src.schemas.player_matches import PlayerView, MatchedPlayer, PlayerMatches
 
 def test_tracks_result_round_trip(tmp_path):
     tf = TrackFrame(frame=0, bbox=[10.0, 20.0, 80.0, 200.0], confidence=0.9, pitch_position=[34.2, 21.5])

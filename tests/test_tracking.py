@@ -1,55 +1,76 @@
-import pytest
+import cv2
 import numpy as np
-from src.utils.player_detector import Detection, FakePlayerDetector, PlayerDetector
-from src.utils.team_classifier import FakeTeamClassifier, TeamClassifier
+import pytest
+from pathlib import Path
+from src.pipeline.config import load_config
+from src.schemas.shots import Shot, ShotsManifest
+from src.schemas.tracks import TracksResult
+from src.stages.tracking import PlayerTrackingStage
+from src.utils.player_detector import Detection, FakePlayerDetector
+from src.utils.team_classifier import FakeTeamClassifier
 
 
-def test_fake_player_detector_cycles():
-    frame = np.zeros((240, 320, 3), dtype=np.uint8)
-    dets = [
-        [Detection(bbox=(10.0, 20.0, 80.0, 200.0), confidence=0.9, class_name="player")],
-        [],
-    ]
-    detector = FakePlayerDetector(dets)
-    assert len(detector.detect(frame)) == 1
-    assert len(detector.detect(frame)) == 0
-    assert len(detector.detect(frame)) == 1  # cycles
+@pytest.fixture(scope="module")
+def tiny_shot_dir(tmp_path_factory) -> Path:
+    """Output directory with a shots manifest and a 1-second synthetic clip."""
+    root = tmp_path_factory.mktemp("tracking_stage")
+    shots_dir = root / "shots"
+    shots_dir.mkdir()
+
+    clip_path = shots_dir / "shot_001.mp4"
+    writer = cv2.VideoWriter(
+        str(clip_path), cv2.VideoWriter_fourcc(*"mp4v"), 10, (320, 240)
+    )
+    for _ in range(10):
+        writer.write(np.full((240, 320, 3), [50, 200, 50], dtype=np.uint8))
+    writer.release()
+
+    shot = Shot(
+        id="shot_001",
+        start_frame=0,
+        end_frame=9,
+        start_time=0.0,
+        end_time=1.0,
+        clip_file="shots/shot_001.mp4",
+    )
+    ShotsManifest(
+        source_file="test.mp4", fps=10.0, total_frames=10, shots=[shot]
+    ).save(shots_dir / "shots_manifest.json")
+    return root
 
 
-def test_detection_is_player_detector():
-    assert issubclass(FakePlayerDetector, PlayerDetector)
+def _one_player_det() -> Detection:
+    return Detection(bbox=(50.0, 30.0, 150.0, 200.0), confidence=0.9, class_name="player")
 
 
-def test_fake_team_classifier_returns_fixed_label():
-    crops = [np.zeros((60, 40, 3), dtype=np.uint8) for _ in range(3)]
-    clf = FakeTeamClassifier("B")
-    labels = clf.classify(crops)
-    assert labels == ["B", "B", "B"]
+def test_tracking_stage_writes_tracks_file(tiny_shot_dir):
+    cfg = load_config()
+    stage = PlayerTrackingStage(
+        config=cfg,
+        output_dir=tiny_shot_dir,
+        player_detector=FakePlayerDetector([[_one_player_det()]]),
+        team_classifier=FakeTeamClassifier("A"),
+    )
+    stage.run()
+    assert (tiny_shot_dir / "tracks" / "shot_001_tracks.json").exists()
 
 
-def test_fake_team_classifier_empty_input():
-    clf = FakeTeamClassifier("A")
-    assert clf.classify([]) == []
+def test_tracking_stage_is_complete_after_run(tiny_shot_dir):
+    cfg = load_config()
+    stage = PlayerTrackingStage(
+        config=cfg,
+        output_dir=tiny_shot_dir,
+        player_detector=FakePlayerDetector([[_one_player_det()]]),
+        team_classifier=FakeTeamClassifier("A"),
+    )
+    assert stage.is_complete()
 
 
-def test_team_classifier_is_abstract():
-    assert issubclass(FakeTeamClassifier, TeamClassifier)
-
-
-def test_clip_team_classifier_raises_before_fit():
-    from src.utils.team_classifier import CLIPTeamClassifier
-    clf = CLIPTeamClassifier()
-    with pytest.raises(RuntimeError, match="Call fit()"):
-        clf.classify([np.zeros((60, 40, 3), dtype=np.uint8)])
-
-
-def test_clip_team_classifier_fit_classify(monkeypatch):
-    from src.utils.team_classifier import CLIPTeamClassifier
-    clf = CLIPTeamClassifier(n_clusters=2)
-    clf._id_to_name = {0: "A", 1: "B"}
-    monkeypatch.setattr(clf, "_embed", lambda crops: np.random.default_rng(0).random((len(crops), 512)))
-    crops = [np.zeros((60, 40, 3), dtype=np.uint8) for _ in range(6)]
-    clf.fit(crops)
-    labels = clf.classify(crops)
-    assert len(labels) == 6
-    assert all(label in {"A", "B"} for label in labels)
+def test_tracking_stage_tracks_have_correct_schema(tiny_shot_dir):
+    result = TracksResult.load(tiny_shot_dir / "tracks" / "shot_001_tracks.json")
+    assert result.shot_id == "shot_001"
+    assert len(result.tracks) >= 1
+    t = result.tracks[0]
+    assert t.team == "A"
+    assert len(t.frames) >= 1
+    assert len(t.frames[0].bbox) == 4

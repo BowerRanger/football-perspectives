@@ -31,3 +31,7 @@ pose_estimation:
   model_name: nielsr/vitpose-base-simple
   min_confidence: 0.3
   smooth_sigma: 2.0
+
+matching:
+  max_distance_m: 5.0
+  n_reference_frames: 10

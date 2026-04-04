@@ -51,7 +51,7 @@ def hungarian_match_players(
     if not tracks_a or not tracks_b:
         return []
 
-    b_frames = [max(0, f - sync_offset) for f in reference_frames]
+    b_frames = [f - sync_offset for f in reference_frames if f - sync_offset >= 0]
 
     pos_a = {t.track_id: _mean_pitch_position(shot_a_tracks, t.track_id, reference_frames)
              for t in tracks_a}
@@ -101,6 +101,9 @@ class CrossViewMatchingStage(BaseStage):
             if path.exists():
                 tracks_by_shot[shot.id] = TracksResult.load(path)
 
+        if not tracks_by_shot:
+            logging.warning("No track files found in %s — player_matches will be empty", tracks_dir)
+
         # Assign a global player_id to every track in the reference shot first
         player_counter = 0
         player_id_map: dict[tuple[str, str], str] = {}  # (shot_id, track_id) -> player_id
@@ -110,9 +113,9 @@ class CrossViewMatchingStage(BaseStage):
             for track in tracks_by_shot[ref_id].tracks:
                 if track.class_name == "ball":
                     continue
-                pid = f"P{player_counter + 1:03d}"
-                player_id_map[(ref_id, track.track_id)] = pid
                 player_counter += 1
+                pid = f"P{player_counter:03d}"
+                player_id_map[(ref_id, track.track_id)] = pid
 
         # Match each non-reference shot to the reference
         for alignment in sync_map.alignments:

@@ -1,7 +1,16 @@
 shot_segmentation:
   detector: content
-  threshold: 30.0
+  threshold: 24.0
+  adaptive_threshold: 3.5
+  adaptive_min_content_val: 18.0
+  min_scene_len_frames: 12
   min_shot_duration_s: 0.5
+  reaction_max_duration_s: 3.2
+  min_pitch_ratio: 0.12
+  reaction_max_peak_pitch_ratio: 0.2
+  reaction_sample_points: [0.2, 0.5, 0.8]
+  merge_short_shots_max_duration_s: 1.2
+  merge_max_gap_s: 0.08
 
 calibration:
   pitch_model: fifa_standard
@@ -17,3 +26,8 @@ sync:
 detection:
   ball_model: yolov8n
   confidence_threshold: 0.3
+
+pose_estimation:
+  model_name: nielsr/vitpose-base-simple
+  min_confidence: 0.3
+  smooth_sigma: 2.0

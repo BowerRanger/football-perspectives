@@ -103,14 +103,14 @@ class PoseEstimationStage(BaseStage):
         for shot in manifest.shots:
             tracks_path = tracks_dir / f"{shot.id}_tracks.json"
             if not tracks_path.exists():
-                print(f"  [SKIP] {shot.id}: no tracks file")
+                logging.info("  [SKIP] %s: no tracks file", shot.id)
                 continue
             tracks = TracksResult.load(tracks_path)
             result = self._estimate_shot(
                 shot.id, shot.clip_file, tracks, estimator, min_conf, smooth_sigma
             )
             result.save(poses_dir / f"{shot.id}_poses.json")
-            print(f"  -> {shot.id}: {len(result.players)} players")
+            logging.info("  -> %s: %d players", shot.id, len(result.players))
 
     def _estimate_shot(
         self,

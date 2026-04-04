@@ -1,0 +1,19 @@
+shot_segmentation:
+  detector: content
+  threshold: 30.0
+  min_shot_duration_s: 0.5
+
+calibration:
+  pitch_model: fifa_standard
+  max_reprojection_error: 15.0
+  keyframe_interval: 5
+
+sync:
+  method: hybrid
+  search_window_s: 5.0
+  min_overlap_frames: 25
+  min_confidence: 0.4
+
+detection:
+  ball_model: yolov8n
+  confidence_threshold: 0.3

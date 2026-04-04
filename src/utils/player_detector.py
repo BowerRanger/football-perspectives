@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import numpy as np
 
 
-@dataclass
+@dataclass(frozen=True)
 class Detection:
     bbox: tuple[float, float, float, float]  # (x1, y1, x2, y2)
     confidence: float
@@ -56,4 +56,4 @@ class FakePlayerDetector(PlayerDetector):
     def detect(self, frame: np.ndarray) -> list[Detection]:
         dets = self._seq[self._idx % len(self._seq)]
         self._idx += 1
-        return dets
+        return list(dets)

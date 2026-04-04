@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from src.utils.player_detector import Detection, FakePlayerDetector, PlayerDetector
 
 

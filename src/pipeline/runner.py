@@ -1,9 +1,10 @@
 from pathlib import Path
 from src.pipeline.base import BaseStage
+from src.stages.segmentation import ShotSegmentationStage
 
 # Populated as stages are implemented; each entry is (canonical_name, StageClass)
 STAGE_ORDER: list[tuple[str, type[BaseStage] | None]] = [
-    ("segmentation", None),   # placeholder — replaced in Task 5
+    ("segmentation", ShotSegmentationStage),
     ("calibration", None),    # placeholder — replaced in Task 7
     ("sync", None),           # placeholder — replaced in Task 9
 ]

@@ -31,3 +31,42 @@ def test_extract_thumbnail_creates_jpg(tmp_path, tiny_video):
     img = cv2.imread(str(out))
     assert img is not None
     assert img.shape[:2] == (240, 320)
+
+
+from src.stages.segmentation import detect_shots, ShotSegmentationStage
+from src.schemas.shots import ShotsManifest
+
+
+def test_detect_shots_finds_cut(tiny_video):
+    shots = detect_shots(tiny_video, threshold=20.0)
+    # Synthetic video has a hard cut between blue and green frames
+    assert len(shots) == 2
+
+
+def test_detect_shots_returns_correct_timings(tiny_video):
+    shots = detect_shots(tiny_video, threshold=20.0)
+    assert shots[0].start_frame == 0
+    assert shots[1].start_frame > 0
+
+
+def test_stage1_writes_manifest(tmp_path, tiny_video):
+    cfg = {
+        "shot_segmentation": {"threshold": 20.0, "min_shot_duration_s": 0.1}
+    }
+    stage = ShotSegmentationStage(
+        config=cfg, output_dir=tmp_path, video_path=tiny_video
+    )
+    stage.run()
+    manifest_path = tmp_path / "shots" / "shots_manifest.json"
+    assert manifest_path.exists()
+    manifest = ShotsManifest.load(manifest_path)
+    assert len(manifest.shots) == 2
+    assert manifest.fps == 25.0
+
+
+def test_stage1_is_complete_after_run(tmp_path, tiny_video):
+    cfg = {"shot_segmentation": {"threshold": 20.0, "min_shot_duration_s": 0.1}}
+    stage = ShotSegmentationStage(config=cfg, output_dir=tmp_path, video_path=tiny_video)
+    assert not stage.is_complete()
+    stage.run()
+    assert stage.is_complete()

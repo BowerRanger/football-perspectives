@@ -10,7 +10,10 @@ from src.schemas.shots import ShotsManifest
 from src.schemas.tracks import Track, TrackFrame, TracksResult
 from src.utils.camera import project_to_pitch
 from src.utils.player_detector import Detection, PlayerDetector, YOLOPlayerDetector
-from src.utils.team_classifier import FakeTeamClassifier, TeamClassifier
+from src.utils.team_classifier import CLIPTeamClassifier, TeamClassifier
+
+
+_ID_TO_CLASS = {0: "player", 1: "goalkeeper", 2: "referee", 3: "ball"}
 
 
 def _foot_centre(bbox: tuple[float, float, float, float]) -> tuple[float, float]:
@@ -58,7 +61,7 @@ class PlayerTrackingStage(BaseStage):
         detector = self.player_detector or YOLOPlayerDetector(
             model_name=model_name, confidence=confidence
         )
-        team_classifier = self.team_classifier or FakeTeamClassifier("A")
+        team_classifier = self.team_classifier or CLIPTeamClassifier()
 
         manifest = ShotsManifest.load(self.output_dir / "shots" / "shots_manifest.json")
         cal_dir = self.output_dir / "calibration"
@@ -70,7 +73,7 @@ class PlayerTrackingStage(BaseStage):
                 shot.id, shot.clip_file, detector, team_classifier, calibration
             )
             result.save(tracks_dir / f"{shot.id}_tracks.json")
-            print(f"  -> {shot.id}: {len(result.tracks)} tracks")
+            logging.info("  -> %s: %d tracks", shot.id, len(result.tracks))
 
     def _track_shot(
         self,
@@ -115,7 +118,10 @@ class PlayerTrackingStage(BaseStage):
                 if player_dets:
                     xyxy = np.array([list(d.bbox) for d in player_dets], dtype=np.float32)
                     confs = np.array([d.confidence for d in player_dets], dtype=np.float32)
-                    class_ids = np.zeros(len(player_dets), dtype=int)
+                    class_ids = np.array([
+                        {"player": 0, "goalkeeper": 1, "referee": 2, "ball": 3}.get(d.class_name, 0)
+                        for d in player_dets
+                    ], dtype=int)
                     sv_dets = sv.Detections(
                         xyxy=xyxy, confidence=confs, class_id=class_ids
                     )
@@ -140,6 +146,8 @@ class PlayerTrackingStage(BaseStage):
                         )
                         bbox = [float(x1), float(y1), float(x2), float(y2)]
                         team = team_labels[i] if i < len(team_labels) else "unknown"
+                        cls_id = int(tracked.class_id[i]) if tracked.class_id is not None else 0
+                        class_name = _ID_TO_CLASS.get(cls_id, "player")
 
                         foot_u, foot_v = _foot_centre((x1, y1, x2, y2))
                         pitch_pos: list[float] | None = None
@@ -167,7 +175,7 @@ class PlayerTrackingStage(BaseStage):
                         if tid not in active_tracks:
                             active_tracks[tid] = Track(
                                 track_id=f"T{tid:03d}",
-                                class_name="player",
+                                class_name=class_name,
                                 team=team,
                                 frames=[],
                             )

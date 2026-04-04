@@ -74,3 +74,46 @@ def test_tracking_stage_tracks_have_correct_schema(tiny_shot_dir):
     assert t.team == "A"
     assert len(t.frames) >= 1
     assert len(t.frames[0].bbox) == 4
+
+
+# Unit tests for PlayerDetector (from plan Task 2)
+def test_fake_player_detector_cycles():
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    from src.utils.player_detector import Detection, FakePlayerDetector, PlayerDetector
+    dets = [
+        [Detection(bbox=(10.0, 20.0, 80.0, 200.0), confidence=0.9, class_name="player")],
+        [],
+    ]
+    detector = FakePlayerDetector(dets)
+    assert len(detector.detect(frame)) == 1
+    assert len(detector.detect(frame)) == 0
+    assert len(detector.detect(frame)) == 1  # cycles
+
+
+def test_player_detector_is_abstract():
+    from src.utils.player_detector import PlayerDetector, FakePlayerDetector
+    with pytest.raises(TypeError):
+        PlayerDetector()
+    assert issubclass(FakePlayerDetector, PlayerDetector)
+
+
+# Unit tests for TeamClassifier (from plan Task 3)
+def test_fake_team_classifier_returns_fixed_label():
+    from src.utils.team_classifier import FakeTeamClassifier
+    crops = [np.zeros((60, 40, 3), dtype=np.uint8) for _ in range(3)]
+    clf = FakeTeamClassifier("B")
+    labels = clf.classify(crops)
+    assert labels == ["B", "B", "B"]
+
+
+def test_fake_team_classifier_empty_input():
+    from src.utils.team_classifier import FakeTeamClassifier
+    clf = FakeTeamClassifier("A")
+    assert clf.classify([]) == []
+
+
+def test_team_classifier_is_abstract():
+    from src.utils.team_classifier import TeamClassifier, FakeTeamClassifier
+    with pytest.raises(TypeError):
+        TeamClassifier()
+    assert issubclass(FakeTeamClassifier, TeamClassifier)

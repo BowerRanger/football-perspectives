@@ -35,6 +35,8 @@ def smooth_keypoints(player_poses: PlayerPoses, sigma: float = 2.0) -> PlayerPos
     """
     if len(player_poses.frames) < 3:
         return player_poses
+    if not player_poses.frames[0].keypoints:
+        return player_poses
 
     n_kps = len(player_poses.frames[0].keypoints)
     xs = np.array([[kp.x for kp in f.keypoints] for f in player_poses.frames])

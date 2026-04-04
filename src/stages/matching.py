@@ -52,6 +52,12 @@ def hungarian_match_players(
         return []
 
     b_frames = [f - sync_offset for f in reference_frames if f - sync_offset >= 0]
+    if not b_frames:
+        logging.warning(
+            "No valid b_frames for sync_offset=%d with %d reference_frames — skipping match",
+            sync_offset, len(reference_frames),
+        )
+        return []
 
     pos_a = {t.track_id: _mean_pitch_position(shot_a_tracks, t.track_id, reference_frames)
              for t in tracks_a}

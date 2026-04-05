@@ -8,8 +8,9 @@ class Alignment:
     shot_id: str
     frame_offset: int
     confidence: float
-    method: str  # "ball_trajectory" | "player_formation" | "manual"
+    method: str  # "hybrid" | "ball_trajectory" | "player_formation" | "manual" | "low_confidence"
     overlap_frames: list[int]  # [start_frame, end_frame] in reference shot
+    graph_residual_frames: float | None = None
 
 
 @dataclass

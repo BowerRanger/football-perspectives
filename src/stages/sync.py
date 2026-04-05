@@ -134,9 +134,11 @@ class TemporalSyncStage(BaseStage):
         cfg = self.config.get("sync", {})
         min_conf = cfg.get("min_confidence", 0.4)
 
-        manifest = ShotsManifest.load(
-            self.output_dir / "shots" / "shots_manifest.json"
-        )
+        shots_dir = self.output_dir / "shots"
+        manifest_path = shots_dir / "shots_manifest.json"
+        if not manifest_path.exists():
+            print("  -> inferred shots_manifest.json from prepared clips")
+        manifest = ShotsManifest.load_or_infer(shots_dir, persist=True)
         if len(manifest.shots) < 2:
             ref = manifest.shots[0].id if manifest.shots else ""
             SyncMap(reference_shot=ref).save(sync_dir / "sync_map.json")

@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
+import logging
 
 import cv2
 import numpy as np
@@ -11,33 +13,71 @@ from src.utils.camera import reprojection_error
 from src.utils.pitch import FIFA_LANDMARKS
 
 
+@dataclass(frozen=True)
+class LandmarkDetection:
+    uv: np.ndarray
+    confidence: float
+    source: str | None = None
+
+
 class PitchKeypointDetector(ABC):
     """Detects pitch landmark keypoints in a video frame."""
 
     @abstractmethod
-    def detect(self, frame: np.ndarray) -> dict[str, np.ndarray]:
+    def detect(
+        self,
+        frame: np.ndarray,
+        frame_idx: int | None = None,
+        shot_id: str | None = None,
+    ) -> dict[str, LandmarkDetection]:
         """
-        Returns {landmark_name: (u, v)} for landmarks detected in this frame.
+        Returns {landmark_name: LandmarkDetection} for landmarks detected in this frame.
         Only includes landmarks detected with sufficient confidence.
         """
         ...
 
 
+def _normalize_correspondences(
+    correspondences: dict[str, np.ndarray] | dict[str, LandmarkDetection],
+) -> dict[str, LandmarkDetection]:
+    """Normalize mixed correspondence inputs into validated LandmarkDetection values."""
+    normalized: dict[str, LandmarkDetection] = {}
+    for name, value in correspondences.items():
+        if isinstance(value, LandmarkDetection):
+            uv = np.asarray(value.uv, dtype=np.float32)
+            conf = float(value.confidence)
+            source = value.source
+        else:
+            uv = np.asarray(value, dtype=np.float32)
+            conf = 1.0
+            source = None
+        if uv.shape != (2,):
+            logging.debug("Skipping landmark %s due to invalid uv shape %s", name, uv.shape)
+            continue
+        if conf < 0.0 or conf > 1.0:
+            logging.debug("Skipping landmark %s due to invalid confidence %.3f", name, conf)
+            continue
+        normalized[name] = LandmarkDetection(uv=uv, confidence=conf, source=source)
+    return normalized
+
+
 def calibrate_frame(
-    correspondences: dict[str, np.ndarray],
+    correspondences: dict[str, np.ndarray] | dict[str, LandmarkDetection],
     landmarks_3d: dict[str, np.ndarray],
     image_shape: tuple[int, int],  # (height, width)
     frame_idx: int = 0,
+    max_reprojection_error: float = 15.0,
 ) -> CameraFrame | None:
     """
     Solve camera pose from 2D-3D pitch correspondences.
     Returns None if fewer than 4 common points or solvePnP fails.
     """
-    common = [k for k in correspondences if k in landmarks_3d]
+    normalized = _normalize_correspondences(correspondences)
+    common = [k for k in normalized if k in landmarks_3d]
     if len(common) < 4:
         return None
 
-    pts_2d = np.array([correspondences[k] for k in common], dtype=np.float32)
+    pts_2d = np.array([normalized[k].uv for k in common], dtype=np.float32)
     pts_3d = np.array([landmarks_3d[k] for k in common], dtype=np.float32)
 
     h, w = image_shape
@@ -83,7 +123,8 @@ def calibrate_frame(
     tvec = best_tvec
     idx = best_idx
     err = best_err
-    confidence = float(max(0.0, 1.0 - err / 15.0))
+    frame_confidence = float(np.mean([normalized[k].confidence for k in common]))
+    confidence = float(max(0.0, 1.0 - err / max_reprojection_error) * frame_confidence)
 
     return CameraFrame(
         frame=frame_idx,
@@ -129,10 +170,22 @@ class CameraCalibrationStage(BaseStage):
         cfg = self.config.get("calibration", {})
         keyframe_interval = cfg.get("keyframe_interval", 5)
         max_err = cfg.get("max_reprojection_error", 15.0)
+        require_detector = bool(cfg.get("require_detector", False))
 
-        manifest = ShotsManifest.load(
-            self.output_dir / "shots" / "shots_manifest.json"
-        )
+        if self.detector is None:
+            if require_detector:
+                raise RuntimeError(
+                    "calibration.require_detector=true but no pitch keypoint detector is configured"
+                )
+            logging.warning(
+                "No pitch keypoint detector configured; calibration outputs will contain empty frame lists"
+            )
+
+        shots_dir = self.output_dir / "shots"
+        manifest_path = shots_dir / "shots_manifest.json"
+        if not manifest_path.exists():
+            print("  -> inferred shots_manifest.json from prepared clips")
+        manifest = ShotsManifest.load_or_infer(shots_dir, persist=True)
 
         for shot in manifest.shots:
             result = self._calibrate_shot(shot.id, shot.clip_file, keyframe_interval, max_err)
@@ -144,27 +197,44 @@ class CameraCalibrationStage(BaseStage):
     def _calibrate_shot(
         self, shot_id: str, clip_file: str, keyframe_interval: int, max_err: float
     ) -> CalibrationResult:
+        if self.detector is None:
+            return CalibrationResult(shot_id=shot_id, camera_type="static", frames=[])
+
         clip_path = self.output_dir / clip_file
         cap = cv2.VideoCapture(str(clip_path))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        try:
+            if not cap.isOpened():
+                logging.warning("Failed to open clip for calibration: %s", clip_path)
+                return CalibrationResult(shot_id=shot_id, camera_type="static", frames=[])
 
-        frames: list[CameraFrame] = []
-        frame_idx = 0
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if frame_idx % keyframe_interval == 0 and self.detector is not None:
-                correspondences = self.detector.detect(frame)
-                cf = calibrate_frame(
-                    correspondences, FIFA_LANDMARKS, (h, w), frame_idx
-                )
-                if cf is not None and cf.reprojection_error <= max_err:
-                    frames.append(cf)
-            frame_idx += 1
+            frames: list[CameraFrame] = []
+            frame_idx = 0
 
-        cap.release()
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if frame_idx % keyframe_interval == 0:
+                    correspondences = self.detector.detect(
+                        frame,
+                        frame_idx=frame_idx,
+                        shot_id=shot_id,
+                    )
+                    cf = calibrate_frame(
+                        correspondences,
+                        FIFA_LANDMARKS,
+                        (h, w),
+                        frame_idx,
+                        max_reprojection_error=max_err,
+                    )
+                    if cf is not None and cf.reprojection_error <= max_err:
+                        frames.append(cf)
+                frame_idx += 1
+        finally:
+            cap.release()
+
         camera_type = "tracking" if len(frames) > 1 else "static"
         return CalibrationResult(shot_id=shot_id, camera_type=camera_type, frames=frames)

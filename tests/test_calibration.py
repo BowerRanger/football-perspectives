@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 import pytest
+from pathlib import Path
 from src.utils.pitch import FIFA_LANDMARKS, PITCH_LENGTH, PITCH_WIDTH
 from src.utils.camera import build_projection_matrix, project_to_pitch, reprojection_error
 
@@ -43,6 +44,7 @@ def test_project_to_pitch_round_trips():
 
 from src.stages.calibration import calibrate_frame, PitchKeypointDetector
 from src.schemas.calibration import CameraFrame
+from src.stages.calibration import CameraCalibrationStage
 
 def _make_synthetic_correspondences():
     """Project known pitch landmarks with a synthetic camera to get 2D points."""
@@ -84,3 +86,61 @@ def test_calibrate_frame_returns_none_with_too_few_points():
 def test_pitch_keypoint_detector_is_abstract():
     import inspect
     assert inspect.isabstract(PitchKeypointDetector)
+
+
+def _create_dummy_clip(path: Path, fps: float, frames: int):
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(path), fourcc, fps, (640, 480))
+    for _ in range(frames):
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        writer.write(frame)
+    writer.release()
+
+
+def test_calibration_without_detector_logs_warning_and_creates_empty_stubs(tmp_path, caplog):
+    shots_dir = tmp_path / "shots"
+    shots_dir.mkdir()
+    _create_dummy_clip(shots_dir / "shot_001.mp4", fps=25.0, frames=100)
+    _create_dummy_clip(shots_dir / "shot_002.mp4", fps=25.0, frames=120)
+
+    stage = CameraCalibrationStage(config={}, output_dir=tmp_path, detector=None)
+    with caplog.at_level("WARNING"):
+        stage.run()
+
+    assert sum("no pitch keypoint detector configured" in r.message.lower() for r in caplog.records) == 1
+
+    from src.schemas.calibration import CalibrationResult
+    result_1 = CalibrationResult.load(tmp_path / "calibration" / "shot_001_calibration.json")
+    result_2 = CalibrationResult.load(tmp_path / "calibration" / "shot_002_calibration.json")
+    assert result_1.frames == []
+    assert result_2.frames == []
+    assert result_1.camera_type == "static"
+
+
+def test_calibration_strict_mode_raises_without_detector(tmp_path):
+    shots_dir = tmp_path / "shots"
+    shots_dir.mkdir()
+    _create_dummy_clip(shots_dir / "shot_001.mp4", fps=25.0, frames=100)
+
+    stage = CameraCalibrationStage(
+        config={"calibration": {"require_detector": True}},
+        output_dir=tmp_path,
+        detector=None,
+    )
+
+    with pytest.raises(RuntimeError, match="require_detector"):
+        stage.run()
+
+
+def test_calibrate_shot_short_circuits_without_detector(tmp_path, monkeypatch):
+    stage = CameraCalibrationStage(config={}, output_dir=tmp_path, detector=None)
+
+    def fail_video_capture(*args, **kwargs):
+        raise AssertionError("VideoCapture should not be called when detector is None")
+
+    monkeypatch.setattr("src.stages.calibration.cv2.VideoCapture", fail_video_capture)
+    result = stage._calibrate_shot("shot_001", "shots/shot_001.mp4", 5, 15.0)
+
+    assert result.shot_id == "shot_001"
+    assert result.camera_type == "static"
+    assert result.frames == []

@@ -1,21 +1,31 @@
 shot_segmentation:
   detector: content
-  threshold: 24.0
+  threshold: 28.0
   adaptive_threshold: 3.5
   adaptive_min_content_val: 18.0
-  min_scene_len_frames: 12
+  min_scene_len_frames: 15
   min_shot_duration_s: 0.5
   reaction_max_duration_s: 3.2
   min_pitch_ratio: 0.12
   reaction_max_peak_pitch_ratio: 0.2
   reaction_sample_points: [0.2, 0.5, 0.8]
+  exclude_fade_transitions: true
+  fade_transition_max_duration_s: 1.0
+  fade_black_frame_threshold: 0.18
+  fade_min_brightness_range: 0.25
+  fade_sample_points: [0.15, 0.5, 0.85]
   merge_short_shots_max_duration_s: 1.2
   merge_max_gap_s: 0.08
+  require_ball_in_shot: true
 
 calibration:
   pitch_model: fifa_standard
+  detector_type: none
+  manual_landmarks_dir: null
+  min_point_confidence: 0.3
   max_reprojection_error: 15.0
   keyframe_interval: 5
+  require_detector: false
 
 sync:
   method: hybrid
@@ -24,7 +34,7 @@ sync:
   min_confidence: 0.4
 
 detection:
-  ball_model: yolov8n
+  ball_model: yolov8n.pt
   confidence_threshold: 0.3
 
 tracking:

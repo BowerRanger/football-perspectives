@@ -1,6 +1,9 @@
 from pathlib import Path
+import pytest
 from src.pipeline.config import load_config
 from src.pipeline.runner import resolve_stages, STAGE_ORDER
+from src.pipeline.runner import _create_pitch_detector
+from src.utils.pitch_detector import ManualJsonPitchDetector
 
 
 def test_load_config_returns_dict(tmp_path):
@@ -54,3 +57,28 @@ def test_resolve_stages_from_tracking():
 def test_resolve_stages_explicit_4_5():
     names = resolve_stages("4,5", from_stage=None)
     assert names == ["tracking", "pose"]
+
+
+def test_create_pitch_detector_none_by_default(tmp_path):
+    detector = _create_pitch_detector(config={}, output_dir=tmp_path)
+    assert detector is None
+
+
+def test_create_pitch_detector_manual_json(tmp_path):
+    annotations_dir = tmp_path / "landmarks"
+    annotations_dir.mkdir(parents=True)
+
+    cfg = {
+        "calibration": {
+            "detector_type": "manual_json",
+            "manual_landmarks_dir": "landmarks",
+        }
+    }
+    detector = _create_pitch_detector(config=cfg, output_dir=tmp_path)
+    assert isinstance(detector, ManualJsonPitchDetector)
+
+
+def test_create_pitch_detector_unknown_raises(tmp_path):
+    cfg = {"calibration": {"detector_type": "mystery"}}
+    with pytest.raises(ValueError):
+        _create_pitch_detector(config=cfg, output_dir=tmp_path)

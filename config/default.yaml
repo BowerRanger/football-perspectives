@@ -17,10 +17,11 @@ shot_segmentation:
   merge_short_shots_max_duration_s: 1.2
   merge_max_gap_s: 0.08
   require_ball_in_shot: true
+  remove_duplicate_frames: false
 
 calibration:
   pitch_model: fifa_standard
-  detector_type: none
+  detector_type: hybrid
   manual_landmarks_dir: null
   min_point_confidence: 0.3
   max_reprojection_error: 15.0
@@ -28,10 +29,20 @@ calibration:
   require_detector: false
 
 sync:
-  method: hybrid
-  search_window_s: 5.0
+  sample_fps: 5.0
+  formation_grid: [8, 5]
   min_overlap_frames: 25
-  min_confidence: 0.4
+  min_confidence: 0.3
+  reid_min_track_frames: 20
+  reid_min_similarity: 0.6
+  speed_factors: [1.0]
+  audio_min_zscore: 4.0
+  trajectory_refinement_enabled: true
+  trajectory_refinement_n_reference_frames: 50
+  trajectory_refinement_coarse_match_distance_m: 20.0
+  pass2_search_margin_frames: 30
+  graph_confidence_alpha: 0.4
+  graph_residual_flag_threshold_frames: 15
 
 detection:
   ball_model: yolov8n.pt
@@ -40,9 +51,14 @@ detection:
 tracking:
   player_model: yolov8x.pt
   confidence_threshold: 0.3
+  team_classifier: none
+  default_team_label: unknown
+  progress_every_frames: 150
 
 pose_estimation:
-  model_name: nielsr/vitpose-base-simple
+  model_config: td-hm_ViTPose-small_8xb64-210e_coco-256x192
+  checkpoint: null
+  device: auto
   min_confidence: 0.3
   smooth_sigma: 2.0
 

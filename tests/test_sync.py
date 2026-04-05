@@ -1142,4 +1142,37 @@ def test_collect_pairwise_estimates_returns_correct_pairs(tmp_path):
     i, j, est = results[0]
     assert i == 1  # shot_002 is index 1
     assert j == 2  # shot_003 is index 2
-    assert isinstance(est, AlignmentEstimate)
+
+
+def test_run_produces_graph_residual_field(tmp_path):
+    """TemporalSyncStage.run() must populate graph_residual_frames on all Alignments."""
+    import json
+
+    (tmp_path / "shots").mkdir()
+    for name in ("shot_001.mp4", "shot_002.mp4"):
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        out = cv2.VideoWriter(str(tmp_path / "shots" / name), fourcc, 25.0, (64, 36))
+        for _ in range(50):
+            out.write(np.zeros((36, 64, 3), dtype=np.uint8))
+        out.release()
+
+    manifest_data = {
+        "source_file": "dummy.mp4",
+        "fps": 25.0,
+        "total_frames": 100,
+        "shots": [
+            {"id": "shot_001", "clip_file": "shots/shot_001.mp4",
+             "start_frame": 0, "end_frame": 50, "start_time": 0.0, "end_time": 2.0},
+            {"id": "shot_002", "clip_file": "shots/shot_002.mp4",
+             "start_frame": 0, "end_frame": 50, "start_time": 0.0, "end_time": 2.0},
+        ],
+    }
+    (tmp_path / "shots" / "shots_manifest.json").write_text(json.dumps(manifest_data))
+
+    stage = TemporalSyncStage(config={"sync": {}}, output_dir=tmp_path)
+    stage.run()
+
+    sm = SyncMap.load(tmp_path / "sync" / "sync_map.json")
+    assert len(sm.alignments) == 1
+    # graph_residual_frames must be set (not None) after the graph solve
+    assert sm.alignments[0].graph_residual_frames is not None

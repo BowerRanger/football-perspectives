@@ -1534,6 +1534,11 @@ class TemporalSyncStage(BaseStage):
         speed_factors = [float(s) for s in speed_factors_cfg]
         audio_min_zscore = float(cfg.get("audio_min_zscore", 4.0))
 
+        # Pass-2 / graph-solve config
+        pass2_margin = int(cfg.get("pass2_search_margin_frames", 30))
+        graph_alpha = float(cfg.get("graph_confidence_alpha", 0.4))
+        graph_residual_threshold = float(cfg.get("graph_residual_flag_threshold_frames", 15))
+
         # Trajectory-refinement config
         traj_enabled = bool(cfg.get("trajectory_refinement_enabled", True))
         traj_n_reference_frames = int(cfg.get("trajectory_refinement_n_reference_frames", 50))
@@ -1575,7 +1580,7 @@ class TemporalSyncStage(BaseStage):
         ref_clip = self.output_dir / manifest.shots[0].clip_file
         ref_n_frames = n_frames_by_shot.get(reference, 1)
 
-        alignments: list[Alignment] = []
+        pass1_estimates: dict[str, AlignmentEstimate] = {}
 
         for shot in manifest.shots[1:]:
             shot_clip = self.output_dir / shot.clip_file
@@ -1741,32 +1746,85 @@ class TemporalSyncStage(BaseStage):
                         best.offset, best.confidence,
                     )
 
-            offset = best.offset
-            confidence = best.confidence
+            pass1_estimates[shot.id] = best
+            flag = "" if best.confidence >= min_conf else " [WARNING] low confidence"
+            logging.info(
+                "  [sync/pass1] %s → %s  offset=%+d  conf=%.2f  method=%s%s",
+                reference, shot.id, best.offset, best.confidence, best.method, flag,
+            )
 
-            start, end = _compute_overlap_frames(ref_n_frames, shot_n_frames, offset)
+        # --- Pass 2: pairwise non-reference comparisons ---
+        pairwise = _collect_pairwise_estimates(
+            shots=manifest.shots,
+            clips={s.id: self.output_dir / s.clip_file for s in manifest.shots},
+            tracks_by_shot=tracks_by_shot,
+            n_frames_by_shot=n_frames_by_shot,
+            pass1_estimates=pass1_estimates,
+            poses_dir=poses_dir,
+            fps=fps,
+            cfg=cfg,
+        )
+
+        # --- Build edge list ---
+        edges: list[tuple[int, int, float, float]] = []
+        for idx, shot in enumerate(manifest.shots[1:], start=1):
+            est = pass1_estimates[shot.id]
+            edges.append((0, idx, float(est.offset), float(est.confidence)))
+        for i, j, est in pairwise:
+            if est.confidence > 0:
+                edges.append((i, j, float(est.offset), float(est.confidence)))
+
+        # --- Solve ---
+        solved = _solve_offset_graph(len(manifest.shots), edges)
+
+        # Build incident pairwise confidence lookup per clip
+        incident: dict[str, list[float]] = {s.id: [] for s in manifest.shots[1:]}
+        for i, j, est in pairwise:
+            if est.confidence > 0:
+                incident[manifest.shots[i].id].append(est.confidence)
+                incident[manifest.shots[j].id].append(est.confidence)
+
+        # --- Assemble final Alignments ---
+        alignments: list[Alignment] = []
+        for idx, shot in enumerate(manifest.shots[1:], start=1):
+            solved_offset = int(round(solved[idx]))
+            pass1_est = pass1_estimates[shot.id]
+            residual = float(abs(solved_offset - pass1_est.offset))
+
+            inc = incident[shot.id]
+            mean_inc = float(np.mean(inc)) if inc else pass1_est.confidence
+            confidence = float(min(
+                1.0,
+                pass1_est.confidence * graph_alpha + mean_inc * (1.0 - graph_alpha),
+            ))
+
+            method = pass1_est.method
+            if residual > graph_residual_threshold:
+                method = "graph_refined"
+
+            shot_n_frames = n_frames_by_shot.get(shot.id, 1)
+            start, end = _compute_overlap_frames(ref_n_frames, shot_n_frames, solved_offset)
             overlap = max(0, end - start)
-
-            method = best.method
             if confidence < min_conf or overlap < min_overlap_frames:
                 method = "low_confidence"
 
             alignments.append(Alignment(
                 shot_id=shot.id,
-                frame_offset=offset,
+                frame_offset=solved_offset,
                 confidence=confidence,
                 method=method,
                 overlap_frames=[start, end],
+                graph_residual_frames=residual,
             ))
 
             flag = "" if confidence >= min_conf else " [WARNING] low confidence"
             logging.info(
-                "  [sync] %s → %s  offset=%+d  conf=%.2f  method=%s%s",
-                reference, shot.id, offset, confidence, method, flag,
+                "  [sync] %s → %s  offset=%+d  conf=%.2f  method=%s  residual=%.1f%s",
+                reference, shot.id, solved_offset, confidence, method, residual, flag,
             )
             print(
-                f"  -> {shot.id} offset={offset:+d} frames, "
-                f"confidence={confidence:.2f} ({method}){flag}"
+                f"  -> {shot.id} offset={solved_offset:+d} frames, "
+                f"confidence={confidence:.2f} ({method}), residual={residual:.1f}f{flag}"
             )
 
         SyncMap(reference_shot=reference, alignments=alignments).save(

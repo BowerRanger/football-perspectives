@@ -118,6 +118,20 @@ def test_cross_correlate_signal_enforces_min_overlap():
     assert confidence == 0.0
 
 
+def test_visual_similarity_profile_max_lag_limits_offsets():
+    rng = np.random.default_rng(0)
+    ref_desc = rng.random((20, 16)).astype(np.float32)
+    shot_desc = rng.random((20, 16)).astype(np.float32)
+
+    offsets_full, _ = _visual_similarity_profile(ref_desc, shot_desc, min_overlap=2)
+    offsets_windowed, _ = _visual_similarity_profile(
+        ref_desc, shot_desc, min_overlap=2, max_lag=5
+    )
+
+    assert len(offsets_windowed) < len(offsets_full)
+    assert int(np.abs(offsets_windowed).max()) <= 5
+
+
 def test_extract_player_motion_signal_ignores_ball_tracks():
     tracks = TracksResult(
         shot_id="shot_001",

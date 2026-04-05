@@ -295,6 +295,7 @@ def _visual_similarity_profile(
     ref_desc: np.ndarray,
     shot_desc: np.ndarray,
     min_overlap: int,
+    max_lag: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Mean cosine similarity for every temporal offset between two clips.
@@ -302,6 +303,17 @@ def _visual_similarity_profile(
     Offset convention matches the rest of the pipeline:
     ``ref_desc[j + d]`` aligns with ``shot_desc[j]`` at offset ``d``.
     (Equivalently: frame_in_reference = frame_in_shot + d * frame_step.)
+
+    Parameters
+    ----------
+    ref_desc : np.ndarray
+        Reference descriptors, shape (N_ref, D)
+    shot_desc : np.ndarray
+        Shot descriptors, shape (N_shot, D)
+    min_overlap : int
+        Minimum overlap in descriptor samples
+    max_lag : int | None
+        Maximum offset to search (descriptor samples). If None, search full range.
 
     Returns
     -------
@@ -316,6 +328,8 @@ def _visual_similarity_profile(
     M = ref_desc @ shot_desc.T  # shape (N_ref, N_shot)
 
     offsets = np.arange(-(N_shot - 1), N_ref, dtype=np.int64)
+    if max_lag is not None:
+        offsets = offsets[(offsets >= -max_lag) & (offsets <= max_lag)]
     scores = np.zeros(len(offsets), dtype=np.float64)
 
     for k, d in enumerate(offsets):
@@ -333,19 +347,25 @@ def _align_visual(
     fps: float,
     min_overlap_frames: int,
     sample_fps: float,
+    max_lag_frames: int | None = None,
 ) -> AlignmentEstimate:
     """
     Align two clips by maximising visual frame similarity over all offsets.
 
-    No search-window constraint — the full range of offsets is searched.
     Confidence is the z-score of the peak similarity relative to the
     median background similarity, normalised to [0, 1].
+
+    Parameters
+    ----------
+    max_lag_frames : int | None
+        Maximum lag in frames. If provided, limits the search window.
     """
     ref_desc, frame_step = _extract_frame_descriptors(ref_clip, fps, sample_fps)
     shot_desc, _ = _extract_frame_descriptors(shot_clip, fps, sample_fps)
 
     min_overlap_samples = max(1, int(np.ceil(min_overlap_frames / frame_step)))
-    offsets, scores = _visual_similarity_profile(ref_desc, shot_desc, min_overlap_samples)
+    max_lag_samples = None if max_lag_frames is None else max(1, max_lag_frames // frame_step)
+    offsets, scores = _visual_similarity_profile(ref_desc, shot_desc, min_overlap_samples, max_lag=max_lag_samples)
 
     if len(scores) == 0 or scores.max() <= 0.0:
         return AlignmentEstimate(offset=0, confidence=0.0, method="visual", valid=False)
@@ -507,15 +527,22 @@ def _align_formation_spatial(
     shot_desc: np.ndarray,
     frame_step: int,
     min_overlap_frames: int,
+    max_lag_frames: int | None = None,
 ) -> AlignmentEstimate:
     """
     Align two clips by maximising spatial formation histogram similarity.
 
     Uses the same similarity-matrix approach as ``_align_visual``.
     Returns ``method='player_formation'``.
+
+    Parameters
+    ----------
+    max_lag_frames : int | None
+        Maximum lag in frames. If provided, limits the search window.
     """
     min_overlap_samples = max(1, int(np.ceil(min_overlap_frames / frame_step)))
-    offsets, scores = _visual_similarity_profile(ref_desc, shot_desc, min_overlap_samples)
+    max_lag_samples = None if max_lag_frames is None else max(1, max_lag_frames // frame_step)
+    offsets, scores = _visual_similarity_profile(ref_desc, shot_desc, min_overlap_samples, max_lag=max_lag_samples)
 
     if len(scores) == 0 or scores.max() <= 0.0:
         return AlignmentEstimate(offset=0, confidence=0.0, method="player_formation", valid=False)

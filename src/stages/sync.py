@@ -1332,6 +1332,54 @@ def _align_celebration_signal(
     )
 
 
+def _solve_offset_graph(
+    n_clips: int,
+    edges: list[tuple[int, int, float, float]],
+) -> np.ndarray:
+    """
+    Weighted least-squares solve for clip offsets.
+
+    Clips are indexed 0..n_clips-1. Clip 0 is the reference (offset = 0, pinned).
+    Non-reference clips are indexed 1..n_clips-1.
+
+    Edge convention: o_j - o_i = offset_estimate.
+    Each edge is (i, j, offset_estimate, weight).
+
+    Returns float array of length n_clips (index 0 = 0.0).
+    """
+    n_vars = n_clips - 1  # reference is pinned at 0
+    result = np.zeros(n_clips, dtype=np.float64)
+    if n_vars <= 0:
+        return result
+
+    valid_edges = [(i, j, e, w) for i, j, e, w in edges if w > 0]
+    if not valid_edges:
+        return result
+
+    n_edges = len(valid_edges)
+    A = np.zeros((n_edges, n_vars), dtype=np.float64)
+    b = np.zeros(n_edges, dtype=np.float64)
+    W = np.zeros(n_edges, dtype=np.float64)
+
+    for k, (i, j, e, w) in enumerate(valid_edges):
+        # Constraint: o_j - o_i = e  (reference has o_0 = 0, not a variable)
+        if i > 0:
+            A[k, i - 1] = -1.0
+        if j > 0:
+            A[k, j - 1] = +1.0
+        b[k] = float(e)
+        W[k] = float(w)
+
+    sqrt_W = np.sqrt(W)
+    x, _, _, _ = np.linalg.lstsq(
+        sqrt_W[:, None] * A,
+        sqrt_W * b,
+        rcond=None,
+    )
+    result[1:] = x
+    return result
+
+
 class TemporalSyncStage(BaseStage):
     name = "sync"
 

@@ -37,6 +37,7 @@ from src.stages.sync import (
     _fill_nans,
     cross_correlate_trajectories,
     project_ball_to_pitch,
+    _solve_offset_graph,
 )
 from src.utils.ball_detector import BallDetector, FakeBallDetector
 
@@ -1032,3 +1033,64 @@ def test_align_audio_max_lag_excludes_true_peak(tmp_path):
     # The offset should be reasonably constrained (within ±5 frames if windowing worked)
     # or 0 if audio couldn't be loaded (test environment may lack ffmpeg for wav)
     assert abs(est_windowed.offset) <= 5
+
+
+def test_solve_offset_graph_single_clip():
+    """One clip with one pass-1 edge — solved offset equals the estimate."""
+    solved = _solve_offset_graph(n_clips=2, edges=[(0, 1, 141.0, 0.8)])
+    assert solved[0] == pytest.approx(0.0)
+    assert solved[1] == pytest.approx(141.0)
+
+
+def test_solve_offset_graph_consistent_triangle():
+    """Three clips with consistent pass-1 + pass-2 edges — solution matches."""
+    edges = [
+        (0, 1, 141.0, 0.8),
+        (0, 2, 393.0, 0.7),
+        (1, 2, 252.0, 0.9),
+    ]
+    solved = _solve_offset_graph(n_clips=3, edges=edges)
+    assert solved[0] == pytest.approx(0.0)
+    assert solved[1] == pytest.approx(141.0, abs=1.0)
+    assert solved[2] == pytest.approx(393.0, abs=1.0)
+
+
+def test_solve_offset_graph_conflicting_edges_compromise():
+    """Pass-2 edge contradicts pass-1 — solution is a weighted compromise."""
+    edges = [
+        (0, 1, 100.0, 0.5),
+        (0, 2, 200.0, 0.5),
+        (1, 2, 80.0, 2.0),
+    ]
+    solved = _solve_offset_graph(n_clips=3, edges=edges)
+    assert solved[2] < 200.0
+
+
+def test_solve_offset_graph_zero_weight_edges_ignored():
+    """Zero-weight edges have no effect on the solution."""
+    edges_with = [
+        (0, 1, 141.0, 0.8),
+        (0, 2, 393.0, 0.7),
+        (1, 2, 999.0, 0.0),
+    ]
+    edges_without = [
+        (0, 1, 141.0, 0.8),
+        (0, 2, 393.0, 0.7),
+    ]
+    solved_with = _solve_offset_graph(n_clips=3, edges=edges_with)
+    solved_without = _solve_offset_graph(n_clips=3, edges=edges_without)
+    assert solved_with[1] == pytest.approx(solved_without[1], abs=0.1)
+    assert solved_with[2] == pytest.approx(solved_without[2], abs=0.1)
+
+
+def test_solve_offset_graph_reference_always_zero():
+    """Reference clip (index 0) is always 0.0 regardless of edges."""
+    solved = _solve_offset_graph(n_clips=3, edges=[(0, 1, 50.0, 1.0), (0, 2, 100.0, 1.0)])
+    assert solved[0] == pytest.approx(0.0)
+
+
+def test_solve_offset_graph_single_clip_returns_correct_shape():
+    """n_clips=1 (only reference) — returns array of length 1."""
+    solved = _solve_offset_graph(n_clips=1, edges=[])
+    assert len(solved) == 1
+    assert solved[0] == pytest.approx(0.0)

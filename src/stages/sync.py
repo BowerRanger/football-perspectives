@@ -1380,6 +1380,124 @@ def _solve_offset_graph(
     return result
 
 
+def _collect_pairwise_estimates(
+    shots: list,
+    clips: dict[str, Path],
+    tracks_by_shot: dict[str, "TracksResult"],
+    n_frames_by_shot: dict[str, int],
+    pass1_estimates: dict[str, AlignmentEstimate],
+    poses_dir: Path,
+    fps: float,
+    cfg: dict,
+) -> list[tuple[int, int, AlignmentEstimate]]:
+    """
+    Run the signal stack for all non-reference pairs.
+
+    shots[0] is the reference. All pairs (i, j) with 1 <= i < j < len(shots)
+    are evaluated. Returns list of (i, j, AlignmentEstimate) where i and j are
+    indices into the shots list.
+
+    The search window is constrained to ±pass2_search_margin_frames around the
+    expected relative offset when both pass-1 confidences meet min_confidence.
+    Otherwise, full search is used.
+    """
+    min_conf = float(cfg.get("min_confidence", 0.3))
+    search_margin = int(cfg.get("pass2_search_margin_frames", 30))
+    sample_fps = float(cfg.get("sample_fps", 5.0))
+    min_overlap_frames = int(cfg.get("min_overlap_frames", 25))
+    reid_min_track_frames = int(cfg.get("reid_min_track_frames", 20))
+    reid_min_similarity = float(cfg.get("reid_min_similarity", 0.6))
+    speed_factors = [float(s) for s in cfg.get("speed_factors", [1.0])]
+    agreement_tolerance = int(cfg.get("agreement_tolerance_frames", 8))
+    audio_min_zscore = float(cfg.get("audio_min_zscore", 4.0))
+
+    non_ref = shots[1:]
+    results: list[tuple[int, int, AlignmentEstimate]] = []
+
+    for a_pos, shot_a in enumerate(non_ref):
+        for b_pos in range(a_pos + 1, len(non_ref)):
+            shot_b = non_ref[b_pos]
+            i = a_pos + 1   # index in shots list
+            j = b_pos + 1   # index in shots list
+
+            est_a = pass1_estimates.get(shot_a.id)
+            est_b = pass1_estimates.get(shot_b.id)
+
+            # Compute search window from pass-1 offsets
+            if (
+                est_a is not None and est_b is not None
+                and est_a.confidence >= min_conf and est_b.confidence >= min_conf
+            ):
+                max_lag: int | None = search_margin
+            else:
+                max_lag = None
+
+            clip_a = clips[shot_a.id]
+            clip_b = clips[shot_b.id]
+            n_a = n_frames_by_shot.get(shot_a.id, 1)
+            n_b = n_frames_by_shot.get(shot_b.id, 1)
+            tracks_a = tracks_by_shot.get(shot_a.id)
+            tracks_b = tracks_by_shot.get(shot_b.id)
+
+            logging.info(
+                "  [sync/pass2] aligning %s ↔ %s (max_lag=%s)",
+                shot_a.id, shot_b.id, max_lag,
+            )
+
+            # --- Audio ---
+            audio_est = _align_audio(
+                ref_clip=clip_a,
+                shot_clip=clip_b,
+                fps=fps,
+                min_zscore=audio_min_zscore,
+                max_lag_frames=max_lag,
+            )
+
+            # --- Celebration cross-correlation ---
+            ref_celeb = _compute_celebration_signal(poses_dir, shot_a.id, n_a)
+            shot_celeb = _compute_celebration_signal(poses_dir, shot_b.id, n_b)
+            celeb_est = _align_celebration_signal(
+                ref_celeb, shot_celeb, speed_factors=speed_factors,
+            )
+
+            # --- Player re-ID ---
+            reid_est = AlignmentEstimate(
+                offset=0, confidence=0.0, method="player_reid", valid=False,
+            )
+            if tracks_a is not None and tracks_b is not None:
+                reid_est = _align_player_reid(
+                    ref_clip=clip_a,
+                    shot_clip=clip_b,
+                    ref_tracks=tracks_a,
+                    shot_tracks=tracks_b,
+                    ref_n_frames=n_a,
+                    shot_n_frames=n_b,
+                    fps=fps,
+                    min_track_frames=reid_min_track_frames,
+                    min_similarity=reid_min_similarity,
+                    speed_factors=speed_factors,
+                    agreement_tolerance=agreement_tolerance,
+                )
+
+            # --- Fusion: audio first, then celebration, then reid, else invalid ---
+            if audio_est.valid and audio_est.confidence >= 0.5:
+                best = audio_est
+            elif celeb_est.valid and celeb_est.confidence > 0.3:
+                best = celeb_est
+            elif reid_est.valid:
+                best = reid_est
+            elif audio_est.valid:
+                best = audio_est
+            else:
+                best = AlignmentEstimate(
+                    offset=0, confidence=0.0, method="low_confidence", valid=False,
+                )
+
+            results.append((i, j, best))
+
+    return results
+
+
 class TemporalSyncStage(BaseStage):
     name = "sync"
 

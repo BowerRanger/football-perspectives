@@ -38,6 +38,7 @@ from src.stages.sync import (
     cross_correlate_trajectories,
     project_ball_to_pitch,
     _solve_offset_graph,
+    _collect_pairwise_estimates,
 )
 from src.utils.ball_detector import BallDetector, FakeBallDetector
 
@@ -1094,3 +1095,51 @@ def test_solve_offset_graph_single_clip_returns_correct_shape():
     solved = _solve_offset_graph(n_clips=1, edges=[])
     assert len(solved) == 1
     assert solved[0] == pytest.approx(0.0)
+
+
+def test_collect_pairwise_estimates_returns_correct_pairs(tmp_path):
+    """With 3 shots (1 ref + 2 non-ref), exactly 1 pair is returned with correct indices."""
+    from src.schemas.tracks import TracksResult
+
+    # Create minimal dummy video files (1-frame black clips)
+    (tmp_path / "shots").mkdir()
+    for name in ("shot_001.mp4", "shot_002.mp4", "shot_003.mp4"):
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        out = cv2.VideoWriter(str(tmp_path / "shots" / name), fourcc, 25.0, (64, 36))
+        out.write(np.zeros((36, 64, 3), dtype=np.uint8))
+        out.release()
+
+    shots = [
+        Shot(id="shot_001", clip_file="shots/shot_001.mp4", start_frame=0, end_frame=25,
+             start_time=0.0, end_time=1.0),
+        Shot(id="shot_002", clip_file="shots/shot_002.mp4", start_frame=0, end_frame=25,
+             start_time=0.0, end_time=1.0),
+        Shot(id="shot_003", clip_file="shots/shot_003.mp4", start_frame=0, end_frame=25,
+             start_time=0.0, end_time=1.0),
+    ]
+    clips = {s.id: tmp_path / s.clip_file for s in shots}
+    tracks_by_shot: dict[str, TracksResult] = {}
+    n_frames = {"shot_001": 25, "shot_002": 25, "shot_003": 25}
+    pass1 = {
+        "shot_002": AlignmentEstimate(offset=141, confidence=0.8, method="audio", valid=True),
+        "shot_003": AlignmentEstimate(offset=393, confidence=0.7, method="audio", valid=True),
+    }
+    cfg = {"min_confidence": 0.3, "pass2_search_margin_frames": 30}
+
+    results = _collect_pairwise_estimates(
+        shots=shots,
+        clips=clips,
+        tracks_by_shot=tracks_by_shot,
+        n_frames_by_shot=n_frames,
+        pass1_estimates=pass1,
+        poses_dir=tmp_path / "poses",
+        fps=25.0,
+        cfg=cfg,
+    )
+
+    # 2 non-reference shots → 1 pair
+    assert len(results) == 1
+    i, j, est = results[0]
+    assert i == 1  # shot_002 is index 1
+    assert j == 2  # shot_003 is index 2
+    assert isinstance(est, AlignmentEstimate)

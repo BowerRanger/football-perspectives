@@ -296,6 +296,7 @@ def _visual_similarity_profile(
     shot_desc: np.ndarray,
     min_overlap: int,
     max_lag: int | None = None,
+    center_lag: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Mean cosine similarity for every temporal offset between two clips.
@@ -329,7 +330,7 @@ def _visual_similarity_profile(
 
     offsets = np.arange(-(N_shot - 1), N_ref, dtype=np.int64)
     if max_lag is not None:
-        offsets = offsets[(offsets >= -max_lag) & (offsets <= max_lag)]
+        offsets = offsets[(offsets >= center_lag - max_lag) & (offsets <= center_lag + max_lag)]
     scores = np.zeros(len(offsets), dtype=np.float64)
 
     for k, d in enumerate(offsets):
@@ -348,6 +349,7 @@ def _align_visual(
     min_overlap_frames: int,
     sample_fps: float,
     max_lag_frames: int | None = None,
+    center_lag_frames: int = 0,
 ) -> AlignmentEstimate:
     """
     Align two clips by maximising visual frame similarity over all offsets.
@@ -359,13 +361,20 @@ def _align_visual(
     ----------
     max_lag_frames : int | None
         Maximum lag in frames. If provided, limits the search window.
+    center_lag_frames : int
+        Centre of the search window in frames. Combined with max_lag_frames to
+        produce a window [center - max_lag, center + max_lag].
     """
     ref_desc, frame_step = _extract_frame_descriptors(ref_clip, fps, sample_fps)
     shot_desc, _ = _extract_frame_descriptors(shot_clip, fps, sample_fps)
 
     min_overlap_samples = max(1, int(np.ceil(min_overlap_frames / frame_step)))
     max_lag_samples = None if max_lag_frames is None else max(1, max_lag_frames // frame_step)
-    offsets, scores = _visual_similarity_profile(ref_desc, shot_desc, min_overlap_samples, max_lag=max_lag_samples)
+    center_lag_samples = int(round(center_lag_frames / frame_step)) if frame_step > 0 else 0
+    offsets, scores = _visual_similarity_profile(
+        ref_desc, shot_desc, min_overlap_samples,
+        max_lag=max_lag_samples, center_lag=center_lag_samples,
+    )
 
     if len(scores) == 0 or scores.max() <= 0.0:
         return AlignmentEstimate(offset=0, confidence=0.0, method="visual", valid=False)
@@ -528,6 +537,7 @@ def _align_formation_spatial(
     frame_step: int,
     min_overlap_frames: int,
     max_lag_frames: int | None = None,
+    center_lag_frames: int = 0,
 ) -> AlignmentEstimate:
     """
     Align two clips by maximising spatial formation histogram similarity.
@@ -539,10 +549,17 @@ def _align_formation_spatial(
     ----------
     max_lag_frames : int | None
         Maximum lag in frames. If provided, limits the search window.
+    center_lag_frames : int
+        Centre of the search window in frames. Combined with max_lag_frames to
+        produce a window [center - max_lag, center + max_lag].
     """
     min_overlap_samples = max(1, int(np.ceil(min_overlap_frames / frame_step)))
     max_lag_samples = None if max_lag_frames is None else max(1, max_lag_frames // frame_step)
-    offsets, scores = _visual_similarity_profile(ref_desc, shot_desc, min_overlap_samples, max_lag=max_lag_samples)
+    center_lag_samples = int(round(center_lag_frames / frame_step)) if frame_step > 0 else 0
+    offsets, scores = _visual_similarity_profile(
+        ref_desc, shot_desc, min_overlap_samples,
+        max_lag=max_lag_samples, center_lag=center_lag_samples,
+    )
 
     if len(scores) == 0 or scores.max() <= 0.0:
         return AlignmentEstimate(offset=0, confidence=0.0, method="player_formation", valid=False)
@@ -614,6 +631,7 @@ def _align_audio(
     min_zscore: float = 4.0,
     min_pearson_r: float = 0.4,
     max_lag_frames: int | None = None,
+    center_lag_frames: int = 0,
 ) -> AlignmentEstimate:
     """
     Align two clips by cross-correlating their raw audio waveforms.
@@ -623,6 +641,12 @@ def _align_audio(
     the aligned waveform segments exceeds ``min_pearson_r``, which filters
     out false peaks from broadcast commentary that has similar energy
     profiles but different waveform content.
+
+    Parameters
+    ----------
+    center_lag_frames : int
+        Centre of the search window in frames. Combined with max_lag_frames to
+        produce a window [center - max_lag, center + max_lag].
     """
     ref_audio = _load_audio_mono(ref_clip, sample_rate)
     shot_audio = _load_audio_mono(shot_clip, sample_rate)
@@ -636,7 +660,8 @@ def _align_audio(
 
     if max_lag_frames is not None:
         max_lag_samples = int(round(max_lag_frames / fps * sample_rate))
-        mask = np.abs(lags) <= max_lag_samples
+        center_lag_samples = int(round(center_lag_frames / fps * sample_rate))
+        mask = np.abs(lags - center_lag_samples) <= max_lag_samples
         if np.any(mask):
             corr = corr[mask]
             lags = lags[mask]
@@ -1429,8 +1454,10 @@ def _collect_pairwise_estimates(
                 and est_a.confidence >= min_conf and est_b.confidence >= min_conf
             ):
                 max_lag: int | None = search_margin
+                center_lag = int(est_b.offset - est_a.offset)
             else:
                 max_lag = None
+                center_lag = 0
 
             clip_a = clips[shot_a.id]
             clip_b = clips[shot_b.id]
@@ -1451,6 +1478,7 @@ def _collect_pairwise_estimates(
                 fps=fps,
                 min_zscore=audio_min_zscore,
                 max_lag_frames=max_lag,
+                center_lag_frames=center_lag,
             )
 
             # --- Celebration cross-correlation ---
@@ -1535,7 +1563,6 @@ class TemporalSyncStage(BaseStage):
         audio_min_zscore = float(cfg.get("audio_min_zscore", 4.0))
 
         # Pass-2 / graph-solve config
-        pass2_margin = int(cfg.get("pass2_search_margin_frames", 30))
         graph_alpha = float(cfg.get("graph_confidence_alpha", 0.4))
         graph_residual_threshold = float(cfg.get("graph_residual_flag_threshold_frames", 15))
 

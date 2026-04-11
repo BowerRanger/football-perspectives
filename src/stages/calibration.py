@@ -186,6 +186,78 @@ def _score_candidate(c: _PnPCandidate, preferred_height_range: tuple[float, floa
     return score
 
 
+def _try_calibrate_camera(
+    pts_3d: np.ndarray,
+    pts_2d: np.ndarray,
+    image_size: tuple[int, int],
+    min_height: float,
+    max_height: float,
+    initial_fx: float | None = None,
+) -> _PnPCandidate | None:
+    """Try cv2.calibrateCamera which jointly estimates intrinsics and extrinsics.
+
+    This is more accurate than solvePnP when the focal length is unknown because
+    it optimises K and [R|t] simultaneously. Requires ≥5 points (to have more
+    residuals than free parameters: 2*N > 8).
+    """
+    w, h = image_size
+    if len(pts_3d) < 5:
+        return None
+
+    focal_seeds = [initial_fx] if initial_fx is not None else [1500, 2000, 3000, 5000]
+    best: _PnPCandidate | None = None
+    best_err = float("inf")
+
+    for seed in focal_seeds:
+        K_init = np.array([[seed, 0, w / 2.0], [0, seed, h / 2.0], [0, 0, 1]], dtype=np.float64)
+        flags = (
+            cv2.CALIB_USE_INTRINSIC_GUESS
+            | cv2.CALIB_FIX_PRINCIPAL_POINT
+            | cv2.CALIB_FIX_ASPECT_RATIO
+            | cv2.CALIB_ZERO_TANGENT_DIST
+            | cv2.CALIB_FIX_K2
+            | cv2.CALIB_FIX_K3
+        )
+        try:
+            ret, K, _dc, rvecs, tvecs = cv2.calibrateCamera(
+                [pts_3d.astype(np.float32)],
+                [pts_2d.reshape(-1, 1, 2).astype(np.float32)],
+                (w, h),
+                K_init.copy(),
+                None,
+                flags=flags,
+            )
+        except cv2.error:
+            continue
+        if ret <= 0 or not rvecs or not tvecs:
+            continue
+        rvec, tvec = rvecs[0], tvecs[0]
+        fx = float(K[0, 0])
+        if not _validate_calibration(tvec, fx):
+            continue
+        if not is_camera_valid(rvec, tvec, min_height, max_height):
+            continue
+        err = reprojection_error(
+            pts_3d.astype(np.float32),
+            pts_2d.reshape(-1, 2).astype(np.float32),
+            K.astype(np.float32),
+            rvec,
+            tvec,
+        )
+        if err < best_err:
+            best_err = err
+            pos = camera_world_position(rvec, tvec)
+            best = _PnPCandidate(
+                rvec=rvec,
+                tvec=tvec,
+                K=K.astype(np.float32),
+                inlier_indices=np.arange(len(pts_3d)),
+                reprojection_error=err,
+                camera_height=float(pos[2]),
+            )
+    return best
+
+
 def calibrate_frame(
     correspondences: dict[str, np.ndarray] | dict[str, LandmarkDetection],
     landmarks_3d: dict[str, np.ndarray],
@@ -200,12 +272,15 @@ def calibrate_frame(
     initial_fx: float | None = None,
     focal_length_tolerance: float = 0.2,
 ) -> CameraFrame | None:
-    """
-    Solve camera pose from 2D-3D pitch correspondences using multiple PnP methods.
+    """Solve camera pose from 2D-3D pitch correspondences.
 
-    Generates candidates from RANSAC, IPPE, and EPNP, filters by physical constraints
-    (camera above pitch, looking downward), and selects the best by reprojection error
-    and height plausibility.
+    Strategy:
+    1. Try cv2.calibrateCamera first (jointly estimates focal length — most accurate
+       when the focal length is unknown). Requires ≥5 points.
+    2. If initial_rvec/initial_tvec provided, try solvePnP with extrinsic guess
+       (temporal seeding for panning shots).
+    3. Fall back to multi-method solvePnP with focal length candidates.
+    4. Select the best candidate by reprojection error + height plausibility.
 
     Returns None if fewer than 4 common points or no valid solution is found.
     """
@@ -220,7 +295,17 @@ def calibrate_frame(
     h, w = image_shape
     cx, cy = w / 2.0, h / 2.0
 
-    # Build focal length candidate list
+    candidates: list[_PnPCandidate] = []
+
+    # Method 0: calibrateCamera — joint intrinsics + extrinsics estimation.
+    # Most accurate when focal length is unknown. Requires ≥5 points.
+    cal_cam = _try_calibrate_camera(
+        pts_3d, pts_2d, (w, h), min_camera_height, max_camera_height, initial_fx,
+    )
+    if cal_cam is not None:
+        candidates.append(cal_cam)
+
+    # Build focal length candidate list for solvePnP methods
     diagonal = float(np.sqrt(h ** 2 + w ** 2))
     if initial_fx is not None:
         tol = focal_length_tolerance
@@ -229,13 +314,18 @@ def calibrate_frame(
             initial_fx,
             initial_fx * (1.0 + tol),
         ]
+    elif cal_cam is not None:
+        # Use calibrateCamera's estimated focal length as anchor
+        est_fx = float(cal_cam.K[0, 0])
+        focal_candidates = [est_fx * s for s in (0.8, 0.9, 1.0, 1.1, 1.2)]
     else:
         focal_candidates = [diagonal * s for s in (0.25, 0.30, 0.35, 0.40, 0.47, 0.55, 0.65, 0.75, 0.85, 1.0, 1.2, 1.4)]
 
-    candidates = _generate_pnp_candidates(
+    # Methods 1-3: solvePnP variants with fixed focal length candidates
+    candidates.extend(_generate_pnp_candidates(
         pts_3d, pts_2d, focal_candidates, cx, cy,
         ransac_reproj_threshold, min_camera_height, max_camera_height,
-    )
+    ))
 
     # Optional temporal seeding: try solvePnP with an extrinsic guess
     if initial_rvec is not None and initial_tvec is not None:

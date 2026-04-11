@@ -760,23 +760,14 @@ class CameraCalibrationStage(BaseStage):
             initial_tvec = np.array(prev.translation_vector, dtype=np.float64)
             initial_fx = float(np.array(prev.intrinsic_matrix)[0, 0])
 
-        cf = self._try_with_player_heights(
-            shot_id=shot_id,
-            frame_idx=frame_idx,
-            correspondences=correspondences,
-            image_shape=image_shape,
-            max_err=max_err,
-            ransac_thresh=ransac_thresh,
-            min_camera_height=min_camera_height,
-            max_camera_height=max_camera_height,
-            initial_rvec=initial_rvec,
-            initial_tvec=initial_tvec,
-            initial_fx=initial_fx,
-            focal_length_tolerance=focal_length_tolerance,
-        )
+        # Try seeded calibration first, then free calibration.
+        # Pick the first that passes temporal check.
+        attempts: list[tuple[np.ndarray | None, np.ndarray | None, float | None]] = []
+        if initial_rvec is not None:
+            attempts.append((initial_rvec, initial_tvec, initial_fx))
+        attempts.append((None, None, None))  # free (no seed)
 
-        if cf is None and initial_rvec is not None:
-            # Fall back: unconstrained calibration (no temporal seed)
+        for a_rvec, a_tvec, a_fx in attempts:
             cf = self._try_with_player_heights(
                 shot_id=shot_id,
                 frame_idx=frame_idx,
@@ -786,18 +777,15 @@ class CameraCalibrationStage(BaseStage):
                 ransac_thresh=ransac_thresh,
                 min_camera_height=min_camera_height,
                 max_camera_height=max_camera_height,
-                initial_rvec=None,
-                initial_tvec=None,
-                initial_fx=None,
+                initial_rvec=a_rvec,
+                initial_tvec=a_tvec,
+                initial_fx=a_fx,
+                focal_length_tolerance=focal_length_tolerance,
             )
+            if cf is not None and self._passes_temporal_check(cf, accepted_frames, temporal_max_jump):
+                return cf
 
-        if cf is None:
-            return None
-
-        if not self._passes_temporal_check(cf, accepted_frames, temporal_max_jump):
-            return None
-
-        return cf
+        return None
 
     def _calibrate_shot_from_manual(
         self,

@@ -3,7 +3,7 @@ import cv2
 import pytest
 from pathlib import Path
 from src.utils.pitch import FIFA_LANDMARKS, PITCH_LENGTH, PITCH_WIDTH
-from src.utils.camera import build_projection_matrix, project_to_pitch, reprojection_error
+from src.utils.camera import build_projection_matrix, project_to_pitch, reprojection_error, camera_world_position, is_camera_valid
 
 def _synthetic_camera():
     K = np.array([[1500, 0, 960], [0, 1500, 540], [0, 0, 1]], dtype=np.float32)
@@ -167,3 +167,52 @@ def test_near_landmarks_have_lower_y_than_far():
     assert FIFA_LANDMARKS["halfway_near"][1] < FIFA_LANDMARKS["halfway_far"][1]
     assert FIFA_LANDMARKS["centre_circle_near"][1] < FIFA_LANDMARKS["centre_circle_far"][1]
     assert FIFA_LANDMARKS["left_goal_near_post_base"][1] < FIFA_LANDMARKS["left_goal_far_post_base"][1]
+
+
+def _valid_broadcast_camera():
+    """Return (rvec, tvec) for a physically plausible broadcast camera.
+
+    Camera is placed at world position (52.5, -10, 30) — on the pitch centreline,
+    10 m behind the near touchline and 30 m above the pitch — and aimed at the
+    pitch centre (52.5, 34, 0).  All pitch coordinates use z-up convention.
+    """
+    C = np.array([52.5, -10.0, 30.0])
+    target = np.array([52.5, 34.0, 0.0])
+    cam_z_world = target - C
+    cam_z_world /= np.linalg.norm(cam_z_world)
+    world_up = np.array([0.0, 0.0, 1.0])
+    cam_x_world = np.cross(cam_z_world, world_up)
+    cam_x_world /= np.linalg.norm(cam_x_world)
+    cam_y_world = np.cross(cam_z_world, cam_x_world)
+    R = np.array([cam_x_world, cam_y_world, cam_z_world])
+    rvec_raw, _ = cv2.Rodrigues(R)
+    rvec = rvec_raw.flatten().astype(np.float64)
+    tvec = (-R @ C).astype(np.float64)
+    return rvec, tvec
+
+
+def test_camera_world_position_synthetic():
+    rvec, tvec = _valid_broadcast_camera()
+    pos = camera_world_position(rvec, tvec)
+    assert pos[2] > 0  # camera above pitch
+    assert pos.shape == (3,)
+
+
+def test_is_camera_valid_accepts_normal_broadcast_camera():
+    rvec, tvec = _valid_broadcast_camera()
+    assert is_camera_valid(rvec, tvec, min_height=3.0, max_height=80.0)
+
+
+def test_is_camera_valid_rejects_camera_below_pitch():
+    # Identity rotation; tvec z positive → world position z negative (below pitch plane).
+    rvec_id = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    tvec_below = np.array([0.0, 0.0, 10.0], dtype=np.float32)
+    assert not is_camera_valid(rvec_id, tvec_below, min_height=3.0, max_height=80.0)
+
+
+def test_is_camera_valid_rejects_camera_looking_up():
+    # Identity rotation, tvec z negative → camera at z=+30 (above pitch) but optical axis
+    # points in world +z (upward), which is physically wrong for a broadcast camera.
+    rvec_id = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    tvec_up = np.array([0.0, 0.0, -30.0], dtype=np.float32)
+    assert not is_camera_valid(rvec_id, tvec_up, min_height=3.0, max_height=80.0)

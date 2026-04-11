@@ -34,9 +34,9 @@ The pipeline has 9 sequential stages. Each stage reads from previous stage outpu
 | Stage | Name | Input | Output |
 |-------|------|-------|--------|
 | 1 | Shot Segmentation | video file | `shots/shots_manifest.json` + per-shot `.mp4` clips |
-| 2 | Camera Calibration | shots | `calibration/shot_XXX_calibration.json` |
-| 3 | Temporal Synchronisation | shots + calibration | `sync/sync_map.json` |
-| 4 | Player Detection & Tracking | shots | `tracks/shot_XXX_tracks.json` |
+| 2 | Player Detection & Tracking | shots | `tracks/shot_XXX_tracks.json` |
+| 3 | Camera Calibration | shots + tracks | `calibration/shot_XXX_calibration.json` |
+| 4 | Temporal Synchronisation | shots + calibration | `sync/sync_map.json` |
 | 5 | 2D Pose Estimation | shots + tracks | `poses/shot_XXX_poses.json` |
 | 6 | Cross-View Player Matching | tracks + sync | `matching/player_matches.json` |
 | 7 | 3D Triangulation | poses + calibration + matches | `triangulated/PXXX_3d_joints.npz` |
@@ -45,7 +45,9 @@ The pipeline has 9 sequential stages. Each stage reads from previous stage outpu
 
 ## Key Design Decisions
 
-**Pitch coordinate system**: The football pitch is the ground plane (z=0), 105m × 68m (FIFA standard). All 3D positions are in pitch-metres. Camera calibration maps pixel space → pitch space.
+**Pitch coordinate system**: The football pitch is the ground plane (z=0), 105m × 68m (FIFA standard). All 3D positions are in pitch-metres. Near side = y=0 (bottom of broadcast view), far side = y=68 (top of broadcast view). Camera calibration maps pixel space → pitch space.
+
+**Landmark naming**: Pitch landmarks use near/far convention (near = y=0, far = y=68). Goal landmarks include crossbar points at z=2.44m. Corner flag tops at z=1.5m.
 
 **Keypoint format**: COCO 17 keypoints throughout (nose through right_ankle). Confidence threshold 0.3 is the cutoff below which a keypoint is treated as occluded.
 

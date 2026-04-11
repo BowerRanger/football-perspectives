@@ -9,8 +9,10 @@ import numpy as np
 from src.pipeline.base import BaseStage
 from src.schemas.calibration import CameraFrame, CalibrationResult
 from src.schemas.shots import ShotsManifest
+from src.schemas.tracks import TracksResult
 from src.utils.camera import reprojection_error, camera_world_position, is_camera_valid
 from src.utils.pitch import FIFA_LANDMARKS
+from src.utils.player_height import score_player_heights
 
 
 @dataclass(frozen=True)
@@ -526,10 +528,311 @@ class CameraCalibrationStage(BaseStage):
                 results.append(cf)
         return results
 
+    def _load_track_bboxes(self, shot_id: str, frame_idx: int) -> list[list[float]]:
+        """Load player bounding boxes for a given shot and frame from tracks output.
+
+        Returns a list of [x1, y1, x2, y2] bboxes for player/goalkeeper tracks
+        visible on ``frame_idx``.  Returns an empty list if the tracks file does
+        not exist or the frame has no detections.
+        """
+        tracks_path = self.output_dir / "tracks" / f"{shot_id}_tracks.json"
+        if not tracks_path.exists():
+            return []
+        try:
+            result = TracksResult.load(tracks_path)
+        except Exception:
+            return []
+
+        bboxes: list[list[float]] = []
+        for track in result.tracks:
+            if track.class_name not in ("player", "goalkeeper"):
+                continue
+            for tf in track.frames:
+                if tf.frame == frame_idx:
+                    bboxes.append(list(tf.bbox))
+                    break
+        return bboxes
+
+    @staticmethod
+    def _passes_temporal_check(
+        cf: CameraFrame,
+        previous_frames: list[CameraFrame],
+        max_jump: float,
+    ) -> bool:
+        """Return True if the camera world position is within max_jump metres of
+        the most recent accepted frame.  Always returns True when previous_frames
+        is empty (no prior frame to compare against).
+        """
+        if not previous_frames:
+            return True
+        prev = previous_frames[-1]
+        prev_pos = camera_world_position(
+            np.array(prev.rotation_vector), np.array(prev.translation_vector)
+        )
+        cur_pos = camera_world_position(
+            np.array(cf.rotation_vector), np.array(cf.translation_vector)
+        )
+        jump = float(np.linalg.norm(cur_pos - prev_pos))
+        if jump > max_jump:
+            logging.debug(
+                "Temporal check failed: camera jumped %.1fm (max %.1fm)", jump, max_jump
+            )
+            return False
+        return True
+
+    def _try_with_player_heights(
+        self,
+        shot_id: str,
+        frame_idx: int,
+        correspondences: dict,
+        image_shape: tuple[int, int],
+        max_err: float,
+        ransac_thresh: float,
+        min_camera_height: float,
+        max_camera_height: float,
+        initial_rvec: np.ndarray | None = None,
+        initial_tvec: np.ndarray | None = None,
+        initial_fx: float | None = None,
+        focal_length_tolerance: float = 0.2,
+        player_height_weight: float = 0.3,
+    ) -> CameraFrame | None:
+        """Calibrate a frame and score by player height plausibility.
+
+        Runs ``calibrate_frame`` then checks implied player heights from bounding
+        boxes loaded from the tracks output.  Returns the result only if the
+        player height score is above a minimum threshold (or no bboxes available).
+        """
+        cf = calibrate_frame(
+            correspondences,
+            FIFA_LANDMARKS,
+            image_shape,
+            frame_idx=frame_idx,
+            max_reprojection_error=max_err,
+            ransac_reproj_threshold=ransac_thresh,
+            min_camera_height=min_camera_height,
+            max_camera_height=max_camera_height,
+            initial_rvec=initial_rvec,
+            initial_tvec=initial_tvec,
+            initial_fx=initial_fx,
+            focal_length_tolerance=focal_length_tolerance,
+        )
+        if cf is None:
+            return None
+
+        bboxes = self._load_track_bboxes(shot_id, frame_idx)
+        if bboxes:
+            K = np.array(cf.intrinsic_matrix, dtype=np.float64)
+            rv = np.array(cf.rotation_vector, dtype=np.float64)
+            tv = np.array(cf.translation_vector, dtype=np.float64)
+            height_score = score_player_heights(bboxes, K, rv, tv)
+            # Require at least 30% of visible players to have plausible heights
+            min_score = self.config.get("calibration", {}).get(
+                "player_height_min_score", 0.3
+            )
+            if height_score < min_score:
+                logging.debug(
+                    "Frame %d rejected by player height check (score=%.2f < %.2f)",
+                    frame_idx,
+                    height_score,
+                    min_score,
+                )
+                return None
+
+        return cf
+
+    def _calibrate_frame_with_continuity(
+        self,
+        shot_id: str,
+        frame_idx: int,
+        correspondences: dict,
+        image_shape: tuple[int, int],
+        max_err: float,
+        ransac_thresh: float,
+        min_camera_height: float,
+        max_camera_height: float,
+        temporal_max_jump: float,
+        accepted_frames: list[CameraFrame],
+        focal_length_tolerance: float = 0.2,
+    ) -> CameraFrame | None:
+        """Calibrate a single frame with temporal seeding and continuity checking.
+
+        Tries calibration with temporal seed first (if prior frames exist), then
+        falls back to unconstrained calibration.  The result is checked against
+        the temporal continuity constraint.
+        """
+        initial_rvec: np.ndarray | None = None
+        initial_tvec: np.ndarray | None = None
+        initial_fx: float | None = None
+
+        if accepted_frames:
+            prev = accepted_frames[-1]
+            initial_rvec = np.array(prev.rotation_vector, dtype=np.float64)
+            initial_tvec = np.array(prev.translation_vector, dtype=np.float64)
+            initial_fx = float(np.array(prev.intrinsic_matrix)[0, 0])
+
+        cf = self._try_with_player_heights(
+            shot_id=shot_id,
+            frame_idx=frame_idx,
+            correspondences=correspondences,
+            image_shape=image_shape,
+            max_err=max_err,
+            ransac_thresh=ransac_thresh,
+            min_camera_height=min_camera_height,
+            max_camera_height=max_camera_height,
+            initial_rvec=initial_rvec,
+            initial_tvec=initial_tvec,
+            initial_fx=initial_fx,
+            focal_length_tolerance=focal_length_tolerance,
+        )
+
+        if cf is None and initial_rvec is not None:
+            # Fall back: unconstrained calibration (no temporal seed)
+            cf = self._try_with_player_heights(
+                shot_id=shot_id,
+                frame_idx=frame_idx,
+                correspondences=correspondences,
+                image_shape=image_shape,
+                max_err=max_err,
+                ransac_thresh=ransac_thresh,
+                min_camera_height=min_camera_height,
+                max_camera_height=max_camera_height,
+                initial_rvec=None,
+                initial_tvec=None,
+                initial_fx=None,
+            )
+
+        if cf is None:
+            return None
+
+        if not self._passes_temporal_check(cf, accepted_frames, temporal_max_jump):
+            return None
+
+        return cf
+
+    def _calibrate_shot_from_manual(
+        self,
+        shot_id: str,
+        manual_path: Path,
+        image_shape: tuple[int, int],
+        max_err: float,
+        ransac_thresh: float,
+        min_camera_height: float,
+        max_camera_height: float,
+        temporal_max_jump: float,
+        focal_length_tolerance: float = 0.2,
+    ) -> list[CameraFrame]:
+        """Calibrate a panning shot from manual landmark annotations with temporal continuity.
+
+        Strategy:
+        1. Find the annotated frame with the most correspondences (seed frame).
+        2. Calibrate the seed frame without temporal seeding.
+        3. Propagate forward from seed, then backward, using each accepted frame
+           as the initial guess for the next.
+
+        Returns the calibrated frames sorted by frame index.
+        """
+        import json as _json
+
+        data = _json.loads(manual_path.read_text())
+
+        # Build per-frame correspondence dicts, ordered by frame index
+        frame_corrs: list[tuple[int, dict]] = []
+        for fid_str, pts in data.get("frames", {}).items():
+            fid = int(fid_str)
+            correspondences: dict = {}
+            for name, pt in pts.items():
+                if name not in FIFA_LANDMARKS:
+                    continue
+                correspondences[name] = LandmarkDetection(
+                    uv=np.array([float(pt["u"]), float(pt["v"])], dtype=np.float32),
+                    confidence=float(pt.get("confidence", 1.0)),
+                    source="manual_json",
+                )
+            if len(correspondences) >= 4:
+                frame_corrs.append((fid, correspondences))
+
+        if not frame_corrs:
+            return []
+
+        frame_corrs.sort(key=lambda x: x[0])
+
+        # Find seed frame (most correspondences)
+        seed_idx = max(range(len(frame_corrs)), key=lambda i: len(frame_corrs[i][1]))
+        seed_fid, seed_corrs = frame_corrs[seed_idx]
+
+        # Calibrate seed frame (unconstrained)
+        seed_cf = calibrate_frame(
+            seed_corrs,
+            FIFA_LANDMARKS,
+            image_shape,
+            frame_idx=seed_fid,
+            max_reprojection_error=max_err,
+            ransac_reproj_threshold=ransac_thresh,
+            min_camera_height=min_camera_height,
+            max_camera_height=max_camera_height,
+        )
+        if seed_cf is None:
+            logging.warning("%s: seed frame %d calibration failed", shot_id, seed_fid)
+            return []
+
+        # Collect all accepted frames indexed by position in frame_corrs
+        accepted_by_idx: dict[int, CameraFrame] = {seed_idx: seed_cf}
+
+        # Propagate forward (seed_idx+1 .. end)
+        prev_frames: list[CameraFrame] = [seed_cf]
+        for i in range(seed_idx + 1, len(frame_corrs)):
+            fid, corrs = frame_corrs[i]
+            cf = self._calibrate_frame_with_continuity(
+                shot_id=shot_id,
+                frame_idx=fid,
+                correspondences=corrs,
+                image_shape=image_shape,
+                max_err=max_err,
+                ransac_thresh=ransac_thresh,
+                min_camera_height=min_camera_height,
+                max_camera_height=max_camera_height,
+                temporal_max_jump=temporal_max_jump,
+                accepted_frames=prev_frames,
+                focal_length_tolerance=focal_length_tolerance,
+            )
+            if cf is not None:
+                accepted_by_idx[i] = cf
+                prev_frames.append(cf)
+
+        # Propagate backward (seed_idx-1 .. 0)
+        prev_frames = [seed_cf]
+        for i in range(seed_idx - 1, -1, -1):
+            fid, corrs = frame_corrs[i]
+            cf = self._calibrate_frame_with_continuity(
+                shot_id=shot_id,
+                frame_idx=fid,
+                correspondences=corrs,
+                image_shape=image_shape,
+                max_err=max_err,
+                ransac_thresh=ransac_thresh,
+                min_camera_height=min_camera_height,
+                max_camera_height=max_camera_height,
+                temporal_max_jump=temporal_max_jump,
+                accepted_frames=prev_frames,
+                focal_length_tolerance=focal_length_tolerance,
+            )
+            if cf is not None:
+                accepted_by_idx[i] = cf
+                prev_frames.append(cf)
+
+        # Return frames sorted by frame index
+        sorted_idxs = sorted(accepted_by_idx.keys(), key=lambda i: frame_corrs[i][0])
+        return [accepted_by_idx[i] for i in sorted_idxs]
+
     def _calibrate_shot(
         self, shot_id: str, clip_file: str, keyframe_interval: int, max_err: float, ransac_thresh: float = 40.0,
     ) -> CalibrationResult:
         clip_path = self.output_dir / clip_file
+        cfg = self.config.get("calibration", {})
+        min_camera_height = float(cfg.get("min_camera_height", 3.0))
+        max_camera_height = float(cfg.get("max_camera_height", 80.0))
+        temporal_max_jump = float(cfg.get("temporal_max_jump", 5.0))
+        focal_length_tolerance = float(cfg.get("focal_length_tolerance", 0.2))
 
         manual_path = self.output_dir / "calibration" / "manual_landmarks" / f"{shot_id}.json"
         if manual_path.exists():
@@ -543,19 +846,26 @@ class CameraCalibrationStage(BaseStage):
                 panning = self._is_panning(manual_path)
 
                 if panning:
-                    # Per-frame calibration for panning cameras
-                    static_thresh = float(
-                        self.config.get("calibration", {}).get("static_ransac_threshold", 80.0)
+                    # Panning camera: use temporal continuity across annotated frames
+                    frames = self._calibrate_shot_from_manual(
+                        shot_id=shot_id,
+                        manual_path=manual_path,
+                        image_shape=(h, w),
+                        max_err=max_err,
+                        ransac_thresh=ransac_thresh,
+                        min_camera_height=min_camera_height,
+                        max_camera_height=max_camera_height,
+                        temporal_max_jump=temporal_max_jump,
+                        focal_length_tolerance=focal_length_tolerance,
                     )
-                    frames = self._per_frame_calibrate(manual_path, (h, w), max_err, static_thresh)
                     if frames:
-                        print(f"     panning camera: {len(frames)} frames calibrated independently")
+                        print(f"     panning camera: {len(frames)} frames calibrated with temporal continuity")
                         return CalibrationResult(
                             shot_id=shot_id,
                             camera_type="tracking",
                             frames=frames,
                         )
-                    logging.warning("%s: per-frame calibration produced 0 frames", shot_id)
+                    logging.warning("%s: temporal calibration produced 0 frames", shot_id)
                 else:
                     # Static camera: merge all landmarks and solve once
                     cf = self._static_calibrate(merged, (h, w), max_err)
@@ -570,7 +880,7 @@ class CameraCalibrationStage(BaseStage):
                         shot_id, len(merged),
                     )
 
-        # ── Fallback: per-frame calibration ──
+        # ── Fallback: detector-based per-frame calibration with temporal seeding ──
         if self.detector is None:
             return CalibrationResult(shot_id=shot_id, camera_type="static", frames=[])
 
@@ -594,13 +904,18 @@ class CameraCalibrationStage(BaseStage):
                         frame_idx=frame_idx,
                         shot_id=shot_id,
                     )
-                    cf = calibrate_frame(
-                        correspondences,
-                        FIFA_LANDMARKS,
-                        (h, w),
-                        frame_idx,
-                        max_reprojection_error=max_err,
-                        ransac_reproj_threshold=ransac_thresh,
+                    cf = self._calibrate_frame_with_continuity(
+                        shot_id=shot_id,
+                        frame_idx=frame_idx,
+                        correspondences=correspondences,
+                        image_shape=(h, w),
+                        max_err=max_err,
+                        ransac_thresh=ransac_thresh,
+                        min_camera_height=min_camera_height,
+                        max_camera_height=max_camera_height,
+                        temporal_max_jump=temporal_max_jump,
+                        accepted_frames=frames,
+                        focal_length_tolerance=focal_length_tolerance,
                     )
                     if cf is not None and cf.reprojection_error <= max_err:
                         frames.append(cf)

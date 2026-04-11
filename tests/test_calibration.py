@@ -253,3 +253,37 @@ def test_calibrate_frame_produces_camera_above_pitch():
         np.array(result.translation_vector),
     )
     assert pos[2] > 0, f"Camera placed below pitch at z={pos[2]:.1f}"
+
+
+# ── Player height disambiguation tests ──────────────────────────────────────
+
+from src.utils.player_height import score_player_heights
+
+
+def test_score_player_heights_correct_solution_scores_higher():
+    """A camera solution that produces ~1.8m player heights should score well."""
+    K = np.array([[2000, 0, 960], [0, 2000, 540], [0, 0, 1]], dtype=np.float64)
+    rvec = np.array([1.3, -0.1, 0.0], dtype=np.float64)
+    tvec = np.array([-30.0, -34.0, 40.0], dtype=np.float64)
+
+    # Create a synthetic player bbox by projecting a standing person at (30, 20)
+    foot_3d = np.array([[30.0, 20.0, 0.0]], dtype=np.float64)
+    head_3d = np.array([[30.0, 20.0, 1.8]], dtype=np.float64)
+    foot_2d, _ = cv2.projectPoints(foot_3d, rvec, tvec, K, None)
+    head_2d, _ = cv2.projectPoints(head_3d, rvec, tvec, K, None)
+
+    bboxes = [[
+        float(head_2d[0, 0, 0]) - 20, float(head_2d[0, 0, 1]),
+        float(foot_2d[0, 0, 0]) + 20, float(foot_2d[0, 0, 1]),
+    ]]
+
+    score = score_player_heights(bboxes, K, rvec, tvec, height_range=(1.5, 2.1))
+    assert score > 0.5
+
+
+def test_score_player_heights_empty_bboxes_returns_zero():
+    K = np.array([[2000, 0, 960], [0, 2000, 540], [0, 0, 1]], dtype=np.float64)
+    rvec = np.array([1.3, -0.1, 0.0], dtype=np.float64)
+    tvec = np.array([-30.0, -34.0, 40.0], dtype=np.float64)
+    score = score_player_heights([], K, rvec, tvec)
+    assert score == 0.0

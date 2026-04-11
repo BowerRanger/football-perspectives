@@ -171,6 +171,109 @@ def _generate_pnp_candidates(
     return candidates
 
 
+def calibrate_frame_fixed_position(
+    correspondences: dict[str, np.ndarray] | dict[str, LandmarkDetection],
+    landmarks_3d: dict[str, np.ndarray],
+    image_shape: tuple[int, int],
+    camera_position: np.ndarray,
+    frame_idx: int = 0,
+    max_reprojection_error: float = 15.0,
+    focal_candidates: list[float] | None = None,
+) -> CameraFrame | None:
+    """Solve camera rotation and focal length with a fixed 3D camera position.
+
+    For a static broadcast camera on a tripod, the world position C is constant
+    across all frames. Only rotation (pan/tilt) and focal length (zoom) change.
+    Given C, for each candidate (rvec, fx): tvec = -R @ C.
+
+    Uses solvePnP to get an initial rvec, then recomputes tvec = -R @ C and
+    refines with iterative PnP.
+    """
+    normalized = _normalize_correspondences(correspondences)
+    common = [k for k in normalized if k in landmarks_3d]
+    if len(common) < 4:
+        return None
+
+    pts_2d = np.array([normalized[k].uv for k in common], dtype=np.float32)
+    pts_3d = np.array([landmarks_3d[k] for k in common], dtype=np.float32)
+
+    h, w = image_shape
+    cx, cy = w / 2.0, h / 2.0
+    C = np.asarray(camera_position, dtype=np.float64).reshape(3)
+
+    if focal_candidates is None:
+        diagonal = float(np.sqrt(h ** 2 + w ** 2))
+        focal_candidates = [diagonal * s for s in (0.5, 0.7, 1.0, 1.4, 2.0, 2.5, 3.0)]
+
+    best_err = float("inf")
+    best_rvec: np.ndarray | None = None
+    best_tvec: np.ndarray | None = None
+    best_K: np.ndarray | None = None
+
+    for fx in focal_candidates:
+        K = np.array([[fx, 0, cx], [0, fx, cy], [0, 0, 1]], dtype=np.float64)
+
+        # Get initial rvec from solvePnP (unconstrained)
+        for method in [cv2.SOLVEPNP_EPNP, cv2.SOLVEPNP_ITERATIVE]:
+            try:
+                ok, rvec_init, _tvec_init = cv2.solvePnP(
+                    pts_3d.astype(np.float64), pts_2d.astype(np.float64),
+                    K, None, flags=method,
+                )
+                if not ok:
+                    continue
+            except cv2.error:
+                continue
+
+            # Enforce fixed position: tvec = -R @ C
+            R_init, _ = cv2.Rodrigues(rvec_init)
+            tvec_fixed = (-R_init @ C).reshape(3, 1)
+
+            # Refine rvec with fixed-position tvec as starting point
+            try:
+                ok, rvec_ref, tvec_ref = cv2.solvePnP(
+                    pts_3d.astype(np.float64), pts_2d.astype(np.float64),
+                    K, None,
+                    rvec=rvec_init.copy(), tvec=tvec_fixed.copy(),
+                    useExtrinsicGuess=True, flags=cv2.SOLVEPNP_ITERATIVE,
+                )
+                if not ok:
+                    continue
+            except cv2.error:
+                continue
+
+            # Re-enforce fixed position with the refined rotation
+            R_ref, _ = cv2.Rodrigues(rvec_ref)
+            tvec_final = (-R_ref @ C).reshape(3, 1)
+
+            err = reprojection_error(
+                pts_3d.astype(np.float32), pts_2d,
+                K.astype(np.float32), rvec_ref, tvec_final,
+            )
+            if err < best_err:
+                best_err = err
+                best_rvec = rvec_ref
+                best_tvec = tvec_final
+                best_K = K.astype(np.float32)
+
+    if best_rvec is None or best_K is None:
+        return None
+
+    frame_confidence = float(np.mean([normalized[k].confidence for k in common]))
+    confidence = float(max(0.0, 1.0 - best_err / max_reprojection_error) * frame_confidence)
+
+    return CameraFrame(
+        frame=frame_idx,
+        intrinsic_matrix=best_K.tolist(),
+        rotation_vector=best_rvec.flatten().tolist(),
+        translation_vector=best_tvec.flatten().tolist(),
+        reprojection_error=float(best_err),
+        num_correspondences=len(common),
+        confidence=confidence,
+        tracked_landmark_types=common,
+    )
+
+
 def _score_candidate(c: _PnPCandidate, preferred_height_range: tuple[float, float] = (5.0, 80.0)) -> float:
     """Score a PnP candidate; lower score is better.
 
@@ -799,13 +902,15 @@ class CameraCalibrationStage(BaseStage):
         temporal_max_jump: float,
         focal_length_tolerance: float = 0.2,
     ) -> list[CameraFrame]:
-        """Calibrate a panning shot from manual landmark annotations with temporal continuity.
+        """Calibrate a static-position shot from manual landmark annotations.
 
-        Strategy:
+        Broadcast cameras sit on a fixed tripod — they pan, tilt, and zoom but
+        do not move in 3D space.  Strategy:
+
         1. Find the annotated frame with the most correspondences (seed frame).
-        2. Calibrate the seed frame without temporal seeding.
-        3. Propagate forward from seed, then backward, using each accepted frame
-           as the initial guess for the next.
+        2. Calibrate the seed frame fully (position + rotation + focal length).
+        3. Extract the camera world position C from the seed.
+        4. For all other frames, fix C and only solve for rotation + focal length.
 
         Returns the calibrated frames sorted by frame index.
         """
@@ -813,11 +918,11 @@ class CameraCalibrationStage(BaseStage):
 
         data = _json.loads(manual_path.read_text())
 
-        # Build per-frame correspondence dicts, ordered by frame index
-        frame_corrs: list[tuple[int, dict]] = []
+        # Build per-frame correspondence dicts
+        frame_corrs: list[tuple[int, dict[str, LandmarkDetection]]] = []
         for fid_str, pts in data.get("frames", {}).items():
             fid = int(fid_str)
-            correspondences: dict = {}
+            correspondences: dict[str, LandmarkDetection] = {}
             for name, pt in pts.items():
                 if name not in FIFA_LANDMARKS:
                     continue
@@ -838,7 +943,7 @@ class CameraCalibrationStage(BaseStage):
         seed_idx = max(range(len(frame_corrs)), key=lambda i: len(frame_corrs[i][1]))
         seed_fid, seed_corrs = frame_corrs[seed_idx]
 
-        # Calibrate seed frame (unconstrained)
+        # Calibrate seed frame fully (position + rotation + focal length)
         seed_cf = calibrate_frame(
             seed_corrs,
             FIFA_LANDMARKS,
@@ -853,54 +958,43 @@ class CameraCalibrationStage(BaseStage):
             logging.warning("%s: seed frame %d calibration failed", shot_id, seed_fid)
             return []
 
-        # Collect all accepted frames indexed by position in frame_corrs
-        accepted_by_idx: dict[int, CameraFrame] = {seed_idx: seed_cf}
+        # Extract fixed camera world position from seed
+        cam_pos = camera_world_position(
+            np.array(seed_cf.rotation_vector), np.array(seed_cf.translation_vector),
+        )
+        seed_fx = float(np.array(seed_cf.intrinsic_matrix)[0, 0])
+        logging.info(
+            "%s: seed frame %d → camera at (%.1f, %.1f, %.1f), fx=%.0f",
+            shot_id, seed_fid, cam_pos[0], cam_pos[1], cam_pos[2], seed_fx,
+        )
 
-        # Propagate forward (seed_idx+1 .. end)
-        prev_frames: list[CameraFrame] = [seed_cf]
-        for i in range(seed_idx + 1, len(frame_corrs)):
-            fid, corrs = frame_corrs[i]
-            cf = self._calibrate_frame_with_continuity(
-                shot_id=shot_id,
-                frame_idx=fid,
-                correspondences=corrs,
-                image_shape=image_shape,
-                max_err=max_err,
-                ransac_thresh=ransac_thresh,
-                min_camera_height=min_camera_height,
-                max_camera_height=max_camera_height,
-                temporal_max_jump=temporal_max_jump,
-                accepted_frames=prev_frames,
-                focal_length_tolerance=focal_length_tolerance,
-            )
-            if cf is not None:
-                accepted_by_idx[i] = cf
-                prev_frames.append(cf)
+        # Build focal length candidates centred on seed's estimate
+        h, w = image_shape
+        diagonal = float(np.sqrt(h ** 2 + w ** 2))
+        focal_cands = sorted({
+            seed_fx * s for s in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.4)
+        } | {diagonal * s for s in (0.5, 0.7, 1.0, 1.4, 2.0, 2.5)})
 
-        # Propagate backward (seed_idx-1 .. 0)
-        prev_frames = [seed_cf]
-        for i in range(seed_idx - 1, -1, -1):
-            fid, corrs = frame_corrs[i]
-            cf = self._calibrate_frame_with_continuity(
-                shot_id=shot_id,
+        # Calibrate all other frames with fixed camera position
+        results: dict[int, CameraFrame] = {seed_idx: seed_cf}
+        for i, (fid, corrs) in enumerate(frame_corrs):
+            if i == seed_idx:
+                continue
+            cf = calibrate_frame_fixed_position(
+                corrs,
+                FIFA_LANDMARKS,
+                image_shape,
+                camera_position=cam_pos,
                 frame_idx=fid,
-                correspondences=corrs,
-                image_shape=image_shape,
-                max_err=max_err,
-                ransac_thresh=ransac_thresh,
-                min_camera_height=min_camera_height,
-                max_camera_height=max_camera_height,
-                temporal_max_jump=temporal_max_jump,
-                accepted_frames=prev_frames,
-                focal_length_tolerance=focal_length_tolerance,
+                max_reprojection_error=max_err,
+                focal_candidates=focal_cands,
             )
-            if cf is not None:
-                accepted_by_idx[i] = cf
-                prev_frames.append(cf)
+            if cf is not None and cf.reprojection_error <= max_err:
+                results[i] = cf
 
         # Return frames sorted by frame index
-        sorted_idxs = sorted(accepted_by_idx.keys(), key=lambda i: frame_corrs[i][0])
-        return [accepted_by_idx[i] for i in sorted_idxs]
+        sorted_idxs = sorted(results.keys(), key=lambda i: frame_corrs[i][0])
+        return [results[i] for i in sorted_idxs]
 
     def _calibrate_shot(
         self, shot_id: str, clip_file: str, keyframe_interval: int, max_err: float, ransac_thresh: float = 40.0,

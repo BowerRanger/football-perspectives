@@ -24,9 +24,16 @@ calibration:
   detector_type: hybrid
   manual_landmarks_dir: null
   min_point_confidence: 0.3
-  max_reprojection_error: 15.0
+  max_reprojection_error: 50.0
+  ransac_reproj_threshold: 40.0
+  static_ransac_threshold: 80.0
   keyframe_interval: 5
   require_detector: false
+  min_camera_height: 3.0
+  max_camera_height: 80.0
+  player_height_range: [1.5, 2.1]
+  temporal_max_jump: 5.0
+  focal_length_tolerance: 0.2
 
 sync:
   sample_fps: 5.0
@@ -65,3 +72,27 @@ pose_estimation:
 matching:
   max_distance_m: 5.0
   n_reference_frames: 10
+
+triangulation:
+  min_keypoint_confidence: 0.3
+  ransac_threshold: 15.0
+  savgol_window: 7
+  savgol_order: 3
+  bone_length_tolerance: 0.2
+  ground_snap_velocity: 0.1
+
+smpl_fitting:
+  model_path: data/smpl/SMPL_NEUTRAL.pkl
+  device: cpu
+  lr: 0.01
+  n_iterations: 100
+  lambda_joint: 1.0
+  lambda_prior: 0.01
+  lambda_shape: 0.1
+  lambda_smooth: 0.5
+  lambda_ground: 0.1
+
+export:
+  gltf_enabled: true
+  fbx_enabled: false
+  blender_path: blender

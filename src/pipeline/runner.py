@@ -5,42 +5,66 @@ from src.stages.calibration import CameraCalibrationStage
 from src.stages.sync import TemporalSyncStage
 from src.stages.tracking import PlayerTrackingStage
 from src.stages.pose import PoseEstimationStage
-from src.stages.matching import CrossViewMatchingStage
+from src.stages.triangulation import TriangulationStage
+from src.stages.smpl_fitting import SmplFittingStage
+from src.stages.export import ExportStage
 from src.stages.calibration import PitchKeypointDetector
 from src.utils.ball_detector import YOLOBallDetector
-from src.utils.pitch_detector import ManualJsonPitchDetector
+from src.utils.pitch_detector import (
+    HeuristicPitchDetector,
+    HybridPitchDetector,
+    ManualJsonPitchDetector,
+)
 
 STAGE_ORDER: list[tuple[str, type[BaseStage]]] = [
     ("segmentation", ShotSegmentationStage),
+    ("tracking", PlayerTrackingStage),
     ("calibration", CameraCalibrationStage),
     ("sync", TemporalSyncStage),
-    ("tracking", PlayerTrackingStage),
     ("pose", PoseEstimationStage),
-    ("matching", CrossViewMatchingStage),
+    ("triangulation", TriangulationStage),
+    ("smpl_fitting", SmplFittingStage),
+    ("export", ExportStage),
 ]
 
 _ALIASES: dict[str, str] = {
     "1": "segmentation",
-    "2": "calibration",
-    "3": "sync",
-    "4": "tracking",
+    "2": "tracking",
+    "3": "calibration",
+    "4": "sync",
     "5": "pose",
-    "6": "matching",
+    "6": "triangulation",
+    "7": "smpl_fitting",
+    "8": "export",
 }
 
 
 def _create_pitch_detector(config: dict, output_dir: Path) -> PitchKeypointDetector | None:
     cfg = config.get("calibration", {})
-    detector_type = str(cfg.get("detector_type", "none")).strip().lower()
+    detector_type = str(cfg.get("detector_type", "hybrid")).strip().lower()
+    min_confidence = float(cfg.get("min_point_confidence", 0.0))
     if detector_type in {"", "none"}:
         return None
+    if detector_type == "heuristic":
+        return HeuristicPitchDetector(min_confidence=min_confidence)
+    if detector_type == "hybrid":
+        detectors: list[PitchKeypointDetector] = [
+            HeuristicPitchDetector(min_confidence=min_confidence),
+        ]
+        # Auto-include manual landmarks when they exist (from the web annotation tool)
+        manual_dir = output_dir / "calibration" / "manual_landmarks"
+        if manual_dir.is_dir() and any(manual_dir.glob("*.json")):
+            detectors.insert(0, ManualJsonPitchDetector(
+                annotations_dir=manual_dir,
+                min_confidence=0.0,
+            ))
+        return HybridPitchDetector(detectors=detectors)
     if detector_type == "manual_json":
         landmarks_dir = cfg.get("manual_landmarks_dir")
         if not landmarks_dir:
             raise ValueError(
                 "calibration.manual_landmarks_dir is required when detector_type=manual_json"
             )
-        min_confidence = float(cfg.get("min_point_confidence", 0.0))
         return ManualJsonPitchDetector(
             annotations_dir=output_dir / landmarks_dir,
             min_confidence=min_confidence,

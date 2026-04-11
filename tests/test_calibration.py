@@ -14,9 +14,9 @@ def _synthetic_camera():
 def test_pitch_constants():
     assert PITCH_LENGTH == 105.0
     assert PITCH_WIDTH == 68.0
-    assert "top_left_corner" in FIFA_LANDMARKS
+    assert "corner_near_left" in FIFA_LANDMARKS
     assert "center_spot" in FIFA_LANDMARKS
-    pt = FIFA_LANDMARKS["top_left_corner"]
+    pt = FIFA_LANDMARKS["corner_near_left"]
     assert pt[2] == 0.0  # z=0, pitch is ground plane
 
 def test_build_projection_matrix_shape():
@@ -53,9 +53,9 @@ def _make_synthetic_correspondences():
     tvec = np.array([-52.5, -34.0, 60.0], dtype=np.float32)
 
     landmark_names = [
-        "top_left_corner", "top_right_corner", "bottom_left_corner",
-        "bottom_right_corner", "center_spot", "left_penalty_spot",
-        "right_penalty_spot", "halfway_top", "halfway_bottom",
+        "corner_near_left", "corner_near_right", "corner_far_left",
+        "corner_far_right", "center_spot", "left_penalty_spot",
+        "right_penalty_spot", "halfway_near", "halfway_far",
     ]
     pts_3d = np.array([FIFA_LANDMARKS[n] for n in landmark_names], dtype=np.float32)
     pts_2d, _ = cv2.projectPoints(pts_3d, rvec, tvec, K, None)
@@ -74,10 +74,12 @@ def test_calibrate_frame_recovers_low_reprojection_error():
     assert result.reprojection_error < 2.0  # near-perfect on noise-free data
     assert result.confidence > 0.8
     assert result.num_correspondences >= 4
+    assert len(result.tracked_landmark_types) == result.num_correspondences
+    assert "center_spot" in result.tracked_landmark_types
 
 def test_calibrate_frame_returns_none_with_too_few_points():
     result = calibrate_frame(
-        correspondences={"top_left_corner": np.array([100.0, 100.0])},
+        correspondences={"corner_near_left": np.array([100.0, 100.0])},
         landmarks_3d=FIFA_LANDMARKS,
         image_shape=(1080, 1920),
     )
@@ -144,3 +146,24 @@ def test_calibrate_shot_short_circuits_without_detector(tmp_path, monkeypatch):
     assert result.shot_id == "shot_001"
     assert result.camera_type == "static"
     assert result.frames == []
+
+
+def test_goal_crossbar_landmarks_are_off_plane():
+    for name in ["left_goal_near_post_top", "left_goal_far_post_top",
+                 "right_goal_near_post_top", "right_goal_far_post_top"]:
+        assert name in FIFA_LANDMARKS
+        assert FIFA_LANDMARKS[name][2] == 2.44
+
+
+def test_corner_flag_landmarks_are_off_plane():
+    for name in ["corner_near_left_flag_top", "corner_near_right_flag_top",
+                 "corner_far_left_flag_top", "corner_far_right_flag_top"]:
+        assert name in FIFA_LANDMARKS
+        assert FIFA_LANDMARKS[name][2] == 1.5
+
+
+def test_near_landmarks_have_lower_y_than_far():
+    assert FIFA_LANDMARKS["corner_near_left"][1] < FIFA_LANDMARKS["corner_far_left"][1]
+    assert FIFA_LANDMARKS["halfway_near"][1] < FIFA_LANDMARKS["halfway_far"][1]
+    assert FIFA_LANDMARKS["centre_circle_near"][1] < FIFA_LANDMARKS["centre_circle_far"][1]
+    assert FIFA_LANDMARKS["left_goal_near_post_base"][1] < FIFA_LANDMARKS["left_goal_far_post_base"][1]

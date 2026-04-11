@@ -51,24 +51,27 @@ def test_calibration_round_trip(tmp_path):
         reprojection_error=3.2,
         num_correspondences=8,
         confidence=0.79,
+        tracked_landmark_types=["center_spot", "halfway_near"],
     )
     result = CalibrationResult(shot_id="shot_001", camera_type="static", frames=[frame])
     p = tmp_path / "cal.json"
     result.save(p)
     loaded = CalibrationResult.load(p)
     assert loaded.frames[0].reprojection_error == 3.2
+    assert loaded.frames[0].tracked_landmark_types == ["center_spot", "halfway_near"]
 
 def test_sync_map_round_trip(tmp_path):
     sm = SyncMap(
         reference_shot="shot_001",
         alignments=[Alignment(shot_id="shot_003", frame_offset=-47,
-                              confidence=0.92, method="ball_trajectory",
+                              confidence=0.92, method="hybrid",
                               overlap_frames=[120, 280])]
     )
     p = tmp_path / "sync.json"
     sm.save(p)
     loaded = SyncMap.load(p)
     assert loaded.alignments[0].frame_offset == -47
+    assert loaded.alignments[0].method == "hybrid"
 
 
 def test_tracks_result_round_trip(tmp_path):

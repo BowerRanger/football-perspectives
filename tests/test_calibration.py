@@ -47,15 +47,35 @@ from src.schemas.calibration import CameraFrame
 from src.stages.calibration import CameraCalibrationStage
 
 def _make_synthetic_correspondences():
-    """Project known pitch landmarks with a synthetic camera to get 2D points."""
-    K = np.array([[1500,0,960],[0,1500,540],[0,0,1]], dtype=np.float32)
-    rvec = np.array([0.05, 0.15, 0.0], dtype=np.float32)
-    tvec = np.array([-52.5, -34.0, 60.0], dtype=np.float32)
+    """Project known pitch landmarks with a physically valid broadcast camera.
+
+    Camera is placed at world position (52.5, -20, 25) — on the pitch centreline,
+    20 m behind the near touchline and 25 m above the pitch — and aimed at the
+    pitch centre.  Focal length 1212px ≈ 0.55 × image diagonal so that the
+    solver's focal-length grid includes an exact match.  All pitch coordinates
+    use z-up convention.
+    """
+    C = np.array([52.5, -20.0, 25.0])
+    target = np.array([52.5, 34.0, 0.0])
+    cam_z_world = target - C
+    cam_z_world /= np.linalg.norm(cam_z_world)
+    world_up = np.array([0.0, 0.0, 1.0])
+    cam_x_world = np.cross(cam_z_world, world_up)
+    cam_x_world /= np.linalg.norm(cam_x_world)
+    cam_y_world = np.cross(cam_z_world, cam_x_world)
+    R = np.array([cam_x_world, cam_y_world, cam_z_world])
+    rvec_raw, _ = cv2.Rodrigues(R)
+    rvec = rvec_raw.flatten().astype(np.float32)
+    tvec = (-R @ C).astype(np.float32)
+    # Use diagonal*0.55 ≈ 1212px — a value in the solver's focal candidate grid
+    diagonal = float(np.sqrt(1080 ** 2 + 1920 ** 2))
+    fx = diagonal * 0.55
+    K = np.array([[fx, 0, 960], [0, fx, 540], [0, 0, 1]], dtype=np.float32)
 
     landmark_names = [
-        "corner_near_left", "corner_near_right", "corner_far_left",
-        "corner_far_right", "center_spot", "left_penalty_spot",
-        "right_penalty_spot", "halfway_near", "halfway_far",
+        "corner_far_left", "corner_far_right", "center_spot",
+        "left_penalty_spot", "right_penalty_spot", "halfway_near",
+        "halfway_far", "centre_circle_near", "centre_circle_far",
     ]
     pts_3d = np.array([FIFA_LANDMARKS[n] for n in landmark_names], dtype=np.float32)
     pts_2d, _ = cv2.projectPoints(pts_3d, rvec, tvec, K, None)
@@ -216,3 +236,20 @@ def test_is_camera_valid_rejects_camera_looking_up():
     rvec_id = np.array([0.0, 0.0, 0.0], dtype=np.float32)
     tvec_up = np.array([0.0, 0.0, -30.0], dtype=np.float32)
     assert not is_camera_valid(rvec_id, tvec_up, min_height=3.0, max_height=80.0)
+
+
+def test_calibrate_frame_produces_camera_above_pitch():
+    """The solver must place the camera above the pitch (z > 0)."""
+    correspondences, _ = _make_synthetic_correspondences()
+    result = calibrate_frame(
+        correspondences=correspondences,
+        landmarks_3d=FIFA_LANDMARKS,
+        image_shape=(1080, 1920),
+    )
+    assert result is not None
+    from src.utils.camera import camera_world_position
+    pos = camera_world_position(
+        np.array(result.rotation_vector),
+        np.array(result.translation_vector),
+    )
+    assert pos[2] > 0, f"Camera placed below pitch at z={pos[2]:.1f}"

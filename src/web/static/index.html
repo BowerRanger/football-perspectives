@@ -1,0 +1,2748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Football Perspectives — Pipeline Dashboard</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    background: #0f1117;
+    color: #e2e8f0;
+    height: 100vh;
+    display: flex;
+    overflow: hidden;
+  }
+
+  /* ── Sidebar ─────────────────────────────────────────────────── */
+  #sidebar {
+    width: 220px;
+    min-width: 220px;
+    background: #1a1d27;
+    border-right: 1px solid #2d3148;
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+  }
+
+  #sidebar-header {
+    padding: 16px 16px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #64748b;
+    border-bottom: 1px solid #2d3148;
+  }
+
+  .stage-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 11px 16px;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+    transition: background 0.12s;
+  }
+  .stage-item:hover { background: #252840; }
+  .stage-item.active {
+    background: #252840;
+    border-left-color: #6366f1;
+  }
+
+  .stage-dot {
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: #4b5563;
+  }
+  .stage-dot.complete  { background: #22c55e; }
+  .stage-dot.running   { background: #f59e0b; animation: pulse 1s infinite; }
+  .stage-dot.error     { background: #ef4444; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .stage-label { font-size: 13px; color: #cbd5e1; }
+  .stage-item.active .stage-label { color: #f1f5f9; font-weight: 500; }
+  .stage-index { font-size: 11px; color: #64748b; margin-left: auto; }
+
+  /* ── Main panel ───────────────────────────────────────────────── */
+  #main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  #stage-header {
+    padding: 16px 24px;
+    border-bottom: 1px solid #2d3148;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: #1a1d27;
+    flex-shrink: 0;
+  }
+
+  #stage-title { font-size: 18px; font-weight: 600; color: #f1f5f9; }
+
+  .badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .badge-complete { background: #14532d; color: #86efac; }
+  .badge-pending  { background: #1e293b; color: #64748b; }
+  .badge-running  { background: #451a03; color: #fbbf24; }
+  .badge-error    { background: #450a0a; color: #fca5a5; }
+
+  /* ── Scrollable body ──────────────────────────────────────────── */
+  #main-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  /* ── Panels ───────────────────────────────────────────────────── */
+  .panel {
+    background: #1a1d27;
+    border: 1px solid #2d3148;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .panel-title {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #64748b;
+    padding: 10px 16px;
+    border-bottom: 1px solid #2d3148;
+  }
+
+  .panel-body { padding: 16px; }
+
+  .btn {
+    padding: 7px 16px;
+    border-radius: 5px;
+    border: none;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.12s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary { background: #6366f1; color: #fff; }
+  .btn-secondary { background: #374151; color: #e2e8f0; }
+
+  /* ── Log panel ────────────────────────────────────────────────── */
+  #log-output {
+    background: #0a0c12;
+    border-radius: 5px;
+    padding: 12px;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    color: #94a3b8;
+    max-height: 220px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  /* ── Tables ───────────────────────────────────────────────────── */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left;
+    padding: 8px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #64748b;
+    border-bottom: 1px solid #2d3148;
+  }
+  td { padding: 8px 12px; border-bottom: 1px solid #1e2236; color: #cbd5e1; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #1e2236; }
+
+  .cell-green { color: #22c55e; }
+  .cell-amber { color: #f59e0b; }
+  .cell-red   { color: #ef4444; }
+  .cell-dim   { color: #4b5563; }
+
+  /* ── Confidence bar ───────────────────────────────────────────── */
+  .conf-bar-wrap {
+    background: #1e293b;
+    border-radius: 3px;
+    height: 6px;
+    width: 80px;
+    display: inline-block;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+  .conf-bar { height: 100%; border-radius: 3px; background: #6366f1; }
+
+  /* ── Video + canvas viewer ────────────────────────────────────── */
+  .shot-viewer { margin-bottom: 24px; }
+  .shot-viewer h4 {
+    font-size: 12px;
+    color: #64748b;
+    margin-bottom: 8px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .video-wrap {
+    position: relative;
+    display: block;
+    width: 100%;
+    background: #000;
+    border-radius: 6px;
+  }
+
+  /* Inner sizing wrapper — canvas is positioned relative to this, not video-wrap */
+  .video-inner {
+    position: relative;
+    display: block;
+    line-height: 0;
+    width: 100%;
+  }
+
+  .video-wrap video {
+    display: block;
+    width: 100%;
+  }
+
+  .video-wrap canvas {
+    position: absolute;
+    top: 0; left: 0;
+    pointer-events: none;
+  }
+
+  /* Fullscreen: video-wrap becomes the black centering container */
+  .video-wrap:fullscreen,
+  .video-wrap:-webkit-full-screen {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    border-radius: 0;
+    width: 100vw;
+    height: 100vh;
+  }
+
+  /* Remove the normal max-height cap so video fills the screen */
+  .video-wrap:fullscreen video,
+  .video-wrap:-webkit-full-screen video {
+    max-height: 100vh;
+    max-height: 100dvh;
+    max-width: 100vw;
+  }
+
+  /* Custom fullscreen button — appears on hover, stays visible while in fullscreen */
+  .fs-btn {
+    position: absolute;
+    top: 6px; right: 6px;
+    z-index: 20;
+    background: rgba(0, 0, 0, 0.55);
+    color: #e2e8f0;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 7px;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .video-inner:hover .fs-btn,
+  .video-wrap:fullscreen .fs-btn,
+  .video-wrap:-webkit-full-screen .fs-btn { opacity: 1; }
+
+  /* ── Matching table ───────────────────────────────────────────── */
+  .team-a    { color: #60a5fa; }
+  .team-b    { color: #f87171; }
+  .team-ref  { color: #fbbf24; }
+  .team-unk  { color: #9ca3af; }
+</style>
+</head>
+<body>
+
+<!-- ── Sidebar ──────────────────────────────────────────────────────── -->
+<div id="sidebar">
+  <div id="sidebar-header">Pipeline Stages</div>
+  <div id="stage-list"></div>
+</div>
+
+<!-- ── Main ─────────────────────────────────────────────────────────── -->
+<div id="main">
+  <div id="stage-header">
+    <span id="stage-title">—</span>
+    <span id="stage-badge" class="badge badge-pending">Not run</span>
+    <button id="rerun-btn" class="btn btn-primary" disabled style="margin-left:auto;font-size:12px;">Re-run Stage</button>
+  </div>
+
+  <div id="main-body">
+
+    <!-- Logs -->
+    <div class="panel" id="log-panel" style="display:none">
+      <div class="panel-title">Log Output</div>
+      <div class="panel-body" style="padding:0">
+        <pre id="log-output"></pre>
+      </div>
+    </div>
+
+    <!-- Output -->
+    <div id="output-panel"></div>
+
+  </div>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────
+let currentStage = null;
+let currentStages = [];   // [{name, index, complete}]
+let globalManifest = null;  // shots manifest (fps, shots list)
+let activeSource = null;    // current EventSource
+
+// ── COCO skeleton connections ─────────────────────────────────────────
+const SKELETON = [
+  [0,1],[0,2],[1,3],[2,4],
+  [5,6],
+  [5,7],[7,9],[6,8],[8,10],
+  [5,11],[6,12],[11,12],
+  [11,13],[13,15],[12,14],[14,16],
+];
+
+const TEAM_COLORS = {
+  A:        '#3b82f6',
+  B:        '#ef4444',
+  referee:  '#f59e0b',
+  unknown:  '#6b7280',
+  ball:     '#ffffff',
+};
+
+// ── Initialise ───────────────────────────────────────────────────────��
+async function init() {
+  await loadStages();
+  // pre-fetch manifest for fps
+  try {
+    const r = await fetch('/api/output/segmentation');
+    if (r.ok) globalManifest = await r.json();
+  } catch (_) {}
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────
+async function loadStages() {
+  const res = await fetch('/api/stages');
+  if (!res.ok) return;
+  currentStages = await res.json();
+  renderSidebar();
+}
+
+function renderSidebar() {
+  const list = document.getElementById('stage-list');
+  list.innerHTML = '';
+  for (const s of currentStages) {
+    const item = document.createElement('div');
+    item.className = 'stage-item' + (s.name === currentStage ? ' active' : '');
+    item.dataset.stage = s.name;
+    item.onclick = () => selectStage(s.name);
+
+    const dot = document.createElement('span');
+    dot.className = 'stage-dot' + (s.complete ? ' complete' : '');
+    dot.id = `dot-${s.name}`;
+
+    const label = document.createElement('span');
+    label.className = 'stage-label';
+    label.textContent = humanizeStageName(s.name);
+
+    const idx = document.createElement('span');
+    idx.className = 'stage-index';
+    idx.textContent = s.index;
+
+    item.appendChild(dot);
+    item.appendChild(label);
+    item.appendChild(idx);
+    list.appendChild(item);
+  }
+
+  // auto-select first incomplete, or first stage
+  if (!currentStage) {
+    const first = currentStages.find(s => !s.complete) || currentStages[0];
+    if (first) selectStage(first.name);
+  }
+}
+
+// ── Stage selection ───────────────────────────────────────────────────
+async function selectStage(name) {
+  currentStage = name;
+  // highlight sidebar
+  document.querySelectorAll('.stage-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.stage === name);
+  });
+
+  const s = currentStages.find(x => x.name === name);
+  document.getElementById('stage-title').textContent = humanizeStageName(name);
+
+  const badge = document.getElementById('stage-badge');
+  if (s && s.complete) {
+    badge.textContent = 'Complete';
+    badge.className = 'badge badge-complete';
+  } else {
+    badge.textContent = 'Not run';
+    badge.className = 'badge badge-pending';
+  }
+
+  // Dependency gating for Re-run button
+  const rerunBtn = document.getElementById('rerun-btn');
+  const stageIdx = currentStages.findIndex(x => x.name === name);
+  const depsComplete = currentStages.slice(0, stageIdx).every(x => x.complete);
+  rerunBtn.disabled = !depsComplete;
+  rerunBtn.title = depsComplete ? '' : 'Requires earlier stages to be complete';
+
+  // clear output panel and reload
+  document.getElementById('output-panel').innerHTML = '';
+  loadOutput(name);
+}
+
+// ── Run ───────────────────────────────────────────────────────────────
+async function startRun(stages) {
+  const logPanel = document.getElementById('log-panel');
+  const logOutput = document.getElementById('log-output');
+  logPanel.style.display = '';
+  logOutput.textContent = '';
+
+  if (currentStage) setDot(currentStage, 'running');
+  const badge = document.getElementById('stage-badge');
+  badge.textContent = 'Running';
+  badge.className = 'badge badge-running';
+
+  const body = { stages };
+  const res = await fetch('/api/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    logOutput.textContent = 'Failed to start run';
+    if (currentStage) setDot(currentStage, 'error');
+    return;
+  }
+
+  const { job_id } = await res.json();
+  if (activeSource) activeSource.close();
+  activeSource = new EventSource(`/api/jobs/${job_id}/logs`);
+
+  activeSource.addEventListener('log', e => {
+    const { line } = JSON.parse(e.data);
+    logOutput.textContent += line + '\n';
+    logOutput.scrollTop = logOutput.scrollHeight;
+  });
+
+  activeSource.addEventListener('done', e => {
+    activeSource.close();
+    activeSource = null;
+    const { status } = JSON.parse(e.data);
+    if (status === 'done') {
+      if (currentStage) setDot(currentStage, 'complete');
+      loadStages().then(() => { if (currentStage) loadOutput(currentStage); });
+    } else {
+      if (currentStage) setDot(currentStage, 'error');
+      badge.textContent = 'Error';
+      badge.className = 'badge badge-error';
+    }
+  });
+}
+
+document.getElementById('rerun-btn').addEventListener('click', async () => {
+  if (!currentStage) return;
+  const btn = document.getElementById('rerun-btn');
+  btn.disabled = true;
+  // Delete existing artifacts
+  await fetch(`/api/output/${currentStage}`, { method: 'DELETE' });
+  // Re-run the stage
+  startRun(currentStage);
+});
+
+function setDot(stageName, state) {
+  const dot = document.getElementById(`dot-${stageName}`);
+  if (dot) dot.className = 'stage-dot ' + state;
+}
+
+// ── Output loading ────────────────────────────────────────────────────
+async function loadOutput(stageName) {
+  const res = await fetch(`/api/output/${stageName}`);
+  const panel = document.getElementById('output-panel');
+  panel.innerHTML = '';
+
+  // Calibration runs automatically via PnLCalib — no pre-run annotation UI.
+  if (stageName === 'calibration') {
+    if (res.ok) {
+      renderCalibration(panel, await res.json());
+    } else {
+      renderNoOutput();
+    }
+    return;
+  }
+
+  if (!res.ok) { renderNoOutput(); return; }
+  const data = await res.json();
+
+  switch (stageName) {
+    case 'segmentation':   renderSegmentation(panel, data); break;
+    case 'tracking':       renderTracking(panel, data); break;
+    case 'pose':           renderPose(panel, data); break;
+    case 'sync':           renderSync(panel, data); break;
+    case 'triangulation':  renderTriangulation(panel, data); break;
+    case 'smpl_fitting':   renderSmplFitting(panel, data); break;
+    case 'export':         renderExport(panel, data); break;
+  }
+}
+
+function renderNoOutput() {
+  const panel = document.getElementById('output-panel');
+  panel.innerHTML = `<div style="color:#4b5563;padding:12px 0;font-size:13px;">No output yet — run this stage to see results.</div>`;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────
+function makePanel(title) {
+  const wrap = document.createElement('div');
+  wrap.className = 'panel';
+  wrap.innerHTML = `<div class="panel-title">${title}</div>`;
+  const body = document.createElement('div');
+  body.className = 'panel-body';
+  body.style.padding = '0';
+  wrap.appendChild(body);
+  return { wrap, body };
+}
+
+function makeTable(headers) {
+  const t = document.createElement('table');
+  const thead = document.createElement('thead');
+  const tr = document.createElement('tr');
+  headers.forEach(h => {
+    const th = document.createElement('th');
+    th.textContent = h;
+    tr.appendChild(th);
+  });
+  thead.appendChild(tr);
+  t.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  t.appendChild(tbody);
+  return { t, tbody };
+}
+
+function addRow(tbody, cells) {
+  const tr = document.createElement('tr');
+  cells.forEach(c => {
+    const td = document.createElement('td');
+    if (typeof c === 'string' || typeof c === 'number') {
+      td.textContent = c;
+    } else if (c && c.html) {
+      td.innerHTML = c.html;
+    } else if (c && c.el) {
+      td.appendChild(c.el);
+    }
+    if (c && c.cls) td.className = c.cls;
+    tr.appendChild(td);
+  });
+  tbody.appendChild(tr);
+}
+
+function fmt(n, dec=1) {
+  if (n == null) return '—';
+  return Number(n).toFixed(dec);
+}
+
+function humanizeStageName(name) {
+  if (!name) return '—';
+  return name
+    .split('_')
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function getShotFps() {
+  return (globalManifest && globalManifest.fps) ? globalManifest.fps : 30;
+}
+
+// ── Segmentation renderer ─────────────────────────────────────────────
+function renderSegmentation(panel, data) {
+  globalManifest = data;
+  const { wrap, body } = makePanel(`Shots (${data.shots.length})`);
+
+  const { t, tbody } = makeTable(['Shot ID', 'Start', 'End', 'Duration', 'Frames', 'Preview']);
+  data.shots.forEach(s => {
+    const dur = (s.end_time - s.start_time).toFixed(2) + 's';
+    const frames = (s.end_frame - s.start_frame);
+    const vid = document.createElement('video');
+    vid.src = `/api/video/${s.id}`;
+    vid.controls = true;
+    vid.preload = 'metadata';
+    vid.style.cssText = 'max-width:240px;max-height:80px;border-radius:4px;';
+    addRow(tbody, [
+      s.id,
+      fmt(s.start_time, 2) + 's',
+      fmt(s.end_time, 2) + 's',
+      dur,
+      frames,
+      { el: vid },
+    ]);
+  });
+
+  body.appendChild(t);
+  wrap.appendChild(body);  // already in wrap from makePanel but body is separate
+  panel.appendChild(wrap);
+}
+
+// ── Prepare Shots renderer ────────────────────────────────────────────
+function renderPrepareShots(panel, data) {
+  globalManifest = data;
+  const { wrap, body } = makePanel(`Prepared Shots (${data.shots.length})`);
+
+  const { t, tbody } = makeTable([
+    'Shot ID',
+    'Start',
+    'End',
+    'Duration',
+    'Frames',
+    'Speed Factor',
+    'Preview',
+  ]);
+
+  data.shots.forEach(s => {
+    const dur = (s.end_time - s.start_time).toFixed(2) + 's';
+    const frames = (s.end_frame - s.start_frame + 1);
+    const speedFactor = (s.speed_factor ?? 1.0);
+    const speedCls = Math.abs(speedFactor - 1.0) > 0.15 ? 'cell-amber' : 'cell-green';
+
+    const vid = document.createElement('video');
+    vid.src = `/api/video/${s.id}`;
+    vid.controls = true;
+    vid.preload = 'metadata';
+    vid.style.cssText = 'max-width:240px;max-height:80px;border-radius:4px;';
+
+    addRow(tbody, [
+      s.id,
+      fmt(s.start_time, 2) + 's',
+      fmt(s.end_time, 2) + 's',
+      dur,
+      frames,
+      { html: `<span class="${speedCls}">${fmt(speedFactor, 3)}</span>` },
+      { el: vid },
+    ]);
+  });
+
+  body.appendChild(t);
+  panel.appendChild(wrap);
+}
+
+// ── Calibration renderer ──────────────────────────────────────────────
+function renderCalibration(panel, data) {
+  const shots = Object.values(data.shots);
+  const { wrap, body } = makePanel(`Calibration (${shots.length} shots)`);
+  const { t, tbody } = makeTable(['Shot', 'Type', 'Frames', 'Err', '']);
+
+  shots.forEach(s => {
+    const errors = s.frames.map(f => f.reprojection_error).filter(e => e != null);
+    const mean = errors.length ? errors.reduce((a,b) => a+b, 0) / errors.length : null;
+    const cls = mean == null ? '' : mean < 5 ? 'cell-green' : mean < 30 ? 'cell-amber' : 'cell-red';
+
+    const placeBtn = document.createElement('button');
+    placeBtn.textContent = 'Place Camera';
+    placeBtn.title = 'Manually override the camera for this shot. Useful when PnLCalib fails on extreme angles.';
+    placeBtn.style.cssText = 'background:#4f46e5;color:#fff;border:none;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px;';
+    placeBtn.addEventListener('click', () => renderCameraPlacement(panel, s.shot_id));
+
+    addRow(tbody, [
+      s.shot_id,
+      s.camera_type || '—',
+      s.frames.length,
+      { html: `<span class="${cls}">${fmt(mean,1)}</span>` },
+      { el: placeBtn },
+    ]);
+  });
+
+  body.appendChild(t);
+  panel.appendChild(wrap);
+
+  // ── Refine button (bundle adjustment using tracked players) ──
+  const refineBar = document.createElement('div');
+  refineBar.style.cssText = 'padding:8px 0;';
+  const refineBtn = document.createElement('button');
+  refineBtn.textContent = 'Refine Calibration (Bundle Adjustment)';
+  refineBtn.title = 'Refine camera positions using cross-view player tracking data. Requires Tracking, Sync, and Matching stages to have run.';
+  refineBtn.style.cssText = 'background:#4f46e5;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;';
+  refineBtn.addEventListener('click', async () => {
+    refineBtn.disabled = true; refineBtn.textContent = 'Refining…';
+    const res = await fetch('/api/calibration/refine', { method: 'POST' });
+    if (res.ok) {
+      const result = await res.json();
+      refineBtn.textContent = `Refined ${result.refined.length} shots. Reloading…`;
+      setTimeout(() => loadOutput('calibration'), 500);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      refineBtn.textContent = err.detail || 'Refinement failed';
+      refineBtn.disabled = false;
+    }
+  });
+  refineBar.appendChild(refineBtn);
+  panel.appendChild(refineBar);
+
+  // ── 3D Camera Position Viewer ──
+  renderCalibrationCameraView(panel, data);
+}
+
+function renderCalibrationCameraView(panel, data) {
+  const { wrap: vizWrap, body: vizBody } = makePanel('Camera Positions (3D)');
+
+  const shotData = JSON.stringify(Object.entries(data.shots).map(([id, s]) => ({
+    id,
+    frames: s.frames.map(f => ({
+      rvec: f.rotation_vector,
+      tvec: f.translation_vector,
+      err: f.reprojection_error,
+    })),
+  })));
+
+  // Build srcdoc without literal script tags (which break the outer parser)
+  const S = 'scr' + 'ipt';
+  const srcdoc =
+    '<!DOCTYPE html><html><head>' +
+    '<style>*{margin:0;padding:0}body{overflow:hidden;background:#111118}</style>' +
+    '<' + S + ' type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.164.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.164.0/examples/jsm/"}}</' + S + '>' +
+    '</head><body><' + S + ' type="module">' +
+    'import*as THREE from"three";import{OrbitControls}from"three/addons/controls/OrbitControls.js";' +
+    'const shots=' + shotData + ';' +
+    `const w=window.innerWidth,h=window.innerHeight;
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x111118);
+const camera=new THREE.PerspectiveCamera(50,w/h,0.1,1000);
+camera.position.set(52.5,40,60);camera.lookAt(52.5,0,-34);
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(w,h);document.body.appendChild(renderer.domElement);
+const controls=new OrbitControls(camera,renderer.domElement);
+controls.target.set(52.5,0,-34);controls.enableDamping=true;
+scene.add(new THREE.AmbientLight(0xffffff,0.5));
+const dl=new THREE.DirectionalLight(0xffffff,0.5);dl.position.set(52.5,50,-34);scene.add(dl);
+const pitch=new THREE.Mesh(new THREE.PlaneGeometry(105,68),new THREE.MeshStandardMaterial({color:0x1a5e1a,side:THREE.DoubleSide}));
+pitch.rotation.x=-Math.PI/2;pitch.position.set(52.5,0,-34);scene.add(pitch);
+const lm=new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.3});
+function al(x1,z1,x2,z2){scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(x1,0.05,-z1),new THREE.Vector3(x2,0.05,-z2)]),lm))}
+al(0,0,105,0);al(105,0,105,68);al(105,68,0,68);al(0,68,0,0);al(52.5,0,52.5,68);
+const cc=[];for(let a=0;a<=Math.PI*2;a+=0.1)cc.push(new THREE.Vector3(52.5+9.15*Math.cos(a),0.05,-(34+9.15*Math.sin(a))));
+scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(cc),lm));
+function addLabel(text,x,y,z,color){const c2=document.createElement('canvas');c2.width=192;c2.height=48;const cx=c2.getContext('2d');cx.fillStyle=color||'#ffffff';cx.font='bold 24px sans-serif';cx.fillText(text,4,32);const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c2)}));sp.scale.set(16,4,1);sp.position.set(x,y,z);scene.add(sp)}
+addLabel('LEFT GOAL (x=0)',0,3,-34,'#ff6b6b');
+addLabel('RIGHT GOAL (x=105)',105,3,-34,'#ff6b6b');
+addLabel('Near (y=0)',52.5,3,0,'#69db7c');
+addLabel('Far (y=68)',52.5,3,-68,'#69db7c');
+function camPos(rv,tv){const ang=Math.sqrt(rv[0]**2+rv[1]**2+rv[2]**2);if(ang<1e-8)return new THREE.Vector3(-tv[0],tv[2],tv[1]);const ax=new THREE.Vector3(rv[0]/ang,rv[1]/ang,rv[2]/ang);const R=new THREE.Matrix4().makeRotationAxis(ax,ang);const Rt=R.clone().transpose();const t=new THREE.Vector3(tv[0],tv[1],tv[2]);const C=t.applyMatrix4(Rt).negate();return new THREE.Vector3(C.x,-C.z,-C.y)}
+const COLORS=[0x3b82f6,0xef4444,0xf59e0b,0x22c55e,0xa855f7,0xec4899];
+shots.forEach((shot,si)=>{const color=COLORS[si%COLORS.length];const mat=new THREE.MeshBasicMaterial({color});const trail=[];
+shot.frames.forEach(f=>{const pos=camPos(f.rvec,f.tvec);const sp=new THREE.Mesh(new THREE.SphereGeometry(1.2,8,8),mat);sp.position.copy(pos);scene.add(sp);trail.push(pos);
+scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([pos,new THREE.Vector3(52.5,0,-34)]),new THREE.LineBasicMaterial({color,transparent:true,opacity:0.1})))});
+if(trail.length>1)scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(trail),new THREE.LineBasicMaterial({color,transparent:true,opacity:0.6})));
+if(trail.length){const c2=document.createElement('canvas');c2.width=128;c2.height=32;const cx=c2.getContext('2d');cx.fillStyle='#'+color.toString(16).padStart(6,'0');cx.font='bold 18px sans-serif';cx.fillText(shot.id,4,22);
+const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c2)}));sp.scale.set(12,3,1);sp.position.copy(trail[0]).add(new THREE.Vector3(0,5,0));scene.add(sp)}});
+(function anim(){requestAnimationFrame(anim);controls.update();renderer.render(scene,camera)})();
+window.addEventListener('resize',()=>{camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight)});` +
+    '</' + S + '></body></html>';
+
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText = 'width:100%;height:420px;border:none;border-radius:6px;';
+  iframe.srcdoc = srcdoc;
+  vizBody.appendChild(iframe);
+
+  // Legend
+  const LEGEND_COLORS = ['#3b82f6','#ef4444','#f59e0b','#22c55e','#a855f7','#ec4899'];
+  const legend = document.createElement('div');
+  legend.style.cssText = 'display:flex;gap:16px;padding:8px 10px;flex-wrap:wrap;';
+  Object.keys(data.shots).forEach((shotId, i) => {
+    const item = document.createElement('span');
+    item.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:12px;color:#cbd5e1;';
+    const dot = document.createElement('span');
+    dot.style.cssText = 'width:10px;height:10px;border-radius:50%;background:' + LEGEND_COLORS[i % LEGEND_COLORS.length] + ';';
+    item.appendChild(dot);
+    item.appendChild(document.createTextNode(shotId));
+    const n = data.shots[shotId].frames.length;
+    const note = document.createElement('span');
+    note.style.cssText = 'color:#64748b;font-size:11px;';
+    note.textContent = '(' + n + ' frame' + (n !== 1 ? 's' : '') + ')';
+    item.appendChild(note);
+    legend.appendChild(item);
+  });
+  vizBody.appendChild(legend);
+
+  panel.appendChild(vizWrap);
+}
+
+// ── Manual Landmark Annotation Tool (REMOVED) ────────────────────────
+// Manual landmark annotation was removed when calibration switched to the
+// PnLCalib neural solver. The `Place Camera` tool below remains available
+// as a last-resort manual override for extreme camera angles where
+// PnLCalib fails.
+
+// ── Camera Placement Tool (3D gizmo + video overlay) ──────────────────
+function renderCameraPlacement(panel, shotId) {
+  panel.innerHTML = '';
+
+  // Header
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex;align-items:center;gap:12px;padding:8px 0;';
+  const backBtn = document.createElement('button');
+  backBtn.textContent = '← Back';
+  backBtn.style.cssText = 'background:#334155;color:#e2e8f0;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;';
+  backBtn.addEventListener('click', () => loadOutput('calibration'));
+  header.appendChild(backBtn);
+  const titleSpan = document.createElement('span');
+  titleSpan.textContent = `Place Camera — ${shotId}`;
+  titleSpan.style.cssText = 'font-weight:600;font-size:14px;';
+  header.appendChild(titleSpan);
+  const saveBtn = document.createElement('button');
+  saveBtn.textContent = 'Save Camera Position';
+  saveBtn.style.cssText = 'background:#16a34a;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;margin-left:auto;';
+  header.appendChild(saveBtn);
+  panel.appendChild(header);
+
+  // Two-panel layout: 3D pitch (left) + video preview (right)
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;align-items:stretch;height:450px;';
+
+  // Left: 3D pitch iframe
+  const leftCol = document.createElement('div');
+  leftCol.style.cssText = 'flex:1;min-width:0;border-radius:6px;overflow:hidden;background:#111118;';
+  row.appendChild(leftCol);
+
+  // Right: video + overlay
+  const rightCol = document.createElement('div');
+  rightCol.style.cssText = 'flex:1;min-width:0;position:relative;background:#000;border-radius:6px;overflow:hidden;';
+  const video = document.createElement('video');
+  video.src = `/api/video/${shotId}`;
+  video.preload = 'metadata';
+  video.style.cssText = 'display:block;width:100%;height:100%;object-fit:contain;';
+  const overlayCanvas = document.createElement('canvas');
+  overlayCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;';
+  rightCol.appendChild(video);
+  rightCol.appendChild(overlayCanvas);
+  row.appendChild(rightCol);
+  panel.appendChild(row);
+
+  // Numeric inputs below
+  const numRow = document.createElement('div');
+  numRow.style.cssText = 'display:grid;grid-template-columns:repeat(7,1fr);gap:6px;padding:8px 0;';
+  const fields = {x:52.5, y:-15, z:15, lookX:52.5, lookY:34, focal:1500, roll:0};
+  const fieldLabels = {x:'X pos', y:'Y pos', z:'Height', lookX:'Look X', lookY:'Look Y', focal:'Focal', roll:'Roll °'};
+  const inputs = {};
+  for (const [key, val] of Object.entries(fields)) {
+    const g = document.createElement('div');
+    const l = document.createElement('label');
+    l.textContent = fieldLabels[key];
+    l.style.cssText = 'display:block;font-size:10px;color:#64748b;margin-bottom:2px;';
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.step = key === 'focal' ? '10' : '0.5';
+    inp.value = String(val);
+    inp.style.cssText = 'width:100%;background:#1e293b;color:#e2e8f0;border:1px solid #334155;padding:3px 5px;border-radius:3px;font-size:12px;';
+    g.appendChild(l); g.appendChild(inp);
+    numRow.appendChild(g);
+    inputs[key] = inp;
+    inp.addEventListener('input', () => updateOverlay());
+  }
+  panel.appendChild(numRow);
+
+  // Help
+  const help = document.createElement('div');
+  help.style.cssText = 'color:#64748b;font-size:11px;padding:4px 0;';
+  help.textContent = 'Left: 3D pitch view — drag gizmo to position/rotate camera. Right: video with projected pitch lines. Adjust until green lines match the video.';
+  panel.appendChild(help);
+
+  // Overlay setup
+  video.addEventListener('loadedmetadata', () => {
+    overlayCanvas.width = video.videoWidth;
+    overlayCanvas.height = video.videoHeight;
+    updateOverlay();
+  });
+
+  // Pitch lines for overlay projection
+  const PITCH_LINES = [
+    [[0,0],[105,0]],[[105,0],[105,68]],[[105,68],[0,68]],[[0,68],[0,0]],
+    [[52.5,0],[52.5,68]],
+    [[0,13.84],[16.5,13.84]],[[16.5,13.84],[16.5,54.16]],[[16.5,54.16],[0,54.16]],
+    [[105,13.84],[88.5,13.84]],[[88.5,13.84],[88.5,54.16]],[[88.5,54.16],[105,54.16]],
+    [[0,24.84],[5.5,24.84]],[[5.5,24.84],[5.5,43.16]],[[5.5,43.16],[0,43.16]],
+    [[105,24.84],[99.5,24.84]],[[99.5,24.84],[99.5,43.16]],[[99.5,43.16],[105,43.16]],
+  ];
+  const CIRCLE_PTS = [];
+  for (let a = 0; a <= Math.PI*2; a += 0.12) CIRCLE_PTS.push([52.5+9.15*Math.cos(a),34+9.15*Math.sin(a)]);
+
+  function proj(pt, K, R, t) {
+    const cx=R[0][0]*pt[0]+R[0][1]*pt[1]+t[0];
+    const cy=R[1][0]*pt[0]+R[1][1]*pt[1]+t[1];
+    const cz=R[2][0]*pt[0]+R[2][1]*pt[1]+t[2];
+    if(cz<=0.1) return null;
+    return [K[0]*cx/cz+K[2], K[4]*cy/cz+K[5]];
+  }
+
+  function computeCam() {
+    const x=+inputs.x.value, y=+inputs.y.value, z=+inputs.z.value;
+    const lx=+inputs.lookX.value, ly=+inputs.lookY.value;
+    const focal=+inputs.focal.value, roll=(+inputs.roll.value)*Math.PI/180;
+    const C=[x,y,z], tgt=[lx,ly,0];
+    let fwd=[tgt[0]-C[0],tgt[1]-C[1],tgt[2]-C[2]];
+    const fl=Math.sqrt(fwd[0]**2+fwd[1]**2+fwd[2]**2);
+    if(fl<0.01) return null;
+    fwd=[fwd[0]/fl,fwd[1]/fl,fwd[2]/fl];
+    let wup=[0,0,1];
+    let right=[fwd[1]*wup[2]-fwd[2]*wup[1],fwd[2]*wup[0]-fwd[0]*wup[2],fwd[0]*wup[1]-fwd[1]*wup[0]];
+    let rl=Math.sqrt(right[0]**2+right[1]**2+right[2]**2);
+    if(rl<0.01){wup=[0,1,0];right=[fwd[1]*wup[2]-fwd[2]*wup[1],fwd[2]*wup[0]-fwd[0]*wup[2],fwd[0]*wup[1]-fwd[1]*wup[0]];rl=Math.sqrt(right[0]**2+right[1]**2+right[2]**2);}
+    right=[right[0]/rl,right[1]/rl,right[2]/rl];
+    let up=[right[1]*fwd[2]-right[2]*fwd[1],right[2]*fwd[0]-right[0]*fwd[2],right[0]*fwd[1]-right[1]*fwd[0]];
+    // Apply roll
+    if(roll!==0){
+      const cr=Math.cos(roll),sr=Math.sin(roll);
+      const nr=[cr*right[0]+sr*up[0],cr*right[1]+sr*up[1],cr*right[2]+sr*up[2]];
+      const nu=[-sr*right[0]+cr*up[0],-sr*right[1]+cr*up[1],-sr*right[2]+cr*up[2]];
+      right=nr; up=nu;
+    }
+    const R=[[right[0],right[1],right[2]],[-up[0],-up[1],-up[2]],[fwd[0],fwd[1],fwd[2]]];
+    const t=[-(R[0][0]*C[0]+R[0][1]*C[1]+R[0][2]*C[2]),-(R[1][0]*C[0]+R[1][1]*C[1]+R[1][2]*C[2]),-(R[2][0]*C[0]+R[2][1]*C[1]+R[2][2]*C[2])];
+    return {R,t,K:[focal,0,960,0,focal,540,0,0,1]};
+  }
+
+  function updateOverlay() {
+    const ctx = overlayCanvas.getContext('2d');
+    ctx.clearRect(0,0,overlayCanvas.width,overlayCanvas.height);
+    const cam = computeCam();
+    if(!cam) return;
+    ctx.strokeStyle='rgba(0,255,100,0.6)'; ctx.lineWidth=2;
+    for(const [a,b] of PITCH_LINES){
+      const pa=proj(a,cam.K,cam.R,cam.t), pb=proj(b,cam.K,cam.R,cam.t);
+      if(!pa||!pb) continue;
+      ctx.beginPath();ctx.moveTo(pa[0],pa[1]);ctx.lineTo(pb[0],pb[1]);ctx.stroke();
+    }
+    ctx.beginPath(); let s=false;
+    for(const pt of CIRCLE_PTS){const pp=proj(pt,cam.K,cam.R,cam.t);if(!pp){s=false;continue;}if(!s){ctx.moveTo(pp[0],pp[1]);s=true;}else ctx.lineTo(pp[0],pp[1]);}
+    ctx.stroke();
+    const cs=proj([52.5,34],cam.K,cam.R,cam.t);
+    if(cs){ctx.fillStyle='rgba(0,255,100,0.8)';ctx.beginPath();ctx.arc(cs[0],cs[1],4,0,Math.PI*2);ctx.fill();}
+    // Notify iframe of camera state for gizmo sync
+    if(leftCol._iframe) leftCol._iframe.contentWindow?.postMessage({type:'camUpdate',x:+inputs.x.value,y:+inputs.y.value,z:+inputs.z.value,lookX:+inputs.lookX.value,lookY:+inputs.lookY.value},'*');
+  }
+
+  // Save
+  saveBtn.addEventListener('click', async () => {
+    saveBtn.disabled=true; saveBtn.textContent='Saving…';
+    const res = await fetch(`/api/calibration/camera-position/${shotId}`,{
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({x:+inputs.x.value,y:+inputs.y.value,z:+inputs.z.value,lookX:+inputs.lookX.value,lookY:+inputs.lookY.value,focal:+inputs.focal.value,frame:0}),
+    });
+    if(res.ok){saveBtn.textContent='Saved!';setTimeout(()=>loadOutput('calibration'),500);}
+    else{saveBtn.textContent='Error';saveBtn.disabled=false;}
+  });
+
+  // Build 3D pitch iframe with TransformControls gizmo
+  const S='scr'+'ipt';
+  const iframeSrc =
+    '<!DOCTYPE html><html><head><style>*{margin:0;padding:0}body{overflow:hidden;background:#111118}</style>' +
+    '<'+S+' type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.164.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.164.0/examples/jsm/"}}</'+S+'>' +
+    '</head><body><'+S+' type="module">' +
+    'import*as THREE from"three";import{OrbitControls}from"three/addons/controls/OrbitControls.js";import{TransformControls}from"three/addons/controls/TransformControls.js";' +
+    `const w=window.innerWidth,h=window.innerHeight;
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x111118);
+const cam=new THREE.PerspectiveCamera(50,w/h,0.1,500);cam.position.set(52.5,40,60);cam.lookAt(52.5,0,-34);
+const rend=new THREE.WebGLRenderer({antialias:true});rend.setSize(w,h);document.body.appendChild(rend.domElement);
+const orbit=new OrbitControls(cam,rend.domElement);orbit.target.set(52.5,0,-34);orbit.enableDamping=true;
+scene.add(new THREE.AmbientLight(0xffffff,0.5));
+const dl=new THREE.DirectionalLight(0xffffff,0.5);dl.position.set(52.5,50,-34);scene.add(dl);
+const pitch=new THREE.Mesh(new THREE.PlaneGeometry(105,68),new THREE.MeshStandardMaterial({color:0x1a5e1a,side:THREE.DoubleSide}));
+pitch.rotation.x=-Math.PI/2;pitch.position.set(52.5,0,-34);scene.add(pitch);
+const lm=new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.3});
+function al(x1,z1,x2,z2){scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(x1,0.05,-z1),new THREE.Vector3(x2,0.05,-z2)]),lm))}
+al(0,0,105,0);al(105,0,105,68);al(105,68,0,68);al(0,68,0,0);al(52.5,0,52.5,68);
+const cc=[];for(let a=0;a<=Math.PI*2;a+=0.1)cc.push(new THREE.Vector3(52.5+9.15*Math.cos(a),0.05,-(34+9.15*Math.sin(a))));
+scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(cc),lm));
+function addLabel(text,x,y,z,color){const c2=document.createElement('canvas');c2.width=192;c2.height=48;const cx=c2.getContext('2d');cx.fillStyle=color||'#fff';cx.font='bold 20px sans-serif';cx.fillText(text,4,32);const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c2)}));sp.scale.set(14,3.5,1);sp.position.set(x,y,z);scene.add(sp)}
+addLabel('LEFT GOAL (x=0)',0,2,-34,'#ff6b6b');addLabel('RIGHT GOAL (x=105)',105,2,-34,'#ff6b6b');
+const camMarker=new THREE.Mesh(new THREE.SphereGeometry(1.5,12,12),new THREE.MeshBasicMaterial({color:0xf59e0b}));
+camMarker.position.set(52.5,15,15);scene.add(camMarker);
+const tc=new TransformControls(cam,rend.domElement);
+tc.attach(camMarker);tc.setMode('translate');tc.setSize(0.8);
+scene.add(tc);
+tc.addEventListener('dragging-changed',e=>{orbit.enabled=!e.value});
+tc.addEventListener('objectChange',()=>{
+  const p=camMarker.position;
+  // Forward direction in Three.js is +Z, transformed by object quaternion
+  const fwd=new THREE.Vector3(0,0,1).applyQuaternion(camMarker.quaternion);
+  // Project forward ray to pitch plane (y=0 in Three.js = z=0 in FIFA)
+  // Camera pos in FIFA: x=p.x, y=-p.z, z=p.y
+  // Forward in FIFA: fx=fwd.x, fy=-fwd.z, fz=fwd.y
+  const camZ=p.y; // height in FIFA
+  const fwdZ=fwd.y; // vertical component of forward in FIFA
+  let lookX=52.5, lookY=34; // default: centre
+  if(Math.abs(fwdZ)>0.01){
+    const tGround=-camZ/fwdZ; // parameter where ray hits z=0
+    if(tGround>0){
+      lookX=p.x+fwd.x*tGround;
+      lookY=-p.z+(-fwd.z)*tGround;
+    }
+  }
+  window.parent.postMessage({type:'gizmoMove',x:p.x,y:-p.z,z:p.y,lookX,lookY},'*');
+});
+const modeBtn=document.createElement('button');
+modeBtn.textContent='Mode: Move';
+modeBtn.style.cssText='position:absolute;top:8px;left:8px;z-index:10;background:rgba(0,0,0,0.6);color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px;';
+document.body.appendChild(modeBtn);
+modeBtn.addEventListener('click',()=>{
+  if(tc.mode==='translate'){tc.setMode('rotate');modeBtn.textContent='Mode: Rotate';}
+  else{tc.setMode('translate');modeBtn.textContent='Mode: Move';}
+});
+window.addEventListener('message',e=>{
+  if(e.data?.type==='camUpdate'){
+    camMarker.position.set(e.data.x, e.data.z, -e.data.y);
+    if(e.data.lookX!==undefined&&e.data.lookY!==undefined){
+      // Point the marker toward the look-at target
+      const tgt=new THREE.Vector3(e.data.lookX,0,-e.data.lookY);
+      camMarker.lookAt(tgt);
+    }
+  }
+});
+(function anim(){requestAnimationFrame(anim);orbit.update();rend.render(scene,cam)})();
+window.addEventListener('resize',()=>{cam.aspect=window.innerWidth/window.innerHeight;cam.updateProjectionMatrix();rend.setSize(window.innerWidth,window.innerHeight)});` +
+    '</'+S+'></body></html>';
+
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText = 'width:100%;height:100%;border:none;';
+  iframe.srcdoc = iframeSrc;
+  leftCol.appendChild(iframe);
+  leftCol._iframe = iframe;
+
+  // Listen for gizmo moves from the iframe
+  window.addEventListener('message', e => {
+    if (e.data?.type === 'gizmoMove') {
+      inputs.x.value = e.data.x.toFixed(1);
+      inputs.y.value = e.data.y.toFixed(1);
+      inputs.z.value = e.data.z.toFixed(1);
+      if (e.data.lookX !== undefined) inputs.lookX.value = e.data.lookX.toFixed(1);
+      if (e.data.lookY !== undefined) inputs.lookY.value = e.data.lookY.toFixed(1);
+      updateOverlay();
+    }
+  });
+
+  updateOverlay();
+}
+
+// ── Fullscreen overlay helper ─────────────────────────────────────────
+// Adds a custom fullscreen button to video-inner and wires up fullscreen
+// so the video-wrap (not the <video> itself) is fullscreened, keeping the
+// canvas overlay in the same stacking context as the video.
+function addOverlayFullscreen(wrap, inner, video, canvas) {
+  const btn = document.createElement('button');
+  btn.className = 'fs-btn';
+  btn.title = 'Fullscreen with overlay';
+  btn.textContent = '⛶';
+  inner.appendChild(btn);
+
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    if (document.fullscreenElement === wrap) document.exitFullscreen();
+    else wrap.requestFullscreen().catch(() => {});
+  });
+
+  // If the browser's native video fullscreen button is clicked, redirect it
+  // to the wrap so the canvas overlay is included.
+  video.addEventListener('fullscreenchange', () => {
+    if (document.fullscreenElement === video) {
+      document.exitFullscreen()
+        .then(() => wrap.requestFullscreen())
+        .catch(() => {});
+    }
+  });
+
+  // After the fullscreen transition the video's displayed size changes.
+  // Update canvas CSS size so it stays matched to the video bounds.
+  wrap.addEventListener('fullscreenchange', () => {
+    const isFs = document.fullscreenElement === wrap;
+    btn.textContent = isFs ? '✕' : '⛶';
+    // Layout hasn't necessarily settled yet — defer one frame.
+    requestAnimationFrame(() => {
+      if (!video.videoWidth) return;
+      canvas.style.width = video.offsetWidth + 'px';
+      canvas.style.height = video.offsetHeight + 'px';
+    });
+  });
+}
+
+// ── Tracking renderer ─────────────────────────────────────────────────
+function renderTracking(panel, data) {
+  const shots = Object.entries(data.shots);
+  if (!shots.length) { renderNoOutput(); return; }
+
+  // Collect all known player names across all shots for the suggestion datalist
+  const allNames = new Set();
+  shots.forEach(([, sd]) => (sd.tracks || []).forEach(t => { if (t.player_name) allNames.add(t.player_name); }));
+
+  // ── Auto-match button ──
+  const matchBar = document.createElement('div');
+  matchBar.style.cssText = 'padding:0 0 10px;';
+  const matchBtn = document.createElement('button');
+  matchBtn.textContent = 'Auto-Match Players Across Shots';
+  matchBtn.style.cssText = 'background:#4f46e5;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;';
+  matchBtn.addEventListener('click', async () => {
+    matchBtn.disabled = true; matchBtn.textContent = 'Matching…';
+    const res = await fetch('/api/tracks/auto-match', { method: 'POST' });
+    matchBtn.textContent = res.ok ? 'Done! Reloading…' : 'Failed';
+    if (res.ok) setTimeout(() => loadOutput('tracking'), 500);
+    else matchBtn.disabled = false;
+  });
+  matchBar.appendChild(matchBtn);
+
+  // De-dupe button: merge tracks that share the same player_name into one player_id
+  const dedupeBtn = document.createElement('button');
+  dedupeBtn.textContent = 'De-dupe by Name';
+  dedupeBtn.title = 'Merge tracks with the same player name into a single player ID';
+  dedupeBtn.style.cssText = 'background:#334155;color:#e2e8f0;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;margin-left:8px;';
+  dedupeBtn.addEventListener('click', async () => {
+    dedupeBtn.disabled = true; dedupeBtn.textContent = 'Merging…';
+    const res = await fetch('/api/tracks/dedupe-by-name', { method: 'POST' });
+    if (res.ok) {
+      const result = await res.json();
+      dedupeBtn.textContent = `Merged ${result.merged} players. Reloading…`;
+      setTimeout(() => loadOutput('tracking'), 500);
+    } else {
+      dedupeBtn.textContent = 'Failed'; dedupeBtn.disabled = false;
+    }
+  });
+  matchBar.appendChild(dedupeBtn);
+
+  // Ignore Unknown — marks all unnamed players in the active shot as "ignore"
+  const ignoreBtn = document.createElement('button');
+  ignoreBtn.textContent = 'Ignore Unknown';
+  ignoreBtn.title = 'Set all unnamed players in the current shot to "ignore"';
+  ignoreBtn.style.cssText = 'background:#334155;color:#e2e8f0;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;margin-left:8px;';
+  ignoreBtn.addEventListener('click', async () => {
+    if (!activeTab) return;
+    ignoreBtn.disabled = true; ignoreBtn.textContent = 'Updating…';
+    const res = await fetch(`/api/tracks/ignore-unknown/${activeTab}`, { method: 'POST' });
+    if (res.ok) {
+      const result = await res.json();
+      ignoreBtn.textContent = `Ignored ${result.count} players. Reloading…`;
+      setTimeout(() => loadOutput('tracking'), 500);
+    } else {
+      ignoreBtn.textContent = 'Failed'; ignoreBtn.disabled = false;
+    }
+  });
+  matchBar.appendChild(ignoreBtn);
+
+  // Delete Ignores — removes all tracks marked with player_name "ignore"
+  const deleteIgnBtn = document.createElement('button');
+  deleteIgnBtn.textContent = 'Delete Ignores';
+  deleteIgnBtn.title = 'Remove all tracks named "ignore" from all shots';
+  deleteIgnBtn.style.cssText = 'background:#7f1d1d;color:#fca5a5;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;margin-left:8px;';
+  deleteIgnBtn.addEventListener('click', async () => {
+    deleteIgnBtn.disabled = true; deleteIgnBtn.textContent = 'Deleting…';
+    const res = await fetch('/api/tracks/delete-ignored', { method: 'POST' });
+    if (res.ok) {
+      const result = await res.json();
+      deleteIgnBtn.textContent = `Deleted ${result.deleted} tracks. Reloading…`;
+      setTimeout(() => loadOutput('tracking'), 500);
+    } else {
+      deleteIgnBtn.textContent = 'Failed'; deleteIgnBtn.disabled = false;
+    }
+  });
+  matchBar.appendChild(deleteIgnBtn);
+
+  panel.appendChild(matchBar);
+
+  // ── Shot tabs ──
+  const tabBar = document.createElement('div');
+  tabBar.style.cssText = 'display:flex;gap:0;border-bottom:2px solid #2d3148;margin-bottom:12px;';
+  const shotPanels = {};
+  let activeTab = null;
+
+  shots.forEach(([shotId], i) => {
+    const tab = document.createElement('button');
+    tab.textContent = shotId;
+    tab.style.cssText = 'background:none;border:none;color:#94a3b8;padding:8px 16px;font-size:13px;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;';
+    tab.addEventListener('click', () => selectShotTab(shotId));
+    tabBar.appendChild(tab);
+    shotPanels[shotId] = { tab };
+  });
+  panel.appendChild(tabBar);
+
+  // ── Content area (swapped per tab) ──
+  const contentArea = document.createElement('div');
+  panel.appendChild(contentArea);
+
+  // Name suggestion datalist (shared across all shots)
+  const datalistId = 'player-name-suggestions';
+  const datalist = document.createElement('datalist');
+  datalist.id = datalistId;
+  allNames.forEach(n => { const o = document.createElement('option'); o.value = n; datalist.appendChild(o); });
+  panel.appendChild(datalist);
+
+  function selectShotTab(shotId) {
+    if (activeTab === shotId) return;
+    activeTab = shotId;
+    // Update tab styling
+    for (const [sid, sp] of Object.entries(shotPanels)) {
+      const active = sid === shotId;
+      sp.tab.style.color = active ? '#f1f5f9' : '#94a3b8';
+      sp.tab.style.fontWeight = active ? '600' : '400';
+      sp.tab.style.borderBottomColor = active ? '#6366f1' : 'transparent';
+    }
+    // Render shot content
+    contentArea.innerHTML = '';
+    renderShotTrackingView(contentArea, shotId, data.shots[shotId], datalistId, allNames);
+  }
+
+  selectShotTab(shots[0][0]);
+}
+
+function renderShotTrackingView(container, shotId, tracksData, datalistId, allNames) {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:14px;align-items:flex-start;';
+
+  // ── Left: video with overlay + custom timeline ──
+  const videoCol = document.createElement('div');
+  videoCol.style.cssText = 'flex:1;min-width:0;overflow:hidden;';
+
+  const wrap = document.createElement('div');
+  wrap.className = 'video-wrap';
+  wrap.style.display = 'block';
+  const inner = document.createElement('div');
+  inner.className = 'video-inner';
+  const video = document.createElement('video');
+  video.src = `/api/video/${shotId}`;
+  video.preload = 'metadata';
+  video.style.cssText = 'display:block;width:100%;';
+  const canvas = document.createElement('canvas');
+  canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:auto;cursor:crosshair;';
+  inner.appendChild(video);
+  inner.appendChild(canvas);
+  wrap.appendChild(inner);
+  videoCol.appendChild(wrap);
+
+  // ── Timeline controls ──
+  const controls = document.createElement('div');
+  controls.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 0;';
+
+  const playBtn = document.createElement('button');
+  playBtn.textContent = '▶';
+  playBtn.style.cssText = 'background:#4f46e5;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:14px;width:36px;';
+  controls.appendChild(playBtn);
+
+  // Step back
+  const stepBackBtn = document.createElement('button');
+  stepBackBtn.textContent = '◀';
+  stepBackBtn.title = 'Previous frame';
+  stepBackBtn.style.cssText = 'background:#334155;color:#e2e8f0;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:11px;';
+  controls.appendChild(stepBackBtn);
+
+  // Step forward
+  const stepFwdBtn = document.createElement('button');
+  stepFwdBtn.textContent = '▶';
+  stepFwdBtn.title = 'Next frame';
+  stepFwdBtn.style.cssText = 'background:#334155;color:#e2e8f0;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:11px;';
+  controls.appendChild(stepFwdBtn);
+
+  const timeline = document.createElement('input');
+  timeline.type = 'range';
+  timeline.min = '0';
+  timeline.max = '1000';
+  timeline.value = '0';
+  timeline.style.cssText = 'flex:1;';
+  controls.appendChild(timeline);
+
+  const frameLabel = document.createElement('span');
+  frameLabel.style.cssText = 'font-size:11px;color:#94a3b8;min-width:90px;text-align:right;font-variant-numeric:tabular-nums;';
+  frameLabel.textContent = 'Frame 0';
+  controls.appendChild(frameLabel);
+
+  videoCol.appendChild(controls);
+  row.appendChild(videoCol);
+
+  // Wire up timeline
+  let seeking = false;
+  video.addEventListener('loadedmetadata', () => {
+    const totalFrames = Math.round(video.duration * fps);
+    timeline.max = String(totalFrames);
+  });
+
+  video.addEventListener('timeupdate', () => {
+    if (seeking) return;
+    const frame = Math.round(video.currentTime * fps);
+    timeline.value = String(frame);
+    frameLabel.textContent = `Frame ${frame}`;
+  });
+
+  timeline.addEventListener('input', () => {
+    seeking = true;
+    const frame = parseInt(timeline.value);
+    video.currentTime = frame / fps;
+    frameLabel.textContent = `Frame ${frame}`;
+    seeking = false;
+  });
+
+  playBtn.addEventListener('click', () => {
+    if (video.paused) { video.play(); playBtn.textContent = '⏸'; }
+    else { video.pause(); playBtn.textContent = '▶'; }
+  });
+  video.addEventListener('pause', () => { playBtn.textContent = '▶'; });
+  video.addEventListener('play', () => { playBtn.textContent = '⏸'; });
+  video.addEventListener('ended', () => { playBtn.textContent = '▶'; });
+
+  stepBackBtn.addEventListener('click', () => {
+    video.pause();
+    video.currentTime = Math.max(0, video.currentTime - 1 / fps);
+  });
+  stepFwdBtn.addEventListener('click', () => {
+    video.pause();
+    video.currentTime = Math.min(video.duration || 0, video.currentTime + 1 / fps);
+  });
+
+  // ── Right: independently scrollable player list ──
+  const listCol = document.createElement('div');
+  listCol.style.cssText = 'width:280px;min-width:280px;overflow-y:auto;background:#1a1d27;border-radius:6px;border:1px solid #2d3148;position:sticky;top:0;';
+
+  const listHeader = document.createElement('div');
+  listHeader.style.cssText = 'padding:8px 10px;font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.06em;border-bottom:1px solid #2d3148;position:sticky;top:0;background:#1a1d27;z-index:1;';
+  listHeader.textContent = `Players — ${shotId}`;
+  listCol.appendChild(listHeader);
+
+  const playerTracks = (tracksData.tracks || []).filter(t => t.class_name !== 'ball');
+  const fps = getShotFps();
+
+  // Build frame index for overlay + click hit-testing (shared between overlay and click handler)
+  const frameIndex = new Map();
+  for (const track of tracksData.tracks) {
+    for (const tf of track.frames) {
+      if (!frameIndex.has(tf.frame)) frameIndex.set(tf.frame, []);
+      frameIndex.get(tf.frame).push({ track, tf });
+    }
+  }
+
+  // Canvas click → find player bbox → focus their name input in the list
+  canvas.addEventListener('click', e => {
+    const rect = canvas.getBoundingClientRect();
+    if (!canvas.width) return;
+    const sx = canvas.width / rect.width, sy = canvas.height / rect.height;
+    const cx = (e.clientX - rect.left) * sx, cy = (e.clientY - rect.top) * sy;
+    const frame = Math.round(video.currentTime * fps);
+    const entries = frameIndex.get(frame) || [];
+    for (const { track } of entries) {
+      // Find this track's bbox at this frame
+      const tf = track.frames?.find(f => f.frame === frame);
+      if (!tf) continue;
+      const [x1, y1, x2, y2] = tf.bbox;
+      if (cx >= x1 && cx <= x2 && cy >= y1 && cy <= y2) {
+        const pid = track.player_id || track.track_id;
+        const rowEl = listCol.querySelector(`[data-player-id="${CSS.escape(pid)}"]`);
+        if (rowEl) {
+          rowEl.scrollIntoView({ block: 'nearest' });
+          const inp = rowEl.querySelector('input');
+          if (inp) inp.focus();
+          // Brief highlight
+          rowEl.style.background = '#2d3148';
+          setTimeout(() => { rowEl.style.background = ''; }, 800);
+        }
+        return;
+      }
+    }
+    // No bbox hit — toggle play/pause
+    video.paused ? video.play() : video.pause();
+  });
+
+  // Group tracks by player_id so de-duped players show one row
+  const grouped = {};
+  playerTracks.forEach(track => {
+    const key = track.player_id || track.track_id;
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(track);
+  });
+
+  for (const [pid, tracks] of Object.entries(grouped)) {
+    const firstTrack = tracks[0];
+    const hasName = !!firstTrack.player_name;
+
+    const item = document.createElement('div');
+    item.dataset.playerId = pid;
+    item.style.cssText = 'display:flex;align-items:center;gap:5px;padding:5px 8px;border-bottom:1px solid #1e293b;transition:background 0.2s;';
+
+    // Color dot
+    const dot = document.createElement('span');
+    dot.style.cssText = `width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${hasName ? '#22c55e' : '#ef4444'};`;
+    item.appendChild(dot);
+
+    // Clickable ID label — seeks video to a frame where this player is visible
+    const idLabel = document.createElement('a');
+    idLabel.textContent = pid;
+    idLabel.href = '#';
+    idLabel.style.cssText = 'font-size:11px;color:#818cf8;min-width:32px;text-decoration:none;cursor:pointer;flex-shrink:0;';
+    idLabel.title = 'Jump to this player';
+    idLabel.addEventListener('click', e => {
+      e.preventDefault();
+      const allFrames = tracks.flatMap(t => (t.frames || []).map(f => f.frame));
+      if (allFrames.length) {
+        allFrames.sort((a, b) => a - b);
+        video.currentTime = allFrames[Math.floor(allFrames.length / 2)] / fps;
+      }
+    });
+    item.appendChild(idLabel);
+
+    // Name input
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.value = firstTrack.player_name || '';
+    nameInput.placeholder = 'Name…';
+    nameInput.setAttribute('list', datalistId);
+    nameInput.style.cssText = 'flex:1;min-width:0;background:#0f1117;color:#e2e8f0;border:1px solid #334155;padding:3px 5px;border-radius:3px;font-size:12px;';
+    nameInput.addEventListener('change', async () => {
+      const newName = nameInput.value.trim();
+      for (const t of tracks) {
+        await fetch(`/api/tracks/${shotId}/${t.track_id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ player_name: newName }),
+        });
+        t.player_name = newName;
+      }
+      dot.style.background = newName ? '#22c55e' : '#ef4444';
+      if (newName && !allNames.has(newName)) {
+        allNames.add(newName);
+        const o = document.createElement('option');
+        o.value = newName;
+        document.getElementById(datalistId).appendChild(o);
+      }
+    });
+    item.appendChild(nameInput);
+
+    // Team badge
+    const team = firstTrack.team || 'unknown';
+    const teamCls = team === 'A' ? 'team-a' : team === 'B' ? 'team-b' : team === 'referee' ? 'team-ref' : 'team-unk';
+    const teamBadge = document.createElement('span');
+    teamBadge.textContent = team;
+    teamBadge.className = teamCls;
+    teamBadge.style.cssText = 'font-size:10px;flex-shrink:0;';
+    item.appendChild(teamBadge);
+
+    // Split button — splits track at current video frame
+    const splitBtn = document.createElement('button');
+    splitBtn.textContent = '✂';
+    splitBtn.title = 'Split track at current frame (for when tracker swapped two players)';
+    splitBtn.style.cssText = 'background:none;border:1px solid #475569;color:#94a3b8;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:12px;flex-shrink:0;';
+    splitBtn.addEventListener('click', async () => {
+      const frame = Math.round(video.currentTime * fps);
+      splitBtn.disabled = true; splitBtn.textContent = '…';
+      const res = await fetch('/api/tracks/split', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shot_id: shotId, track_id: tracks[0].track_id, split_frame: frame }),
+      });
+      if (res.ok) {
+        loadOutput('tracking');
+      } else {
+        const err = await res.json().catch(() => ({}));
+        splitBtn.textContent = '✂';
+        splitBtn.disabled = false;
+        alert(err.detail || 'Split failed');
+      }
+    });
+    item.appendChild(splitBtn);
+
+    listCol.appendChild(item);
+  }
+
+  row.appendChild(listCol);
+  container.appendChild(row);
+
+  setupTrackOverlay(video, canvas, frameIndex);
+  addOverlayFullscreen(wrap, inner, video, canvas);
+}
+
+function setupTrackOverlay(video, canvas, frameIndex) {
+
+  video.addEventListener('loadedmetadata', () => {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.style.width = video.offsetWidth + 'px';
+    canvas.style.height = video.offsetHeight + 'px';
+  });
+
+  const ro = new ResizeObserver(() => {
+    if (video.videoWidth) {
+      canvas.style.width = video.offsetWidth + 'px';
+      canvas.style.height = video.offsetHeight + 'px';
+    }
+  });
+  ro.observe(video);
+
+  let lastFrame = -1;
+  let rafId = null;
+
+  function drawFrame() {
+    const frame = Math.round(video.currentTime * getShotFps());
+    if (frame !== lastFrame) {
+      drawTracks(canvas, frameIndex, frame);
+      lastFrame = frame;
+    }
+  }
+
+  function startLoop() {
+    if (rafId) return;
+    (function loop() { rafId = requestAnimationFrame(loop); drawFrame(); })();
+  }
+
+  function stopLoop() {
+    cancelAnimationFrame(rafId);
+    rafId = null;
+    drawFrame();
+  }
+
+  video.addEventListener('play', startLoop);
+  video.addEventListener('pause', stopLoop);
+  video.addEventListener('ended', stopLoop);
+  video.addEventListener('seeked', () => { if (video.paused) drawFrame(); });
+}
+
+function drawTracks(canvas, frameIndex, frame) {
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const entries = frameIndex.get(frame) || [];
+  for (const { track, tf } of entries) {
+    const [x1, y1, x2, y2] = tf.bbox;
+    const hasName = !!track.player_name;
+    // Red if unnamed, green if named
+    const color = hasName ? '#22c55e' : '#ef4444';
+    const label = hasName ? track.player_name : (track.player_id || track.track_id);
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+    // Label background
+    ctx.font = 'bold 11px sans-serif';
+    const textW = ctx.measureText(label).width;
+    const labelY = y1 - 4 < 12 ? y1 + 14 : y1 - 4;
+    const bgY = labelY - 11;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(x1, bgY, textW + 6, 14);
+    ctx.fillStyle = color;
+    ctx.fillText(label, x1 + 3, labelY);
+  }
+}
+
+// ── Pose renderer ─────────────────────────────────────────────────────
+function renderPose(panel, data) {
+  const shots = Object.entries(data.shots);
+  shots.forEach(([shotId, poseData]) => {
+    const div = document.createElement('div');
+    div.className = 'shot-viewer';
+
+    const h4 = document.createElement('h4');
+    h4.textContent = shotId + ` (${poseData.players.length} players)`;
+    div.appendChild(h4);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'video-wrap';
+
+    const inner = document.createElement('div');
+    inner.className = 'video-inner';
+
+    const video = document.createElement('video');
+    video.src = `/api/video/${shotId}`;
+    video.controls = true;
+    video.preload = 'metadata';
+
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
+
+    inner.appendChild(video);
+    inner.appendChild(canvas);
+    wrap.appendChild(inner);
+    div.appendChild(wrap);
+    panel.appendChild(div);
+
+    setupPoseOverlay(video, canvas, poseData);
+    addOverlayFullscreen(wrap, inner, video, canvas);
+  });
+}
+
+function setupPoseOverlay(video, canvas, poseData) {
+  // Pre-index: Map<trackId, Map<frame, keypoints[]>>
+  const poseIndex = new Map();
+  for (const player of poseData.players) {
+    const frameMap = new Map();
+    for (const pf of player.frames) {
+      frameMap.set(pf.frame, pf.keypoints);
+    }
+    poseIndex.set(player.track_id, frameMap);
+  }
+
+  video.addEventListener('loadedmetadata', () => {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.style.width = video.offsetWidth + 'px';
+    canvas.style.height = video.offsetHeight + 'px';
+  });
+
+  const ro = new ResizeObserver(() => {
+    if (video.videoWidth) {
+      canvas.style.width = video.offsetWidth + 'px';
+      canvas.style.height = video.offsetHeight + 'px';
+    }
+  });
+  ro.observe(video);
+
+  let lastFrame = -1;
+  let rafId = null;
+
+  function drawFrame() {
+    const frame = Math.round(video.currentTime * getShotFps());
+    if (frame !== lastFrame) {
+      drawPoses(canvas, poseIndex, frame);
+      lastFrame = frame;
+    }
+  }
+
+  function startLoop() {
+    if (rafId) return;
+    (function loop() { rafId = requestAnimationFrame(loop); drawFrame(); })();
+  }
+
+  function stopLoop() {
+    cancelAnimationFrame(rafId);
+    rafId = null;
+    drawFrame();
+  }
+
+  video.addEventListener('play', startLoop);
+  video.addEventListener('pause', stopLoop);
+  video.addEventListener('ended', stopLoop);
+  video.addEventListener('seeked', () => { if (video.paused) drawFrame(); });
+}
+
+function drawPoses(canvas, poseIndex, frame) {
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  for (const [, frameMap] of poseIndex) {
+    const kps = frameMap.get(frame);
+    if (!kps) continue;
+
+    // Draw skeleton bones
+    for (const [a, b] of SKELETON) {
+      const kpA = kps[a], kpB = kps[b];
+      if (!kpA || !kpB || kpA.conf < 0.3 || kpB.conf < 0.3) continue;
+      ctx.beginPath();
+      ctx.moveTo(kpA.x, kpA.y);
+      ctx.lineTo(kpB.x, kpB.y);
+      ctx.strokeStyle = 'rgba(99,102,241,0.75)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    // Draw joints
+    for (const kp of kps) {
+      if (kp.conf < 0.3) continue;
+      const hue = Math.round((kp.conf - 0.3) / 0.7 * 120);
+      ctx.beginPath();
+      ctx.arc(kp.x, kp.y, 4, 0, 2 * Math.PI);
+      ctx.fillStyle = `hsl(${hue},100%,55%)`;
+      ctx.fill();
+    }
+  }
+}
+
+// ── Sync renderer ─────────────────────────────────────────────────────
+function renderSync(panel, data) {
+  // ── 1. Alignment table ────────────────────────────────────────────
+  const { wrap: tableWrap, body: tableBody } = makePanel('Sync Map');
+  tableBody.style.padding = '12px 16px';
+
+  const ref = document.createElement('p');
+  ref.style.cssText = 'font-size:12px;color:#64748b;margin-bottom:12px;';
+  ref.textContent = `Reference shot: ${data.reference_shot}`;
+  tableBody.appendChild(ref);
+
+  const { t, tbody } = makeTable(['Shot', 'Frame Offset', 'Confidence', 'Method', 'Overlap']);
+  (data.alignments || []).forEach(a => {
+    const conf = a.confidence != null ? a.confidence : 0;
+    const confHtml = `
+      <span class="conf-bar-wrap"><span class="conf-bar" style="width:${Math.round(conf*100)}%"></span></span>
+      ${(conf*100).toFixed(0)}%`;
+    const overlap = a.overlap_frames ? `${a.overlap_frames[0]}–${a.overlap_frames[1]}` : '—';
+    addRow(tbody, [
+      a.shot_id,
+      a.frame_offset != null ? a.frame_offset : '—',
+      { html: confHtml },
+      a.method || '—',
+      overlap,
+    ]);
+  });
+  tableBody.appendChild(t);
+  panel.appendChild(tableWrap);
+
+  // ── 2. Multi-view sync player ─────────────────────────────────────
+  renderSyncPlayer(panel, data);
+}
+
+function renderSyncPlayer(panel, data) {
+  const fps = getShotFps();
+  const refId = data.reference_shot;
+
+  // Convention: frame_in_reference = frame_in_shot + offset
+  //   → at virtual time T, shot plays at  T − offset/fps
+  // offsets is mutable state: updated by drag and nudge controls.
+  const offsets = {};  // shotId → integer frame offset
+  const methods = {};  // shotId → method string
+  offsets[refId] = 0;
+  methods[refId] = 'reference';
+  (data.alignments || []).forEach(a => {
+    offsets[a.shot_id] = a.frame_offset || 0;
+    methods[a.shot_id] = a.method || 'auto';
+  });
+
+  const shots = [
+    { shotId: refId, isRef: true, confidence: null },
+    ...(data.alignments || []).map(a => ({
+      shotId: a.shot_id,
+      isRef: false,
+      confidence: a.confidence,
+    })),
+  ];
+
+  // ── Sticky panel: two-column — reference video left, timeline right ──
+  const { wrap, body } = makePanel('Sync Timeline');
+  // body is a flex row: refSide | timelineSide
+  body.style.cssText = 'padding:0;display:flex;align-items:stretch;';
+
+  const refSide = document.createElement('div');
+  refSide.style.cssText = `
+    flex: 0 0 300px;
+    min-width: 220px;
+    border-right: 1px solid #2d3148;
+    display: flex;
+    flex-direction: column;
+  `;
+
+  const timelineSide = document.createElement('div');
+  timelineSide.style.cssText = `
+    flex: 1;
+    min-width: 0;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  `;
+
+  body.appendChild(refSide);
+  body.appendChild(timelineSide);
+
+  // Sticky shell — sits directly inside #main-body's scroll container.
+  // .panel's overflow:hidden is on `wrap`, not on stickyShell, so sticky works.
+  const stickyShell = document.createElement('div');
+  stickyShell.style.cssText = `
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: #0f1117;
+    padding-bottom: 4px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+  `;
+  stickyShell.appendChild(wrap);
+
+  // ── Video grid panel (scrolls normally below the sticky panel) ──
+  const { wrap: videoWrap, body: videoBody } = makePanel('Clip Previews');
+  videoBody.style.padding = '16px';
+
+  const grid = document.createElement('div');
+  grid.style.cssText = `
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
+    gap: 12px;
+  `;
+
+  const videoEls = {};   // shotId → <video>
+
+  shots.forEach(({ shotId, isRef, confidence }) => {
+    const offset = offsets[shotId];
+    const cell = document.createElement('div');
+    cell.style.cssText = `
+      background: #0a0c12;
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid ${isRef ? '#6366f1' : '#2d3148'};
+      ${isRef ? 'flex:1;' : ''}
+    `;
+
+    const label = document.createElement('div');
+    label.style.cssText = `
+      padding: 5px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: ${isRef ? '#1e1f3a' : '#111827'};
+      color: ${isRef ? '#a5b4fc' : '#94a3b8'};
+    `;
+    const offsetLabel = isRef ? 'reference' :
+      (offset === 0 ? '±0 frames' : `${offset > 0 ? '+' : ''}${offset} frames`);
+    const confLabel = confidence != null ? ` · ${(confidence * 100).toFixed(0)}%` : '';
+    label.innerHTML = `<span>${shotId}${isRef ? ' ★' : ''}</span><span>${offsetLabel}${confLabel}</span>`;
+
+    const video = document.createElement('video');
+    video.src = `/api/video/${shotId}`;
+    video.preload = 'metadata';
+    video.muted = !isRef;
+    // Reference video fills the sticky panel column; others are large in the scrollable grid
+    video.style.cssText = isRef
+      ? 'width:100%;display:block;flex:1;min-height:0;object-fit:contain;'
+      : 'width:100%;display:block;max-height:480px;object-fit:contain;';
+
+    const timeBar = document.createElement('div');
+    timeBar.id = `sync-time-${shotId}`;
+    timeBar.style.cssText = `
+      padding: 3px 10px;
+      font-size: 10px;
+      font-family: monospace;
+      color: #4b5563;
+      background: #0a0c12;
+      flex-shrink: 0;
+    `;
+    timeBar.textContent = '0:00.0';
+
+    cell.appendChild(label);
+    cell.appendChild(video);
+    cell.appendChild(timeBar);
+
+    if (isRef) {
+      refSide.appendChild(cell);    // pinned in the sticky panel's left column
+    } else {
+      grid.appendChild(cell);       // scrolls in the clip previews grid below
+    }
+    videoEls[shotId] = video;
+  });
+
+  videoBody.appendChild(grid);
+  // videoWrap appended after the timeline so DOM order is: timeline (sticky) → videos
+
+  // ── Timeline panel ────────────────────────────────────────────────
+  // Shared state
+  let pxPerSec = 40;          // zoom level; steps: 10, 20, 40, 80, 160
+  const PX_STEPS = [10, 20, 40, 80, 160];
+  const ROW_H = 36;           // px height per clip row
+  const RULER_H = 24;         // px height of time ruler
+  const LABEL_W = 80;         // px width of left label column
+  const NUDGE_W = 220;        // px width of nudge control column
+
+  const timelineWrap = document.createElement('div');
+  timelineWrap.style.cssText = `
+    background: #0a0c12;
+    border-radius: 6px;
+    border: 1px solid #1e2130;
+    margin-bottom: 12px;
+    overflow: hidden;
+    user-select: none;
+  `;
+
+  // ── Ruler header row ──────────────────────────────────────────────
+  const rulerRow = document.createElement('div');
+  rulerRow.style.cssText = `
+    display: flex;
+    align-items: stretch;
+    border-bottom: 1px solid #1e2130;
+    height: ${RULER_H}px;
+  `;
+
+  const rulerLabelCell = document.createElement('div');
+  rulerLabelCell.style.cssText = `
+    width: ${LABEL_W}px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 8px;
+    gap: 4px;
+  `;
+
+  const zoomOut = document.createElement('button');
+  zoomOut.textContent = '−';
+  zoomOut.title = 'Zoom out';
+  zoomOut.style.cssText = 'background:#1e2130;border:1px solid #2d3148;color:#94a3b8;border-radius:3px;width:20px;height:20px;cursor:pointer;font-size:14px;line-height:1;padding:0;';
+  const zoomIn = document.createElement('button');
+  zoomIn.textContent = '+';
+  zoomIn.title = 'Zoom in';
+  zoomIn.style.cssText = zoomOut.style.cssText;
+  rulerLabelCell.appendChild(zoomOut);
+  rulerLabelCell.appendChild(zoomIn);
+
+  const rulerScroll = document.createElement('div');
+  rulerScroll.style.cssText = `flex:1;overflow:hidden;position:relative;`;
+
+  const rulerCanvas = document.createElement('div');
+  rulerCanvas.style.cssText = `position:absolute;top:0;left:0;height:100%;`;
+
+  rulerScroll.appendChild(rulerCanvas);
+  rulerRow.appendChild(rulerLabelCell);
+  rulerRow.appendChild(rulerScroll);
+  timelineWrap.appendChild(rulerRow);
+
+  // ── Clip rows ─────────────────────────────────────────────────────
+  const rowsArea = document.createElement('div');
+  rowsArea.style.cssText = `position:relative;`;
+
+  // Playhead: absolute-positioned full-height line over the rows area
+  const playheadWrap = document.createElement('div');
+  playheadWrap.style.cssText = `
+    position:absolute; top:0; left:${LABEL_W}px; right:${NUDGE_W}px;
+    height:100%; pointer-events:none; overflow:hidden; z-index:10;
+  `;
+  const playheadLine = document.createElement('div');
+  playheadLine.style.cssText = `
+    position:absolute;top:0;bottom:0;width:2px;
+    background:#6366f1;opacity:0.85;
+    transform:translateX(0);
+    pointer-events:all;cursor:col-resize;
+  `;
+  playheadWrap.appendChild(playheadLine);
+  rowsArea.appendChild(playheadWrap);
+
+  // Clip row elements: rowEl, barEl, barTextEl, offsetLabelEl, nudgeControlEl per shot
+  const rowEls = {};         // shotId → { rowEl, barEl, barTextEl, offLabel, methodBadge, nudgeBtns } (non-ref only)
+  const barElsByShot = {};   // shotId → barEl (all shots, including ref)
+
+  shots.forEach(({ shotId, isRef }) => {
+    const rowEl = document.createElement('div');
+    rowEl.style.cssText = `
+      display:flex;align-items:center;
+      height:${ROW_H}px;border-bottom:1px solid #111520;position:relative;
+    `;
+
+    // Left label
+    const labelCell = document.createElement('div');
+    labelCell.style.cssText = `
+      width:${LABEL_W}px;flex-shrink:0;
+      font-size:10px;font-weight:600;color:${isRef ? '#a5b4fc' : '#64748b'};
+      padding-right:8px;text-align:right;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+    `;
+    labelCell.textContent = shotId + (isRef ? ' ★' : '');
+
+    // Scrollable bar zone
+    const barZone = document.createElement('div');
+    barZone.style.cssText = `flex:1;position:relative;height:100%;overflow:hidden;`;
+
+    const barEl = document.createElement('div');
+    barEl.style.cssText = `
+      position:absolute;top:6px;height:${ROW_H - 12}px;
+      background:${isRef ? '#4f46e5' : '#2d3148'};
+      border-radius:3px;min-width:4px;
+      cursor:${isRef ? 'default' : 'ew-resize'};
+      border:1px solid ${isRef ? '#6366f1' : '#3d4060'};
+      display:flex;align-items:center;overflow:hidden;
+    `;
+
+    const barTextEl = document.createElement('span');
+    barTextEl.style.cssText = `
+      font-size:9px;color:${isRef ? '#a5b4fc' : '#94a3b8'};
+      padding:0 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;
+    `;
+    barTextEl.textContent = isRef ? '★ ref' : shotId;
+    barEl.appendChild(barTextEl);
+
+    // Track barEl for all shots (used by redrawTimeline)
+    barElsByShot[shotId] = barEl;
+
+    // Hover highlight for non-ref bars
+    if (!isRef) {
+      barEl.addEventListener('mouseenter', () => { if (!dragState) barEl.style.background = '#3d4168'; });
+      barEl.addEventListener('mouseleave', () => { if (!dragState) barEl.style.background = '#2d3148'; });
+    }
+
+    barZone.appendChild(barEl);
+
+    // Right nudge area
+    const nudgeCell = document.createElement('div');
+    nudgeCell.style.cssText = `
+      width:${NUDGE_W}px;flex-shrink:0;display:flex;align-items:center;
+      gap:3px;padding-left:8px;
+    `;
+
+    if (isRef) {
+      nudgeCell.innerHTML = `<span style="font-size:10px;color:#4b5563;font-style:italic;">reference (fixed)</span>`;
+    } else {
+      const fmtOff = (v) => (v === 0 ? '±0' : (v > 0 ? '+' : '') + v) + ' fr';
+
+      const nudgeBtns = [-10, -1, 1, 10].map(delta => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = delta > 0 ? `+${delta}` : `${delta}`;
+        btn.dataset.delta = delta;
+        btn.style.cssText = `
+          background:#1e2130;border:1px solid #2d3148;color:#94a3b8;
+          border-radius:3px;padding:1px 4px;font-size:10px;cursor:pointer;flex-shrink:0;
+        `;
+        btn.addEventListener('click', () => commitOffset(shotId, offsets[shotId] + delta));
+        return btn;
+      });
+
+      const offLabel = document.createElement('span');
+      offLabel.style.cssText = `
+        font-size:10px;font-family:monospace;color:#64748b;
+        min-width:52px;text-align:center;flex-shrink:0;
+      `;
+      offLabel.textContent = fmtOff(offsets[shotId]);
+
+      const methodBadge = document.createElement('span');
+      methodBadge.style.cssText = `
+        font-size:9px;padding:1px 4px;border-radius:3px;flex-shrink:0;
+        background:${methods[shotId] === 'manual' ? '#312e81' : '#1e2130'};
+        color:${methods[shotId] === 'manual' ? '#a5b4fc' : '#4b5563'};
+        border:1px solid ${methods[shotId] === 'manual' ? '#4f46e5' : '#2d3148'};
+      `;
+      methodBadge.textContent = methods[shotId] === 'manual' ? 'manual' : 'auto';
+
+      // Insert: -10 -1 [label] +1 +10 [badge]
+      nudgeCell.appendChild(nudgeBtns[0]);
+      nudgeCell.appendChild(nudgeBtns[1]);
+      nudgeCell.appendChild(offLabel);
+      nudgeCell.appendChild(nudgeBtns[2]);
+      nudgeCell.appendChild(nudgeBtns[3]);
+      nudgeCell.appendChild(methodBadge);
+
+      rowEls[shotId] = { rowEl, barEl, barTextEl, offLabel, methodBadge, nudgeBtns };
+    }
+
+    rowEl.appendChild(labelCell);
+    rowEl.appendChild(barZone);
+    rowEl.appendChild(nudgeCell);
+    rowsArea.appendChild(rowEl);
+  });
+
+  rowsArea.appendChild(playheadWrap);  // keep playhead on top
+  timelineWrap.appendChild(rowsArea);
+  timelineSide.appendChild(timelineWrap);
+
+  // ── Controls row ──────────────────────────────────────────────────
+  const controls = document.createElement('div');
+  controls.style.cssText = `
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: #0a0c12;
+    border-radius: 6px;
+  `;
+
+  const playBtn = document.createElement('button');
+  playBtn.className = 'btn btn-primary';
+  playBtn.style.cssText = 'width:80px;flex-shrink:0;font-size:16px;padding:6px 0;';
+  playBtn.textContent = '▶';
+
+  const timeLabel = document.createElement('span');
+  timeLabel.style.cssText = 'font-size:12px;color:#64748b;font-family:monospace;flex-shrink:0;min-width:55px;';
+  timeLabel.textContent = '0:00.0';
+
+  const durLabel = document.createElement('span');
+  durLabel.style.cssText = 'font-size:12px;color:#4b5563;font-family:monospace;flex-shrink:0;';
+  durLabel.textContent = '—';
+
+  controls.appendChild(playBtn);
+  controls.appendChild(timeLabel);
+  controls.appendChild(durLabel);
+  timelineSide.appendChild(controls);
+  panel.appendChild(stickyShell);  // sticky timeline — first in DOM, stays pinned at top on scroll
+  panel.appendChild(videoWrap);    // video grid — scrolls normally below the sticky timeline
+
+  // ── Shared virtual-clock state ────────────────────────────────────
+  // Start at the overlap point (latest offset) so all shots are in range
+  const _initT = shots.filter(s => !s.isRef)
+    .reduce((m, s) => Math.max(m, offsets[s.shotId] / fps), 0);
+  let virtualT = _initT;
+  let globalDuration = 0;
+  let playing = false;
+  let rafId = null;
+  let lastWallMs = null;
+  const durations = {};   // shotId → seconds
+  shots.forEach(s => { durations[s.shotId] = null; });
+
+  function fmtTime(t) {
+    if (!isFinite(t) || t < 0) return '—';
+    const m = Math.floor(t / 60);
+    const s = (t % 60).toFixed(1).padStart(4, '0');
+    return `${m}:${s}`;
+  }
+
+  function computeGlobalDuration() {
+    let end = 0;
+    shots.forEach(({ shotId }) => {
+      const d = durations[shotId];
+      if (d == null) return;
+      end = Math.max(end, offsets[shotId] / fps + d);
+    });
+    return end;
+  }
+
+  // ── Timeline drawing ──────────────────────────────────────────────
+  function timelineWidth() {
+    return rulerScroll.clientWidth || 400;
+  }
+
+  function redrawTimeline() {
+    globalDuration = computeGlobalDuration();
+    const totalPx = Math.max(timelineWidth(), globalDuration * pxPerSec + 20);
+
+    // ── Ruler ticks ──
+    rulerCanvas.style.width = totalPx + 'px';
+    rulerCanvas.innerHTML = '';
+    const tickStep = pxPerSec >= 80 ? 1 : pxPerSec >= 40 ? 2 : pxPerSec >= 20 ? 5 : 10;
+    const labelStep = pxPerSec >= 40 ? 5 : 10;
+    const totalSecs = Math.ceil(globalDuration) + 5;
+    for (let s = 0; s <= totalSecs; s += tickStep) {
+      const x = s * pxPerSec;
+      const isMajor = s % labelStep === 0;
+      const tick = document.createElement('div');
+      tick.style.cssText = `
+        position:absolute;left:${x}px;bottom:0;
+        width:1px;height:${isMajor ? 12 : 5}px;
+        background:${isMajor ? '#3d4060' : '#1e2130'};
+      `;
+      rulerCanvas.appendChild(tick);
+      if (isMajor) {
+        const lbl = document.createElement('span');
+        lbl.textContent = s + 's';
+        lbl.style.cssText = `
+          position:absolute;left:${x + 3}px;top:2px;
+          font-size:9px;color:#4b5563;font-family:monospace;
+          white-space:nowrap;
+        `;
+        rulerCanvas.appendChild(lbl);
+      }
+    }
+
+    // ── Bars ──
+    shots.forEach(({ shotId }) => {
+      const barEl = barElsByShot[shotId];
+      if (!barEl) return;
+      const offset = offsets[shotId];
+      const dur = durations[shotId];
+      const barLeft = (offset / fps) * pxPerSec;
+      const barWidth = dur != null ? dur * pxPerSec : 0;
+      barEl.style.left = barLeft + 'px';
+      barEl.style.width = (barWidth || 40) + 'px';
+    });
+
+    // Also update playhead position
+    updatePlayhead();
+  }
+
+  function updatePlayhead() {
+    const x = virtualT * pxPerSec;
+    playheadLine.style.transform = `translateX(${x}px)`;
+  }
+
+  function onDurationKnown(shotId, d) {
+    durations[shotId] = d;
+    globalDuration = computeGlobalDuration();
+    if (globalDuration > 0) {
+      durLabel.textContent = fmtTime(globalDuration);
+    }
+    redrawTimeline();
+    applyVirtualT(virtualT);
+  }
+
+  function applyVirtualT(t) {
+    virtualT = Math.max(0, globalDuration > 0 ? Math.min(globalDuration, t) : t);
+    timeLabel.textContent = fmtTime(virtualT);
+    updatePlayhead();
+
+    shots.forEach(({ shotId }) => {
+      const vid = videoEls[shotId];
+      if (!vid) return;
+      const localT = virtualT - offsets[shotId] / fps;
+      const dur = durations[shotId] || vid.duration || 0;
+      const inRange = localT >= 0 && localT <= dur;
+      vid.style.opacity = inRange ? '1' : '0.3';
+      const tEl = document.getElementById(`sync-time-${shotId}`);
+      if (tEl) tEl.textContent = inRange ? fmtTime(localT) : 'out of range';
+      if (!inRange) return;
+      const clamped = Math.max(0, Math.min(dur, localT));
+      const seekThreshold = 1.5 / fps;
+      if (Math.abs(vid.currentTime - clamped) > seekThreshold) {
+        vid.currentTime = clamped;
+      }
+    });
+  }
+
+  function startPlayback() {
+    playing = true;
+    playBtn.textContent = '⏸';
+    lastWallMs = performance.now();
+    shots.forEach(({ shotId }) => {
+      const vid = videoEls[shotId];
+      if (!vid) return;
+      const localT = virtualT - offsets[shotId] / fps;
+      const dur = durations[shotId] || vid.duration || 0;
+      if (localT >= 0 && localT <= dur) vid.play().catch(() => {});
+    });
+
+    function tick(nowMs) {
+      if (!playing) return;
+      const dt = (nowMs - lastWallMs) / 1000;
+      lastWallMs = nowMs;
+      const next = virtualT + dt;
+
+      if (next >= globalDuration) {
+        stopPlayback();
+        applyVirtualT(globalDuration);
+        return;
+      }
+
+      virtualT = next;
+      timeLabel.textContent = fmtTime(virtualT);
+      updatePlayhead();
+
+      shots.forEach(({ shotId }) => {
+        const vid = videoEls[shotId];
+        if (!vid) return;
+        const localT = virtualT - offsets[shotId] / fps;
+        const dur = durations[shotId] || vid.duration || 0;
+        const inRange = localT >= 0 && localT <= dur;
+        vid.style.opacity = inRange ? '1' : '0.3';
+        const tEl = document.getElementById(`sync-time-${shotId}`);
+        if (tEl) tEl.textContent = inRange ? fmtTime(localT) : 'out of range';
+        if (inRange) {
+          if (vid.paused) vid.play().catch(() => {});
+          if (Math.abs(vid.currentTime - localT) > 0.25) vid.currentTime = localT;
+        } else {
+          if (!vid.paused) vid.pause();
+        }
+      });
+
+      rafId = requestAnimationFrame(tick);
+    }
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function stopPlayback() {
+    playing = false;
+    playBtn.textContent = '▶';
+    if (rafId != null) { cancelAnimationFrame(rafId); rafId = null; }
+    shots.forEach(({ shotId }) => videoEls[shotId]?.pause());
+  }
+
+  // ── Save offset to server ─────────────────────────────────────────
+  // prevOffsetOverride lets the drag pass its pre-drag startOffset so the
+  // error-revert goes back to the value before the drag, not after mousemove.
+  function commitOffset(shotId, newOffset, prevOffsetOverride = null) {
+    const row = rowEls[shotId];
+    if (!row) return;
+    const prevOffset = prevOffsetOverride !== null ? prevOffsetOverride : offsets[shotId];
+    offsets[shotId] = newOffset;
+
+    // Update offset label immediately
+    const fmtOff = (v) => (v === 0 ? '±0' : (v > 0 ? '+' : '') + v) + ' fr';
+    row.offLabel.textContent = '…';
+    row.nudgeBtns.forEach(btn => { btn.disabled = true; btn.style.opacity = '0.4'; });
+
+    redrawTimeline();
+    applyVirtualT(virtualT);
+
+    const patchPayload = { shot_id: shotId, frame_offset: newOffset };
+    console.debug('[sync] PATCH payload', patchPayload);
+    fetch('/api/sync', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patchPayload),
+    })
+      .then(async r => {
+        if (!r.ok) {
+          // Extract server detail without letting the parse error mask the real message
+          let detail = String(r.status);
+          try { const b = await r.json(); detail = b.detail || detail; } catch (_) {}
+          console.debug('[sync] PATCH response error', r.status, detail);
+          throw new Error(`HTTP ${r.status}: ${detail}`);
+        }
+        return r.json();
+      })
+      .then(updated => {
+        offsets[shotId] = updated.frame_offset;
+        methods[shotId] = updated.method || 'manual';
+        row.offLabel.textContent = fmtOff(offsets[shotId]);
+        row.methodBadge.textContent = 'manual';
+        row.methodBadge.style.background = '#312e81';
+        row.methodBadge.style.color = '#a5b4fc';
+        row.methodBadge.style.borderColor = '#4f46e5';
+
+        // Flash ✓
+        const orig = row.offLabel.style.color;
+        row.offLabel.style.color = '#4ade80';
+        setTimeout(() => { row.offLabel.style.color = orig; }, 1500);
+      })
+      .catch(err => {
+        // Revert to the value that was in place before this commit
+        console.error('[sync] PATCH /api/sync failed:', err.message);
+        offsets[shotId] = prevOffset;
+        row.offLabel.textContent = fmtOff(prevOffset);
+        row.offLabel.style.color = '#f87171';
+        row.offLabel.title = err.message;
+        showSyncError(err.message);
+        setTimeout(() => { row.offLabel.style.color = ''; row.offLabel.title = ''; }, 5000);
+        redrawTimeline();
+        applyVirtualT(virtualT);
+      })
+      .finally(() => {
+        row.nudgeBtns.forEach(btn => { btn.disabled = false; btn.style.opacity = ''; });
+      });
+  }
+
+  // ── Transient error banner ────────────────────────────────────────
+  function showSyncError(msg) {
+    let banner = document.getElementById('sync-error-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'sync-error-banner';
+      banner.style.cssText = `
+        position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+        background:#450a0a;color:#fca5a5;border:1px solid #7f1d1d;
+        border-radius:6px;padding:10px 20px;font-size:13px;z-index:9999;
+        box-shadow:0 4px 12px rgba(0,0,0,0.5);
+      `;
+      document.body.appendChild(banner);
+    }
+    banner.textContent = msg;
+    banner.style.display = 'block';
+    clearTimeout(banner._hideTimeout);
+    banner._hideTimeout = setTimeout(() => { banner.style.display = 'none'; }, 6000);
+  }
+
+  // ── Clip bar drag ─────────────────────────────────────────────────
+  let dragState = null;  // { shotId, startX, startOffset }
+
+  shots.forEach(({ shotId, isRef }, i) => {
+    if (isRef) return;
+    const row = rowEls[shotId];
+    if (!row) return;
+    row.barEl.addEventListener('mousedown', e => {
+      e.preventDefault();
+      dragState = { shotId, startX: e.clientX, startOffset: offsets[shotId] };
+    });
+  });
+
+  // ── Document-level handlers — registered once per sync-player instance.
+  // If renderSyncPlayer is called again (stage re-visit), first remove the old
+  // handlers so they don't accumulate.
+  if (window._syncCleanup) window._syncCleanup();
+
+  function onDocMousemoveBar(e) {
+    if (!dragState) return;
+    const dx = e.clientX - dragState.startX;
+    const deltaFrames = Math.round(dx / pxPerSec * fps);
+    const newOffset = dragState.startOffset + deltaFrames;
+    offsets[dragState.shotId] = newOffset;
+    // Update offset label live
+    const row = rowEls[dragState.shotId];
+    if (row) {
+      const fmtOff = (v) => (v === 0 ? '±0' : (v > 0 ? '+' : '') + v) + ' fr';
+      row.offLabel.textContent = fmtOff(newOffset);
+    }
+    redrawTimeline();
+    applyVirtualT(virtualT);
+  }
+
+  function onDocMouseupBar(e) {
+    if (!dragState) return;
+    const { shotId, startOffset } = dragState;
+    dragState = null;
+    // Reset bar hover style
+    const row = rowEls[shotId];
+    if (row) row.barEl.style.background = '#2d3148';
+    // Only save if offset actually changed; pass startOffset so error-revert
+    // goes back to the pre-drag value (offsets[shotId] was already mutated by mousemove).
+    if (offsets[shotId] !== startOffset) {
+      commitOffset(shotId, offsets[shotId], startOffset);
+    }
+  }
+
+  document.addEventListener('mousemove', onDocMousemoveBar);
+  document.addEventListener('mouseup', onDocMouseupBar);
+
+  // ── Playhead drag to seek ─────────────────────────────────────────
+  let seekDragging = false;
+
+  playheadLine.addEventListener('mousedown', e => {
+    e.preventDefault();
+    seekDragging = true;
+    if (playing) stopPlayback();
+  });
+
+  function onDocMousemoveSeek(e) {
+    if (!seekDragging) return;
+    const rect = rulerScroll.getBoundingClientRect();
+    const x = Math.max(0, e.clientX - rect.left);
+    applyVirtualT(x / pxPerSec);
+  }
+
+  function onDocMouseupSeek() { seekDragging = false; }
+
+  document.addEventListener('mousemove', onDocMousemoveSeek);
+  document.addEventListener('mouseup', onDocMouseupSeek);
+
+  // Store cleanup so next call can remove these listeners
+  window._syncCleanup = () => {
+    document.removeEventListener('mousemove', onDocMousemoveBar);
+    document.removeEventListener('mouseup', onDocMouseupBar);
+    document.removeEventListener('mousemove', onDocMousemoveSeek);
+    document.removeEventListener('mouseup', onDocMouseupSeek);
+    window._syncCleanup = null;
+  };
+
+  // Click on ruler area to seek
+  rulerScroll.addEventListener('click', e => {
+    if (seekDragging) return;
+    const rect = rulerScroll.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    applyVirtualT(x / pxPerSec);
+  });
+
+  // ── Zoom controls ─────────────────────────────────────────────────
+  zoomOut.addEventListener('click', () => {
+    const idx = PX_STEPS.indexOf(pxPerSec);
+    if (idx > 0) { pxPerSec = PX_STEPS[idx - 1]; redrawTimeline(); }
+  });
+  zoomIn.addEventListener('click', () => {
+    const idx = PX_STEPS.indexOf(pxPerSec);
+    if (idx < PX_STEPS.length - 1) { pxPerSec = PX_STEPS[idx + 1]; redrawTimeline(); }
+  });
+
+  // ── Duration listeners + play/pause ──────────────────────────────
+  shots.forEach(({ shotId }) => {
+    const vid = videoEls[shotId];
+    if (!vid) return;
+    vid.addEventListener('loadedmetadata', () => onDurationKnown(shotId, vid.duration));
+  });
+
+  playBtn.addEventListener('click', () => {
+    if (playing) stopPlayback();
+    else startPlayback();
+  });
+
+  // Initial draw (before durations known); seek to overlap point
+  redrawTimeline();
+  applyVirtualT(_initT);
+}
+
+// ── Pitch drawing utilities (reused by matching, triangulation viewers) ──
+const PITCH_LENGTH = 105;  // metres (FIFA standard)
+const PITCH_WIDTH  = 68;
+
+function pitchToCanvas(px, py, cw, ch) {
+  const pad = 20;
+  const drawW = cw - 2 * pad;
+  const drawH = ch - 2 * pad;
+  return {
+    x: pad + (px / PITCH_LENGTH) * drawW,
+    y: pad + (py / PITCH_WIDTH) * drawH,
+  };
+}
+
+function drawPitch(ctx, cw, ch) {
+  const pad = 20;
+  const drawW = cw - 2 * pad;
+  const drawH = ch - 2 * pad;
+
+  ctx.fillStyle = '#1a3a1a';
+  ctx.fillRect(0, 0, cw, ch);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 1.5;
+
+  // Outer boundary
+  ctx.strokeRect(pad, pad, drawW, drawH);
+
+  // Centre line
+  const cx = pad + drawW / 2;
+  ctx.beginPath(); ctx.moveTo(cx, pad); ctx.lineTo(cx, pad + drawH); ctx.stroke();
+
+  // Centre circle (r = 9.15m)
+  const cy = pad + drawH / 2;
+  const r = (9.15 / PITCH_LENGTH) * drawW;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+
+  // Centre spot
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.beginPath(); ctx.arc(cx, cy, 2, 0, Math.PI * 2); ctx.fill();
+
+  // Penalty areas (16.5m deep, 40.32m wide)
+  const paW = (16.5 / PITCH_LENGTH) * drawW;
+  const paH = (40.32 / PITCH_WIDTH) * drawH;
+  const paY = pad + (drawH - paH) / 2;
+  ctx.strokeRect(pad, paY, paW, paH);
+  ctx.strokeRect(pad + drawW - paW, paY, paW, paH);
+
+  // Goal areas (5.5m deep, 18.32m wide)
+  const gaW = (5.5 / PITCH_LENGTH) * drawW;
+  const gaH = (18.32 / PITCH_WIDTH) * drawH;
+  const gaY = pad + (drawH - gaH) / 2;
+  ctx.strokeRect(pad, gaY, gaW, gaH);
+  ctx.strokeRect(pad + drawW - gaW, gaY, gaW, gaH);
+}
+
+// ── Triangulation renderer ────────────────────────────────────────────
+function renderTriangulation(panel, data) {
+  const players = data.players || [];
+  if (!players.length) { renderNoOutput(); return; }
+
+  // ── Summary table ──
+  const { wrap, body } = makePanel(`Triangulated Players (${players.length})`);
+  const { t, tbody } = makeTable(['Player', 'Team', 'Frames', 'Avg Confidence', 'Avg Views']);
+
+  players.forEach(p => {
+    const confs = p.confidences.flat();
+    const validConfs = confs.filter(c => c > 0);
+    const avgConf = validConfs.length ? validConfs.reduce((a,b)=>a+b,0)/validConfs.length : 0;
+    // Count average views per joint per frame from positions (non-NaN)
+    let totalViews = 0, countViews = 0;
+    p.positions.forEach(frame => {
+      frame.forEach(joint => {
+        if (joint[0] !== null && !isNaN(joint[0])) { totalViews++; countViews++; }
+      });
+    });
+    const teamCls = p.team === 'A' ? 'team-a' : p.team === 'B' ? 'team-b' :
+                    p.team === 'referee' ? 'team-ref' : 'team-unk';
+    addRow(tbody, [
+      p.player_id,
+      { html: `<span class="${teamCls}">${p.team}</span>` },
+      p.num_frames,
+      { html: `<span class="${avgConf>0.5?'cell-green':avgConf>0.2?'cell-amber':'cell-red'}">${avgConf.toFixed(2)}</span>` },
+      fmt(totalViews / Math.max(1, p.num_frames * 17), 1),
+    ]);
+  });
+
+  // ── Bird's-eye skeleton viewer (above the table) ──
+  const { wrap: vizWrap, body: vizBody } = makePanel('Bird\'s-Eye View');
+
+  const canvas = document.createElement('canvas');
+  const cw = 800, ch = 520;
+  canvas.width = cw; canvas.height = ch;
+  canvas.style.cssText = 'display:block;margin:0 auto;border-radius:6px;';
+  vizBody.appendChild(canvas);
+
+  // Controls bar
+  const controls = document.createElement('div');
+  controls.style.cssText = 'display:flex;align-items:center;gap:12px;padding:8px 12px;';
+
+  const playBtn = document.createElement('button');
+  playBtn.textContent = '▶';
+  playBtn.style.cssText = 'background:#4f46e5;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:14px;';
+  controls.appendChild(playBtn);
+
+  const slider = document.createElement('input');
+  slider.type = 'range'; slider.min = '0'; slider.max = String(Math.max(0, (players[0]?.num_frames || 1) - 1));
+  slider.value = '0'; slider.style.cssText = 'flex:1;';
+  controls.appendChild(slider);
+
+  const frameInfo = document.createElement('span');
+  frameInfo.style.cssText = 'font-size:12px;color:#94a3b8;min-width:100px;';
+  controls.appendChild(frameInfo);
+
+  vizBody.appendChild(controls);
+  panel.appendChild(vizWrap);
+
+  // ── Drawing logic ──
+  let currentFrame = 0;
+  let playing = false;
+  let animId = null;
+  const fps = players[0]?.fps || 25;
+
+  function drawFrame(fi) {
+    const ctx = canvas.getContext('2d');
+
+    // Detect data range for auto-scaling (same logic as matching viewer)
+    const allX = [], allY = [];
+    players.forEach(p => {
+      if (fi < p.positions.length) {
+        p.positions[fi].forEach(j => {
+          if (j && j[0] !== null && !isNaN(j[0])) { allX.push(j[0]); allY.push(j[1]); }
+        });
+      }
+    });
+
+    const pad = 20;
+    const drawW = cw - 2 * pad, drawH = ch - 2 * pad;
+    let toX, toY;
+
+    const minX = allX.length ? Math.min(...allX) : 0;
+    const maxX = allX.length ? Math.max(...allX) : 105;
+    const minY = allY.length ? Math.min(...allY) : 0;
+    const maxY = allY.length ? Math.max(...allY) : 68;
+    const rangeOk = minX >= -10 && maxX <= 115 && minY >= -10 && maxY <= 78;
+
+    if (rangeOk) {
+      drawPitch(ctx, cw, ch);
+      toX = x => pad + (x / PITCH_LENGTH) * drawW;
+      toY = y => pad + (y / PITCH_WIDTH) * drawH;
+    } else {
+      const spanX = Math.max(1, maxX - minX), spanY = Math.max(1, maxY - minY);
+      const m = 0.08;
+      const bMinX = minX - spanX*m, bMaxX = maxX + spanX*m;
+      const bMinY = minY - spanY*m, bMaxY = maxY + spanY*m;
+      ctx.fillStyle = '#1a3a1a'; ctx.fillRect(0, 0, cw, ch);
+      ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 1;
+      ctx.strokeRect(pad, pad, drawW, drawH);
+      toX = x => pad + ((x - bMinX) / (bMaxX - bMinX)) * drawW;
+      toY = y => pad + ((y - bMinY) / (bMaxY - bMinY)) * drawH;
+    }
+
+    // Draw skeletons
+    players.forEach(p => {
+      if (fi >= p.positions.length) return;
+      const joints = p.positions[fi];
+      const confs = p.confidences[fi];
+      const color = TEAM_COLORS[p.team] || TEAM_COLORS.unknown;
+
+      // Draw bones
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.7;
+      for (const [a, b] of SKELETON) {
+        const ja = joints[a], jb = joints[b];
+        if (!ja || !jb || isNaN(ja[0]) || isNaN(jb[0])) continue;
+        if (confs[a] < 0.05 || confs[b] < 0.05) continue;
+        ctx.beginPath();
+        ctx.moveTo(toX(ja[0]), toY(ja[1]));
+        ctx.lineTo(toX(jb[0]), toY(jb[1]));
+        ctx.stroke();
+      }
+
+      // Draw joints
+      ctx.globalAlpha = 1.0;
+      for (let j = 0; j < joints.length; j++) {
+        const jt = joints[j];
+        if (!jt || isNaN(jt[0])) continue;
+        const c = confs[j];
+        if (c < 0.05) continue;
+        // Confidence heatmap: green (high) → red (low)
+        const r = Math.round(255 * (1 - c));
+        const g = Math.round(255 * c);
+        ctx.fillStyle = `rgb(${r},${g},60)`;
+        ctx.beginPath();
+        ctx.arc(toX(jt[0]), toY(jt[1]), 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    });
+
+    frameInfo.textContent = `Frame ${fi + (players[0]?.start_frame || 0)} / ${slider.max}`;
+  }
+
+  function tick() {
+    currentFrame++;
+    if (currentFrame >= parseInt(slider.max)) { currentFrame = 0; }
+    slider.value = String(currentFrame);
+    drawFrame(currentFrame);
+    if (playing) animId = requestAnimationFrame(tick);
+  }
+
+  playBtn.addEventListener('click', () => {
+    playing = !playing;
+    playBtn.textContent = playing ? '⏸' : '▶';
+    if (playing) animId = requestAnimationFrame(tick);
+    else if (animId) cancelAnimationFrame(animId);
+  });
+
+  slider.addEventListener('input', () => {
+    currentFrame = parseInt(slider.value);
+    drawFrame(currentFrame);
+  });
+
+  drawFrame(0);
+
+  // ── Summary table (below the viewer) ──
+  body.appendChild(t);
+  panel.appendChild(wrap);
+}
+
+// ── SMPL Fitting renderer ─────────────────────────────────────────────
+function renderSmplFitting(panel, data) {
+  const players = data.players || [];
+  if (!players.length) { renderNoOutput(); return; }
+
+  const { wrap, body } = makePanel(`SMPL Fitting (${players.length} players)`);
+  const { t, tbody } = makeTable(['Player', 'Frames', 'FPS', 'Shape Norm']);
+
+  players.forEach(p => {
+    addRow(tbody, [
+      p.player_id,
+      p.num_frames,
+      fmt(p.fps, 1),
+      fmt(p.betas_norm, 3),
+    ]);
+  });
+
+  body.appendChild(t);
+  panel.appendChild(wrap);
+
+  const info = document.createElement('div');
+  info.style.cssText = 'color:#64748b;font-size:12px;padding:8px 0;';
+  info.textContent = 'SMPL parameters fitted. Run the Export stage (9) to generate the 3D viewer scene.';
+  panel.appendChild(info);
+}
+
+// ── Export renderer ──────────────────────────────────────────────────
+function renderExport(panel, data) {
+  const { wrap, body } = makePanel('Export');
+  const items = [];
+
+  if (data.gltf_file) items.push(`glTF: ${data.gltf_file}`);
+  if (data.metadata_file) items.push(`Metadata: ${data.metadata_file}`);
+  if (data.fbx_files && data.fbx_files.length) items.push(`FBX files: ${data.fbx_files.length}`);
+  items.push(`Players: ${(data.players || []).join(', ')}`);
+
+  const list = document.createElement('ul');
+  list.style.cssText = 'padding:8px 24px;margin:0;font-size:13px;color:#cbd5e1;';
+  items.forEach(text => {
+    const li = document.createElement('li');
+    li.textContent = text;
+    li.style.padding = '2px 0';
+    list.appendChild(li);
+  });
+  body.appendChild(list);
+
+  if (data.gltf_file) {
+    const btnWrap = document.createElement('div');
+    btnWrap.style.cssText = 'padding:8px 12px;';
+    const viewerBtn = document.createElement('a');
+    viewerBtn.href = '/viewer';
+    viewerBtn.target = '_blank';
+    viewerBtn.textContent = 'Open 3D Viewer';
+    viewerBtn.style.cssText = 'display:inline-block;background:#4f46e5;color:#fff;padding:8px 20px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:500;';
+    btnWrap.appendChild(viewerBtn);
+    body.appendChild(btnWrap);
+  }
+
+  panel.appendChild(wrap);
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

@@ -20,20 +20,30 @@ shot_segmentation:
   remove_duplicate_frames: false
 
 calibration:
-  pitch_model: fifa_standard
-  detector_type: hybrid
-  manual_landmarks_dir: null
-  min_point_confidence: 0.3
-  max_reprojection_error: 50.0
-  ransac_reproj_threshold: 40.0
-  static_ransac_threshold: 80.0
-  keyframe_interval: 5
-  require_detector: false
-  min_camera_height: 3.0
-  max_camera_height: 80.0
-  player_height_range: [1.5, 2.1]
-  temporal_max_jump: 5.0
-  focal_length_tolerance: 0.2
+  # PnLCalib neural inference runs on every `keyframe_interval`-th frame,
+  # capped at `max_keyframes_per_shot` samples.  The per-frame (K, R, t)
+  # results are fused into a single static camera position per shot.
+  device: auto                  # auto|cpu|cuda|cuda:0|mps
+  keyframe_interval: 30
+  max_keyframes_per_shot: 10
+  # PnLCalib detection thresholds (defaults match PnLCalib's inference.py)
+  kp_threshold: 0.3434
+  line_threshold: 0.7867
+  pnl_refine: true
+  # Per-frame plausibility bounds — PnLCalib occasionally returns numerically
+  # valid but physically impossible results (camera underground, fx of 5,
+  # etc.). Samples outside these bounds are dropped before fusing.
+  plausibility_bounds:
+    x: [-30.0, 135.0]           # x in metres from near-left corner
+    y: [-60.0, 130.0]           # y in metres
+    z: [3.0, 80.0]              # elevation above pitch
+    fx: [500.0, 15000.0]        # focal length in pixels
+  # Maximum distance (metres) a frame's PnLCalib position can be from the
+  # consensus median before it's dropped. PnLCalib sometimes returns a
+  # position that is plausible on its own but inconsistent with the
+  # majority; those frames' rotations + focal lengths are tied to a
+  # different camera location and must not be kept.
+  cluster_tolerance: 5.0
 
 sync:
   sample_fps: 5.0

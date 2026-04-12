@@ -211,3 +211,5 @@ __marimo__/
 
 # Football Perspectives
 /output
+/checkpoints
+/data/models/

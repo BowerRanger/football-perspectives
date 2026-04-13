@@ -128,6 +128,7 @@ let playing = false;
 let speed = 1;
 let showSkeletons = true;
 let animationData = null; // raw positions from triangulation
+let ballMesh = null;
 
 // ── Load data ──
 async function loadScene() {
@@ -150,6 +151,15 @@ async function loadScene() {
   }
 
   document.getElementById('timeline').max = String(Math.max(0, totalFrames - 1));
+
+  // Ball visualization (single white sphere with subtle outline)
+  if (animationData && animationData.ball) {
+    const ballGeo = new THREE.SphereGeometry(0.25, 16, 16);
+    const ballMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    ballMesh = new THREE.Mesh(ballGeo, ballMat);
+    ballMesh.visible = false;
+    scene.add(ballMesh);
+  }
 
   // Create player visualizations from triangulation data
   if (animationData && animationData.players) {
@@ -195,6 +205,17 @@ function updateFrame(fi) {
   document.getElementById('timeline').value = String(fi);
 
   if (!animationData) return;
+
+  // Ball position
+  if (ballMesh && animationData.ball && fi < animationData.ball.positions.length) {
+    const bp = animationData.ball.positions[fi];
+    if (bp && bp[0] !== null && !isNaN(bp[0])) {
+      ballMesh.position.set(bp[0], bp[2] || 0, -(bp[1] || 0));
+      ballMesh.visible = true;
+    } else {
+      ballMesh.visible = false;
+    }
+  }
 
   // Update each player
   for (const p of animationData.players) {

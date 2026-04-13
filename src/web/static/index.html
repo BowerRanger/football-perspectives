@@ -2512,6 +2512,7 @@ function drawPitch(ctx, cw, ch) {
 // ── Triangulation renderer ────────────────────────────────────────────
 function renderTriangulation(panel, data) {
   const players = data.players || [];
+  const ball = data.ball || null;
   if (!players.length) { renderNoOutput(); return; }
 
   // Count non-null valid frames per player (NaN is null in JSON).
@@ -2733,6 +2734,31 @@ function renderTriangulation(panel, data) {
         ctx.fill();
       }
     });
+
+    // Ball: white circle scaled by world height (visible bounce/peak)
+    if (ball && fi < ball.positions.length) {
+      const bp = ball.positions[fi];
+      if (bp && bp[0] !== null && !isNaN(bp[0])) {
+        const bx = toX(bp[0]);
+        const by = toY(bp[1]);
+        const z = bp[2] || 0;
+        // Show altitude as a vertical drop-line + radius scaling
+        ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(bx, by);
+        ctx.lineTo(bx, by - Math.min(20, z * 4));
+        ctx.stroke();
+        const r = 4 + Math.min(4, z * 0.5);
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(bx, by - Math.min(20, z * 4), r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
 
     // Pose overlay is drawn alongside the reference shot video.  The
     // video plays itself (refVideo.play()) so its timing stays at the

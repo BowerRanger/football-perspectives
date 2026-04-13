@@ -31,7 +31,8 @@ from src.schemas.poses import Keypoint, PosesResult
 from src.schemas.shots import ShotsManifest
 from src.schemas.sync_map import SyncMap
 from src.schemas.tracks import TracksResult
-from src.schemas.triangulated import TriangulatedPlayer
+from src.schemas.triangulated import TriangulatedBall, TriangulatedPlayer
+from src.utils.ball_reconstruction import reconstruct_ball
 from src.utils.camera import build_projection_matrix
 from src.utils.single_shot_reconstruction import reconstruct_player as _single_shot_reconstruct
 from src.utils.triangulation import (
@@ -376,6 +377,35 @@ class TriangulationStage(BaseStage):
             result.save(tri_dir / f"{result.player_id}_3d_joints.npz")
 
         print(f"  -> saved {len(triangulated_players)} player triangulations to triangulated/")
+
+        # ── Ball reconstruction ──
+        if bool(cfg.get("reconstruct_ball", True)):
+            try:
+                ball = reconstruct_ball(
+                    tracks_full_by_shot,
+                    interps_by_shot,
+                    sync_offsets,
+                    frame_range,
+                    fps,
+                )
+                if ball is not None:
+                    ball.save(tri_dir / "ball_3d_trajectory.npz")
+                    n_valid = int(np.sum(~np.isnan(ball.positions[:, 0])))
+                    n_multi = int(np.sum(ball.methods == 1))
+                    n_ground = int(np.sum(ball.methods == 2))
+                    n_flight = int(np.sum(ball.methods == 3))
+                    print(
+                        f"  -> ball: {n_valid}/{len(frame_range)} frames "
+                        f"(multi={n_multi}, ground={n_ground}, flight={n_flight})"
+                    )
+                else:
+                    # Remove any stale ball file from a prior run
+                    stale = tri_dir / "ball_3d_trajectory.npz"
+                    if stale.exists():
+                        stale.unlink()
+                    print("  -> ball: no ball detections found in any shot")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ball reconstruction failed: %s", exc)
 
     # ------------------------------------------------------------------ helpers
 

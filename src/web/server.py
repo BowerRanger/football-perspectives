@@ -372,7 +372,14 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         if stage == "triangulation":
             import numpy as _np
             tri_dir = output_dir / "triangulated"
-            npz_files = sorted(tri_dir.glob("*.npz")) if tri_dir.exists() else []
+            # Filter out the ball trajectory file from the player npz set;
+            # the ball is loaded separately and passed to the renderer
+            # alongside the players list.
+            npz_files = sorted(
+                p for p in tri_dir.glob("*.npz")
+                if p.name != "ball_3d_trajectory.npz"
+            ) if tri_dir.exists() else []
+            ball_path = tri_dir / "ball_3d_trajectory.npz"
             if not npz_files:
                 raise HTTPException(status_code=404, detail="Stage output not found")
             # Also load matching data for team info
@@ -418,7 +425,26 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     "positions": pos_list,
                     "confidences": conf_list,
                 })
-            return {"players": players}
+            ball_payload = None
+            if ball_path.exists():
+                bd = _np.load(ball_path, allow_pickle=False)
+                ball_pos = bd["positions"]
+                ball_conf = bd["confidences"]
+                ball_methods = bd["methods"]
+                ball_payload = {
+                    "fps": float(bd["fps"]),
+                    "start_frame": int(bd["start_frame"]),
+                    "num_frames": int(ball_pos.shape[0]),
+                    "positions": [
+                        [None if _np.isnan(v) else float(v) for v in p]
+                        for p in ball_pos
+                    ],
+                    "confidences": [
+                        None if _np.isnan(c) else float(c) for c in ball_conf
+                    ],
+                    "methods": [int(m) for m in ball_methods],
+                }
+            return {"players": players, "ball": ball_payload}
 
         if stage == "smpl_fitting":
             import numpy as _np

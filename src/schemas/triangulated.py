@@ -5,6 +5,43 @@ import numpy as np
 
 
 @dataclass
+class TriangulatedBall:
+    """3D ball trajectory across frames.
+
+    Per-frame state covers the ball's world position, velocity, the
+    method used to estimate that frame ("multi" / "single_ground" /
+    "flight" / "interp"), and a coarse confidence (0 = no data).
+    """
+
+    positions: np.ndarray   # (N, 3) float32 — pitch-metres, NaN where unknown
+    confidences: np.ndarray  # (N,) float32
+    methods: np.ndarray     # (N,) int8 — 0=none, 1=multi, 2=single_ground, 3=flight
+    fps: float
+    start_frame: int
+
+    def save(self, path: Path) -> None:
+        np.savez_compressed(
+            path,
+            positions=self.positions.astype(np.float32),
+            confidences=self.confidences.astype(np.float32),
+            methods=self.methods.astype(np.int8),
+            fps=np.array(self.fps, dtype=np.float32),
+            start_frame=np.array(self.start_frame, dtype=np.int32),
+        )
+
+    @classmethod
+    def load(cls, path: Path) -> "TriangulatedBall":
+        data = np.load(path, allow_pickle=False)
+        return cls(
+            positions=data["positions"],
+            confidences=data["confidences"],
+            methods=data["methods"],
+            fps=float(data["fps"]),
+            start_frame=int(data["start_frame"]),
+        )
+
+
+@dataclass
 class TriangulatedPlayer:
     """3D joint positions for a single player across frames.
 

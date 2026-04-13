@@ -326,26 +326,44 @@ def _project_board_polyline(
 def _segment_to_polyline_distance(seg: DetectedLine, polyline: np.ndarray) -> float:
     """Perpendicular distance from a segment midpoint to a projected polyline.
 
+    Vectorised: computes the distance from the midpoint to every
+    polyline edge in one numpy operation rather than a Python loop.
     Returns ``inf`` when the polyline is empty (entirely behind camera).
     """
     if polyline.shape[0] < 2:
         return float("inf")
     mid = seg.midpoint()
-    best = float("inf")
-    for k in range(polyline.shape[0] - 1):
-        a = polyline[k]
-        b = polyline[k + 1]
-        ab = b - a
-        ab_len_sq = float(ab @ ab)
-        if ab_len_sq < 1e-9:
-            continue
-        ap = mid - a
-        t = float(np.clip(float(ap @ ab) / ab_len_sq, 0.0, 1.0))
-        closest = a + t * ab
-        d = float(np.linalg.norm(mid - closest))
-        if d < best:
-            best = d
-    return best
+    return _point_to_polyline_distance(mid, polyline)
+
+
+def _point_to_polyline_distance(point: np.ndarray, polyline: np.ndarray) -> float:
+    """Vectorised point-to-polyline distance.
+
+    For an (N, 2) polyline of N-1 line segments, computes the
+    perpendicular distance from ``point`` to each segment in a single
+    numpy expression and returns the minimum.
+    """
+    if polyline.shape[0] < 2:
+        return float("inf")
+    a = polyline[:-1]                    # (N-1, 2)
+    b = polyline[1:]                     # (N-1, 2)
+    ab = b - a                           # (N-1, 2)
+    ab_len_sq = np.einsum("ij,ij->i", ab, ab)  # (N-1,)
+    # Avoid division-by-zero on degenerate edges (consecutive identical points)
+    safe = ab_len_sq > 1e-12
+    ap = point - a                       # (N-1, 2) via broadcasting
+    t = np.zeros(len(a), dtype=np.float64)
+    if np.any(safe):
+        t[safe] = np.clip(
+            np.einsum("ij,ij->i", ap[safe], ab[safe]) / ab_len_sq[safe],
+            0.0, 1.0,
+        )
+    closest = a + ab * t[:, None]        # (N-1, 2)
+    diffs = point - closest
+    dists_sq = np.einsum("ij,ij->i", diffs, diffs)
+    if np.any(safe):
+        dists_sq = dists_sq[safe]
+    return float(np.sqrt(np.min(dists_sq)))
 
 
 def _assign(

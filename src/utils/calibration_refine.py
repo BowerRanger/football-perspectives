@@ -431,12 +431,22 @@ def refine_shot_calibration(
 
     # Stash the per-frame diagnostics on the returned list so the
     # calibration stage can surface them in its log without changing
-    # the function signature.  Use a sentinel attribute on the list
-    # rather than introducing a wrapper class.
-    diagnostics = list(diagnostics)
-    setattr(diagnostics, "per_frame_diagnostics", per_frame_diags)
+    # the function signature.  Built-in `list` doesn't accept
+    # attribute assignment, so use a tiny subclass that does.
+    diagnostics = _DiagsList(diagnostics)
+    diagnostics.per_frame_diagnostics = per_frame_diags
 
     return refined, diagnostics
+
+
+class _DiagsList(list):
+    """``list`` subclass that allows extra attribute assignment.
+
+    Used to attach per-frame ICL diagnostics to the per-keyframe
+    diagnostics list returned by :func:`refine_shot_calibration`
+    without breaking callers that iterate it as a plain list.
+    """
+    pass
 
 
 def refine_per_frame(
@@ -514,7 +524,12 @@ def refine_per_frame(
                 confidence=1.0,
                 tracked_landmark_types=[],
             )
-            refined_cf, diag = refine_with_lines(seed_cf, frame)
+            # Per-frame ICL uses a single outer iteration: the SLERP
+            # seed is already near-optimal, so additional iterations
+            # mainly waste time re-running the LM solver.  Multi-pass
+            # ICL is only worthwhile at the keyframe level where the
+            # seed (raw PnLCalib) is more often in a poor basin.
+            refined_cf, diag = refine_with_lines(seed_cf, frame, max_iters=1)
             new_frames.append(refined_cf)
             diagnostics.append(diag)
     finally:

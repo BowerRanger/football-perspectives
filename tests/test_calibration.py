@@ -446,10 +446,15 @@ def test_stage_fuses_per_frame_results_to_shared_position(tmp_path):
 
     result = CalibrationResult.load(tmp_path / "calibration" / "shot_001_calibration.json")
     assert result.camera_type == "static"
-    # 4 sampled, 1 rejected by plausibility (z=2), 3 kept.
-    assert len(result.frames) == 3
+    # The post-PnLCalib pipeline now densifies to one frame per video
+    # frame via per-frame ICL refinement.  The 4 PnLCalib samples (3
+    # surviving plausibility) become the seed for SLERP across all
+    # 90 video frames.
+    assert len(result.frames) == 90
 
-    # Every output frame must share the same world position (within numerical noise).
+    # Every output frame must share the same world position (within
+    # numerical noise) — line refinement keeps the static-camera
+    # invariant.
     positions_out = [
         camera_world_position(
             np.asarray(f.rotation_vector), np.asarray(f.translation_vector),

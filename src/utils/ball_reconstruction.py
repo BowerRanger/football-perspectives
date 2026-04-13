@@ -47,6 +47,12 @@ _GRAVITY = 9.81       # m/s²
 _FLIGHT_PX_VELOCITY = 25.0    # pixel velocity threshold to consider "in flight"
 _MIN_FLIGHT_FRAMES = 4
 _MAX_FLIGHT_FRAMES = 60       # don't fit a parabola over a 2.4-sec arc
+# Generous pitch-bounding box for plausibility filtering.  A back-projected
+# ball that lands outside this box came from either a false-positive
+# detection (e.g. a player's white sock) or a near-tangent camera ray;
+# either way it would only pollute the bird's-eye view.
+_PLAUSIBLE_X = (-15.0, 120.0)
+_PLAUSIBLE_Y = (-15.0, 83.0)
 
 
 _METHOD_NONE = 0
@@ -143,6 +149,14 @@ def _gather_observations_at_frame(
     return obs
 
 
+def _is_plausible_ball_xy(pt: np.ndarray) -> bool:
+    """Reject ball positions that fall well off the pitch in (x, y)."""
+    return (
+        _PLAUSIBLE_X[0] <= float(pt[0]) <= _PLAUSIBLE_X[1]
+        and _PLAUSIBLE_Y[0] <= float(pt[1]) <= _PLAUSIBLE_Y[1]
+    )
+
+
 def _try_multi_view(observations: list[_BallObservation]) -> np.ndarray | None:
     """Weighted DLT across distinct shots.  Returns world (x,y,z) or None."""
     distinct = {obs.shot_id for obs in observations}
@@ -154,9 +168,11 @@ def _try_multi_view(observations: list[_BallObservation]) -> np.ndarray | None:
     pt = weighted_dlt(Ps, uvs, weights)
     if not np.all(np.isfinite(pt)):
         return None
-    # Sanity: ball must be on or above the pitch plane and within reasonable
-    # vertical extent.  Reject if it's underground or absurdly high.
+    # Sanity: ball must be on or above the pitch plane, within a sane
+    # vertical extent, and roughly above the pitch in (x, y).
     if pt[2] < -0.5 or pt[2] > 30.0:
+        return None
+    if not _is_plausible_ball_xy(pt):
         return None
     return pt.astype(np.float64)
 
@@ -326,7 +342,7 @@ def reconstruct_ball(
         ground = _back_project_to_plane(
             obs.pixel_uv, obs.K, obs.rvec, obs.tvec, plane_z=_BALL_RADIUS,
         )
-        if ground is None:
+        if ground is None or not _is_plausible_ball_xy(ground):
             continue
         positions[fi] = ground.astype(np.float32)
         confidences[fi] = 0.6

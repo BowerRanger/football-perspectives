@@ -24,8 +24,13 @@ calibration:
   # capped at `max_keyframes_per_shot` samples.  The per-frame (K, R, t)
   # results are fused into a single static camera position per shot.
   device: auto                  # auto|cpu|cuda|cuda:0|mps
-  keyframe_interval: 30
-  max_keyframes_per_shot: 10
+  # Dense sampling: PnLCalib fails on many frames of panning side-view
+  # shots (e.g. behind-goal angles).  Sampling every 5 frames gives the
+  # plausibility + consensus filter a much bigger pool to select from,
+  # which in turn widens the keyframe range that the triangulation
+  # interpolator can cover.
+  keyframe_interval: 5
+  max_keyframes_per_shot: 100
   # PnLCalib detection thresholds (defaults match PnLCalib's inference.py)
   kp_threshold: 0.3434
   line_threshold: 0.7867

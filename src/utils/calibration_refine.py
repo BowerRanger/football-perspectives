@@ -399,8 +399,129 @@ def refine_shot_calibration(
     finally:
         cap.release()
 
+    refined = CalibrationResult(
+        shot_id=cal.shot_id,
+        camera_type=cal.camera_type,
+        frames=new_frames,
+    )
+
+    # ── Temporal smoothing across keyframes ──
+    # PnLCalib's per-frame inference is noisy and ICL refines each
+    # keyframe independently, so consecutive keyframes can disagree
+    # by 5–14° of rotation and ±70% in focal length even on a
+    # physically-static broadcast camera.  Smooth the per-keyframe
+    # (rvec, fx) sequences with a moving median so the SLERP
+    # interpolator gets a temporally consistent input.
+    refined = smooth_calibration_temporally(refined, window=5)
+
+    return refined, diagnostics
+
+
+def smooth_calibration_temporally(
+    cal: CalibrationResult,
+    *,
+    window: int = 5,
+) -> CalibrationResult:
+    """Median-filter per-keyframe rotation + focal length within a shot.
+
+    The broadcast camera is physically static — only pan, tilt, and
+    zoom change within a shot.  Real pan motion is smooth; PnLCalib's
+    independent per-frame inference plus the per-keyframe ICL
+    refinement layer noise on top.  A small-window moving median:
+
+    - **Rejects single-keyframe outliers** (PnLCalib occasionally
+      returns a wildly-different rotation on one frame even when its
+      neighbours agree).
+    - **Damps the back-and-forth wobble** between keyframes that
+      disagree by a few degrees.
+    - **Preserves real pans** at frequencies below ~``window/2``
+      keyframes.
+
+    The smoothing is applied component-wise to the Rodrigues vector
+    and to ``fx`` (with ``fy = fx`` carried along).  ``cy``, ``cx``
+    stay at the image centre.  After smoothing, the translation
+    vector is recomputed for every frame so the camera world position
+    stays exactly where the static-camera fuser placed it — the only
+    things that change are rotation and focal length.
+
+    A tiny shot (fewer than ``window`` keyframes) is returned
+    unchanged.
+    """
+    n = len(cal.frames)
+    if n < window:
+        return cal
+    if window < 3 or window % 2 == 0:
+        raise ValueError(f"window must be odd and >= 3 (got {window})")
+
+    # Sort by frame index for stable median ordering
+    sorted_frames = sorted(cal.frames, key=lambda cf: cf.frame)
+
+    rvecs = np.array([cf.rotation_vector for cf in sorted_frames], dtype=np.float64)
+    fxs = np.array([cf.intrinsic_matrix[0][0] for cf in sorted_frames], dtype=np.float64)
+    cxs = np.array([cf.intrinsic_matrix[0][2] for cf in sorted_frames], dtype=np.float64)
+    cys = np.array([cf.intrinsic_matrix[1][2] for cf in sorted_frames], dtype=np.float64)
+
+    smoothed_rvecs = np.empty_like(rvecs)
+    smoothed_fxs = _median_filter_1d(fxs, window)
+    for d in range(3):
+        smoothed_rvecs[:, d] = _median_filter_1d(rvecs[:, d], window)
+
+    # Recover the camera world position from the *original* (untouched
+    # by smoothing) per-frame extrinsics.  Under the static-camera
+    # fuser they should all be identical, but compute the median to
+    # be safe in case ICL modified something subtly.
+    positions = np.array([
+        camera_world_position(
+            np.asarray(cf.rotation_vector, dtype=np.float64),
+            np.asarray(cf.translation_vector, dtype=np.float64),
+        )
+        for cf in sorted_frames
+    ])
+    shared_pos = np.median(positions, axis=0)
+
+    new_frames: list[CameraFrame] = []
+    for i, cf in enumerate(sorted_frames):
+        rvec_smoothed = smoothed_rvecs[i]
+        fx_smoothed = float(smoothed_fxs[i])
+        K_smoothed = [
+            [fx_smoothed, 0.0, float(cxs[i])],
+            [0.0,         fx_smoothed, float(cys[i])],
+            [0.0,         0.0,         1.0],
+        ]
+        R_smoothed, _ = cv2.Rodrigues(rvec_smoothed.reshape(3, 1))
+        t_smoothed = -R_smoothed @ shared_pos
+        new_frames.append(CameraFrame(
+            frame=cf.frame,
+            intrinsic_matrix=K_smoothed,
+            rotation_vector=rvec_smoothed.tolist(),
+            translation_vector=t_smoothed.tolist(),
+            reprojection_error=cf.reprojection_error,
+            num_correspondences=cf.num_correspondences,
+            confidence=cf.confidence,
+            tracked_landmark_types=list(cf.tracked_landmark_types),
+        ))
+
     return CalibrationResult(
         shot_id=cal.shot_id,
         camera_type=cal.camera_type,
         frames=new_frames,
-    ), diagnostics
+    )
+
+
+def _median_filter_1d(xs: np.ndarray, window: int) -> np.ndarray:
+    """Symmetric moving median filter with edge-value padding.
+
+    For each position ``i`` returns the median of a length-``window``
+    window centred on ``i``.  Out-of-range indices are filled with the
+    nearest edge value (numpy's ``edge`` mode), which preserves linear
+    ramps exactly while still rejecting single-point outliers.
+    """
+    r = window // 2
+    n = len(xs)
+    if n == 0:
+        return xs.astype(np.float64, copy=True)
+    padded = np.pad(xs.astype(np.float64), r, mode="edge")
+    out = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        out[i] = float(np.median(padded[i:i + window]))
+    return out

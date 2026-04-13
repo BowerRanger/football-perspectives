@@ -2613,20 +2613,26 @@ function renderTriangulation(panel, data) {
   // joints (noisy wrists/ankles, keepers behind the goal line) stay visible.
   // Joints more than 10m off-pitch clip at the canvas edge — that's a clear
   // "this joint is wrong" diagnostic.
+  //
+  // The y axis is FLIPPED so the camera-side touchline (pitch y=0, "near")
+  // appears at the BOTTOM of the canvas and the far touchline (y=68) at the
+  // top.  This matches how the broadcast camera sees the pitch.
   const OUTSIDE_MARGIN_M = 10;
   const mappedW = PITCH_LENGTH + 2 * OUTSIDE_MARGIN_M;
   const mappedH = PITCH_WIDTH + 2 * OUTSIDE_MARGIN_M;
   const pad = 20;
   const drawW = cw - 2 * pad, drawH = ch - 2 * pad;
-  // Convert a pitch-coord to canvas-coord (pitch origin offset by margin).
+  // toX is unchanged.  toY now inverts: pitch y=0 → canvas bottom.
   const toX = x => pad + ((x + OUTSIDE_MARGIN_M) / mappedW) * drawW;
-  const toY = y => pad + ((y + OUTSIDE_MARGIN_M) / mappedH) * drawH;
+  const toY = y => pad + drawH - ((y + OUTSIDE_MARGIN_M) / mappedH) * drawH;
 
   // Pre-compute pitch geometry anchors for drawPitchInline().
+  // After the y-flip, "NEAR" (y=0) maps to a high canvas-y (bottom) and
+  // "FAR" (y=68) maps to a low canvas-y (top).
   const PITCH_LEFT = toX(0);
   const PITCH_RIGHT = toX(PITCH_LENGTH);
-  const PITCH_TOP = toY(0);
-  const PITCH_BOTTOM = toY(PITCH_WIDTH);
+  const PITCH_NEAR_Y = toY(0);            // canvas y of near touchline (bottom)
+  const PITCH_FAR_Y = toY(PITCH_WIDTH);   // canvas y of far touchline (top)
 
   function drawPitchInline(ctx) {
     // Background: dark green filling the whole canvas.
@@ -2636,12 +2642,16 @@ function renderTriangulation(panel, data) {
     ctx.strokeStyle = 'rgba(255,255,255,0.35)';
     ctx.lineWidth = 1.5;
 
-    // Outer boundary
-    ctx.strokeRect(PITCH_LEFT, PITCH_TOP, PITCH_RIGHT - PITCH_LEFT, PITCH_BOTTOM - PITCH_TOP);
+    // Outer boundary — note PITCH_FAR_Y is the smaller value (canvas top).
+    const pitchH = PITCH_NEAR_Y - PITCH_FAR_Y;
+    ctx.strokeRect(PITCH_LEFT, PITCH_FAR_Y, PITCH_RIGHT - PITCH_LEFT, pitchH);
 
     // Centre line
     const midX = toX(PITCH_LENGTH / 2);
-    ctx.beginPath(); ctx.moveTo(midX, PITCH_TOP); ctx.lineTo(midX, PITCH_BOTTOM); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(midX, PITCH_FAR_Y);
+    ctx.lineTo(midX, PITCH_NEAR_Y);
+    ctx.stroke();
 
     // Centre circle (r = 9.15m)
     const midY = toY(PITCH_WIDTH / 2);
@@ -2652,21 +2662,29 @@ function renderTriangulation(panel, data) {
     ctx.fillStyle = 'rgba(255,255,255,0.5)';
     ctx.beginPath(); ctx.arc(midX, midY, 2, 0, Math.PI * 2); ctx.fill();
 
-    // Penalty areas (16.5m deep, 40.32m wide, centred on pitch width)
-    const penYTop = toY((PITCH_WIDTH - 40.32) / 2);
-    const penYBot = toY((PITCH_WIDTH + 40.32) / 2);
+    // Penalty areas (16.5m deep, 40.32m wide, centred on pitch width).
+    // After the y-flip, the "lower" pitch-y is at HIGHER canvas y so we
+    // sort the canvas y values by max/min before passing to strokeRect.
+    const penA = toY((PITCH_WIDTH - 40.32) / 2);
+    const penB = toY((PITCH_WIDTH + 40.32) / 2);
+    const penTop = Math.min(penA, penB);
+    const penBot = Math.max(penA, penB);
+    const penH = penBot - penTop;
     const penLeftX = toX(16.5);
     const penRightX = toX(PITCH_LENGTH - 16.5);
-    ctx.strokeRect(PITCH_LEFT, penYTop, penLeftX - PITCH_LEFT, penYBot - penYTop);
-    ctx.strokeRect(penRightX, penYTop, PITCH_RIGHT - penRightX, penYBot - penYTop);
+    ctx.strokeRect(PITCH_LEFT, penTop, penLeftX - PITCH_LEFT, penH);
+    ctx.strokeRect(penRightX, penTop, PITCH_RIGHT - penRightX, penH);
 
     // Goal areas (5.5m deep, 18.32m wide)
-    const gaYTop = toY((PITCH_WIDTH - 18.32) / 2);
-    const gaYBot = toY((PITCH_WIDTH + 18.32) / 2);
+    const gaA = toY((PITCH_WIDTH - 18.32) / 2);
+    const gaB = toY((PITCH_WIDTH + 18.32) / 2);
+    const gaTop = Math.min(gaA, gaB);
+    const gaBot = Math.max(gaA, gaB);
+    const gaH = gaBot - gaTop;
     const gaLeftX = toX(5.5);
     const gaRightX = toX(PITCH_LENGTH - 5.5);
-    ctx.strokeRect(PITCH_LEFT, gaYTop, gaLeftX - PITCH_LEFT, gaYBot - gaYTop);
-    ctx.strokeRect(gaRightX, gaYTop, PITCH_RIGHT - gaRightX, gaYBot - gaYTop);
+    ctx.strokeRect(PITCH_LEFT, gaTop, gaLeftX - PITCH_LEFT, gaH);
+    ctx.strokeRect(gaRightX, gaTop, PITCH_RIGHT - gaRightX, gaH);
   }
 
   // Valid-joint predicate — positions carry `null` for NaN values from the
@@ -2716,11 +2734,11 @@ function renderTriangulation(panel, data) {
       }
     });
 
-    // Drive the reference-shot video + pose overlay in sync with the
-    // bird's-eye playhead.  The triangulation output's `start_frame`
-    // is the reference frame of index 0, and the reference shot is
-    // (by sync-map convention) at offset 0, so we can seek directly.
-    syncReferenceShot(fi);
+    // Pose overlay is drawn alongside the reference shot video.  The
+    // video plays itself (refVideo.play()) so its timing stays at the
+    // native source fps; we just refresh the overlay every animation
+    // tick using the current playhead.
+    drawPoseOverlay(fi);
 
     const refFrame = fi + (players[0]?.start_frame || 0);
     frameInfo.textContent = `Frame ${refFrame} / ${slider.max}`;
@@ -2739,9 +2757,15 @@ function renderTriangulation(panel, data) {
     const ctx = refOverlay.getContext('2d');
     ctx.clearRect(0, 0, refOverlay.width, refOverlay.height);
 
-    // reference shot's local frame = reference-time frame (offset 0 for the
-    // reference shot by definition of the sync map)
-    const refFrame = fi + (players[0]?.start_frame || 0);
+    // Prefer the video's currentTime (when loaded) over the bird's-eye
+    // index, so the overlay is always frame-perfect with whatever the
+    // <video> element is showing right now.
+    let refFrame;
+    if (refVideoReady) {
+      refFrame = Math.round(refVideo.currentTime * fps);
+    } else {
+      refFrame = fi + (players[0]?.start_frame || 0);
+    }
 
     ctx.lineWidth = 2.5;
     ctx.strokeStyle = 'rgba(99, 102, 241, 0.9)';
@@ -2770,17 +2794,13 @@ function renderTriangulation(panel, data) {
     }
   }
 
-  function syncReferenceShot(fi) {
+  function seekReferenceShot(fi) {
+    // Used by slider scrub and pause-time seeks.
     if (!refVideoReady) return;
     const refFrame = fi + (players[0]?.start_frame || 0);
     const targetTime = refFrame / fps;
     if (targetTime < 0 || targetTime > refVideoDurationS) return;
-    // Only correct video time when drift exceeds 120ms so the browser
-    // doesn't have to seek every frame.
-    if (Math.abs(refVideo.currentTime - targetTime) > 0.12) {
-      refVideo.currentTime = targetTime;
-    }
-    drawPoseOverlay(fi);
+    refVideo.currentTime = targetTime;
   }
 
   // Fire-and-forget load of reference-shot video + pose data
@@ -2830,22 +2850,45 @@ function renderTriangulation(panel, data) {
     } catch (_) {}
   })();
 
-  // Gate frame advancement by wall-clock time so playback runs at the
-  // configured fps regardless of the browser's refresh rate.
+  // Playback strategy:
+  //   - When the reference video is loaded, it is the source of truth.
+  //     We call refVideo.play() / pause() to advance time naturally; the
+  //     bird's-eye and pose overlay derive `currentFrame` from
+  //     refVideo.currentTime each animation tick.
+  //   - When the video isn't ready (still loading / load failed), we fall
+  //     back to wall-clock advancement at the configured fps so the
+  //     bird's-eye preview still works.
   let lastTickMs = 0;
   let frameAccum = 0;
+  const startFrameOffset = players[0]?.start_frame || 0;
+
   function tick(nowMs) {
     if (!playing) return;
-    if (lastTickMs === 0) lastTickMs = nowMs;
-    const dt = (nowMs - lastTickMs) / 1000;
-    lastTickMs = nowMs;
-    frameAccum += dt * fps;
     const maxFrame = parseInt(slider.max);
-    while (frameAccum >= 1) {
-      frameAccum -= 1;
-      currentFrame++;
-      if (currentFrame >= maxFrame) currentFrame = 0;
+
+    if (refVideoReady && !refVideo.paused) {
+      // Video is the clock.  Convert its currentTime to a bird's-eye frame.
+      const videoFrame = Math.round(refVideo.currentTime * fps);
+      currentFrame = Math.max(0, Math.min(maxFrame - 1, videoFrame - startFrameOffset));
+      // Loop the bird's-eye when the video reaches the end of the
+      // visible range.
+      if (currentFrame >= maxFrame - 1 && refVideo.currentTime >= (startFrameOffset + maxFrame - 1) / fps - 0.05) {
+        currentFrame = 0;
+        refVideo.currentTime = startFrameOffset / fps;
+      }
+    } else {
+      // Wall-clock fallback (no video loaded).
+      if (lastTickMs === 0) lastTickMs = nowMs;
+      const dt = (nowMs - lastTickMs) / 1000;
+      lastTickMs = nowMs;
+      frameAccum += dt * fps;
+      while (frameAccum >= 1) {
+        frameAccum -= 1;
+        currentFrame++;
+        if (currentFrame >= maxFrame) currentFrame = 0;
+      }
     }
+
     slider.value = String(currentFrame);
     drawFrame(currentFrame);
     animId = requestAnimationFrame(tick);
@@ -2857,14 +2900,21 @@ function renderTriangulation(panel, data) {
     if (playing) {
       lastTickMs = 0;
       frameAccum = 0;
+      if (refVideoReady) {
+        // Make sure the video is at the current playhead, then start it.
+        seekReferenceShot(currentFrame);
+        refVideo.play().catch(() => { /* autoplay denied — fall back to wall-clock */ });
+      }
       animId = requestAnimationFrame(tick);
-    } else if (animId) {
-      cancelAnimationFrame(animId);
+    } else {
+      if (refVideoReady) refVideo.pause();
+      if (animId) cancelAnimationFrame(animId);
     }
   });
 
   slider.addEventListener('input', () => {
     currentFrame = parseInt(slider.value);
+    seekReferenceShot(currentFrame);
     drawFrame(currentFrame);
   });
 

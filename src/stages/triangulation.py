@@ -150,6 +150,14 @@ class TriangulationStage(BaseStage):
         # triangulation is still used for frames where ≥2 calibrated
         # views see the player.
         allow_single_shot = bool(cfg.get("allow_single_shot", True))
+        # When single-shot is enabled, allow bounded extrapolation of
+        # the per-frame calibration outside the keyframe range.  The
+        # fallback is tolerant of a small rotation error and we'd
+        # rather have approximate coverage of the un-keyframed frames
+        # than no coverage at all.  Set to 0 to disable extrapolation.
+        single_shot_extrapolation_frames = int(
+            cfg.get("single_shot_extrapolation_frames", 200)
+        )
 
         # ── Load inputs ──
         matches = PlayerMatches.load(
@@ -258,6 +266,7 @@ class TriangulationStage(BaseStage):
                 min_conf=min_conf,
                 ransac_thresh=ransac_thresh,
                 allow_single_shot=allow_single_shot,
+                single_shot_extrapolation_frames=single_shot_extrapolation_frames,
             )
             if triangulated is None:
                 logger.warning(
@@ -306,6 +315,7 @@ class TriangulationStage(BaseStage):
         min_conf: float,
         ransac_thresh: float,
         allow_single_shot: bool,
+        single_shot_extrapolation_frames: int = 0,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
         """Triangulate a single player across all frames.
 
@@ -324,10 +334,17 @@ class TriangulationStage(BaseStage):
         n_views_arr = np.zeros((n_frames, _N_COCO_JOINTS), dtype=np.int8)
 
         for fi, ref_frame in enumerate(frame_range):
-            # Gather interpolated calibrations + keypoints for each view.
-            view_data: list[
+            # Gather strictly in-range calibrations (for multi-view) and
+            # extrapolated calibrations (for single-shot fallback) separately.
+            # Multi-view depends on tight calibration to avoid bad
+            # triangulations; single-shot is more tolerant.
+            strict_views: list[
                 tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[Keypoint]]
-            ] = []  # (shot_id, P, K, rvec, tvec, keypoints)
+            ] = []  # (shot_id, P, K, rvec, tvec, keypoints) — strict only
+            extrapolated_views: list[
+                tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[Keypoint]]
+            ] = []  # same, but cal was extrapolated outside the keyframe range
+
             for view in calibrated_views:
                 offset = sync_offsets.get(view.shot_id, 0)
                 local_frame = ref_frame - offset
@@ -342,25 +359,40 @@ class TriangulationStage(BaseStage):
                 interp = interps_by_shot.get(view.shot_id)
                 if interp is None or interp.is_empty:
                     continue
-                cal = interp.at(local_frame)
-                if cal is None:
+
+                # Try strict in-range first.
+                cal_strict = interp.at(local_frame)
+                if cal_strict is not None:
+                    P = build_projection_matrix(cal_strict.K, cal_strict.rvec, cal_strict.tvec)
+                    strict_views.append(
+                        (view.shot_id, P, cal_strict.K, cal_strict.rvec, cal_strict.tvec, keypoints),
+                    )
                     continue
 
-                P = build_projection_matrix(cal.K, cal.rvec, cal.tvec)
-                view_data.append(
-                    (view.shot_id, P, cal.K, cal.rvec, cal.tvec, keypoints),
+                # Out of strict range — try extrapolated for single-shot only.
+                if not allow_single_shot or single_shot_extrapolation_frames <= 0:
+                    continue
+                cal_ext = interp.at_nearest(
+                    local_frame,
+                    max_extrapolation_frames=single_shot_extrapolation_frames,
+                )
+                if cal_ext is None:
+                    continue
+                P = build_projection_matrix(cal_ext.K, cal_ext.rvec, cal_ext.tvec)
+                extrapolated_views.append(
+                    (view.shot_id, P, cal_ext.K, cal_ext.rvec, cal_ext.tvec, keypoints),
                 )
 
-            n_views = len(view_data)
-            unique_shots_at_frame = {vd[0] for vd in view_data}
+            unique_strict_shots = {vd[0] for vd in strict_views}
 
-            if len(unique_shots_at_frame) >= 2:
+            if len(unique_strict_shots) >= 2:
                 # Multi-view path: weighted DLT per joint, RANSAC over inliers.
+                # Only strictly-calibrated views participate.
                 for j in range(_N_COCO_JOINTS):
                     obs_P: list[np.ndarray] = []
                     obs_uv: list[np.ndarray] = []
                     obs_w: list[float] = []
-                    for _sid, P, _K, _rv, _tv, keypoints in view_data:
+                    for _sid, P, _K, _rv, _tv, keypoints in strict_views:
                         if j >= len(keypoints):
                             continue
                         kp = keypoints[j]
@@ -382,24 +414,28 @@ class TriangulationStage(BaseStage):
                     confidences[fi, j] = float(np.mean(obs_w))
                     reproj_errors[fi, j] = err
                     n_views_arr[fi, j] = nv
-            elif n_views == 1 and allow_single_shot:
-                # Single-shot fallback: foot-grounding + vertical body axis.
-                _sid, _P, K, rvec, tvec, keypoints = view_data[0]
-                result = _single_shot_reconstruct(
-                    keypoints=keypoints,
-                    K=K, rvec=rvec, tvec=tvec,
-                    min_foot_confidence=min_conf,
-                    min_joint_confidence=min_conf,
+            elif allow_single_shot:
+                # Single-shot fallback: prefer a strict view if any, else
+                # use an extrapolated one.  Reconstruct via foot-grounding
+                # + vertical body axis.
+                fallback_view = (
+                    strict_views[0] if strict_views else
+                    (extrapolated_views[0] if extrapolated_views else None)
                 )
-                if result is not None:
-                    positions[fi] = result.positions
-                    confidences[fi] = result.confidences
-                    # Mark all valid joints as 1-view
-                    valid_mask = ~np.isnan(result.positions[:, 0])
-                    n_views_arr[fi, valid_mask] = 1
-                    # Reprojection error is not meaningful for single-shot
-                    # reconstruction; leave it NaN.
-            # else: no calibrated view at this frame → NaN stays
+                if fallback_view is not None:
+                    _sid, _P, K, rvec, tvec, keypoints = fallback_view
+                    result = _single_shot_reconstruct(
+                        keypoints=keypoints,
+                        K=K, rvec=rvec, tvec=tvec,
+                        min_foot_confidence=min_conf,
+                        min_joint_confidence=min_conf,
+                    )
+                    if result is not None:
+                        positions[fi] = result.positions
+                        confidences[fi] = result.confidences
+                        valid_mask = ~np.isnan(result.positions[:, 0])
+                        n_views_arr[fi, valid_mask] = 1
+            # else: no usable calibration at this frame → NaN stays
 
         if not np.any(~np.isnan(positions[:, :, 0])):
             return None

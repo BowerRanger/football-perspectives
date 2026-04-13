@@ -87,6 +87,50 @@ class CalibrationInterpolator:
     def is_empty(self) -> bool:
         return len(self._frames) == 0
 
+    def at_nearest(
+        self, frame_idx: int, max_extrapolation_frames: int = 0,
+    ) -> InterpolatedCalibration | None:
+        """Like :meth:`at`, but allow bounded extrapolation outside the range.
+
+        For frames within the keyframe range this is identical to
+        :meth:`at` (SLERP rotation, linear focal length).  For frames
+        outside the range, returns the **nearest** keyframe's
+        calibration directly — provided the gap is at most
+        ``max_extrapolation_frames`` frames.  Beyond that gap, returns
+        ``None``.
+
+        Use this for paths that are tolerant of a small rotation error
+        in exchange for wider frame coverage (e.g., the single-shot
+        triangulation fallback).  Multi-view triangulation should keep
+        using :meth:`at` for strict accuracy.
+        """
+        if self.is_empty:
+            return None
+
+        first_kf = int(self._keyframe_indices[0])
+        last_kf = int(self._keyframe_indices[-1])
+
+        if first_kf <= frame_idx <= last_kf:
+            return self.at(frame_idx)
+
+        # Outside the range: clamp to the nearest keyframe if within budget.
+        if frame_idx < first_kf:
+            distance = first_kf - frame_idx
+            target_kf_idx = 0
+        else:
+            distance = frame_idx - last_kf
+            target_kf_idx = len(self._frames) - 1
+
+        if distance > max_extrapolation_frames:
+            return None
+
+        cf = self._frames[target_kf_idx]
+        return InterpolatedCalibration(
+            K=np.asarray(cf.intrinsic_matrix, dtype=np.float64),
+            rvec=np.asarray(cf.rotation_vector, dtype=np.float64),
+            tvec=np.asarray(cf.translation_vector, dtype=np.float64),
+        )
+
     def at(self, frame_idx: int) -> InterpolatedCalibration | None:
         """Return interpolated calibration at ``frame_idx``.
 

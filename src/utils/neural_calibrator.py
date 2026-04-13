@@ -276,11 +276,18 @@ class PnLCalibrator:
 
     # ------------------------------------------------------------- inference
 
-    def calibrate(self, frame_bgr: np.ndarray) -> NeuralCalibration | None:
-        """Run PnLCalib on a single BGR frame.
+    def _run_heatmaps(
+        self, frame_bgr: np.ndarray,
+    ) -> tuple[dict[int, dict[str, float]], dict, tuple[int, int]]:
+        """Run the HRNet keypoint + line heads and return normalised dicts.
 
-        Returns ``None`` when PnLCalib's heuristic voting does not converge,
-        which happens for extreme camera angles (e.g., behind-goal replays).
+        Shared between :meth:`calibrate` (which also runs PnLCalib's
+        calibration solver) and :meth:`extract_keypoints_pixels` (which
+        just exposes the keypoints for our own fixed-position solver).
+
+        Returns ``(kp_dict, line_dict, (image_width, image_height))`` where
+        the dicts use PnLCalib's own keypoint/line IDs and ``x``/``y`` in
+        the [0, 1] normalised range from ``complete_keypoints``.
         """
         import torch
         import torchvision.transforms as T
@@ -291,10 +298,6 @@ class PnLCalibrator:
         modules = self._pnlcalib_modules
 
         height, width = frame_bgr.shape[:2]
-
-        # FramebyFrameCalib is a per-instance accumulator.  We create a fresh
-        # one per frame so residual state never leaks.
-        cam = modules["FramebyFrameCalib"](iwidth=width, iheight=height, denormalize=True)
 
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         tensor = F.to_tensor(Image.fromarray(rgb)).float().unsqueeze(0)
@@ -320,6 +323,49 @@ class PnLCalibrator:
         kp_dict, line_dict = modules["complete_keypoints"](
             kp_dict[0], line_dict[0], w=tensor_w, h=tensor_h, normalize=True,
         )
+        return kp_dict, line_dict, (width, height)
+
+    def extract_keypoints_pixels(
+        self, frame_bgr: np.ndarray,
+    ) -> dict[int, tuple[float, float]]:
+        """Return PnLCalib's raw 2D keypoint detections in pixel coords.
+
+        This exposes just the HRNet heatmap → keypoint-dict pipeline
+        WITHOUT running PnLCalib's full calibration solver.  Our own
+        fixed-position PnP solver (`src/utils/fixed_position_solver.py`)
+        consumes this output to compute rotation + focal length at
+        frames where PnLCalib's full solver fails.
+
+        The returned dict maps PnLCalib keypoint IDs (1-57 plus aux
+        58-73) to ``(x_pixel, y_pixel)`` in the original frame's
+        resolution.  Only keypoints above the configured confidence
+        threshold appear.
+        """
+        kp_dict, _, (width, height) = self._run_heatmaps(frame_bgr)
+        pixels: dict[int, tuple[float, float]] = {}
+        for kp_id, entry in kp_dict.items():
+            # PnLCalib returns normalised [0, 1] coords when normalize=True.
+            x = float(entry["x"]) * float(width)
+            y = float(entry["y"]) * float(height)
+            pixels[int(kp_id)] = (x, y)
+        return pixels
+
+    def calibrate(self, frame_bgr: np.ndarray) -> NeuralCalibration | None:
+        """Run PnLCalib on a single BGR frame.
+
+        Returns ``None`` when PnLCalib's heuristic voting does not converge,
+        which happens for extreme camera angles (e.g., behind-goal replays).
+        """
+        self._ensure_loaded()
+        modules = self._pnlcalib_modules
+
+        height, width = frame_bgr.shape[:2]
+
+        # FramebyFrameCalib is a per-instance accumulator.  We create a fresh
+        # one per frame so residual state never leaks.
+        cam = modules["FramebyFrameCalib"](iwidth=width, iheight=height, denormalize=True)
+
+        kp_dict, line_dict, _ = self._run_heatmaps(frame_bgr)
 
         cam.update(kp_dict, line_dict)
         try:

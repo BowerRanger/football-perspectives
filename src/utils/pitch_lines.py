@@ -13,6 +13,8 @@ crossbars sit at z = 2.44 m and posts go from z = 0 to z = 2.44 m.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from src.utils.pitch import (
@@ -166,3 +168,87 @@ def pitch_polylines() -> list[np.ndarray]:
     )
 
     return lines
+
+
+@dataclass(frozen=True)
+class PitchLineFamily:
+    """A single straight 3D line family with known canonical world geometry.
+
+    ``polyline`` samples the line densely enough that linear
+    interpolation gives a smooth projected curve.  ``direction`` is
+    the unit vector of the line in world space, used for VP-style
+    consistency checks.  ``label`` is a human-readable identifier
+    used in diagnostics.
+    """
+
+    label: str
+    polyline: np.ndarray  # (N, 3) world points
+    direction: np.ndarray  # (3,) unit vector
+
+
+def pitch_line_families() -> list[PitchLineFamily]:
+    """Straight painted-feature line families used for ICL calibration.
+
+    Excludes curves (centre circle, penalty arcs) and goal frames
+    (which are vertical, too sparsely visible for ICL assignment).
+    The returned list is ordered:
+
+      0 near touchline       (along world x, y=0,    z=0)
+      1 far touchline        (along world x, y=68,   z=0)
+      2 left goal line       (along world y, x=0,    z=0)
+      3 right goal line      (along world y, x=105,  z=0)
+      4 halfway line         (along world y, x=52.5, z=0)
+      5 left 18-yard front   (along world y, x=16.5, z=0)
+      6 right 18-yard front  (along world y, x=88.5, z=0)
+      7 left 6-yard front    (along world y, x=5.5,  z=0)
+      8 right 6-yard front   (along world y, x=99.5, z=0)
+    """
+    x_dir = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    y_dir = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    return [
+        PitchLineFamily(
+            label="near_touchline",
+            polyline=_segment((0.0, 0.0, 0.0), (PITCH_LENGTH, 0.0, 0.0), n=64),
+            direction=x_dir,
+        ),
+        PitchLineFamily(
+            label="far_touchline",
+            polyline=_segment((0.0, PITCH_WIDTH, 0.0), (PITCH_LENGTH, PITCH_WIDTH, 0.0), n=64),
+            direction=x_dir,
+        ),
+        PitchLineFamily(
+            label="left_goal_line",
+            polyline=_segment((0.0, 0.0, 0.0), (0.0, PITCH_WIDTH, 0.0), n=48),
+            direction=y_dir,
+        ),
+        PitchLineFamily(
+            label="right_goal_line",
+            polyline=_segment((PITCH_LENGTH, 0.0, 0.0), (PITCH_LENGTH, PITCH_WIDTH, 0.0), n=48),
+            direction=y_dir,
+        ),
+        PitchLineFamily(
+            label="halfway",
+            polyline=_segment((PITCH_LENGTH / 2, 0.0, 0.0), (PITCH_LENGTH / 2, PITCH_WIDTH, 0.0), n=48),
+            direction=y_dir,
+        ),
+        PitchLineFamily(
+            label="left_18yard_front",
+            polyline=_segment((_18Y_INSET, 13.84, 0.0), (_18Y_INSET, 54.16, 0.0), n=24),
+            direction=y_dir,
+        ),
+        PitchLineFamily(
+            label="right_18yard_front",
+            polyline=_segment((PITCH_LENGTH - _18Y_INSET, 13.84, 0.0), (PITCH_LENGTH - _18Y_INSET, 54.16, 0.0), n=24),
+            direction=y_dir,
+        ),
+        PitchLineFamily(
+            label="left_6yard_front",
+            polyline=_segment((_6Y_INSET, 24.84, 0.0), (_6Y_INSET, 43.16, 0.0), n=12),
+            direction=y_dir,
+        ),
+        PitchLineFamily(
+            label="right_6yard_front",
+            polyline=_segment((PITCH_LENGTH - _6Y_INSET, 24.84, 0.0), (PITCH_LENGTH - _6Y_INSET, 43.16, 0.0), n=12),
+            direction=y_dir,
+        ),
+    ]

@@ -244,13 +244,23 @@ class CameraCalibrationStage(BaseStage):
                 try:
                     result, diagnostics = refine_shot_calibration(result, clip_path)
                     n_accepted = sum(1 for d in diagnostics if d.accepted)
+                    n_icl = sum(1 for d in diagnostics if d.icl_accepted)
                     if diagnostics:
                         before = float(np.mean([d.initial_residual_px for d in diagnostics if np.isfinite(d.initial_residual_px)]) or 0.0)
                         after = float(np.mean([d.refined_residual_px for d in diagnostics if np.isfinite(d.refined_residual_px)]) or 0.0)
+                        icl_before = [d.icl_initial_residual_px for d in diagnostics if d.icl_accepted and np.isfinite(d.icl_initial_residual_px)]
+                        icl_after = [d.icl_refined_residual_px for d in diagnostics if d.icl_accepted and np.isfinite(d.icl_refined_residual_px)]
                         print(
                             f"     line refine: {n_accepted}/{len(diagnostics)} keyframes "
-                            f"improved (residual {before:.1f} → {after:.1f} px)"
+                            f"improved VP residual {before:.1f}→{after:.1f}°"
                         )
+                        if icl_before:
+                            fx_factors = [d.icl_focal_change_factor for d in diagnostics if d.icl_accepted]
+                            print(
+                                f"     ICL refine: {n_icl}/{len(diagnostics)} keyframes "
+                                f"improved line-distance {float(np.mean(icl_before)):.1f}→{float(np.mean(icl_after)):.1f}px "
+                                f"(fx ×{float(np.mean(fx_factors)):.2f})"
+                            )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("line refine failed for %s: %s", shot.id, exc)
             result.save(cal_dir / f"{shot.id}_calibration.json")

@@ -42,6 +42,10 @@ import numpy as np
 
 from src.schemas.calibration import CalibrationResult, CameraFrame
 from src.utils.camera import camera_world_position
+from src.utils.iterative_line_refinement import (
+    ICLResult,
+    refine_with_lines,
+)
 from src.utils.pitch_line_detector import (
     DetectedLine,
     detect_board_lines,
@@ -66,6 +70,12 @@ class RefinementResult:
     accepted: bool
     n_pitch_lines: int
     n_board_lines: int
+    icl_iterations: int = 0
+    icl_n_assigned: int = 0
+    icl_initial_residual_px: float = float("inf")
+    icl_refined_residual_px: float = float("inf")
+    icl_focal_change_factor: float = 1.0
+    icl_accepted: bool = False
 
 
 # Standard board height above the pitch plane in metres (LED boards).
@@ -227,115 +237,121 @@ def refine_keyframe(
 ) -> tuple[CameraFrame, RefinementResult]:
     """Refine a single keyframe's calibration using detected pitch lines.
 
-    Detects the dominant pitch-plane line cluster, computes its image
-    vanishing point, and rotates the existing calibration so the world
-    touchline direction projects exactly through that VP.  The
-    rotation is the *minimum* rotation that achieves the alignment, so
-    PnLCalib's tilt + roll components survive.
+    Two-pass refinement:
 
-    Returns ``(refined_camera_frame, diagnostics)``.  When refinement
-    fails or makes things worse, the original ``cf`` is returned
-    unchanged with ``accepted=False``.
+    1. **Single-VP pan correction**: detect the dominant pitch-line
+       cluster, compute its image vanishing point, and rotate the
+       existing calibration so the world touchline direction projects
+       exactly through that VP.  Corrects the dominant pan error while
+       keeping PnLCalib's tilt + roll + focal length intact.
+
+    2. **ICL refinement**: takes the result of step 1 (or the original
+       calibration if step 1 failed) and runs Iterative Closest Line
+       against the painted markings + ad boards to jointly refine
+       rotation + focal length.  See
+       :mod:`src.utils.iterative_line_refinement`.
+
+    Returns ``(refined_camera_frame, diagnostics)``.  When neither
+    step accepts a change, the original ``cf`` is returned unchanged.
     """
-    K = np.asarray(cf.intrinsic_matrix, dtype=np.float64)
-    rvec = np.asarray(cf.rotation_vector, dtype=np.float64).reshape(3)
-    tvec = np.asarray(cf.translation_vector, dtype=np.float64).reshape(3)
-
     pitch_lines, mask = detect_pitch_lines(frame_bgr)
     board_lines = detect_board_lines(frame_bgr, mask)
     n_pitch = len(pitch_lines)
     n_board = len(board_lines)
 
-    # Initial residual is computed once we know which lines we'll trust
-    # (touch_cluster).  Default to inf until we have it.
-    initial_residual = float("inf")
-
-    fail = RefinementResult(
-        frame=cf.frame,
-        initial_residual_px=initial_residual,
-        refined_residual_px=initial_residual,
-        accepted=False,
-        n_pitch_lines=n_pitch,
-        n_board_lines=n_board,
+    # ── Step 1: single-VP pan correction ──
+    vp_cf, vp_initial, vp_refined, vp_accepted = _refine_with_touchline_vp(
+        cf, pitch_lines, board_lines,
     )
 
-    if n_pitch < 6:
-        return cf, fail
+    # ── Step 2: ICL refinement ──
+    icl_cf, icl_diag = refine_with_lines(
+        vp_cf, frame_bgr,
+        pitch_segments=pitch_lines,
+        board_segments=board_lines,
+    )
 
-    # Combine pitch lines + boards: all lie along the touchline
-    # direction in world space, so they all contribute the same VP
-    # constraint.  Boards are particularly useful because the camera
-    # views them roughly perpendicular, giving very precise edges.
+    # Pick the better of (vp_cf, icl_cf): ICL is only used if it
+    # improved the line-distance residual *and* its diagnostics flagged
+    # acceptance.  Otherwise fall back to the VP result (which is
+    # itself either the refined or the original frame).
+    final_cf = icl_cf if icl_diag.accepted else vp_cf
+    final_accepted = vp_accepted or icl_diag.accepted
+    return final_cf, RefinementResult(
+        frame=cf.frame,
+        initial_residual_px=vp_initial,
+        refined_residual_px=vp_refined,
+        accepted=final_accepted,
+        n_pitch_lines=n_pitch,
+        n_board_lines=n_board,
+        icl_iterations=icl_diag.iterations,
+        icl_n_assigned=icl_diag.n_assigned,
+        icl_initial_residual_px=icl_diag.initial_residual_px,
+        icl_refined_residual_px=icl_diag.refined_residual_px,
+        icl_focal_change_factor=icl_diag.focal_length_change_factor,
+        icl_accepted=icl_diag.accepted,
+    )
+
+
+def _refine_with_touchline_vp(
+    cf: CameraFrame,
+    pitch_lines: list[DetectedLine],
+    board_lines: list[DetectedLine],
+) -> tuple[CameraFrame, float, float, bool]:
+    """Single-VP pan correction (the original refinement step).
+
+    Returns ``(refined_or_original_cf, initial_residual, refined_residual,
+    accepted)``.  Always returns a usable CameraFrame — the original
+    when the VP refinement fails or makes things worse.
+    """
+    K = np.asarray(cf.intrinsic_matrix, dtype=np.float64)
+    rvec = np.asarray(cf.rotation_vector, dtype=np.float64).reshape(3)
+    tvec = np.asarray(cf.translation_vector, dtype=np.float64).reshape(3)
+
+    if len(pitch_lines) < 6:
+        return cf, float("inf"), float("inf"), False
+
     candidates: list[DetectedLine] = list(pitch_lines)
     candidates.extend(board_lines)
 
     clusters = cluster_lines_by_orientation(candidates, n_clusters=3, angle_tol_deg=6.0)
     if not clusters:
-        return cf, fail
+        return cf, float("inf"), float("inf"), False
     touch_cluster = _select_touchline_cluster(clusters, K, rvec, tvec)
     if touch_cluster is None or len(touch_cluster) < 4:
-        return cf, fail
+        return cf, float("inf"), float("inf"), False
 
     vp = vanishing_point_from_lines(touch_cluster)
     if not np.all(np.isfinite(vp)):
-        return cf, fail
+        return cf, float("inf"), float("inf"), False
 
-    # Compute initial residual against the SELECTED cluster only.  This
-    # is what we'll compare the refinement to.
     initial_residual = _vp_consistency_residual(touch_cluster, K, rvec, tvec)
-    fail = RefinementResult(
-        frame=cf.frame,
-        initial_residual_px=initial_residual,
-        refined_residual_px=initial_residual,
-        accepted=False,
-        n_pitch_lines=n_pitch,
-        n_board_lines=n_board,
-    )
 
-    # Camera-frame direction implied by the VP (back-projection of the
-    # vp pixel through K).  This is where the world touchline direction
-    # SHOULD project to under the corrected rotation.
     K_inv = np.linalg.inv(K)
     d_target_cam = K_inv @ np.array([vp[0], vp[1], 1.0], dtype=np.float64)
     d_target_cam /= np.linalg.norm(d_target_cam)
 
-    # Where it currently projects under PnLCalib's rotation:
     R, _ = cv2.Rodrigues(rvec)
     d_current_cam = R @ np.array([1.0, 0.0, 0.0], dtype=np.float64)
     d_current_cam /= np.linalg.norm(d_current_cam)
-    # The VP projection is sign-ambiguous (a direction and its negative
-    # share the same VP); pick whichever sign gives the smaller
-    # alignment rotation.
     if float(d_current_cam @ d_target_cam) < float(d_current_cam @ -d_target_cam):
         d_target_cam = -d_target_cam
 
     R_align = _rotation_aligning(d_current_cam, d_target_cam)
     new_R_world_to_cam = R_align @ R
-    # Reject pathological refinements (>30°): PnLCalib's pan can be
-    # off by quite a bit but a 30° single-step correction is more
-    # likely a misclustered VP than a real fix.
     angle_change = float(np.arccos(np.clip((np.trace(R_align) - 1) / 2, -1.0, 1.0)))
     if angle_change > np.deg2rad(60):
-        return cf, fail
+        return cf, initial_residual, initial_residual, False
 
     new_rvec, _ = cv2.Rodrigues(new_R_world_to_cam)
-    # Recompute tvec so the camera world position stays put
     camera_pos = camera_world_position(rvec, tvec)
     new_tvec = -new_R_world_to_cam @ camera_pos
 
     refined_residual = _vp_consistency_residual(
         touch_cluster, K, new_rvec.reshape(3), new_tvec,
     )
-
     if not np.isfinite(refined_residual) or refined_residual >= initial_residual:
-        return cf, RefinementResult(
-            frame=cf.frame,
-            initial_residual_px=initial_residual,
-            refined_residual_px=refined_residual,
-            accepted=False,
-            n_pitch_lines=n_pitch,
-            n_board_lines=n_board,
-        )
+        return cf, initial_residual, refined_residual, False
 
     new_cf = CameraFrame(
         frame=cf.frame,
@@ -347,14 +363,7 @@ def refine_keyframe(
         confidence=cf.confidence,
         tracked_landmark_types=list(cf.tracked_landmark_types),
     )
-    return new_cf, RefinementResult(
-        frame=cf.frame,
-        initial_residual_px=initial_residual,
-        refined_residual_px=refined_residual,
-        accepted=True,
-        n_pitch_lines=n_pitch,
-        n_board_lines=n_board,
-    )
+    return new_cf, initial_residual, refined_residual, True
 
 
 def refine_shot_calibration(

@@ -124,3 +124,117 @@ class TestSolveFromAnnotations:
         )
         assert result is not None
         assert result.n_points == 4
+
+
+class TestFixedPositionSolve:
+    def test_clustered_3_landmark_recovery(self):
+        """3 landmarks all in one corner of the pitch must recover
+        the pose accurately when the camera position is known."""
+        K, rvec, tvec = _build_synthetic_camera(fx=3500.0)
+        cam_pos = -cv2.Rodrigues(rvec)[0].T @ tvec
+        # 3 clustered landmarks all near the left 18-yard box
+        names = [
+            "left_18yard_far_right", "left_6yard_far_right",
+            "left_penalty_spot",
+        ]
+        annotations = {}
+        for name in names:
+            world = FIFA_LANDMARKS[name]
+            annotations[name] = list(_project(world, K, rvec, tvec))
+        result = solve_from_annotations(
+            annotations, image_size=(1920, 1080),
+            fx_init=3000.0,  # deliberately wrong — test fx refinement
+            camera_position_world=cam_pos,
+        )
+        assert result is not None, "3-point fixed solve should succeed"
+        assert result.mode == "fixed_position"
+        assert result.n_points == 3
+        # Rotation should be recovered to within ~0.5° on noise-free input
+        recovered_rvec = np.array(result.camera_frame.rotation_vector)
+        delta_angle = float(np.linalg.norm(recovered_rvec - rvec))
+        assert delta_angle < np.deg2rad(0.5), f"delta_angle={np.rad2deg(delta_angle):.2f}°"
+        # fx should converge to truth (3500) from the wrong seed (3000)
+        recovered_fx = float(np.array(result.camera_frame.intrinsic_matrix)[0, 0])
+        assert abs(recovered_fx - 3500.0) < 35.0, f"fx={recovered_fx}"
+
+    def test_fixed_position_beats_free_on_clustered_landmarks(self):
+        """With clustered annotations, the fixed-position path must
+        project *distant* unclicked landmarks much closer to their
+        true pixel positions than the free-position path."""
+        K, rvec, tvec = _build_synthetic_camera(fx=3500.0)
+        cam_pos = -cv2.Rodrigues(rvec)[0].T @ tvec
+        names = [
+            "left_18yard_far_right", "left_6yard_far_right",
+            "left_penalty_spot", "left_18yard_d_far",
+            "left_goal_far_post_base",
+        ]
+        annotations = {}
+        for name in names:
+            world = FIFA_LANDMARKS[name]
+            annotations[name] = list(_project(world, K, rvec, tvec))
+
+        # Free-position solve
+        free = solve_from_annotations(
+            annotations, image_size=(1920, 1080), fx_init=3500.0,
+        )
+        assert free is not None
+        assert free.mode in ("pose_only", "full")
+
+        # Fixed-position solve
+        fixed = solve_from_annotations(
+            annotations, image_size=(1920, 1080), fx_init=3500.0,
+            camera_position_world=cam_pos,
+        )
+        assert fixed is not None
+        assert fixed.mode == "fixed_position"
+
+        # Project a distant landmark (far right corner) through each
+        # recovered calibration and measure the error vs truth.
+        distant = np.asarray(FIFA_LANDMARKS["corner_far_right"], dtype=np.float64)
+        truth_px = np.array(_project(distant, K, rvec, tvec))
+
+        def recovered_px(cf_result):
+            K_r = np.array(cf_result.camera_frame.intrinsic_matrix, dtype=np.float64)
+            rvec_r = np.asarray(cf_result.camera_frame.rotation_vector, dtype=np.float64)
+            tvec_r = np.asarray(cf_result.camera_frame.translation_vector, dtype=np.float64)
+            proj, _ = cv2.projectPoints(
+                distant.reshape(1, 3), rvec_r, tvec_r, K_r, None,
+            )
+            return proj.reshape(2)
+
+        free_err = float(np.linalg.norm(recovered_px(free) - truth_px))
+        fixed_err = float(np.linalg.norm(recovered_px(fixed) - truth_px))
+        # Fixed should be *at least* as good as free on this test.
+        # In practice the free path overfits the cluster and the
+        # fixed path stays near-zero.
+        assert fixed_err <= free_err + 1e-6, (
+            f"fixed_err={fixed_err:.2f}px must be ≤ free_err={free_err:.2f}px"
+        )
+        # And fixed should be essentially sub-pixel
+        assert fixed_err < 2.0, f"fixed_err={fixed_err:.2f}px"
+
+    def test_3_landmarks_rejected_without_known_position(self):
+        """3 landmarks alone (no camera position) must return None —
+        the free-position path still needs ≥4."""
+        K, rvec, tvec = _build_synthetic_camera()
+        annotations = {}
+        for name in ["corner_near_left", "corner_near_right", "corner_far_left"]:
+            world = FIFA_LANDMARKS[name]
+            annotations[name] = list(_project(world, K, rvec, tvec))
+        result = solve_from_annotations(
+            annotations, image_size=(1920, 1080), fx_init=3500.0,
+        )
+        assert result is None
+
+    def test_fewer_than_3_rejected_even_with_position(self):
+        K, rvec, tvec = _build_synthetic_camera()
+        cam_pos = -cv2.Rodrigues(rvec)[0].T @ tvec
+        annotations = {}
+        for name in ["corner_near_left", "corner_near_right"]:
+            world = FIFA_LANDMARKS[name]
+            annotations[name] = list(_project(world, K, rvec, tvec))
+        result = solve_from_annotations(
+            annotations, image_size=(1920, 1080),
+            camera_position_world=cam_pos,
+        )
+        assert result is None

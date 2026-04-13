@@ -10,6 +10,7 @@ from queue import Empty, Queue
 from threading import Lock, Thread
 from typing import Any
 
+import numpy as np
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -779,27 +780,44 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         if not isinstance(landmarks, dict):
             raise HTTPException(status_code=400, detail="landmarks must be a dict")
 
-        # Pull a sane fx_init from the existing per-frame calibration
-        # so the solver doesn't start from a wild guess.
+        # Pull a sane fx_init and a known camera world position from
+        # the existing per-frame calibration so the live solve uses
+        # the same fixed-position path the calibration stage uses.
+        # That way the overlay the user sees in the dashboard matches
+        # what the pipeline will produce on the next rebuild — no
+        # surprise drift when they hit "Re-run".
         fx_init = 3500.0
+        shared_position: list[float] | None = None
         cal_path = output_dir / "calibration" / f"{shot_id}_calibration.json"
         if cal_path.exists():
             try:
+                from src.utils.camera import camera_world_position
                 cal_data = json.loads(cal_path.read_text())
+                frames_list = cal_data.get("frames", []) or []
                 fxs = [
                     float(cf["intrinsic_matrix"][0][0])
-                    for cf in cal_data.get("frames", [])
+                    for cf in frames_list
                 ]
                 if fxs:
                     fx_init = float(sorted(fxs)[len(fxs) // 2])
-            except (json.JSONDecodeError, KeyError, IndexError):
+                positions = []
+                for cf in frames_list:
+                    rvec = np.asarray(cf["rotation_vector"], dtype=np.float64)
+                    tvec = np.asarray(cf["translation_vector"], dtype=np.float64)
+                    positions.append(camera_world_position(rvec, tvec))
+                if positions:
+                    pos_arr = np.array(positions, dtype=np.float64)
+                    shared_position = np.median(pos_arr, axis=0).tolist()
+            except (json.JSONDecodeError, KeyError, IndexError, ValueError):
                 pass
 
+        cam_pos_arg = np.asarray(shared_position) if shared_position else None
         result = solve_from_annotations(
             landmarks,
             image_size=(width, height),
             fx_init=fx_init,
             frame_idx=frame,
+            camera_position_world=cam_pos_arg,
         )
         # Persist whatever the user clicked even if the solve failed,
         # so they can come back and add more points later.

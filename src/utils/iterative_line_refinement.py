@@ -114,6 +114,7 @@ def refine_with_lines(
     max_iters: int = _MAX_ICL_ITERS,
     pitch_segments: list[DetectedLine] | None = None,
     board_segments: list[DetectedLine] | None = None,
+    max_rotation_delta_deg: float | None = None,
 ) -> tuple[CameraFrame, ICLResult]:
     """Refine ``cf`` against detected pitch + board lines via ICL + LM.
 
@@ -251,11 +252,23 @@ def refine_with_lines(
         params = new_params
 
     fx_factor = float(best_params[3] / fx_init) if fx_init > 0 else 1.0
+    # Rotation delta from the seed: how far did LM move us in
+    # rotation space?  When the seed is already approximately right
+    # (e.g., per-frame mode where the seed is the SLERP-interpolated
+    # keyframe value) any large delta is a sign that LM landed in a
+    # wrong basin — better to keep the seed unchanged.
+    R_seed, _ = cv2.Rodrigues(rvec)
+    R_refined, _ = cv2.Rodrigues(best_params[:3])
+    R_delta = R_refined @ R_seed.T
+    rotation_delta_deg = float(np.degrees(np.arccos(
+        np.clip((np.trace(R_delta) - 1) / 2, -1.0, 1.0),
+    )))
     accepted = (
         best_residual < initial_residual
         and _FX_MIN_FACTOR <= fx_factor <= _FX_MAX_FACTOR
         and _BOARD_Y_OFFSET_MIN <= float(best_params[4]) <= _BOARD_Y_OFFSET_MAX
         and _BOARD_Y_OFFSET_MIN <= float(best_params[5]) <= _BOARD_Y_OFFSET_MAX
+        and (max_rotation_delta_deg is None or rotation_delta_deg <= max_rotation_delta_deg)
     )
     diagnostics = ICLResult(
         iterations=icl_iters,

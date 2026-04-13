@@ -524,12 +524,15 @@ def refine_per_frame(
                 confidence=1.0,
                 tracked_landmark_types=[],
             )
-            # Per-frame ICL uses a single outer iteration: the SLERP
-            # seed is already near-optimal, so additional iterations
-            # mainly waste time re-running the LM solver.  Multi-pass
-            # ICL is only worthwhile at the keyframe level where the
-            # seed (raw PnLCalib) is more often in a poor basin.
-            refined_cf, diag = refine_with_lines(seed_cf, frame, max_iters=1)
+            # Per-frame ICL uses a single outer iteration and a tight
+            # rotation budget: the SLERP seed is already near-optimal,
+            # so additional iterations mainly waste time and any LM
+            # solution that diverges from the seed by more than 5° is
+            # almost certainly a wrong basin.  Reject those — the
+            # untouched seed is preferable to a wild ICL outlier.
+            refined_cf, diag = refine_with_lines(
+                seed_cf, frame, max_iters=1, max_rotation_delta_deg=5.0,
+            )
             new_frames.append(refined_cf)
             diagnostics.append(diag)
     finally:

@@ -532,6 +532,16 @@ class TriangulationStage(BaseStage):
                     )
                     if np.any(np.isnan(pt)):
                         continue
+                    # Plausibility: a player's joint can't sit below
+                    # the pitch surface or absurdly high above it.
+                    # Multi-view DLT produces wildly off 3D points
+                    # when the two views' calibrations disagree
+                    # significantly; reject those rather than
+                    # polluting the bird's-eye view.
+                    if pt[2] < -0.5 or pt[2] > 3.5:
+                        continue
+                    if not (-15.0 <= pt[0] <= 120.0 and -15.0 <= pt[1] <= 83.0):
+                        continue
                     positions[fi, j] = pt
                     confidences[fi, j] = float(np.mean(obs_w))
                     reproj_errors[fi, j] = err

@@ -2578,44 +2578,70 @@ function renderTriangulation(panel, data) {
   // the preview animation doesn't depend on the browser's refresh rate.
   const fps = 30;
 
+  // Pitch-plus-margin coordinate system: the pitch always occupies a fixed
+  // region of the canvas, with a 10m margin on every side so mildly outlying
+  // joints (noisy wrists/ankles, keepers behind the goal line) stay visible.
+  // Joints more than 10m off-pitch clip at the canvas edge — that's a clear
+  // "this joint is wrong" diagnostic.
+  const OUTSIDE_MARGIN_M = 10;
+  const mappedW = PITCH_LENGTH + 2 * OUTSIDE_MARGIN_M;
+  const mappedH = PITCH_WIDTH + 2 * OUTSIDE_MARGIN_M;
+  const pad = 20;
+  const drawW = cw - 2 * pad, drawH = ch - 2 * pad;
+  // Convert a pitch-coord to canvas-coord (pitch origin offset by margin).
+  const toX = x => pad + ((x + OUTSIDE_MARGIN_M) / mappedW) * drawW;
+  const toY = y => pad + ((y + OUTSIDE_MARGIN_M) / mappedH) * drawH;
+
+  // Pre-compute pitch geometry anchors for drawPitchInline().
+  const PITCH_LEFT = toX(0);
+  const PITCH_RIGHT = toX(PITCH_LENGTH);
+  const PITCH_TOP = toY(0);
+  const PITCH_BOTTOM = toY(PITCH_WIDTH);
+
+  function drawPitchInline(ctx) {
+    // Background: dark green filling the whole canvas.
+    ctx.fillStyle = '#1a3a1a';
+    ctx.fillRect(0, 0, cw, ch);
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 1.5;
+
+    // Outer boundary
+    ctx.strokeRect(PITCH_LEFT, PITCH_TOP, PITCH_RIGHT - PITCH_LEFT, PITCH_BOTTOM - PITCH_TOP);
+
+    // Centre line
+    const midX = toX(PITCH_LENGTH / 2);
+    ctx.beginPath(); ctx.moveTo(midX, PITCH_TOP); ctx.lineTo(midX, PITCH_BOTTOM); ctx.stroke();
+
+    // Centre circle (r = 9.15m)
+    const midY = toY(PITCH_WIDTH / 2);
+    const circleR = toX(9.15) - toX(0);
+    ctx.beginPath(); ctx.arc(midX, midY, circleR, 0, Math.PI * 2); ctx.stroke();
+
+    // Centre spot
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.beginPath(); ctx.arc(midX, midY, 2, 0, Math.PI * 2); ctx.fill();
+
+    // Penalty areas (16.5m deep, 40.32m wide, centred on pitch width)
+    const penYTop = toY((PITCH_WIDTH - 40.32) / 2);
+    const penYBot = toY((PITCH_WIDTH + 40.32) / 2);
+    const penLeftX = toX(16.5);
+    const penRightX = toX(PITCH_LENGTH - 16.5);
+    ctx.strokeRect(PITCH_LEFT, penYTop, penLeftX - PITCH_LEFT, penYBot - penYTop);
+    ctx.strokeRect(penRightX, penYTop, PITCH_RIGHT - penRightX, penYBot - penYTop);
+
+    // Goal areas (5.5m deep, 18.32m wide)
+    const gaYTop = toY((PITCH_WIDTH - 18.32) / 2);
+    const gaYBot = toY((PITCH_WIDTH + 18.32) / 2);
+    const gaLeftX = toX(5.5);
+    const gaRightX = toX(PITCH_LENGTH - 5.5);
+    ctx.strokeRect(PITCH_LEFT, gaYTop, gaLeftX - PITCH_LEFT, gaYBot - gaYTop);
+    ctx.strokeRect(gaRightX, gaYTop, PITCH_RIGHT - gaRightX, gaYBot - gaYTop);
+  }
+
   function drawFrame(fi) {
     const ctx = canvas.getContext('2d');
-
-    // Detect data range for auto-scaling (same logic as matching viewer)
-    const allX = [], allY = [];
-    players.forEach(p => {
-      if (fi < p.positions.length) {
-        p.positions[fi].forEach(j => {
-          if (j && j[0] !== null && !isNaN(j[0])) { allX.push(j[0]); allY.push(j[1]); }
-        });
-      }
-    });
-
-    const pad = 20;
-    const drawW = cw - 2 * pad, drawH = ch - 2 * pad;
-    let toX, toY;
-
-    const minX = allX.length ? Math.min(...allX) : 0;
-    const maxX = allX.length ? Math.max(...allX) : 105;
-    const minY = allY.length ? Math.min(...allY) : 0;
-    const maxY = allY.length ? Math.max(...allY) : 68;
-    const rangeOk = minX >= -10 && maxX <= 115 && minY >= -10 && maxY <= 78;
-
-    if (rangeOk) {
-      drawPitch(ctx, cw, ch);
-      toX = x => pad + (x / PITCH_LENGTH) * drawW;
-      toY = y => pad + (y / PITCH_WIDTH) * drawH;
-    } else {
-      const spanX = Math.max(1, maxX - minX), spanY = Math.max(1, maxY - minY);
-      const m = 0.08;
-      const bMinX = minX - spanX*m, bMaxX = maxX + spanX*m;
-      const bMinY = minY - spanY*m, bMaxY = maxY + spanY*m;
-      ctx.fillStyle = '#1a3a1a'; ctx.fillRect(0, 0, cw, ch);
-      ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 1;
-      ctx.strokeRect(pad, pad, drawW, drawH);
-      toX = x => pad + ((x - bMinX) / (bMaxX - bMinX)) * drawW;
-      toY = y => pad + ((y - bMinY) / (bMaxY - bMinY)) * drawH;
-    }
+    drawPitchInline(ctx);
 
     // Draw skeletons
     players.forEach(p => {

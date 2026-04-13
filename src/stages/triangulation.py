@@ -40,6 +40,7 @@ from src.utils.triangulation import (
     snap_feet_to_ground,
     temporal_smooth_savgol,
 )
+from src.utils.calibration_align import align_shots
 from src.utils.triangulation_calib import CalibrationInterpolator
 from src.utils.triangulation_dedupe import deduplicate_players
 
@@ -179,24 +180,19 @@ class TriangulationStage(BaseStage):
             sync_offsets[alignment.shot_id] = alignment.frame_offset
 
         # ── Per-shot inputs ──
-        interps_by_shot: dict[str, CalibrationInterpolator] = {}
-        poses_by_shot: dict[str, dict[str, dict[int, list[Keypoint]]]] = {}
-        track_meta_by_shot: dict[str, dict[str, tuple[str, str, str]]] = {}
-
         cal_dir = self.output_dir / "calibration"
         poses_dir = self.output_dir / "poses"
         tracks_dir = self.output_dir / "tracks"
 
-        calibrated_shot_ids: set[str] = set()
+        calibrations_by_shot: dict[str, CalibrationResult] = {}
+        tracks_full_by_shot: dict[str, TracksResult] = {}
+        poses_by_shot: dict[str, dict[str, dict[int, list[Keypoint]]]] = {}
+        track_meta_by_shot: dict[str, dict[str, tuple[str, str, str]]] = {}
 
         for shot in manifest.shots:
             cal_path = cal_dir / f"{shot.id}_calibration.json"
             if cal_path.exists():
-                cal = CalibrationResult.load(cal_path)
-                interp = CalibrationInterpolator(cal)
-                interps_by_shot[shot.id] = interp
-                if not interp.is_empty:
-                    calibrated_shot_ids.add(shot.id)
+                calibrations_by_shot[shot.id] = CalibrationResult.load(cal_path)
 
             poses_path = poses_dir / f"{shot.id}_poses.json"
             if poses_path.exists():
@@ -204,9 +200,54 @@ class TriangulationStage(BaseStage):
 
             tracks_path = tracks_dir / f"{shot.id}_tracks.json"
             if tracks_path.exists():
-                track_meta_by_shot[shot.id] = _build_track_metadata(
-                    TracksResult.load(tracks_path)
+                tr = TracksResult.load(tracks_path)
+                tracks_full_by_shot[shot.id] = tr
+                track_meta_by_shot[shot.id] = _build_track_metadata(tr)
+
+        # ── Cross-shot alignment ──
+        # Each shot's calibration sits in its own world frame; we align
+        # every non-reference shot's frame onto the reference shot's
+        # using matched-player foot positions.  Skipped when there's
+        # only one calibrated shot or align_shots is disabled.
+        align_enabled = bool(cfg.get("align_shots", True))
+        if align_enabled and len(calibrations_by_shot) >= 2:
+            try:
+                aligned, align_diags = align_shots(
+                    calibrations_by_shot,
+                    tracks_full_by_shot,
+                    matches,
+                    sync_map,
                 )
+                if align_diags:
+                    accepted = sum(1 for d in align_diags if d.accepted)
+                    print(
+                        f"  -> cross-shot alignment: {accepted}/{len(align_diags)} "
+                        f"shots aligned to reference"
+                    )
+                    for d in align_diags:
+                        flag = "✓" if d.accepted else "·"
+                        print(
+                            f"     {flag} {d.shot_id}: yaw={d.yaw_correction_deg:+.1f}° "
+                            f"t=({d.translation_xy_m[0]:+.1f},{d.translation_xy_m[1]:+.1f})m "
+                            f"residual {d.residual_before_m:.2f}→{d.residual_after_m:.2f}m "
+                            f"({d.n_correspondences} obs)"
+                        )
+                calibrations_by_shot = aligned
+                # Persist the refined calibrations so the web dashboard
+                # picks up the aligned versions on next reload.
+                for sid, cal in aligned.items():
+                    cal.save(cal_dir / f"{sid}_calibration.json")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cross-shot alignment failed: %s", exc)
+
+        # Build interpolators from (possibly aligned) calibrations
+        interps_by_shot: dict[str, CalibrationInterpolator] = {}
+        calibrated_shot_ids: set[str] = set()
+        for shot_id, cal in calibrations_by_shot.items():
+            interp = CalibrationInterpolator(cal)
+            interps_by_shot[shot_id] = interp
+            if not interp.is_empty:
+                calibrated_shot_ids.add(shot_id)
 
         if not calibrated_shot_ids:
             logger.warning("No calibrated shots — skipping triangulation")

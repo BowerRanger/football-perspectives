@@ -27,6 +27,7 @@ import numpy as np
 from src.pipeline.base import BaseStage
 from src.schemas.calibration import CalibrationResult, CameraFrame
 from src.schemas.shots import ShotsManifest
+from src.utils.calibration_debug import render_shot_overlays
 from src.utils.neural_calibrator import NeuralCalibration, PnLCalibrator
 
 logger = logging.getLogger(__name__)
@@ -225,6 +226,9 @@ class CameraCalibrationStage(BaseStage):
             print("  -> inferred shots_manifest.json from prepared clips")
         manifest = ShotsManifest.load_or_infer(shots_dir, persist=True)
 
+        debug_overlay_enabled = bool(cfg.get("debug_overlay", True))
+        debug_overlay_n_frames = int(cfg.get("debug_overlay_n_frames", 6))
+
         for shot in manifest.shots:
             result = self._calibrate_shot(
                 shot.id,
@@ -236,6 +240,15 @@ class CameraCalibrationStage(BaseStage):
             result.save(cal_dir / f"{shot.id}_calibration.json")
             flag = " (no calibration frames — PnLCalib failed)" if not result.frames else ""
             print(f"  -> {shot.id}: {len(result.frames)} frames calibrated{flag}")
+            if debug_overlay_enabled and result.frames:
+                try:
+                    written = render_shot_overlays(
+                        self.output_dir, shot.id, n_frames=debug_overlay_n_frames,
+                    )
+                    if written:
+                        print(f"     debug overlay: {len(written)} frame(s) → calibration/debug/{shot.id}/")
+                except Exception as exc:  # noqa: BLE001 — non-fatal diagnostic
+                    logger.warning("debug overlay failed for %s: %s", shot.id, exc)
 
     @staticmethod
     def _resolve_bounds(

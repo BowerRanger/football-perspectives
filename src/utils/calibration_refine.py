@@ -425,9 +425,16 @@ def refine_shot_calibration(
     # the seed is silently preserved.
     refined, per_frame_diags = refine_per_frame(refined, clip_path)
 
-    # Final light smoothing on the dense per-frame output to suppress
-    # any residual single-frame ICL failures.
+    # Final smoothing on the dense per-frame output: Hampel kills
+    # spikes, then Savgol smooths the per-frame ICL jitter while
+    # preserving real linear motion (real broadcast camera pans last
+    # several seconds at fairly constant angular rate).  A 15-frame
+    # window with order=2 fits a parabola to ~0.6 sec of footage,
+    # which preserves typical pan/zoom curves while damping the
+    # per-frame ICL noise that produces 3–5° rotation jumps between
+    # adjacent frames.
     refined = smooth_calibration_temporally(refined, window=11)
+    refined = savgol_smooth_calibration(refined, window=15, order=2)
 
     # Stash the per-frame diagnostics on the returned list so the
     # calibration stage can surface them in its log without changing
@@ -661,6 +668,82 @@ def _median_filter_1d(xs: np.ndarray, window: int) -> np.ndarray:
     for i in range(n):
         out[i] = float(np.median(padded[i:i + window]))
     return out
+
+
+def savgol_smooth_calibration(
+    cal: CalibrationResult,
+    *,
+    window: int = 7,
+    order: int = 2,
+) -> CalibrationResult:
+    """Savitzky-Golay smoothing of per-frame rotation + focal length.
+
+    Hampel handles outlier spikes; Savgol handles the higher-frequency
+    jitter that per-frame ICL introduces when each frame is fit
+    independently to the line constraints.  Order-2 polynomial fits
+    over a 7-frame window preserve linear and quadratic trends (real
+    smooth pans/zooms) while suppressing per-frame oscillations that
+    deviate from a local quadratic.
+
+    Translation is recomputed from smoothed rotation + the median
+    camera world position so the static-camera invariant holds.
+    Sequences shorter than ``window`` are returned unchanged.
+    """
+    n = len(cal.frames)
+    if n < window:
+        return cal
+    if window < 3 or window % 2 == 0:
+        raise ValueError(f"window must be odd and >= 3 (got {window})")
+
+    from scipy.signal import savgol_filter
+
+    sorted_frames = sorted(cal.frames, key=lambda cf: cf.frame)
+    rvecs = np.array([cf.rotation_vector for cf in sorted_frames], dtype=np.float64)
+    fxs = np.array([cf.intrinsic_matrix[0][0] for cf in sorted_frames], dtype=np.float64)
+    cxs = np.array([cf.intrinsic_matrix[0][2] for cf in sorted_frames], dtype=np.float64)
+    cys = np.array([cf.intrinsic_matrix[1][2] for cf in sorted_frames], dtype=np.float64)
+
+    smoothed_rvecs = np.empty_like(rvecs)
+    for d in range(3):
+        smoothed_rvecs[:, d] = savgol_filter(rvecs[:, d], window, order)
+    smoothed_fxs = savgol_filter(fxs, window, order)
+
+    positions = np.array([
+        camera_world_position(
+            np.asarray(cf.rotation_vector, dtype=np.float64),
+            np.asarray(cf.translation_vector, dtype=np.float64),
+        )
+        for cf in sorted_frames
+    ])
+    shared_pos = np.median(positions, axis=0)
+
+    new_frames: list[CameraFrame] = []
+    for i, cf in enumerate(sorted_frames):
+        rvec_smoothed = smoothed_rvecs[i]
+        fx_smoothed = float(smoothed_fxs[i])
+        K_smoothed = [
+            [fx_smoothed, 0.0, float(cxs[i])],
+            [0.0,         fx_smoothed, float(cys[i])],
+            [0.0,         0.0,         1.0],
+        ]
+        R_smoothed, _ = cv2.Rodrigues(rvec_smoothed.reshape(3, 1))
+        t_smoothed = -R_smoothed @ shared_pos
+        new_frames.append(CameraFrame(
+            frame=cf.frame,
+            intrinsic_matrix=K_smoothed,
+            rotation_vector=rvec_smoothed.tolist(),
+            translation_vector=t_smoothed.tolist(),
+            reprojection_error=cf.reprojection_error,
+            num_correspondences=cf.num_correspondences,
+            confidence=cf.confidence,
+            tracked_landmark_types=list(cf.tracked_landmark_types),
+        ))
+
+    return CalibrationResult(
+        shot_id=cal.shot_id,
+        camera_type=cal.camera_type,
+        frames=new_frames,
+    )
 
 
 def _hampel_filter_1d(

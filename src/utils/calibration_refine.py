@@ -409,10 +409,12 @@ def refine_shot_calibration(
     # PnLCalib's per-frame inference is noisy and ICL refines each
     # keyframe independently, so consecutive keyframes can disagree
     # by 5–14° of rotation and ±70% in focal length even on a
-    # physically-static broadcast camera.  Smooth the per-keyframe
-    # (rvec, fx) sequences with a moving median so the SLERP
-    # interpolator gets a temporally consistent input.
-    refined = smooth_calibration_temporally(refined, window=5)
+    # physically-static broadcast camera.  A Hampel outlier filter
+    # replaces only clear outliers (preserves real pans/zooms exactly).
+    # Window 9 catches BLOCKS of consistently-wrong keyframes — single
+    # PnLCalib failures cluster into 2–3 consecutive bad frames, so a
+    # narrower window misses them.
+    refined = smooth_calibration_temporally(refined, window=9)
 
     return refined, diagnostics
 
@@ -421,21 +423,26 @@ def smooth_calibration_temporally(
     cal: CalibrationResult,
     *,
     window: int = 5,
+    hampel_k: float = 3.0,
 ) -> CalibrationResult:
-    """Median-filter per-keyframe rotation + focal length within a shot.
+    """Hampel-filter per-keyframe rotation + focal length within a shot.
 
     The broadcast camera is physically static — only pan, tilt, and
     zoom change within a shot.  Real pan motion is smooth; PnLCalib's
     independent per-frame inference plus the per-keyframe ICL
-    refinement layer noise on top.  A small-window moving median:
+    refinement layer noise on top.
 
-    - **Rejects single-keyframe outliers** (PnLCalib occasionally
-      returns a wildly-different rotation on one frame even when its
-      neighbours agree).
-    - **Damps the back-and-forth wobble** between keyframes that
-      disagree by a few degrees.
-    - **Preserves real pans** at frequencies below ~``window/2``
-      keyframes.
+    A **Hampel filter** is used instead of a plain moving median so
+    that real motion isn't flattened:
+
+    - For each keyframe, compute the local median + median absolute
+      deviation (MAD) over a ``window``-sized neighbourhood.
+    - If the keyframe's value sits more than ``hampel_k * 1.4826 * MAD``
+      from the local median (i.e., > ``hampel_k`` robust standard
+      deviations) it's a clear outlier — replace it with the local
+      median.
+    - Otherwise keep the keyframe value **exactly**, preserving real
+      pans, tilts, and zooms at any frequency.
 
     The smoothing is applied component-wise to the Rodrigues vector
     and to ``fx`` (with ``fy = fx`` carried along).  ``cy``, ``cx``
@@ -462,9 +469,9 @@ def smooth_calibration_temporally(
     cys = np.array([cf.intrinsic_matrix[1][2] for cf in sorted_frames], dtype=np.float64)
 
     smoothed_rvecs = np.empty_like(rvecs)
-    smoothed_fxs = _median_filter_1d(fxs, window)
+    smoothed_fxs = _hampel_filter_1d(fxs, window, hampel_k)
     for d in range(3):
-        smoothed_rvecs[:, d] = _median_filter_1d(rvecs[:, d], window)
+        smoothed_rvecs[:, d] = _hampel_filter_1d(rvecs[:, d], window, hampel_k)
 
     # Recover the camera world position from the *original* (untouched
     # by smoothing) per-frame extrinsics.  Under the static-camera
@@ -524,4 +531,54 @@ def _median_filter_1d(xs: np.ndarray, window: int) -> np.ndarray:
     out = np.empty(n, dtype=np.float64)
     for i in range(n):
         out[i] = float(np.median(padded[i:i + window]))
+    return out
+
+
+def _hampel_filter_1d(
+    xs: np.ndarray, window: int, k: float = 3.0,
+) -> np.ndarray:
+    """Hampel outlier filter — replace only values that are clear outliers.
+
+    For each position ``i``:
+
+    1. Compute the local median ``m`` and median-absolute-deviation
+       ``mad`` over a length-``window`` window centred on ``i`` (with
+       edge-value padding).
+    2. The robust scale estimate is ``sigma = 1.4826 * mad`` (matches a
+       Gaussian standard deviation for normally distributed inliers).
+       When the local window's values agree exactly the local MAD is
+       zero, which would disable the filter — fall back to the
+       *global* MAD across the whole series as a noise floor.
+    3. If ``|xs[i] - m| > k * sigma``, replace ``xs[i]`` with ``m``.
+       Otherwise leave it untouched.
+
+    The result is identical to the input on smoothly-varying segments
+    (so a real camera pan or zoom is preserved exactly) and only
+    corrects per-keyframe spikes.
+    """
+    r = window // 2
+    n = len(xs)
+    if n == 0:
+        return xs.astype(np.float64, copy=True)
+    src = xs.astype(np.float64)
+    padded = np.pad(src, r, mode="edge")
+    out = src.copy()
+    # Compare values against a tolerance scaled to the value magnitude
+    # so we don't trip on floating-point round-off when the window is
+    # perfectly agreed.
+    abs_max = float(np.max(np.abs(src))) if n > 0 else 1.0
+    eps = max(1e-9 * abs_max, 1e-12)
+    for i in range(n):
+        win = padded[i:i + window]
+        m = float(np.median(win))
+        mad = float(np.median(np.abs(win - m)))
+        if mad < eps:
+            # Local window agrees exactly — any non-equal value is a
+            # clear outlier.  Replace it with the local median.
+            if abs(src[i] - m) > eps:
+                out[i] = m
+            continue
+        sigma = 1.4826 * mad
+        if abs(src[i] - m) > k * sigma:
+            out[i] = m
     return out

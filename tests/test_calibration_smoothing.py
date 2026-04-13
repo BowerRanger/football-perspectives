@@ -7,6 +7,7 @@ import numpy as np
 
 from src.schemas.calibration import CalibrationResult, CameraFrame
 from src.utils.calibration_refine import (
+    _hampel_filter_1d,
     _median_filter_1d,
     smooth_calibration_temporally,
 )
@@ -76,6 +77,39 @@ class TestMedianFilter1D:
         # Median of a centred 5-window of a ramp is the centre value;
         # edge windows narrow but still hit the centre.
         np.testing.assert_allclose(out, xs)
+
+
+class TestHampelFilter1D:
+    def test_smooth_ramp_unchanged(self):
+        # A linear ramp has zero local MAD around its centre values so
+        # a Hampel filter shouldn't touch it.
+        xs = np.arange(20, dtype=np.float64)
+        out = _hampel_filter_1d(xs, window=5, k=3.0)
+        np.testing.assert_array_equal(out, xs)
+
+    def test_constant_unchanged(self):
+        xs = np.full(10, 5.0)
+        out = _hampel_filter_1d(xs, window=5, k=3.0)
+        np.testing.assert_array_equal(out, xs)
+
+    def test_replaces_single_spike(self):
+        xs = np.array([3.0, 3.1, 2.9, 99.0, 3.0, 3.1, 2.9])
+        out = _hampel_filter_1d(xs, window=5, k=3.0)
+        # Spike at index 3 should be replaced; neighbours preserved
+        assert out[3] != 99.0
+        assert abs(out[3] - 3.0) < 0.5
+        # Non-spike positions are kept exactly
+        for i in (0, 1, 2, 4, 5, 6):
+            assert out[i] == xs[i]
+
+    def test_preserves_inliers_in_noisy_data(self):
+        # Slowly drifting series — hampel should leave it alone
+        rng = np.random.default_rng(0)
+        xs = np.linspace(0, 10, 20) + rng.normal(0, 0.1, 20)
+        out = _hampel_filter_1d(xs, window=5, k=3.0)
+        # Most points should be unchanged (no clear outliers)
+        unchanged = int(np.sum(out == xs))
+        assert unchanged >= 18  # allow up to 2 borderline replacements
 
 
 class TestSmoothCalibrationTemporally:

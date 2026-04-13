@@ -754,7 +754,10 @@ addLabel('LEFT GOAL (x=0)',0,3,-34,'#ff6b6b');
 addLabel('RIGHT GOAL (x=105)',105,3,-34,'#ff6b6b');
 addLabel('Near (y=0)',52.5,3,0,'#69db7c');
 addLabel('Far (y=68)',52.5,3,-68,'#69db7c');
-function camPos(rv,tv){const ang=Math.sqrt(rv[0]**2+rv[1]**2+rv[2]**2);if(ang<1e-8)return new THREE.Vector3(-tv[0],tv[2],tv[1]);const ax=new THREE.Vector3(rv[0]/ang,rv[1]/ang,rv[2]/ang);const R=new THREE.Matrix4().makeRotationAxis(ax,ang);const Rt=R.clone().transpose();const t=new THREE.Vector3(tv[0],tv[1],tv[2]);const C=t.applyMatrix4(Rt).negate();return new THREE.Vector3(C.x,-C.z,-C.y)}
+// Map our world (x=length, y=width, z=up) → Three.js (x right, y up, z toward viewer).
+// Pitch is rendered at three.js y=0 with x=[0,105] and z=[-68,0].
+// Our y=0 (near touchline) → three.js z=0; our y=68 (far) → three.js z=-68; our z=height → three.js y.
+function camPos(rv,tv){const ang=Math.sqrt(rv[0]**2+rv[1]**2+rv[2]**2);if(ang<1e-8)return new THREE.Vector3(-tv[0],-tv[2],tv[1]);const ax=new THREE.Vector3(rv[0]/ang,rv[1]/ang,rv[2]/ang);const R=new THREE.Matrix4().makeRotationAxis(ax,ang);const Rt=R.clone().transpose();const t=new THREE.Vector3(tv[0],tv[1],tv[2]);const C=t.applyMatrix4(Rt).negate();return new THREE.Vector3(C.x,C.z,-C.y)}
 const COLORS=[0x3b82f6,0xef4444,0xf59e0b,0x22c55e,0xa855f7,0xec4899];
 shots.forEach((shot,si)=>{const color=COLORS[si%COLORS.length];const mat=new THREE.MeshBasicMaterial({color});const trail=[];
 shot.frames.forEach(f=>{const pos=camPos(f.rvec,f.tvec);const sp=new THREE.Mesh(new THREE.SphereGeometry(1.2,8,8),mat);sp.position.copy(pos);scene.add(sp);trail.push(pos);

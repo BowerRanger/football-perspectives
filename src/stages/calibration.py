@@ -29,6 +29,7 @@ from src.pipeline.base import BaseStage
 from src.schemas.calibration import CalibrationResult, CameraFrame
 from src.schemas.shots import ShotsManifest
 from src.utils.calibration_debug import render_shot_overlays
+from src.utils.calibration_propagation import propagate_calibration_across_gaps
 from src.utils.calibration_refine import refine_shot_calibration
 from src.utils.camera import camera_world_position
 from src.utils.manual_calibration import solve_from_annotations
@@ -233,6 +234,7 @@ class CameraCalibrationStage(BaseStage):
         debug_overlay_enabled = bool(cfg.get("debug_overlay", True))
         debug_overlay_n_frames = int(cfg.get("debug_overlay_n_frames", 6))
         line_refine_enabled = bool(cfg.get("line_refine", True))
+        propagate_gaps_enabled = bool(cfg.get("propagate_gaps", True))
 
         for shot in manifest.shots:
             result = self._calibrate_shot(
@@ -284,6 +286,28 @@ class CameraCalibrationStage(BaseStage):
                         )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("line refine failed for %s: %s", shot.id, exc)
+            # ── Gap propagation via homography chaining ──
+            # PnLCalib produces nothing on frames where the major
+            # pitch features aren't visible (zoomed corner shots,
+            # goal-area close-ups).  Fill those gaps by tracking
+            # generic pitch-surface features frame-to-frame and
+            # chaining 2D homographies from the bracketing good
+            # anchors into the gap.  See
+            # src/utils/calibration_propagation.py.
+            if propagate_gaps_enabled and result.frames:
+                clip_path = self.output_dir / shot.clip_file
+                try:
+                    result, prop_stats = propagate_calibration_across_gaps(
+                        result, clip_path,
+                    )
+                    if prop_stats.n_gaps:
+                        print(
+                            f"     gap propagation: filled "
+                            f"{prop_stats.n_filled}/{prop_stats.n_filled + prop_stats.n_left_missing} "
+                            f"empty frames across {prop_stats.n_gaps} gap(s)"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("gap propagation failed for %s: %s", shot.id, exc)
             result.save(cal_dir / f"{shot.id}_calibration.json")
             flag = " (no calibration frames — PnLCalib failed)" if not result.frames else ""
             print(f"  -> {shot.id}: {len(result.frames)} frames calibrated{flag}")

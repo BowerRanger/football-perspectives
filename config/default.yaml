@@ -49,6 +49,12 @@ calibration:
   # majority; those frames' rotations + focal lengths are tied to a
   # different camera location and must not be kept.
   cluster_tolerance: 5.0
+  # Gap propagation: PnLCalib returns nothing on frames where the major
+  # pitch features (centre circle, penalty box) aren't visible.  Enable
+  # homography-chaining from bracketing good anchors to fill those
+  # gaps via frame-to-frame feature tracking.  See
+  # src/utils/calibration_propagation.py.
+  propagate_gaps: true
 
 sync:
   sample_fps: 5.0

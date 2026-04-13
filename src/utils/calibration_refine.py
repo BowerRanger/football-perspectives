@@ -405,18 +405,129 @@ def refine_shot_calibration(
         frames=new_frames,
     )
 
-    # ── Temporal smoothing across keyframes ──
-    # PnLCalib's per-frame inference is noisy and ICL refines each
-    # keyframe independently, so consecutive keyframes can disagree
-    # by 5–14° of rotation and ±70% in focal length even on a
-    # physically-static broadcast camera.  A Hampel outlier filter
-    # replaces only clear outliers (preserves real pans/zooms exactly).
-    # Window 9 catches BLOCKS of consistently-wrong keyframes — single
-    # PnLCalib failures cluster into 2–3 consecutive bad frames, so a
-    # narrower window misses them.
+    # ── Keyframe-level temporal smoothing (Hampel outlier filter) ──
+    # PnLCalib's per-frame inference is noisy and the per-keyframe ICL
+    # refines independently, so consecutive keyframes can disagree by
+    # 5–14° of rotation and ±70% in focal length even on a physically
+    # static broadcast camera.  Hampel only replaces *clear* outliers
+    # (real pans/zooms pass through untouched).  Window=9 catches
+    # blocks of consistently-wrong keyframes — single PnLCalib failures
+    # cluster into 2–3 consecutive bad frames, so a narrower window
+    # misses them.
     refined = smooth_calibration_temporally(refined, window=9)
 
+    # ── Per-frame ICL refinement ──
+    # The keyframe-level pass leaves us with one calibration every ~6
+    # frames; SLERP between noisy keyframes is the dominant remaining
+    # error source.  Run line-based ICL on EVERY frame, seeded from
+    # the SLERP estimate but driven by the actual lines visible in
+    # each specific frame.  When a frame has no usable line evidence
+    # the seed is silently preserved.
+    refined, per_frame_diags = refine_per_frame(refined, clip_path)
+
+    # Final light smoothing on the dense per-frame output to suppress
+    # any residual single-frame ICL failures.
+    refined = smooth_calibration_temporally(refined, window=11)
+
+    # Stash the per-frame diagnostics on the returned list so the
+    # calibration stage can surface them in its log without changing
+    # the function signature.  Use a sentinel attribute on the list
+    # rather than introducing a wrapper class.
+    diagnostics = list(diagnostics)
+    setattr(diagnostics, "per_frame_diagnostics", per_frame_diags)
+
     return refined, diagnostics
+
+
+def refine_per_frame(
+    cal: CalibrationResult,
+    clip_path: Path,
+    *,
+    sample_every: int = 1,
+) -> tuple[CalibrationResult, list[ICLResult]]:
+    """Run line-based ICL on every video frame, replacing sparse keyframes.
+
+    The keyframe-level pipeline (PnLCalib → single-VP → ICL → Hampel)
+    produces a calibration roughly every 5–6 frames.  This function
+    *densifies* the calibration to one entry per video frame by:
+
+    1. Building a :class:`CalibrationInterpolator` from ``cal``.
+    2. Iterating every frame in the source clip.
+    3. For each frame, taking the SLERP-interpolated keyframe value
+       as a *seed*, then calling
+       :func:`src.utils.iterative_line_refinement.refine_with_lines`
+       to align the seed to the actual pitch + ad-board lines visible
+       in that exact frame.
+    4. When ``refine_with_lines`` accepts the refinement, the result
+       is used; otherwise the seed is preserved unchanged.
+
+    The returned :class:`CalibrationResult` has one
+    :class:`CameraFrame` per video frame (so SLERP becomes a no-op
+    identity lookup downstream).  Frames where no seed is available
+    (outside the keyframe extrapolation range) are skipped.
+
+    Args:
+        cal: Smoothed keyframe-level calibration.
+        clip_path: Source clip on disk (used only for line detection).
+        sample_every: Step between processed frames.  Defaults to 1
+            (every frame).  Set higher for fast iteration in tests.
+    """
+    from src.utils.triangulation_calib import CalibrationInterpolator
+
+    if not cal.frames:
+        return cal, []
+    if not clip_path.exists():
+        logger.warning("refine_per_frame: clip not found %s", clip_path)
+        return cal, []
+
+    interp = CalibrationInterpolator(cal)
+    if interp.is_empty:
+        return cal, []
+
+    cap = cv2.VideoCapture(str(clip_path))
+    if not cap.isOpened():
+        logger.warning("refine_per_frame: cannot open %s", clip_path)
+        return cal, []
+
+    new_frames: list[CameraFrame] = []
+    diagnostics: list[ICLResult] = []
+    try:
+        n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        for fi in range(0, n_total, sample_every):
+            seed = interp.at_nearest(fi, max_extrapolation_frames=200)
+            if seed is None:
+                # No keyframe coverage for this frame — skip
+                cap.read()
+                continue
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+            ok, frame = cap.read()
+            if not ok:
+                continue
+
+            seed_cf = CameraFrame(
+                frame=fi,
+                intrinsic_matrix=seed.K.tolist(),
+                rotation_vector=seed.rvec.tolist(),
+                translation_vector=seed.tvec.tolist(),
+                reprojection_error=0.0,
+                num_correspondences=0,
+                confidence=1.0,
+                tracked_landmark_types=[],
+            )
+            refined_cf, diag = refine_with_lines(seed_cf, frame)
+            new_frames.append(refined_cf)
+            diagnostics.append(diag)
+    finally:
+        cap.release()
+
+    if not new_frames:
+        return cal, diagnostics
+
+    return CalibrationResult(
+        shot_id=cal.shot_id,
+        camera_type=cal.camera_type,
+        frames=new_frames,
+    ), diagnostics
 
 
 def smooth_calibration_temporally(

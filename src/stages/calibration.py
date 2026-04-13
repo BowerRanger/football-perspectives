@@ -261,6 +261,16 @@ class CameraCalibrationStage(BaseStage):
                                 f"improved line-distance {float(np.mean(icl_before)):.1f}→{float(np.mean(icl_after)):.1f}px "
                                 f"(fx ×{float(np.mean(fx_factors)):.2f})"
                             )
+                    pf_diags = getattr(diagnostics, "per_frame_diagnostics", None) or []
+                    if pf_diags:
+                        n_pf_accepted = sum(1 for d in pf_diags if d.accepted)
+                        residuals = [d.refined_residual_px for d in pf_diags
+                                     if d.accepted and np.isfinite(d.refined_residual_px)]
+                        mean_res = float(np.mean(residuals)) if residuals else 0.0
+                        print(
+                            f"     per-frame ICL: {n_pf_accepted}/{len(pf_diags)} frames "
+                            f"refined (mean line residual {mean_res:.1f} px)"
+                        )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("line refine failed for %s: %s", shot.id, exc)
             result.save(cal_dir / f"{shot.id}_calibration.json")

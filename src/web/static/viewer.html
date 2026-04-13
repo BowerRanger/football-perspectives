@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Football Perspectives — 3D Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0a; color: #e2e8f0; font-family: -apple-system, sans-serif; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+  #viewport { flex: 1; }
+  #controls { background: #1a1d27; border-top: 1px solid #2d3148; padding: 10px 20px; display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+  #controls button { background: #4f46e5; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  #controls button:hover { background: #6366f1; }
+  #timeline { flex: 1; }
+  #info { font-size: 12px; color: #94a3b8; min-width: 140px; text-align: right; }
+  #sidebar { position: absolute; top: 10px; right: 10px; background: rgba(26,29,39,0.9); border-radius: 8px; padding: 10px; font-size: 12px; max-height: 50vh; overflow-y: auto; z-index: 10; }
+  .player-row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; cursor: pointer; border-radius: 3px; }
+  .player-row:hover { background: rgba(255,255,255,0.05); }
+  .player-dot { width: 10px; height: 10px; border-radius: 50%; }
+  #speed-select { background: #334155; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  #camera-select { background: #334155; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); font-size: 16px; color: #64748b; }
+  #close-btn { position: absolute; top: 10px; left: 10px; z-index: 20; background: rgba(0,0,0,0.6); color: #e2e8f0; border: 1px solid #475569; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+  #close-btn:hover { background: rgba(0,0,0,0.8); }
+</style>
+</head>
+<body>
+
+<div id="viewport">
+  <button id="close-btn" onclick="window.close(); window.location.href='/';">✕ Close</button>
+  <div id="loading">Loading scene...</div>
+</div>
+
+<div id="sidebar"></div>
+
+<div id="controls">
+  <button id="play-btn">Play</button>
+  <input type="range" id="timeline" min="0" max="100" value="0">
+  <select id="speed-select">
+    <option value="0.25">0.25x</option>
+    <option value="0.5">0.5x</option>
+    <option value="1" selected>1x</option>
+    <option value="2">2x</option>
+  </select>
+  <select id="camera-select">
+    <option value="broadcast">Broadcast</option>
+    <option value="tactical">Tactical (top)</option>
+    <option value="behind-goal">Behind Goal</option>
+  </select>
+  <button id="skeleton-btn">Skeleton: ON</button>
+  <span id="info">Frame 0 / 0</span>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.164.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const TEAM_COLORS = { A: 0x3b82f6, B: 0xef4444, referee: 0xf59e0b, unknown: 0x6b7280 };
+const PITCH_L = 105, PITCH_W = 68;
+
+// ── Scene setup ──
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0a);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
+camera.position.set(52.5, 60, -50);
+camera.lookAt(52.5, 0, -34);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight - 50);
+document.getElementById('viewport').appendChild(renderer.domElement);
+document.getElementById('loading').remove();
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(52.5, 0, -34);
+controls.enableDamping = true;
+controls.update();
+
+// ── Lighting ──
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(52.5, 50, -34);
+scene.add(dirLight);
+
+// ── Pitch ──
+const pitchGeom = new THREE.PlaneGeometry(PITCH_L, PITCH_W);
+const pitchMat = new THREE.MeshStandardMaterial({ color: 0x1a5e1a, side: THREE.DoubleSide });
+const pitchMesh = new THREE.Mesh(pitchGeom, pitchMat);
+pitchMesh.rotation.x = -Math.PI / 2;
+pitchMesh.position.set(PITCH_L / 2, 0, -PITCH_W / 2);
+scene.add(pitchMesh);
+
+// Pitch lines
+const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.4 });
+function addLine(x1, z1, x2, z2) {
+  const pts = [new THREE.Vector3(x1, 0.01, -z1), new THREE.Vector3(x2, 0.01, -z2)];
+  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), lineMat));
+}
+// Boundary
+addLine(0, 0, PITCH_L, 0); addLine(PITCH_L, 0, PITCH_L, PITCH_W);
+addLine(PITCH_L, PITCH_W, 0, PITCH_W); addLine(0, PITCH_W, 0, 0);
+// Centre line
+addLine(PITCH_L/2, 0, PITCH_L/2, PITCH_W);
+// Centre circle
+const circPts = [];
+for (let a = 0; a <= Math.PI * 2; a += 0.1) {
+  circPts.push(new THREE.Vector3(PITCH_L/2 + 9.15*Math.cos(a), 0.01, -(PITCH_W/2 + 9.15*Math.sin(a))));
+}
+scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(circPts), lineMat));
+
+// ── State ──
+let metadata = null;
+let playerMeshes = {};
+let playerSkeletons = {};
+let totalFrames = 0;
+let currentFrame = 0;
+let playing = false;
+let speed = 1;
+let showSkeletons = true;
+let animationData = null; // raw positions from triangulation
+
+// ── Load data ──
+async function loadScene() {
+  // Try to load metadata
+  try {
+    const mRes = await fetch('/api/export/metadata');
+    if (mRes.ok) metadata = await mRes.json();
+  } catch (_) {}
+
+  // Load triangulation data for skeleton rendering
+  try {
+    const tRes = await fetch('/api/output/triangulation');
+    if (tRes.ok) animationData = await tRes.json();
+  } catch (_) {}
+
+  if (animationData && animationData.players) {
+    totalFrames = Math.max(...animationData.players.map(p => p.num_frames || 0));
+  } else if (metadata) {
+    totalFrames = metadata.total_frames || 0;
+  }
+
+  document.getElementById('timeline').max = String(Math.max(0, totalFrames - 1));
+
+  // Create player visualizations from triangulation data
+  if (animationData && animationData.players) {
+    const sidebar = document.getElementById('sidebar');
+    animationData.players.forEach(p => {
+      const color = TEAM_COLORS[p.team] || TEAM_COLORS.unknown;
+
+      // Skeleton lines group
+      const skelGroup = new THREE.Group();
+      skelGroup.name = p.player_id + '_skel';
+      scene.add(skelGroup);
+      playerSkeletons[p.player_id] = { group: skelGroup, data: p, color };
+
+      // Joint spheres group
+      const jointGroup = new THREE.Group();
+      jointGroup.name = p.player_id + '_joints';
+      const jointMat = new THREE.MeshBasicMaterial({ color });
+      for (let j = 0; j < 17; j++) {
+        const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.15, 6, 6), jointMat);
+        sphere.visible = false;
+        jointGroup.add(sphere);
+      }
+      scene.add(jointGroup);
+      playerMeshes[p.player_id] = jointGroup;
+
+      // Sidebar entry
+      const row = document.createElement('div');
+      row.className = 'player-row';
+      row.innerHTML = `<span class="player-dot" style="background:#${color.toString(16).padStart(6,'0')}"></span><span>${p.player_id}</span>`;
+      sidebar.appendChild(row);
+    });
+  }
+
+  updateFrame(0);
+}
+
+// COCO skeleton connections
+const SKELETON = [[0,1],[0,2],[1,3],[2,4],[5,6],[5,7],[7,9],[6,8],[8,10],[5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16]];
+
+function updateFrame(fi) {
+  currentFrame = fi;
+  document.getElementById('info').textContent = `Frame ${fi} / ${totalFrames}`;
+  document.getElementById('timeline').value = String(fi);
+
+  if (!animationData) return;
+
+  // Update each player
+  for (const p of animationData.players) {
+    const jointGroup = playerMeshes[p.player_id];
+    const skelInfo = playerSkeletons[p.player_id];
+    if (!jointGroup || !skelInfo) continue;
+
+    // Clear old skeleton lines
+    while (skelInfo.group.children.length) skelInfo.group.remove(skelInfo.group.children[0]);
+
+    if (fi >= p.positions.length) {
+      jointGroup.children.forEach(c => c.visible = false);
+      continue;
+    }
+
+    const joints = p.positions[fi];
+    const confs = p.confidences[fi];
+
+    // Update joint positions (convert pitch coords to Three.js: x, z=height, -y)
+    for (let j = 0; j < Math.min(17, joints.length); j++) {
+      const sphere = jointGroup.children[j];
+      const jt = joints[j];
+      if (!jt || isNaN(jt[0]) || confs[j] < 0.05) {
+        sphere.visible = false;
+        continue;
+      }
+      sphere.position.set(jt[0], jt[2] || 0, -(jt[1] || 0));
+      sphere.visible = true;
+    }
+
+    // Draw skeleton bones
+    if (showSkeletons) {
+      const boneMat = new THREE.LineBasicMaterial({
+        color: skelInfo.color,
+        transparent: true,
+        opacity: 0.7,
+      });
+      for (const [a, b] of SKELETON) {
+        const ja = joints[a], jb = joints[b];
+        if (!ja || !jb || isNaN(ja[0]) || isNaN(jb[0])) continue;
+        if (confs[a] < 0.05 || confs[b] < 0.05) continue;
+        const pts = [
+          new THREE.Vector3(ja[0], ja[2]||0, -(ja[1]||0)),
+          new THREE.Vector3(jb[0], jb[2]||0, -(jb[1]||0)),
+        ];
+        skelInfo.group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), boneMat));
+      }
+    }
+  }
+}
+
+// ── Controls ──
+const playBtn = document.getElementById('play-btn');
+const timeline = document.getElementById('timeline');
+const speedSelect = document.getElementById('speed-select');
+const cameraSelect = document.getElementById('camera-select');
+const skelBtn = document.getElementById('skeleton-btn');
+
+playBtn.addEventListener('click', () => {
+  playing = !playing;
+  playBtn.textContent = playing ? 'Pause' : 'Play';
+});
+
+timeline.addEventListener('input', () => updateFrame(parseInt(timeline.value)));
+speedSelect.addEventListener('change', () => { speed = parseFloat(speedSelect.value); });
+
+cameraSelect.addEventListener('change', () => {
+  const preset = cameraSelect.value;
+  if (preset === 'broadcast') { camera.position.set(52.5, 25, 50); }
+  else if (preset === 'tactical') { camera.position.set(52.5, 80, -34); }
+  else if (preset === 'behind-goal') { camera.position.set(-10, 10, -34); }
+  controls.target.set(52.5, 0, -34);
+  controls.update();
+});
+
+skelBtn.addEventListener('click', () => {
+  showSkeletons = !showSkeletons;
+  skelBtn.textContent = `Skeleton: ${showSkeletons ? 'ON' : 'OFF'}`;
+  updateFrame(currentFrame);
+});
+
+// ── Animation loop ──
+let lastTime = 0;
+let accumulator = 0;
+// Playback fps: prefer scene metadata, default to 30.  Read lazily each
+// frame so the first-frame race (metadata loaded asynchronously after
+// animate() starts ticking) resolves itself within one frame of landing.
+function getPlaybackFps() {
+  if (metadata && metadata.fps && metadata.fps > 0) return metadata.fps;
+  return 30;
+}
+
+function animate(time) {
+  requestAnimationFrame(animate);
+  const dt = (time - lastTime) / 1000;
+  lastTime = time;
+
+  if (playing && totalFrames > 0) {
+    accumulator += dt * speed;
+    const frameDt = 1 / getPlaybackFps();
+    while (accumulator >= frameDt) {
+      accumulator -= frameDt;
+      currentFrame = (currentFrame + 1) % totalFrames;
+    }
+    updateFrame(currentFrame);
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / (window.innerHeight - 50);
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight - 50);
+});
+
+// ── Init ──
+loadScene();
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

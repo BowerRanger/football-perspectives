@@ -2574,7 +2574,9 @@ function renderTriangulation(panel, data) {
   let currentFrame = 0;
   let playing = false;
   let animId = null;
-  const fps = players[0]?.fps || 25;
+  // Force playback at 30 fps regardless of the source clip's native fps so
+  // the preview animation doesn't depend on the browser's refresh rate.
+  const fps = 30;
 
   function drawFrame(fi) {
     const ctx = canvas.getContext('2d');
@@ -2656,19 +2658,37 @@ function renderTriangulation(panel, data) {
     frameInfo.textContent = `Frame ${fi + (players[0]?.start_frame || 0)} / ${slider.max}`;
   }
 
-  function tick() {
-    currentFrame++;
-    if (currentFrame >= parseInt(slider.max)) { currentFrame = 0; }
+  // Gate frame advancement by wall-clock time so playback runs at the
+  // configured fps regardless of the browser's refresh rate.
+  let lastTickMs = 0;
+  let frameAccum = 0;
+  function tick(nowMs) {
+    if (!playing) return;
+    if (lastTickMs === 0) lastTickMs = nowMs;
+    const dt = (nowMs - lastTickMs) / 1000;
+    lastTickMs = nowMs;
+    frameAccum += dt * fps;
+    const maxFrame = parseInt(slider.max);
+    while (frameAccum >= 1) {
+      frameAccum -= 1;
+      currentFrame++;
+      if (currentFrame >= maxFrame) currentFrame = 0;
+    }
     slider.value = String(currentFrame);
     drawFrame(currentFrame);
-    if (playing) animId = requestAnimationFrame(tick);
+    animId = requestAnimationFrame(tick);
   }
 
   playBtn.addEventListener('click', () => {
     playing = !playing;
     playBtn.textContent = playing ? '⏸' : '▶';
-    if (playing) animId = requestAnimationFrame(tick);
-    else if (animId) cancelAnimationFrame(animId);
+    if (playing) {
+      lastTickMs = 0;
+      frameAccum = 0;
+      animId = requestAnimationFrame(tick);
+    } else if (animId) {
+      cancelAnimationFrame(animId);
+    }
   });
 
   slider.addEventListener('input', () => {

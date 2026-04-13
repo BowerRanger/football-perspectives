@@ -28,6 +28,7 @@ from src.pipeline.base import BaseStage
 from src.schemas.calibration import CalibrationResult, CameraFrame
 from src.schemas.shots import ShotsManifest
 from src.utils.calibration_debug import render_shot_overlays
+from src.utils.calibration_refine import refine_shot_calibration
 from src.utils.neural_calibrator import NeuralCalibration, PnLCalibrator
 
 logger = logging.getLogger(__name__)
@@ -228,6 +229,7 @@ class CameraCalibrationStage(BaseStage):
 
         debug_overlay_enabled = bool(cfg.get("debug_overlay", True))
         debug_overlay_n_frames = int(cfg.get("debug_overlay_n_frames", 6))
+        line_refine_enabled = bool(cfg.get("line_refine", True))
 
         for shot in manifest.shots:
             result = self._calibrate_shot(
@@ -237,6 +239,20 @@ class CameraCalibrationStage(BaseStage):
                 max_keyframes=max_keyframes,
                 bounds=bounds,
             )
+            if line_refine_enabled and result.frames:
+                clip_path = self.output_dir / shot.clip_file
+                try:
+                    result, diagnostics = refine_shot_calibration(result, clip_path)
+                    n_accepted = sum(1 for d in diagnostics if d.accepted)
+                    if diagnostics:
+                        before = float(np.mean([d.initial_residual_px for d in diagnostics if np.isfinite(d.initial_residual_px)]) or 0.0)
+                        after = float(np.mean([d.refined_residual_px for d in diagnostics if np.isfinite(d.refined_residual_px)]) or 0.0)
+                        print(
+                            f"     line refine: {n_accepted}/{len(diagnostics)} keyframes "
+                            f"improved (residual {before:.1f} → {after:.1f} px)"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("line refine failed for %s: %s", shot.id, exc)
             result.save(cal_dir / f"{shot.id}_calibration.json")
             flag = " (no calibration frames — PnLCalib failed)" if not result.frames else ""
             print(f"  -> {shot.id}: {len(result.frames)} frames calibrated{flag}")

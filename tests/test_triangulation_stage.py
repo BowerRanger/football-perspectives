@@ -283,20 +283,44 @@ def test_triangulation_falls_back_to_second_view_for_name(tri_workspace):
     assert result.player_name == "Firmino"
 
 
-def test_triangulation_skips_player_with_only_one_calibrated_view(tri_workspace):
-    # Delete cam_b's calibration → player_id P001 has only 1 calibrated view.
+def test_triangulation_skips_player_with_only_one_calibrated_view_when_single_shot_disabled(tri_workspace):
+    """With ``allow_single_shot: false``, a player visible in only 1
+    calibrated shot is skipped entirely (strict multi-view behaviour)."""
     (tri_workspace / "calibration" / "cam_b_calibration.json").unlink()
 
     cfg = load_config()
+    cfg.setdefault("triangulation", {})["allow_single_shot"] = False
     TriangulationStage(config=cfg, output_dir=tri_workspace).run()
 
     assert not (tri_workspace / "triangulated" / "P001_3d_joints.npz").exists()
 
 
+def test_triangulation_single_shot_reconstructs_player_with_one_view(tri_workspace):
+    """With ``allow_single_shot: true`` (default), a player visible in only
+    1 calibrated shot still gets a 3D reconstruction via the foot-grounding
+    fallback."""
+    (tri_workspace / "calibration" / "cam_b_calibration.json").unlink()
+
+    cfg = load_config()
+    # allow_single_shot defaults to True so no explicit override.
+    TriangulationStage(config=cfg, output_dir=tri_workspace).run()
+
+    out_path = tri_workspace / "triangulated" / "P001_3d_joints.npz"
+    assert out_path.exists()
+
+    result = TriangulatedPlayer.load(out_path)
+    # Single-shot output should have n_views == 1 for the valid joints.
+    max_views = int(result.num_views.max())
+    assert max_views == 1
+    # And some frames should have valid position data.
+    valid = np.any(~np.isnan(result.positions[:, :, 0]), axis=1)
+    assert valid.any()
+
+
 def test_triangulation_skips_player_with_empty_calibrations(tri_workspace):
     """A shot whose calibration file exists but has an empty frames list
     (e.g., PnLCalib failed on every keyframe) should be treated as
-    uncalibrated."""
+    uncalibrated.  With single-shot disabled, this skips the player."""
     from src.schemas.calibration import CalibrationResult
 
     CalibrationResult(
@@ -304,6 +328,7 @@ def test_triangulation_skips_player_with_empty_calibrations(tri_workspace):
     ).save(tri_workspace / "calibration" / "cam_b_calibration.json")
 
     cfg = load_config()
+    cfg.setdefault("triangulation", {})["allow_single_shot"] = False
     TriangulationStage(config=cfg, output_dir=tri_workspace).run()
 
     assert not (tri_workspace / "triangulated" / "P001_3d_joints.npz").exists()

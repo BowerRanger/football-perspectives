@@ -33,6 +33,7 @@ from src.schemas.sync_map import SyncMap
 from src.schemas.tracks import TracksResult
 from src.schemas.triangulated import TriangulatedPlayer
 from src.utils.camera import build_projection_matrix
+from src.utils.single_shot_reconstruction import reconstruct_player as _single_shot_reconstruct
 from src.utils.triangulation import (
     enforce_bone_lengths,
     ransac_triangulate,
@@ -143,6 +144,12 @@ class TriangulationStage(BaseStage):
         savgol_order = int(cfg.get("savgol_order", 3))
         bone_tol = float(cfg.get("bone_length_tolerance", 0.2))
         ground_snap_vel = float(cfg.get("ground_snap_velocity", 0.1))
+        # Single-shot fallback: when only one calibrated view has the
+        # player at a given frame, reconstruct the 3D pose via
+        # foot-grounding + vertical-body assumption.  Multi-view
+        # triangulation is still used for frames where ≥2 calibrated
+        # views see the player.
+        allow_single_shot = bool(cfg.get("allow_single_shot", True))
 
         # ── Load inputs ──
         matches = PlayerMatches.load(
@@ -219,6 +226,7 @@ class TriangulationStage(BaseStage):
         )
 
         n_saved = 0
+        min_shots = 1 if allow_single_shot else 2
         for player in matches.matched_players:
             calibrated_views = [
                 v for v in player.views if v.shot_id in calibrated_shot_ids
@@ -228,12 +236,13 @@ class TriangulationStage(BaseStage):
             # triangulation treats as the same camera twice → degenerate).
             calibrated_views = _dedupe_views_by_shot(calibrated_views, poses_by_shot)
             unique_shots = {v.shot_id for v in calibrated_views}
-            if len(unique_shots) < 2:
+            if len(unique_shots) < min_shots:
                 logger.warning(
                     "Skipping %s: only %d unique calibrated shot(s) — "
-                    "triangulation requires ≥2 distinct cameras",
+                    "requires ≥%d",
                     player.player_id,
                     len(unique_shots),
+                    min_shots,
                 )
                 continue
 
@@ -248,6 +257,7 @@ class TriangulationStage(BaseStage):
                 poses_by_shot=poses_by_shot,
                 min_conf=min_conf,
                 ransac_thresh=ransac_thresh,
+                allow_single_shot=allow_single_shot,
             )
             if triangulated is None:
                 logger.warning(
@@ -295,8 +305,14 @@ class TriangulationStage(BaseStage):
         poses_by_shot: dict[str, dict[str, dict[int, list[Keypoint]]]],
         min_conf: float,
         ransac_thresh: float,
+        allow_single_shot: bool,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
         """Triangulate a single player across all frames.
+
+        Per-frame, picks between:
+          - Multi-view triangulation (≥2 calibrated views with pose data)
+          - Single-shot reconstruction (exactly 1 view, if enabled)
+          - NaN (no calibrated view with pose data)
 
         Returns ``(positions, confidences, reproj_errors, n_views)`` or
         ``None`` if every frame ends up NaN.
@@ -309,7 +325,9 @@ class TriangulationStage(BaseStage):
 
         for fi, ref_frame in enumerate(frame_range):
             # Gather interpolated calibrations + keypoints for each view.
-            view_data: list[tuple[np.ndarray, list[Keypoint]]] = []
+            view_data: list[
+                tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[Keypoint]]
+            ] = []  # (shot_id, P, K, rvec, tvec, keypoints)
             for view in calibrated_views:
                 offset = sync_offsets.get(view.shot_id, 0)
                 local_frame = ref_frame - offset
@@ -329,38 +347,59 @@ class TriangulationStage(BaseStage):
                     continue
 
                 P = build_projection_matrix(cal.K, cal.rvec, cal.tvec)
-                view_data.append((P, keypoints))
-
-            # Strict multi-view: require ≥ 2 observations per joint.
-            if len(view_data) < 2:
-                continue
-
-            for j in range(_N_COCO_JOINTS):
-                obs_P: list[np.ndarray] = []
-                obs_uv: list[np.ndarray] = []
-                obs_w: list[float] = []
-                for P, keypoints in view_data:
-                    if j >= len(keypoints):
-                        continue
-                    kp = keypoints[j]
-                    if kp.conf < min_conf:
-                        continue
-                    obs_P.append(P)
-                    obs_uv.append(np.array([kp.x, kp.y], dtype=np.float64))
-                    obs_w.append(kp.conf)
-
-                if len(obs_P) < 2:
-                    continue
-
-                pt, err, nv = ransac_triangulate(
-                    obs_P, obs_uv, obs_w, threshold=ransac_thresh,
+                view_data.append(
+                    (view.shot_id, P, cal.K, cal.rvec, cal.tvec, keypoints),
                 )
-                if np.any(np.isnan(pt)):
-                    continue
-                positions[fi, j] = pt
-                confidences[fi, j] = float(np.mean(obs_w))
-                reproj_errors[fi, j] = err
-                n_views_arr[fi, j] = nv
+
+            n_views = len(view_data)
+            unique_shots_at_frame = {vd[0] for vd in view_data}
+
+            if len(unique_shots_at_frame) >= 2:
+                # Multi-view path: weighted DLT per joint, RANSAC over inliers.
+                for j in range(_N_COCO_JOINTS):
+                    obs_P: list[np.ndarray] = []
+                    obs_uv: list[np.ndarray] = []
+                    obs_w: list[float] = []
+                    for _sid, P, _K, _rv, _tv, keypoints in view_data:
+                        if j >= len(keypoints):
+                            continue
+                        kp = keypoints[j]
+                        if kp.conf < min_conf:
+                            continue
+                        obs_P.append(P)
+                        obs_uv.append(np.array([kp.x, kp.y], dtype=np.float64))
+                        obs_w.append(kp.conf)
+
+                    if len(obs_P) < 2:
+                        continue
+
+                    pt, err, nv = ransac_triangulate(
+                        obs_P, obs_uv, obs_w, threshold=ransac_thresh,
+                    )
+                    if np.any(np.isnan(pt)):
+                        continue
+                    positions[fi, j] = pt
+                    confidences[fi, j] = float(np.mean(obs_w))
+                    reproj_errors[fi, j] = err
+                    n_views_arr[fi, j] = nv
+            elif n_views == 1 and allow_single_shot:
+                # Single-shot fallback: foot-grounding + vertical body axis.
+                _sid, _P, K, rvec, tvec, keypoints = view_data[0]
+                result = _single_shot_reconstruct(
+                    keypoints=keypoints,
+                    K=K, rvec=rvec, tvec=tvec,
+                    min_foot_confidence=min_conf,
+                    min_joint_confidence=min_conf,
+                )
+                if result is not None:
+                    positions[fi] = result.positions
+                    confidences[fi] = result.confidences
+                    # Mark all valid joints as 1-view
+                    valid_mask = ~np.isnan(result.positions[:, 0])
+                    n_views_arr[fi, valid_mask] = 1
+                    # Reprojection error is not meaningful for single-shot
+                    # reconstruction; leave it NaN.
+            # else: no calibrated view at this frame → NaN stays
 
         if not np.any(~np.isnan(positions[:, :, 0])):
             return None

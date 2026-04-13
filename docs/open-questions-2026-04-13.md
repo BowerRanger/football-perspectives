@@ -14,6 +14,57 @@ Each entry: **Question**, **What I picked**, **Why**.
 
 ---
 
+## 2026-04-13 — End-of-session state + remaining issues
+
+After the four chunks (debug overlay, line refinement, cross-shot
+alignment, ball reconstruction) shipped:
+
+**Player coverage on existing data** (origi01 + origi02):
+- 26 players triangulated (was 24)
+- Player x range: [-59.6, 110.5] m (FIFA pitch is 0–105)
+- Player y range: [0.2, 67.9] m (FIFA pitch is 0–68) — full width covered ✓
+- 51 % of player frames in the x > 50 half
+- 5 % within 10 m of near touchline, 6 % within 10 m of far touchline
+
+**Remaining issue — off-pitch outliers**: some single-shot
+reconstructions back-project the foot anchor to far-off-pitch
+coordinates (down to x = -59 m).  The
+`_MAX_HORIZONTAL_OFFSET_M = 1.5 m` clamp in
+`single_shot_reconstruction.py` only bounds joint distances *from the
+foot anchor*; it doesn't reject implausible foot anchors themselves.
+Worth adding a foot-anchor plausibility filter
+(`-15 ≤ x ≤ 120, -15 ≤ y ≤ 83`) like the one already used in
+`calibration_align._gather_correspondences`.  Not done in this session;
+flagged for next iteration.
+
+**Remaining issue — calibration is still imperfect**: cross-shot
+alignment residual stayed around 17 m (median back-projection
+disagreement).  Means the per-shot calibrations are still off by
+several metres each.  The line refinement only fixes the dominant pan
+error; tilt + focal length are not yet refined.  An
+iterative-closest-line refinement against the painted markings (centre
+circle, penalty box edges) using LM would push this further — flagged
+for next iteration.
+
+**Remaining issue — ball needs tracking re-run**: the existing
+`output/tracks/` files predate the tracking-stage change that lets ball
+detections through ByteTrack.  To activate ball reconstruction the
+user needs to re-run the tracking stage:
+```
+python recon.py run --output output --from-stage tracking
+```
+This is slow (re-detects players on every frame) but unavoidable
+without persisting a separate ball track.  Alternative: write a one-off
+script that re-runs only ball detection on existing shots and merges
+the result into the existing tracks files.  Not done in this session.
+
+**Verification artefacts saved**:
+- `output/calibration/debug/<shot>/frame_NNNN.jpg` — annotated
+  keyframes for visual calibration inspection
+- `docs/open-questions-2026-04-13.md` — this file
+
+---
+
 ## 2026-04-13 — Calibration debug overlay findings
 
 **Calibration quality verdict from the debug overlay**: PnLCalib's

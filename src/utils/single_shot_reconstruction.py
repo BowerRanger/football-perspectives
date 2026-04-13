@@ -144,6 +144,14 @@ def reconstruct_player(
     )
     if foot_world is None:
         return None
+    # Plausibility: the foot anchor must land within a generous bounding
+    # box around the FIFA pitch.  Camera rays nearly tangent to the
+    # ground plane back-project to wildly off-pitch positions, and
+    # we don't want those polluting the bird's-eye view.
+    if not (-15.0 <= float(foot_world[0]) <= 120.0):
+        return None
+    if not (-15.0 <= float(foot_world[1]) <= 83.0):
+        return None
 
     positions = np.full((_N_COCO_JOINTS, 3), np.nan, dtype=np.float32)
     confidences = np.zeros(_N_COCO_JOINTS, dtype=np.float32)

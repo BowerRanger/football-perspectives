@@ -69,6 +69,39 @@ def _build_track_metadata(
     }
 
 
+def _dedupe_views_by_shot(
+    views: list[PlayerView],
+    poses_by_shot: dict[str, dict[str, dict[int, list[Keypoint]]]],
+) -> list[PlayerView]:
+    """Collapse a player's views to at most one per shot.
+
+    The matching stage can group several tracks from the same shot under
+    one ``player_id``.  Triangulation needs **distinct cameras** — two
+    observations from the same camera are geometrically degenerate (both
+    rays originate at the same camera centre), so feeding duplicate-shot
+    views into weighted DLT produces garbage.
+
+    For each shot we keep the view whose track has the most pose frames
+    in that shot, which is a simple heuristic for "the main track" when
+    matching has merged a primary track with a brief spurious copy.
+    """
+    by_shot: dict[str, PlayerView] = {}
+    for view in views:
+        existing = by_shot.get(view.shot_id)
+        if existing is None:
+            by_shot[view.shot_id] = view
+            continue
+        existing_frames = len(
+            poses_by_shot.get(view.shot_id, {}).get(existing.track_id, {})
+        )
+        new_frames = len(
+            poses_by_shot.get(view.shot_id, {}).get(view.track_id, {})
+        )
+        if new_frames > existing_frames:
+            by_shot[view.shot_id] = view
+    return list(by_shot.values())
+
+
 def _pick_player_identity(
     player: MatchedPlayer,
     track_meta_by_shot: dict[str, dict[str, tuple[str, str, str]]],
@@ -190,12 +223,17 @@ class TriangulationStage(BaseStage):
             calibrated_views = [
                 v for v in player.views if v.shot_id in calibrated_shot_ids
             ]
-            if len(calibrated_views) < 2:
+            # Collapse duplicate-shot entries (matching stage sometimes groups
+            # multiple tracks from the same shot under one player_id, which
+            # triangulation treats as the same camera twice → degenerate).
+            calibrated_views = _dedupe_views_by_shot(calibrated_views, poses_by_shot)
+            unique_shots = {v.shot_id for v in calibrated_views}
+            if len(unique_shots) < 2:
                 logger.warning(
-                    "Skipping %s: only %d calibrated view(s) — triangulation "
-                    "requires ≥2",
+                    "Skipping %s: only %d unique calibrated shot(s) — "
+                    "triangulation requires ≥2 distinct cameras",
                     player.player_id,
-                    len(calibrated_views),
+                    len(unique_shots),
                 )
                 continue
 

@@ -64,19 +64,29 @@ def tri_workspace(tmp_path) -> Path:
     K_a, rvec_a, tvec_a = _synthetic_camera(offset_y=-34.0)
     K_b, rvec_b, tvec_b = _synthetic_camera(offset_y=-100.0)
 
+    # Calibration with keyframes spanning the full pose range (0..9) so the
+    # CalibrationInterpolator's strict-range check doesn't reject frames.
+    def _cal_frames(K, rvec, tvec):
+        return [
+            CameraFrame(frame=0, intrinsic_matrix=K, rotation_vector=rvec,
+                        translation_vector=tvec, reprojection_error=0.5,
+                        num_correspondences=8, confidence=0.9),
+            CameraFrame(frame=9, intrinsic_matrix=K, rotation_vector=rvec,
+                        translation_vector=tvec, reprojection_error=0.5,
+                        num_correspondences=8, confidence=0.9),
+        ]
+
     cal_dir = root / "calibration"
     cal_dir.mkdir()
     CalibrationResult(
         shot_id="cam_a",
         camera_type="static",
-        frames=[CameraFrame(frame=0, intrinsic_matrix=K_a, rotation_vector=rvec_a, translation_vector=tvec_a,
-                            reprojection_error=0.5, num_correspondences=8, confidence=0.9)],
+        frames=_cal_frames(K_a, rvec_a, tvec_a),
     ).save(cal_dir / "cam_a_calibration.json")
     CalibrationResult(
         shot_id="cam_b",
         camera_type="static",
-        frames=[CameraFrame(frame=0, intrinsic_matrix=K_b, rotation_vector=rvec_b, translation_vector=tvec_b,
-                            reprojection_error=0.5, num_correspondences=8, confidence=0.9)],
+        frames=_cal_frames(K_b, rvec_b, tvec_b),
     ).save(cal_dir / "cam_b_calibration.json")
 
     # Player matches: one player visible in both cameras
@@ -302,33 +312,6 @@ def test_triangulation_skips_player_with_empty_calibrations(tri_workspace):
 # ── CalibrationInterpolator tests ───────────────────────────────────────────
 
 
-def test_interpolator_single_keyframe_returns_same_values():
-    from src.schemas.calibration import CalibrationResult, CameraFrame
-    from src.utils.triangulation_calib import CalibrationInterpolator
-
-    cal = CalibrationResult(
-        shot_id="t",
-        camera_type="static",
-        frames=[
-            CameraFrame(
-                frame=0,
-                intrinsic_matrix=[[3000.0, 0.0, 960.0], [0.0, 3000.0, 540.0], [0.0, 0.0, 1.0]],
-                rotation_vector=[1.3, -0.1, 0.0],
-                translation_vector=[-30.0, -34.0, 40.0],
-                reprojection_error=0.0,
-                num_correspondences=0,
-                confidence=1.0,
-            )
-        ],
-    )
-    interp = CalibrationInterpolator(cal)
-    r = interp.at(100)
-    assert r is not None
-    assert r.K[0, 0] == 3000.0
-    np.testing.assert_allclose(r.rvec, [1.3, -0.1, 0.0])
-    np.testing.assert_allclose(r.tvec, [-30.0, -34.0, 40.0])
-
-
 def test_interpolator_two_keyframes_preserves_world_position():
     from src.schemas.calibration import CalibrationResult, CameraFrame
     from src.utils.triangulation_calib import CalibrationInterpolator
@@ -372,7 +355,11 @@ def test_interpolator_two_keyframes_preserves_world_position():
         assert r.K[0, 0] == pytest.approx(expected_fx, rel=1e-6)
 
 
-def test_interpolator_clamps_outside_range():
+def test_interpolator_returns_none_outside_range():
+    """Broadcast cameras pan continuously, so extrapolating the rotation
+    outside the keyframe range would use a rotation from a totally different
+    camera orientation.  ``at()`` must return ``None`` instead of clamping.
+    """
     from src.schemas.calibration import CalibrationResult, CameraFrame
     from src.utils.triangulation_calib import CalibrationInterpolator
 
@@ -397,12 +384,38 @@ def test_interpolator_clamps_outside_range():
     cal = CalibrationResult(shot_id="t", camera_type="static", frames=[cf0, cf1])
     interp = CalibrationInterpolator(cal)
 
-    # Frame 0 is before the first keyframe — should clamp to keyframe 10.
-    r0 = interp.at(0)
-    assert r0 is not None
-    assert r0.K[0, 0] == pytest.approx(2000.0)
+    # Frame 0 is before the first keyframe — must be None.
+    assert interp.at(0) is None
+    # Frame 100 is after the last keyframe — must be None.
+    assert interp.at(100) is None
+    # Exactly at the first / last keyframe — must return data.
+    assert interp.at(10) is not None
+    assert interp.at(50) is not None
 
-    # Frame 100 is after the last keyframe — should clamp to keyframe 50.
-    r100 = interp.at(100)
-    assert r100 is not None
-    assert r100.K[0, 0] == pytest.approx(4000.0)
+
+def test_interpolator_single_keyframe_only_covers_that_frame():
+    """A single-keyframe calibration has a zero-width keyframe range.  Only
+    that exact frame gets a valid interpolation; all other frames are None.
+    """
+    from src.schemas.calibration import CalibrationResult, CameraFrame
+    from src.utils.triangulation_calib import CalibrationInterpolator
+
+    cal = CalibrationResult(
+        shot_id="t",
+        camera_type="static",
+        frames=[
+            CameraFrame(
+                frame=5,
+                intrinsic_matrix=[[3000.0, 0.0, 960.0], [0.0, 3000.0, 540.0], [0.0, 0.0, 1.0]],
+                rotation_vector=[1.3, 0.0, 0.0],
+                translation_vector=[-30.0, -34.0, 40.0],
+                reprojection_error=0.0,
+                num_correspondences=0,
+                confidence=1.0,
+            ),
+        ],
+    )
+    interp = CalibrationInterpolator(cal)
+    assert interp.at(4) is None
+    assert interp.at(5) is not None
+    assert interp.at(6) is None

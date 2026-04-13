@@ -386,14 +386,37 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             for npz_path in npz_files:
                 data = _np.load(npz_path, allow_pickle=False)
                 pid = str(data["player_id"])
+                # Prefer the name/team stored in the NPZ (carried from
+                # tracks via triangulation); fall back to matching for older
+                # NPZs that predate the schema change.
+                pname = str(data["player_name"]) if "player_name" in data else ""
+                nteam = str(data["team"]) if "team" in data else ""
+                if not nteam:
+                    nteam = teams.get(pid, "unknown")
+                # NaN → None in the JSON payload so the bird's-eye renderer
+                # can distinguish "no data" from "position (0,0,0)".
+                positions = data["positions"]
+                confidences = data["confidences"]
+                pos_list = [
+                    [
+                        [None if _np.isnan(v) else float(v) for v in joint]
+                        for joint in frame
+                    ]
+                    for frame in positions
+                ]
+                conf_list = [
+                    [None if _np.isnan(c) else float(c) for c in frame]
+                    for frame in confidences
+                ]
                 players.append({
                     "player_id": pid,
-                    "team": teams.get(pid, "unknown"),
+                    "player_name": pname,
+                    "team": nteam,
                     "fps": float(data["fps"]),
                     "start_frame": int(data["start_frame"]),
-                    "num_frames": int(data["positions"].shape[0]),
-                    "positions": _np.nan_to_num(data["positions"], nan=0.0).tolist(),
-                    "confidences": _np.nan_to_num(data["confidences"], nan=0.0).tolist(),
+                    "num_frames": int(positions.shape[0]),
+                    "positions": pos_list,
+                    "confidences": conf_list,
                 })
             return {"players": players}
 

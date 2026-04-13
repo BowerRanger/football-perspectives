@@ -90,40 +90,48 @@ class CalibrationInterpolator:
     def at(self, frame_idx: int) -> InterpolatedCalibration | None:
         """Return interpolated calibration at ``frame_idx``.
 
-        Returns ``None`` if there are no keyframes.
+        Returns ``None`` when there are no keyframes, or when ``frame_idx``
+        falls outside the keyframe range ``[first_keyframe, last_keyframe]``.
+        Extrapolation is deliberately **not** supported: broadcast cameras
+        pan continuously, so clamping to the nearest keyframe would produce
+        a rotation from a totally different camera orientation.  Callers
+        should treat ``None`` as "no calibration data for this frame".
         """
         if self.is_empty:
             return None
 
-        clamped = int(
-            np.clip(frame_idx, self._keyframe_indices[0], self._keyframe_indices[-1]),
-        )
+        first_kf = int(self._keyframe_indices[0])
+        last_kf = int(self._keyframe_indices[-1])
+        if frame_idx < first_kf or frame_idx > last_kf:
+            return None
 
         if self._slerp is None:
-            # Single keyframe: return it directly regardless of frame_idx.
+            # Single keyframe: by the out-of-range check above, frame_idx
+            # must equal first_kf == last_kf.
             cf = self._frames[0]
             rvec = np.asarray(cf.rotation_vector, dtype=np.float64)
             tvec = np.asarray(cf.translation_vector, dtype=np.float64)
             K = np.asarray(cf.intrinsic_matrix, dtype=np.float64)
             return InterpolatedCalibration(K=K, rvec=rvec, tvec=tvec)
 
-        # Rotation via SLERP (scipy handles the bracketing internally)
-        rotation = self._slerp([float(clamped)])[0]
+        target = int(frame_idx)
+
+        # Rotation via SLERP (scipy handles the bracketing internally).
+        rotation = self._slerp([float(target)])[0]
         rvec = rotation.as_rotvec()
 
-        # Focal length via linear interp
-        fx = float(np.interp(clamped, self._keyframe_indices, self._fx_values))
-        fy = float(np.interp(clamped, self._keyframe_indices, self._fy_values))
-        # Principal point (usually constant but interpolate for safety)
-        cx = float(np.interp(clamped, self._keyframe_indices, self._principal_points[:, 0]))
-        cy = float(np.interp(clamped, self._keyframe_indices, self._principal_points[:, 1]))
+        # Focal length via linear interp between bracketing keyframes.
+        fx = float(np.interp(target, self._keyframe_indices, self._fx_values))
+        fy = float(np.interp(target, self._keyframe_indices, self._fy_values))
+        cx = float(np.interp(target, self._keyframe_indices, self._principal_points[:, 0]))
+        cy = float(np.interp(target, self._keyframe_indices, self._principal_points[:, 1]))
 
         K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64)
 
         # Translation: recompute from the world position implied by the
         # nearest keyframe so we stay consistent with the static-camera
         # guarantee from the calibration stage.  Position C = -R_key^T @ t_key.
-        nearest_idx = int(np.argmin(np.abs(self._keyframe_indices - clamped)))
+        nearest_idx = int(np.argmin(np.abs(self._keyframe_indices - target)))
         nearest = self._frames[nearest_idx]
         R_key, _ = _rodrigues(np.asarray(nearest.rotation_vector, dtype=np.float64))
         t_key = np.asarray(nearest.translation_vector, dtype=np.float64)

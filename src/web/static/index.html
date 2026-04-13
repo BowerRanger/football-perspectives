@@ -2514,42 +2514,72 @@ function renderTriangulation(panel, data) {
   const players = data.players || [];
   if (!players.length) { renderNoOutput(); return; }
 
+  // Count non-null valid frames per player (NaN is null in JSON).
+  const validFramesCount = p => {
+    let n = 0;
+    for (let fi = 0; fi < p.positions.length; fi++) {
+      const frame = p.positions[fi];
+      for (let ji = 0; ji < frame.length; ji++) {
+        const j = frame[ji];
+        if (j && j[0] !== null && !isNaN(j[0])) { n++; break; }
+      }
+    }
+    return n;
+  };
+
   // ── Summary table ──
   const { wrap, body } = makePanel(`Triangulated Players (${players.length})`);
-  const { t, tbody } = makeTable(['Player', 'Team', 'Frames', 'Avg Confidence', 'Avg Views']);
+  const { t, tbody } = makeTable(['Player', 'Name', 'Team', 'Valid Frames', 'Avg Confidence']);
 
   players.forEach(p => {
-    const confs = p.confidences.flat();
+    const confs = (p.confidences || []).flat().filter(c => c !== null && !isNaN(c));
     const validConfs = confs.filter(c => c > 0);
     const avgConf = validConfs.length ? validConfs.reduce((a,b)=>a+b,0)/validConfs.length : 0;
-    // Count average views per joint per frame from positions (non-NaN)
-    let totalViews = 0, countViews = 0;
-    p.positions.forEach(frame => {
-      frame.forEach(joint => {
-        if (joint[0] !== null && !isNaN(joint[0])) { totalViews++; countViews++; }
-      });
-    });
     const teamCls = p.team === 'A' ? 'team-a' : p.team === 'B' ? 'team-b' :
                     p.team === 'referee' ? 'team-ref' : 'team-unk';
     addRow(tbody, [
       p.player_id,
+      p.player_name || '—',
       { html: `<span class="${teamCls}">${p.team}</span>` },
-      p.num_frames,
+      `${validFramesCount(p)} / ${p.num_frames}`,
       { html: `<span class="${avgConf>0.5?'cell-green':avgConf>0.2?'cell-amber':'cell-red'}">${avgConf.toFixed(2)}</span>` },
-      fmt(totalViews / Math.max(1, p.num_frames * 17), 1),
     ]);
   });
 
-  // ── Bird's-eye skeleton viewer (above the table) ──
-  const { wrap: vizWrap, body: vizBody } = makePanel('Bird\'s-Eye View');
+  // ── Preview panel: bird's-eye canvas + reference shot video ──
+  const { wrap: vizWrap, body: vizBody } = makePanel('Bird\'s-Eye View + Reference Shot');
 
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:14px;padding:8px;align-items:flex-start;flex-wrap:wrap;';
+
+  // Left: bird's eye canvas
   const canvas = document.createElement('canvas');
-  const cw = 800, ch = 520;
+  const cw = 640, ch = 420;
   canvas.width = cw; canvas.height = ch;
-  canvas.style.cssText = 'display:block;margin:0 auto;border-radius:6px;';
-  vizBody.appendChild(canvas);
+  canvas.style.cssText = 'display:block;border-radius:6px;flex:0 0 auto;';
+  row.appendChild(canvas);
 
-  // Controls bar
+  // Right: reference shot <video> + 2D pose overlay canvas
+  const rightCol = document.createElement('div');
+  rightCol.style.cssText = 'position:relative;flex:0 0 auto;width:640px;';
+  const refVideo = document.createElement('video');
+  refVideo.preload = 'metadata';
+  refVideo.muted = true;
+  refVideo.playsInline = true;
+  refVideo.style.cssText = 'display:block;width:100%;height:auto;border-radius:6px;background:#000;';
+  const refOverlay = document.createElement('canvas');
+  refOverlay.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;width:100%;height:100%;';
+  const refLabel = document.createElement('div');
+  refLabel.style.cssText = 'font-size:11px;color:#94a3b8;padding:4px 0;';
+  refLabel.textContent = 'Loading reference shot…';
+  rightCol.appendChild(refVideo);
+  rightCol.appendChild(refOverlay);
+  rightCol.appendChild(refLabel);
+  row.appendChild(rightCol);
+
+  vizBody.appendChild(row);
+
+  // Controls bar (drives BOTH canvases — unified playhead)
   const controls = document.createElement('div');
   controls.style.cssText = 'display:flex;align-items:center;gap:12px;padding:8px 12px;';
 
@@ -2639,39 +2669,44 @@ function renderTriangulation(panel, data) {
     ctx.strokeRect(gaRightX, gaYTop, PITCH_RIGHT - gaRightX, gaYBot - gaYTop);
   }
 
+  // Valid-joint predicate — positions carry `null` for NaN values from the
+  // API, so we check both `null` and `NaN`.
+  const _isValid = v => v !== null && v !== undefined && !isNaN(v);
+
   function drawFrame(fi) {
     const ctx = canvas.getContext('2d');
     drawPitchInline(ctx);
 
-    // Draw skeletons
+    // Draw skeletons (bird's-eye, top-down pitch coords)
     players.forEach(p => {
       if (fi >= p.positions.length) return;
       const joints = p.positions[fi];
       const confs = p.confidences[fi];
       const color = TEAM_COLORS[p.team] || TEAM_COLORS.unknown;
 
-      // Draw bones
+      // Bones
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.globalAlpha = 0.7;
       for (const [a, b] of SKELETON) {
         const ja = joints[a], jb = joints[b];
-        if (!ja || !jb || isNaN(ja[0]) || isNaN(jb[0])) continue;
-        if (confs[a] < 0.05 || confs[b] < 0.05) continue;
+        if (!ja || !jb) continue;
+        if (!_isValid(ja[0]) || !_isValid(jb[0])) continue;
+        const ca = confs ? confs[a] : 1, cb = confs ? confs[b] : 1;
+        if ((ca ?? 0) < 0.05 || (cb ?? 0) < 0.05) continue;
         ctx.beginPath();
         ctx.moveTo(toX(ja[0]), toY(ja[1]));
         ctx.lineTo(toX(jb[0]), toY(jb[1]));
         ctx.stroke();
       }
 
-      // Draw joints
+      // Joints
       ctx.globalAlpha = 1.0;
       for (let j = 0; j < joints.length; j++) {
         const jt = joints[j];
-        if (!jt || isNaN(jt[0])) continue;
-        const c = confs[j];
+        if (!jt || !_isValid(jt[0])) continue;
+        const c = confs ? (confs[j] ?? 0) : 1;
         if (c < 0.05) continue;
-        // Confidence heatmap: green (high) → red (low)
         const r = Math.round(255 * (1 - c));
         const g = Math.round(255 * c);
         ctx.fillStyle = `rgb(${r},${g},60)`;
@@ -2681,8 +2716,119 @@ function renderTriangulation(panel, data) {
       }
     });
 
-    frameInfo.textContent = `Frame ${fi + (players[0]?.start_frame || 0)} / ${slider.max}`;
+    // Drive the reference-shot video + pose overlay in sync with the
+    // bird's-eye playhead.  The triangulation output's `start_frame`
+    // is the reference frame of index 0, and the reference shot is
+    // (by sync-map convention) at offset 0, so we can seek directly.
+    syncReferenceShot(fi);
+
+    const refFrame = fi + (players[0]?.start_frame || 0);
+    frameInfo.textContent = `Frame ${refFrame} / ${slider.max}`;
   }
+
+  // ── Reference shot video + 2D pose overlay ──
+  // Async state populated after fetches resolve.  drawFrame() guards
+  // on these before accessing them.
+  let refShotId = null;
+  let refPoseByTrack = null; // { track_id: {frame_int: keypoints[]} }
+  let refVideoReady = false;
+  let refVideoDurationS = 0;
+
+  function drawPoseOverlay(fi) {
+    if (!refOverlay.width || !refPoseByTrack) return;
+    const ctx = refOverlay.getContext('2d');
+    ctx.clearRect(0, 0, refOverlay.width, refOverlay.height);
+
+    // reference shot's local frame = reference-time frame (offset 0 for the
+    // reference shot by definition of the sync map)
+    const refFrame = fi + (players[0]?.start_frame || 0);
+
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = 'rgba(99, 102, 241, 0.9)';
+    ctx.fillStyle = 'rgba(245, 245, 245, 1.0)';
+
+    for (const trackId in refPoseByTrack) {
+      const kps = refPoseByTrack[trackId][refFrame];
+      if (!kps) continue;
+      // Bones
+      for (const [a, b] of SKELETON) {
+        const ka = kps[a], kb = kps[b];
+        if (!ka || !kb) continue;
+        if ((ka.conf ?? 0) < 0.3 || (kb.conf ?? 0) < 0.3) continue;
+        ctx.beginPath();
+        ctx.moveTo(ka.x, ka.y);
+        ctx.lineTo(kb.x, kb.y);
+        ctx.stroke();
+      }
+      // Joints
+      for (const kp of kps) {
+        if ((kp.conf ?? 0) < 0.3) continue;
+        ctx.beginPath();
+        ctx.arc(kp.x, kp.y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function syncReferenceShot(fi) {
+    if (!refVideoReady) return;
+    const refFrame = fi + (players[0]?.start_frame || 0);
+    const targetTime = refFrame / fps;
+    if (targetTime < 0 || targetTime > refVideoDurationS) return;
+    // Only correct video time when drift exceeds 120ms so the browser
+    // doesn't have to seek every frame.
+    if (Math.abs(refVideo.currentTime - targetTime) > 0.12) {
+      refVideo.currentTime = targetTime;
+    }
+    drawPoseOverlay(fi);
+  }
+
+  // Fire-and-forget load of reference-shot video + pose data
+  (async () => {
+    try {
+      const syncRes = await fetch('/api/output/sync');
+      if (syncRes.ok) {
+        const sync = await syncRes.json();
+        refShotId = sync.reference_shot;
+      }
+    } catch (_) {}
+    if (!refShotId) {
+      refLabel.textContent = 'No reference shot found in sync map.';
+      return;
+    }
+    refLabel.textContent = `Reference shot: ${refShotId}`;
+
+    refVideo.src = `/api/video/${refShotId}`;
+    refVideo.addEventListener('loadedmetadata', () => {
+      refOverlay.width = refVideo.videoWidth || 1920;
+      refOverlay.height = refVideo.videoHeight || 1080;
+      refVideoDurationS = refVideo.duration || 0;
+      refVideoReady = true;
+      drawFrame(currentFrame);
+    });
+    refVideo.addEventListener('error', () => {
+      refLabel.textContent = `Reference shot: ${refShotId} — video failed to load`;
+    });
+
+    try {
+      const poseRes = await fetch('/api/output/pose');
+      if (poseRes.ok) {
+        const poseData = await poseRes.json();
+        const shotBlock = poseData.shots?.[refShotId];
+        if (shotBlock && Array.isArray(shotBlock.players)) {
+          refPoseByTrack = {};
+          for (const pl of shotBlock.players) {
+            const map = {};
+            for (const pf of (pl.frames || [])) {
+              map[pf.frame] = pf.keypoints;
+            }
+            refPoseByTrack[pl.track_id] = map;
+          }
+          drawFrame(currentFrame);
+        }
+      }
+    } catch (_) {}
+  })();
 
   // Gate frame advancement by wall-clock time so playback runs at the
   // configured fps regardless of the browser's refresh rate.

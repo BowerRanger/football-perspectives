@@ -707,11 +707,280 @@ function renderCalibration(panel, data) {
   refineBar.appendChild(refineBtn);
   panel.appendChild(refineBar);
 
-  // ── 3D Camera Position Viewer ──
-  renderCalibrationCameraView(panel, data);
+  // ── Video + pitch-line overlay viewer ──
+  renderCalibrationVideoOverlay(panel, data);
 }
 
-function renderCalibrationCameraView(panel, data) {
+// ── Canonical FIFA pitch line geometry (mirror of src/utils/pitch_lines.py) ──
+// Each entry is an (N, 3) world-coordinate polyline.  Linear interpolation
+// between samples is enough for a visually-smooth projection.
+const PITCH_L = 105.0;
+const PITCH_W = 68.0;
+const _CIRCLE_R_PL = 9.15;
+const _GOAL_HALF = 7.32 / 2.0;
+const _GOAL_HEIGHT = 2.44;
+const _18Y_INSET = 16.5;
+const _6Y_INSET = 5.5;
+const _PEN_X_LEFT = 11.0;
+const _PEN_X_RIGHT = PITCH_L - _PEN_X_LEFT;
+
+function _segmentLine(p0, p1, n) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    out.push([
+      p0[0] + (p1[0] - p0[0]) * t,
+      p0[1] + (p1[1] - p0[1]) * t,
+      p0[2] + (p1[2] - p0[2]) * t,
+    ]);
+  }
+  return out;
+}
+
+function _arcPL(cx, cy, r, t0, t1, n) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const t = t0 + (t1 - t0) * (i / (n - 1));
+    out.push([cx + r * Math.cos(t), cy + r * Math.sin(t), 0]);
+  }
+  return out;
+}
+
+function pitchPolylines() {
+  const polys = [];
+  // 0 near touchline
+  polys.push({ name: 'near_touchline', color: '#ffff00', pts: _segmentLine([0,0,0], [PITCH_L,0,0], 64) });
+  // 1 far touchline
+  polys.push({ name: 'far_touchline', color: '#ffff00', pts: _segmentLine([0,PITCH_W,0], [PITCH_L,PITCH_W,0], 64) });
+  // 2 left goal line
+  polys.push({ name: 'left_goal_line', color: '#ffff00', pts: _segmentLine([0,0,0], [0,PITCH_W,0], 48) });
+  // 3 right goal line
+  polys.push({ name: 'right_goal_line', color: '#ffff00', pts: _segmentLine([PITCH_L,0,0], [PITCH_L,PITCH_W,0], 48) });
+  // 4 halfway
+  polys.push({ name: 'halfway', color: '#ffc800', pts: _segmentLine([PITCH_L/2,0,0], [PITCH_L/2,PITCH_W,0], 48) });
+  // 5 centre circle
+  polys.push({ name: 'centre_circle', color: '#00c800', pts: _arcPL(PITCH_L/2, PITCH_W/2, _CIRCLE_R_PL, 0, 2*Math.PI, 72) });
+  // 6 left 18yd box (3-segment U)
+  polys.push({ name: 'left_18yd', color: '#00c800', pts: [
+    ..._segmentLine([0,13.84,0], [_18Y_INSET,13.84,0], 24),
+    ..._segmentLine([_18Y_INSET,13.84,0], [_18Y_INSET,54.16,0], 24),
+    ..._segmentLine([_18Y_INSET,54.16,0], [0,54.16,0], 24),
+  ]});
+  // 7 right 18yd box
+  polys.push({ name: 'right_18yd', color: '#00c800', pts: [
+    ..._segmentLine([PITCH_L,13.84,0], [PITCH_L-_18Y_INSET,13.84,0], 24),
+    ..._segmentLine([PITCH_L-_18Y_INSET,13.84,0], [PITCH_L-_18Y_INSET,54.16,0], 24),
+    ..._segmentLine([PITCH_L-_18Y_INSET,54.16,0], [PITCH_L,54.16,0], 24),
+  ]});
+  // 8 left 6yd box
+  polys.push({ name: 'left_6yd', color: '#00c800', pts: [
+    ..._segmentLine([0,24.84,0], [_6Y_INSET,24.84,0], 12),
+    ..._segmentLine([_6Y_INSET,24.84,0], [_6Y_INSET,43.16,0], 12),
+    ..._segmentLine([_6Y_INSET,43.16,0], [0,43.16,0], 12),
+  ]});
+  // 9 right 6yd box
+  polys.push({ name: 'right_6yd', color: '#00c800', pts: [
+    ..._segmentLine([PITCH_L,24.84,0], [PITCH_L-_6Y_INSET,24.84,0], 12),
+    ..._segmentLine([PITCH_L-_6Y_INSET,24.84,0], [PITCH_L-_6Y_INSET,43.16,0], 12),
+    ..._segmentLine([PITCH_L-_6Y_INSET,43.16,0], [PITCH_L,43.16,0], 12),
+  ]});
+  // 10 left penalty arc
+  const dxLeft = _18Y_INSET - _PEN_X_LEFT;
+  const angAtBox = Math.acos(dxLeft / _CIRCLE_R_PL);
+  polys.push({ name: 'left_penalty_arc', color: '#00c8ff', pts: _arcPL(_PEN_X_LEFT, PITCH_W/2, _CIRCLE_R_PL, -angAtBox, angAtBox, 24) });
+  // 11 right penalty arc
+  polys.push({ name: 'right_penalty_arc', color: '#00c8ff', pts: _arcPL(_PEN_X_RIGHT, PITCH_W/2, _CIRCLE_R_PL, Math.PI - angAtBox, Math.PI + angAtBox, 24) });
+  // 12 left goal frame
+  polys.push({ name: 'left_goal', color: '#ff00ff', pts: [
+    ..._segmentLine([0, PITCH_W/2 - _GOAL_HALF, 0], [0, PITCH_W/2 - _GOAL_HALF, _GOAL_HEIGHT], 8),
+    ..._segmentLine([0, PITCH_W/2 - _GOAL_HALF, _GOAL_HEIGHT], [0, PITCH_W/2 + _GOAL_HALF, _GOAL_HEIGHT], 12),
+    ..._segmentLine([0, PITCH_W/2 + _GOAL_HALF, _GOAL_HEIGHT], [0, PITCH_W/2 + _GOAL_HALF, 0], 8),
+  ]});
+  // 13 right goal frame
+  polys.push({ name: 'right_goal', color: '#ff00ff', pts: [
+    ..._segmentLine([PITCH_L, PITCH_W/2 - _GOAL_HALF, 0], [PITCH_L, PITCH_W/2 - _GOAL_HALF, _GOAL_HEIGHT], 8),
+    ..._segmentLine([PITCH_L, PITCH_W/2 - _GOAL_HALF, _GOAL_HEIGHT], [PITCH_L, PITCH_W/2 + _GOAL_HALF, _GOAL_HEIGHT], 12),
+    ..._segmentLine([PITCH_L, PITCH_W/2 + _GOAL_HALF, _GOAL_HEIGHT], [PITCH_L, PITCH_W/2 + _GOAL_HALF, 0], 8),
+  ]});
+  return polys;
+}
+
+// Project a (N,3) world polyline to (N,2) pixel coords using the
+// supplied K (row-major 3x3), rvec (Rodrigues 3-vec), tvec (3-vec).
+// Points behind the camera (cam_z <= 0.05) are dropped.
+function projectPolyline(worldPts, K, rvec, tvec) {
+  // Build rotation matrix from Rodrigues
+  const theta = Math.sqrt(rvec[0]*rvec[0] + rvec[1]*rvec[1] + rvec[2]*rvec[2]);
+  let R;
+  if (theta < 1e-9) {
+    R = [[1,0,0],[0,1,0],[0,0,1]];
+  } else {
+    const k = [rvec[0]/theta, rvec[1]/theta, rvec[2]/theta];
+    const c = Math.cos(theta), s = Math.sin(theta), one_c = 1 - c;
+    R = [
+      [c + k[0]*k[0]*one_c,        k[0]*k[1]*one_c - k[2]*s,  k[0]*k[2]*one_c + k[1]*s],
+      [k[1]*k[0]*one_c + k[2]*s,   c + k[1]*k[1]*one_c,       k[1]*k[2]*one_c - k[0]*s],
+      [k[2]*k[0]*one_c - k[1]*s,   k[2]*k[1]*one_c + k[0]*s,  c + k[2]*k[2]*one_c],
+    ];
+  }
+  const out = [];
+  for (const p of worldPts) {
+    // R @ p + t
+    const cx = R[0][0]*p[0] + R[0][1]*p[1] + R[0][2]*p[2] + tvec[0];
+    const cy = R[1][0]*p[0] + R[1][1]*p[1] + R[1][2]*p[2] + tvec[1];
+    const cz = R[2][0]*p[0] + R[2][1]*p[1] + R[2][2]*p[2] + tvec[2];
+    if (cz <= 0.05) { out.push(null); continue; }
+    // K @ cam / cz
+    const u = (K[0][0]*cx + K[0][1]*cy + K[0][2]*cz) / cz;
+    const v = (K[1][0]*cx + K[1][1]*cy + K[1][2]*cz) / cz;
+    out.push([u, v]);
+  }
+  return out;
+}
+
+// Stroke a projected polyline onto a canvas, breaking the path
+// whenever a point is behind the camera (null).
+function drawProjectedPolyline(ctx, projected, color, lineWidth) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.beginPath();
+  let drawing = false;
+  for (const pt of projected) {
+    if (pt === null) {
+      drawing = false;
+      continue;
+    }
+    if (!drawing) {
+      ctx.moveTo(pt[0], pt[1]);
+      drawing = true;
+    } else {
+      ctx.lineTo(pt[0], pt[1]);
+    }
+  }
+  ctx.stroke();
+}
+
+function renderCalibrationVideoOverlay(panel, data) {
+  const shotIds = Object.keys(data.shots).filter(sid => (data.shots[sid].frames || []).length > 0);
+  if (!shotIds.length) {
+    const note = document.createElement('div');
+    note.style.cssText = 'padding:12px;color:#94a3b8;font-size:12px;';
+    note.textContent = 'No calibrated shots to preview.';
+    panel.appendChild(note);
+    return;
+  }
+  const { wrap, body } = makePanel('Calibration Preview (video + projected pitch lines)');
+
+  // Shot picker
+  const pickerBar = document.createElement('div');
+  pickerBar.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid #1f2937;';
+  pickerBar.appendChild(Object.assign(document.createElement('span'),
+    { textContent: 'Shot:', style: 'cssText: color:#94a3b8;font-size:12px;' }));
+  const select = document.createElement('select');
+  select.style.cssText = 'background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:3px 8px;font-size:12px;';
+  shotIds.forEach(sid => {
+    const opt = document.createElement('option');
+    opt.value = sid; opt.textContent = sid;
+    select.appendChild(opt);
+  });
+  pickerBar.appendChild(select);
+  const status = document.createElement('span');
+  status.style.cssText = 'color:#64748b;font-size:11px;margin-left:auto;';
+  pickerBar.appendChild(status);
+  body.appendChild(pickerBar);
+
+  // Video + canvas overlay container
+  const stage = document.createElement('div');
+  stage.style.cssText = 'position:relative;width:100%;background:#000;display:flex;justify-content:center;';
+  body.appendChild(stage);
+
+  const videoEl = document.createElement('video');
+  videoEl.style.cssText = 'max-width:100%;display:block;';
+  videoEl.controls = true;
+  videoEl.muted = true;
+  stage.appendChild(videoEl);
+
+  const overlay = document.createElement('canvas');
+  overlay.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;';
+  stage.appendChild(overlay);
+
+  // Frame indicator + keyframe scrubber
+  const infoBar = document.createElement('div');
+  infoBar.style.cssText = 'padding:6px 10px;color:#94a3b8;font-size:11px;display:flex;gap:14px;align-items:center;';
+  body.appendChild(infoBar);
+
+  let currentShotId = null;
+  let perFrame = null; // { frames: [...], keyframe_indices, fps, width, height, n_frames }
+  const polylines = pitchPolylines();
+
+  async function loadShot(shotId) {
+    currentShotId = shotId;
+    status.textContent = 'loading…';
+    try {
+      const res = await fetch(`/api/calibration/${shotId}/interpolated`);
+      if (!res.ok) {
+        status.textContent = 'failed';
+        return;
+      }
+      perFrame = await res.json();
+      videoEl.src = perFrame.video_url;
+      // Wait for the video to know its dimensions
+      await new Promise(resolve => {
+        videoEl.addEventListener('loadedmetadata', resolve, { once: true });
+      });
+      // Size the overlay canvas to match the source frame resolution
+      overlay.width = perFrame.width;
+      overlay.height = perFrame.height;
+      const nKf = perFrame.keyframe_indices.length;
+      status.textContent = `${perFrame.n_frames} frames @ ${perFrame.fps.toFixed(1)} fps · ${nKf} keyframes`;
+      drawFrame();
+    } catch (e) {
+      status.textContent = 'error: ' + e.message;
+    }
+  }
+
+  function drawFrame() {
+    if (!perFrame) return;
+    const ctx = overlay.getContext('2d');
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    const fi = Math.floor(videoEl.currentTime * perFrame.fps);
+    const fc = perFrame.frames[Math.max(0, Math.min(perFrame.n_frames - 1, fi))];
+    const isKf = perFrame.keyframe_indices.includes(fi);
+    infoBar.textContent = '';
+    const frameLbl = document.createElement('span');
+    frameLbl.textContent = `frame ${fi}${isKf ? ' (keyframe)' : ''}`;
+    infoBar.appendChild(frameLbl);
+    if (!fc) {
+      const note = document.createElement('span');
+      note.style.color = '#fca5a5';
+      note.textContent = '(no calibration data for this frame)';
+      infoBar.appendChild(note);
+      return;
+    }
+    for (const poly of polylines) {
+      const proj = projectPolyline(poly.pts, fc.K, fc.rvec, fc.tvec);
+      drawProjectedPolyline(ctx, proj, poly.color, 2);
+    }
+  }
+
+  // Sync overlay redraws with video playback at ~30 fps
+  let rafId = null;
+  function tick() {
+    drawFrame();
+    rafId = requestAnimationFrame(tick);
+  }
+  videoEl.addEventListener('play', () => { if (!rafId) rafId = requestAnimationFrame(tick); });
+  videoEl.addEventListener('pause', () => { if (rafId) { cancelAnimationFrame(rafId); rafId = null; } drawFrame(); });
+  videoEl.addEventListener('seeked', drawFrame);
+  videoEl.addEventListener('loadeddata', drawFrame);
+
+  select.addEventListener('change', () => loadShot(select.value));
+  loadShot(shotIds[0]);
+
+  panel.appendChild(wrap);
+}
+
+function _renderCalibrationCameraView_DEPRECATED(panel, data) {
   const { wrap: vizWrap, body: vizBody } = makePanel('Camera Positions (3D)');
 
   const shotData = JSON.stringify(Object.entries(data.shots).map(([id, s]) => ({

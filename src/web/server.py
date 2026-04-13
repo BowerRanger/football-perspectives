@@ -636,6 +636,75 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         return {"refined": list(refined.keys())}
 
     # ------------------------------------------------------------------
+    # GET /api/calibration/{shot_id}/interpolated — per-frame K, R, t
+    # ------------------------------------------------------------------
+
+    @app.get("/api/calibration/{shot_id}/interpolated")
+    def get_interpolated_calibration(shot_id: str):
+        """Return per-frame interpolated calibration for one shot.
+
+        For every frame in the shot's video clip, returns the
+        ``(K, rvec, tvec)`` produced by
+        :class:`src.utils.triangulation_calib.CalibrationInterpolator`
+        — the same SLERP-and-linear interpolation used by triangulation.
+        Frames outside the keyframe range get the nearest-keyframe
+        clamp (matching the triangulation stage's
+        ``single_shot_extrapolation_frames`` setting).
+
+        The web dashboard's calibration viewer uses this to overlay
+        projected pitch lines on the source video, frame-perfect.
+        """
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", shot_id):
+            raise HTTPException(status_code=400, detail="Invalid shot ID")
+        from src.schemas.calibration import CalibrationResult
+        from src.utils.triangulation_calib import CalibrationInterpolator
+        import cv2 as _cv2
+
+        cal_path = output_dir / "calibration" / f"{shot_id}_calibration.json"
+        if not cal_path.exists():
+            raise HTTPException(status_code=404, detail="No calibration for shot")
+        cal = CalibrationResult.load(cal_path)
+        if not cal.frames:
+            raise HTTPException(status_code=404, detail="Empty calibration")
+
+        clip_path = output_dir / "shots" / f"{shot_id}.mp4"
+        if not clip_path.exists():
+            raise HTTPException(status_code=404, detail="No clip for shot")
+        cap = _cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            raise HTTPException(status_code=500, detail="Failed to open clip")
+        try:
+            n_frames = int(cap.get(_cv2.CAP_PROP_FRAME_COUNT))
+            fps = float(cap.get(_cv2.CAP_PROP_FPS) or 25.0)
+            width = int(cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
+        finally:
+            cap.release()
+
+        interp = CalibrationInterpolator(cal)
+        per_frame: list[dict[str, Any] | None] = []
+        for fi in range(n_frames):
+            ip = interp.at_nearest(fi, max_extrapolation_frames=200)
+            if ip is None:
+                per_frame.append(None)
+                continue
+            per_frame.append({
+                "K": ip.K.tolist(),
+                "rvec": ip.rvec.tolist(),
+                "tvec": ip.tvec.tolist(),
+            })
+        return {
+            "shot_id": shot_id,
+            "n_frames": n_frames,
+            "fps": fps,
+            "width": width,
+            "height": height,
+            "video_url": f"/api/video/{shot_id}",
+            "frames": per_frame,
+            "keyframe_indices": [cf.frame for cf in cal.frames],
+        }
+
+    # ------------------------------------------------------------------
     # POST /api/tracks/auto-match — run cross-shot matching on existing tracks
     # ------------------------------------------------------------------
 

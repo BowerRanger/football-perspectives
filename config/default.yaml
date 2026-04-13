@@ -91,10 +91,14 @@ matching:
 triangulation:
   min_keypoint_confidence: 0.3
   ransac_threshold: 15.0
-  savgol_window: 7
-  savgol_order: 3
+  savgol_window: 11
+  savgol_order: 2
+  savgol_max_gap_fill: 5
+  method_switch_hysteresis: 3
   bone_length_tolerance: 0.2
   ground_snap_velocity: 0.1
+  dedupe_distance_m: 1.5
+  dedupe_min_overlap_frames: 30
 
 smpl_fitting:
   model_path: data/smpl/SMPL_NEUTRAL.pkl

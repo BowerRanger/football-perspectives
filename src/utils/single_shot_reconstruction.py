@@ -1,21 +1,30 @@
-"""Single-shot 3D reconstruction via foot-grounding + vertical body axis.
+"""Single-shot 3D reconstruction via foot-grounding + canonical body proportions.
 
 Given 2D COCO pose keypoints and a known camera calibration for a single
 view, reconstruct 3D world-space joint positions under the following
 assumptions:
 
-1. **Foot on pitch plane**: the player's foot is on the ground (``z=0``
-   pitch plane).  This gives a unique 3D foot position from the 2D foot
-   pixel by back-projecting through the camera.
+1. **Foot on pitch plane**: the player's foot is on the ground (the
+   ``z = _ANKLE_HEIGHT`` plane).  Back-projecting the foot pixel through
+   the camera gives a unique world-space foot position.
 
-2. **Vertical body axis**: the player's body stands vertically above the
-   foot position.  Every joint ``(x_j, y_j, z_j)`` lies on the line
-   ``(x_foot, y_foot, z)`` for some ``z``.  This turns the depth-ambiguous
-   single-view 3D problem into a 1D search per joint: find the ``z_j``
-   that projects to the observed 2D pixel.
+2. **Canonical joint heights**: each COCO joint sits at a fixed world
+   height equal to ``body_height * relative_height[j]``, where the
+   relative heights come from average human anatomy and ``body_height``
+   defaults to 1.8 m.  Back-projecting each joint's pixel onto its own
+   horizontal plane gives a per-joint ``(x, y)`` from a single linear
+   solve — so limbs spread horizontally instead of collapsing onto a
+   single vertical line.
 
-Works well for running, walking, and standing players.  Produces
-biased heights during jumps, tackles, and diving saves — those frames
+3. **Plausibility clamp**: the back-projected ``(x, y)`` is rejected if
+   it lands more than ``_MAX_HORIZONTAL_OFFSET`` metres from the foot
+   anchor.  This catches numerical blow-ups (camera ray nearly
+   tangential to the height plane) and joints whose true z is wildly
+   different from the canonical estimate.
+
+Works well for running, walking, and standing players — natural
+horizontal spread on arms, legs, and head.  Produces biased positions
+during jumps, raised arms, tackles, and diving saves; those frames
 can be refined later via SMPL fitting's shape/pose prior.
 
 This is the fallback path used when multi-view triangulation isn't
@@ -52,6 +61,40 @@ _RIGHT_ANKLE = 16
 # so projecting its pixel onto z=0 introduces a systematic offset in the
 # direction of the camera ray.  We back-project onto this plane instead.
 _ANKLE_HEIGHT = 0.08
+
+# Default body height used to scale canonical relative heights.
+_DEFAULT_BODY_HEIGHT_M = 1.8
+
+# Maximum horizontal distance (metres) a joint's back-projected (x, y)
+# can sit from the foot anchor before we reject it as implausible.
+# Limbs naturally extend ~0.8 m from the body axis; 1.5 m gives headroom
+# for fully outstretched arms while still catching numerical blow-ups.
+_MAX_HORIZONTAL_OFFSET_M = 1.5
+
+# Canonical world height of each COCO 17 joint, expressed as a fraction
+# of total body height (foot at 0.0, top of head at ~1.0).  Source:
+# typical adult anatomy averaged across published anthropometric tables.
+# Used to choose the back-projection plane for each joint when the
+# camera only sees the player from one viewpoint.
+_COCO_RELATIVE_HEIGHTS = (
+    0.94,  # 0  nose
+    0.96,  # 1  left_eye
+    0.96,  # 2  right_eye
+    0.93,  # 3  left_ear
+    0.93,  # 4  right_ear
+    0.82,  # 5  left_shoulder
+    0.82,  # 6  right_shoulder
+    0.62,  # 7  left_elbow
+    0.62,  # 8  right_elbow
+    0.45,  # 9  left_wrist
+    0.45,  # 10 right_wrist
+    0.53,  # 11 left_hip
+    0.53,  # 12 right_hip
+    0.28,  # 13 left_knee
+    0.28,  # 14 right_knee
+    0.05,  # 15 left_ankle
+    0.05,  # 16 right_ankle
+)
 
 
 @dataclass(frozen=True)
@@ -105,34 +148,34 @@ def reconstruct_player(
     positions = np.full((_N_COCO_JOINTS, 3), np.nan, dtype=np.float32)
     confidences = np.zeros(_N_COCO_JOINTS, dtype=np.float32)
 
-    # Pre-compute the camera extrinsic projection matrix rows for the
-    # 1D solve.  The camera matrix is [R | t] — rows 0/1/2 give the
-    # numerator and denominator of the perspective divide.
-    R, _ = cv2.Rodrigues(rvec)
-    Rt = np.hstack([R, tvec.reshape(3, 1)])  # (3, 4)
-
-    fx = float(K[0, 0])
-    fy = float(K[1, 1])
-    cx = float(K[0, 2])
-    cy = float(K[1, 2])
+    foot_xy = np.array([foot_world[0], foot_world[1]], dtype=np.float64)
+    max_offset_sq = _MAX_HORIZONTAL_OFFSET_M ** 2
 
     for j, kp in enumerate(keypoints):
         conf = float(kp.conf)
         if conf < min_joint_confidence:
             continue
 
-        z_j = _solve_joint_z(
-            u=float(kp.x), v=float(kp.y),
-            x_foot=float(foot_world[0]), y_foot=float(foot_world[1]),
-            Rt=Rt, fx=fx, fy=fy, cx=cx, cy=cy,
-        )
-        if z_j is None:
+        target_z = _DEFAULT_BODY_HEIGHT_M * _COCO_RELATIVE_HEIGHTS[j]
+        try:
+            xy = _backproject_pixel_to_plane(
+                np.array([float(kp.x), float(kp.y)], dtype=np.float64),
+                K, rvec, tvec,
+                plane_z=target_z,
+            )
+        except np.linalg.LinAlgError:
             continue
-        # Clamp z to a sane human range [0, 2.5 m] to reject numerical
-        # blow-ups from near-degenerate projections.
-        if z_j < -0.3 or z_j > 2.8:
+
+        # Plausibility: the joint must sit within a human-sized cylinder
+        # around the foot anchor.  Joints whose true z is far from the
+        # canonical estimate (raised arms, jumps) end up with a large
+        # horizontal back-projection error along the camera ray and get
+        # filtered here.
+        offset_sq = float((xy[0] - foot_xy[0]) ** 2 + (xy[1] - foot_xy[1]) ** 2)
+        if offset_sq > max_offset_sq:
             continue
-        positions[j] = [foot_world[0], foot_world[1], max(0.0, float(z_j))]
+
+        positions[j] = [float(xy[0]), float(xy[1]), float(target_z)]
         confidences[j] = conf
 
     return SingleShotResult(
@@ -223,53 +266,3 @@ def _backproject_pixel_to_plane(
     return xy
 
 
-def _solve_joint_z(
-    *,
-    u: float,
-    v: float,
-    x_foot: float,
-    y_foot: float,
-    Rt: np.ndarray,
-    fx: float, fy: float, cx: float, cy: float,
-) -> float | None:
-    """Find the z that projects ``(x_foot, y_foot, z)`` onto the pixel ``(u, v)``.
-
-    The projection is ``pixel = K @ (R @ world + t)``.  With ``(x, y)``
-    fixed at the foot position, only ``z`` is unknown.  Both ``u`` and
-    ``v`` give a linear equation in ``z``; we solve each and average.
-    Returns ``None`` if the equations are degenerate (e.g., camera-ray
-    parallel to the vertical axis).
-    """
-    r1 = Rt[0]
-    r2 = Rt[1]
-    r3 = Rt[2]
-
-    world_base = np.array([x_foot, y_foot, 0.0, 1.0], dtype=np.float64)
-    A0 = float(r1 @ world_base)
-    B0 = float(r2 @ world_base)
-    C0 = float(r3 @ world_base)
-
-    # z coefficients along each row (contribution of the z term to each
-    # of the three [R | t] @ [x, y, z, 1] components).
-    A1 = float(r1[2])
-    B1 = float(r2[2])
-    C1 = float(r3[2])
-
-    # From u equation: fx * (A0 + A1*z) + cx * (C0 + C1*z) = u * (C0 + C1*z)
-    #                  fx*A1*z + cx*C1*z - u*C1*z = u*C0 - fx*A0 - cx*C0
-    #                  z * (fx*A1 + (cx - u)*C1) = (u - cx)*C0 - fx*A0
-    denom_u = fx * A1 + (cx - u) * C1
-    numer_u = (u - cx) * C0 - fx * A0
-    # From v equation: analogous with fy, cy, B
-    denom_v = fy * B1 + (cy - v) * C1
-    numer_v = (v - cy) * C0 - fy * B0
-
-    # Accept whichever equations are non-degenerate; average if both.
-    z_vals: list[float] = []
-    if abs(denom_u) > 1e-6:
-        z_vals.append(numer_u / denom_u)
-    if abs(denom_v) > 1e-6:
-        z_vals.append(numer_v / denom_v)
-    if not z_vals:
-        return None
-    return float(np.mean(z_vals))

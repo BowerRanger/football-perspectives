@@ -128,18 +128,23 @@ def ransac_triangulate(
 
 def temporal_smooth_savgol(
     positions: np.ndarray,
-    window: int = 7,
-    order: int = 3,
+    window: int = 11,
+    order: int = 2,
+    max_gap_fill: int = 5,
 ) -> np.ndarray:
     """Savitzky-Golay smoothing per joint trajectory.
 
-    Handles NaN gaps by linear interpolation before filtering, then
-    re-masks original NaN positions.
+    Handles NaN gaps by linear interpolation before filtering.  Short
+    gaps (≤ ``max_gap_fill`` consecutive frames) are filled with the
+    smoothed values so brief detection drop-outs become continuous.
+    Longer gaps are re-masked to NaN so we don't fabricate position
+    data over genuine occlusions.
 
     Args:
         positions: (N, 17, 3) array, may contain NaN.
         window: filter window length (must be odd).
         order: polynomial order.
+        max_gap_fill: maximum NaN-run length to keep after smoothing.
 
     Returns:
         (N, 17, 3) smoothed positions.
@@ -150,21 +155,47 @@ def temporal_smooth_savgol(
 
     result = positions.copy()
     for j in range(n_joints):
+        # Use the same valid-mask for x/y/z so we don't end up with a
+        # joint that has x but not y at some frame.
+        valid_any = ~np.isnan(positions[:, j, 0])
+        if valid_any.sum() < window:
+            continue
+        keep_mask = _gap_keep_mask(valid_any, max_gap_fill)
         for d in range(3):
             traj = positions[:, j, d].copy()
-            valid = ~np.isnan(traj)
-            if valid.sum() < window:
-                continue
-            # Interpolate NaN gaps
-            if not valid.all():
-                xp = np.where(valid)[0]
-                fp = traj[valid]
-                traj = np.interp(np.arange(n_frames), xp, fp)
+            xp = np.where(valid_any)[0]
+            fp = traj[valid_any]
+            traj = np.interp(np.arange(n_frames), xp, fp)
             traj = savgol_filter(traj, window, order)
-            # Re-mask original NaN positions
-            traj[~valid] = np.nan
+            traj[~keep_mask] = np.nan
             result[:, j, d] = traj
     return result
+
+
+def _gap_keep_mask(valid: np.ndarray, max_gap_fill: int) -> np.ndarray:
+    """Mask of frames to keep after smoothing.
+
+    True for originally-valid frames *and* for NaN-runs no longer than
+    ``max_gap_fill`` that are bounded by valid frames on both sides.
+    Leading and trailing NaN runs are never filled — extrapolation
+    beyond the observed range is unsafe.
+    """
+    keep = valid.copy()
+    n = len(valid)
+    i = 0
+    while i < n:
+        if valid[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and not valid[j]:
+            j += 1
+        run_len = j - i
+        bounded = i > 0 and j < n  # valid on both sides
+        if bounded and run_len <= max_gap_fill:
+            keep[i:j] = True
+        i = j
+    return keep
 
 
 def enforce_bone_lengths(

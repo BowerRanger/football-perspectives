@@ -41,6 +41,7 @@ from src.utils.triangulation import (
     temporal_smooth_savgol,
 )
 from src.utils.triangulation_calib import CalibrationInterpolator
+from src.utils.triangulation_dedupe import deduplicate_players
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +141,10 @@ class TriangulationStage(BaseStage):
         cfg = self.config.get("triangulation", {})
         min_conf = float(cfg.get("min_keypoint_confidence", 0.3))
         ransac_thresh = float(cfg.get("ransac_threshold", 15.0))
-        savgol_window = int(cfg.get("savgol_window", 7))
-        savgol_order = int(cfg.get("savgol_order", 3))
+        savgol_window = int(cfg.get("savgol_window", 11))
+        savgol_order = int(cfg.get("savgol_order", 2))
+        savgol_max_gap_fill = int(cfg.get("savgol_max_gap_fill", 5))
+        method_switch_hysteresis = int(cfg.get("method_switch_hysteresis", 3))
         bone_tol = float(cfg.get("bone_length_tolerance", 0.2))
         ground_snap_vel = float(cfg.get("ground_snap_velocity", 0.1))
         # Single-shot fallback: when only one calibrated view has the
@@ -158,6 +161,8 @@ class TriangulationStage(BaseStage):
         single_shot_extrapolation_frames = int(
             cfg.get("single_shot_extrapolation_frames", 200)
         )
+        dedupe_distance_m = float(cfg.get("dedupe_distance_m", 1.5))
+        dedupe_min_overlap_frames = int(cfg.get("dedupe_min_overlap_frames", 30))
 
         # ── Load inputs ──
         matches = PlayerMatches.load(
@@ -227,13 +232,19 @@ class TriangulationStage(BaseStage):
 
         tri_dir = self.output_dir / "triangulated"
         tri_dir.mkdir(parents=True, exist_ok=True)
+        # Clear stale outputs from a previous run.  Without this, players
+        # that get merged away by deduplication on this run would still
+        # have their old .npz files on disk and get picked up by the
+        # viewer as ghost duplicates.
+        for stale in tri_dir.glob("*_3d_joints.npz"):
+            stale.unlink()
 
         print(
             f"  -> triangulating {len(matches.matched_players)} players "
             f"across {n_frames} frames ({len(calibrated_shot_ids)} calibrated shots)"
         )
 
-        n_saved = 0
+        triangulated_players: list[TriangulatedPlayer] = []
         min_shots = 1 if allow_single_shot else 2
         for player in matches.matched_players:
             calibrated_views = [
@@ -267,6 +278,7 @@ class TriangulationStage(BaseStage):
                 ransac_thresh=ransac_thresh,
                 allow_single_shot=allow_single_shot,
                 single_shot_extrapolation_frames=single_shot_extrapolation_frames,
+                method_switch_hysteresis=method_switch_hysteresis,
             )
             if triangulated is None:
                 logger.warning(
@@ -278,7 +290,10 @@ class TriangulationStage(BaseStage):
 
             positions, confidences, reproj_errors, n_views_arr = triangulated
             positions = temporal_smooth_savgol(
-                positions, window=savgol_window, order=savgol_order,
+                positions,
+                window=savgol_window,
+                order=savgol_order,
+                max_gap_fill=savgol_max_gap_fill,
             )
             positions = enforce_bone_lengths(positions, tolerance=bone_tol)
             positions = snap_feet_to_ground(
@@ -296,10 +311,30 @@ class TriangulationStage(BaseStage):
                 fps=fps,
                 start_frame=frame_min,
             )
-            result.save(tri_dir / f"{player.player_id}_3d_joints.npz")
-            n_saved += 1
+            triangulated_players.append(result)
 
-        print(f"  -> saved {n_saved} player triangulations to triangulated/")
+        # ── Deduplicate co-located players ──
+        # The matching stage occasionally emits two MatchedPlayer
+        # records for one physical player (cross-view re-id failure).
+        # Merge them now so the bird's-eye view doesn't show ghost
+        # duplicates.
+        n_before = len(triangulated_players)
+        triangulated_players = deduplicate_players(
+            triangulated_players,
+            distance_m=dedupe_distance_m,
+            min_overlap_frames=dedupe_min_overlap_frames,
+        )
+        n_after = len(triangulated_players)
+        if n_after < n_before:
+            print(
+                f"  -> merged {n_before - n_after} duplicate player(s) "
+                f"({n_before} → {n_after})"
+            )
+
+        for result in triangulated_players:
+            result.save(tri_dir / f"{result.player_id}_3d_joints.npz")
+
+        print(f"  -> saved {len(triangulated_players)} player triangulations to triangulated/")
 
     # ------------------------------------------------------------------ helpers
 
@@ -316,13 +351,20 @@ class TriangulationStage(BaseStage):
         ransac_thresh: float,
         allow_single_shot: bool,
         single_shot_extrapolation_frames: int = 0,
+        method_switch_hysteresis: int = 3,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
         """Triangulate a single player across all frames.
 
-        Per-frame, picks between:
-          - Multi-view triangulation (≥2 calibrated views with pose data)
-          - Single-shot reconstruction (exactly 1 view, if enabled)
-          - NaN (no calibrated view with pose data)
+        Three-pass design so the per-frame method choice (multi-view vs
+        single-shot) can be smoothed with hysteresis before any positions
+        are computed:
+
+          1. **Gather**: collect strict + extrapolated views per frame.
+          2. **Choose**: pick a method per frame, then suppress short
+             single-shot islands embedded inside a multi-view run — those
+             are the visible "flicker" frames where the geometry
+             discontinuity would otherwise be papered over by savgol.
+          3. **Compute**: run the chosen method per frame.
 
         Returns ``(positions, confidences, reproj_errors, n_views)`` or
         ``None`` if every frame ends up NaN.
@@ -333,17 +375,20 @@ class TriangulationStage(BaseStage):
         reproj_errors = np.full((n_frames, _N_COCO_JOINTS), np.nan, dtype=np.float32)
         n_views_arr = np.zeros((n_frames, _N_COCO_JOINTS), dtype=np.int8)
 
-        for fi, ref_frame in enumerate(frame_range):
-            # Gather strictly in-range calibrations (for multi-view) and
-            # extrapolated calibrations (for single-shot fallback) separately.
-            # Multi-view depends on tight calibration to avoid bad
-            # triangulations; single-shot is more tolerant.
+        # ── Pass 1: gather views per frame ──
+        view_data: list[
+            tuple[
+                list[tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[Keypoint]]],
+                list[tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[Keypoint]]],
+            ]
+        ] = []
+        for ref_frame in frame_range:
             strict_views: list[
                 tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[Keypoint]]
-            ] = []  # (shot_id, P, K, rvec, tvec, keypoints) — strict only
+            ] = []
             extrapolated_views: list[
                 tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[Keypoint]]
-            ] = []  # same, but cal was extrapolated outside the keyframe range
+            ] = []
 
             for view in calibrated_views:
                 offset = sync_offsets.get(view.shot_id, 0)
@@ -360,7 +405,6 @@ class TriangulationStage(BaseStage):
                 if interp is None or interp.is_empty:
                     continue
 
-                # Try strict in-range first.
                 cal_strict = interp.at(local_frame)
                 if cal_strict is not None:
                     P = build_projection_matrix(cal_strict.K, cal_strict.rvec, cal_strict.tvec)
@@ -369,7 +413,6 @@ class TriangulationStage(BaseStage):
                     )
                     continue
 
-                # Out of strict range — try extrapolated for single-shot only.
                 if not allow_single_shot or single_shot_extrapolation_frames <= 0:
                     continue
                 cal_ext = interp.at_nearest(
@@ -383,11 +426,19 @@ class TriangulationStage(BaseStage):
                     (view.shot_id, P, cal_ext.K, cal_ext.rvec, cal_ext.tvec, keypoints),
                 )
 
-            unique_strict_shots = {vd[0] for vd in strict_views}
+            view_data.append((strict_views, extrapolated_views))
 
-            if len(unique_strict_shots) >= 2:
-                # Multi-view path: weighted DLT per joint, RANSAC over inliers.
-                # Only strictly-calibrated views participate.
+        # ── Pass 2: choose method per frame with hysteresis ──
+        methods = _choose_methods(
+            view_data,
+            allow_single_shot=allow_single_shot,
+            hysteresis=method_switch_hysteresis,
+        )
+
+        # ── Pass 3: compute positions ──
+        for fi, method in enumerate(methods):
+            strict_views, extrapolated_views = view_data[fi]
+            if method == "multi":
                 for j in range(_N_COCO_JOINTS):
                     obs_P: list[np.ndarray] = []
                     obs_uv: list[np.ndarray] = []
@@ -414,10 +465,7 @@ class TriangulationStage(BaseStage):
                     confidences[fi, j] = float(np.mean(obs_w))
                     reproj_errors[fi, j] = err
                     n_views_arr[fi, j] = nv
-            elif allow_single_shot:
-                # Single-shot fallback: prefer a strict view if any, else
-                # use an extrapolated one.  Reconstruct via foot-grounding
-                # + vertical body axis.
+            elif method == "single":
                 fallback_view = (
                     strict_views[0] if strict_views else
                     (extrapolated_views[0] if extrapolated_views else None)
@@ -435,8 +483,61 @@ class TriangulationStage(BaseStage):
                         confidences[fi] = result.confidences
                         valid_mask = ~np.isnan(result.positions[:, 0])
                         n_views_arr[fi, valid_mask] = 1
-            # else: no usable calibration at this frame → NaN stays
+            # else: NaN — savgol short-gap fill will smooth across it
 
         if not np.any(~np.isnan(positions[:, :, 0])):
             return None
         return positions, confidences, reproj_errors, n_views_arr
+
+
+def _choose_methods(
+    view_data: list[tuple[list, list]],
+    *,
+    allow_single_shot: bool,
+    hysteresis: int,
+) -> list[str | None]:
+    """Choose ``'multi'`` / ``'single'`` / ``None`` per frame, with hysteresis.
+
+    Raw eligibility:
+      - ``multi`` if ≥2 unique strict shots are available
+      - ``single`` if at least one view (strict or extrapolated) is
+        available and single-shot is enabled
+      - ``None`` otherwise
+
+    Hysteresis: a run of ``single`` shorter than ``hysteresis`` frames
+    that is bounded on both sides by ``multi`` is downgraded to ``None``.
+    Those frames would otherwise produce a geometric discontinuity
+    inside an otherwise consistent multi-view trajectory; better to let
+    the savgol short-gap fill carry the trajectory across the hole.
+    """
+    raw: list[str | None] = []
+    for strict, ext in view_data:
+        unique_strict = {sv[0] for sv in strict}
+        if len(unique_strict) >= 2:
+            raw.append("multi")
+        elif allow_single_shot and (strict or ext):
+            raw.append("single")
+        else:
+            raw.append(None)
+
+    if hysteresis <= 1:
+        return raw
+
+    out: list[str | None] = list(raw)
+    n = len(out)
+    i = 0
+    while i < n:
+        if out[i] != "single":
+            i += 1
+            continue
+        j = i
+        while j < n and out[j] == "single":
+            j += 1
+        run_len = j - i
+        left = out[i - 1] if i > 0 else None
+        right = out[j] if j < n else None
+        if run_len < hysteresis and left == "multi" and right == "multi":
+            for k in range(i, j):
+                out[k] = None
+        i = j
+    return out

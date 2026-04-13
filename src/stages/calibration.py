@@ -18,6 +18,7 @@ logged.  Downstream stages handle empty calibrations gracefully.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from src.schemas.calibration import CalibrationResult, CameraFrame
 from src.schemas.shots import ShotsManifest
 from src.utils.calibration_debug import render_shot_overlays
 from src.utils.calibration_refine import refine_shot_calibration
+from src.utils.manual_calibration import solve_from_annotations
 from src.utils.neural_calibrator import NeuralCalibration, PnLCalibrator
 
 logger = logging.getLogger(__name__)
@@ -239,6 +241,13 @@ class CameraCalibrationStage(BaseStage):
                 max_keyframes=max_keyframes,
                 bounds=bounds,
             )
+            # ── Apply manual landmark annotations (if any) ──
+            # Each annotated frame becomes a high-trust keyframe that
+            # replaces (or supplements) PnLCalib's automatic output at
+            # that frame index.  See src/utils/manual_calibration.py.
+            n_anchors = self._apply_manual_annotations(shot.id, result)
+            if n_anchors:
+                print(f"     manual anchors: {n_anchors} keyframe(s) injected from annotations")
             if line_refine_enabled and result.frames:
                 clip_path = self.output_dir / shot.clip_file
                 try:
@@ -285,6 +294,94 @@ class CameraCalibrationStage(BaseStage):
                         print(f"     debug overlay: {len(written)} frame(s) → calibration/debug/{shot.id}/")
                 except Exception as exc:  # noqa: BLE001 — non-fatal diagnostic
                     logger.warning("debug overlay failed for %s: %s", shot.id, exc)
+
+    def _apply_manual_annotations(
+        self, shot_id: str, result: CalibrationResult,
+    ) -> int:
+        """Inject manual-annotation keyframes into ``result`` (in place).
+
+        Reads ``output/calibration/annotations/<shot_id>.json``, solves
+        each annotated frame via :func:`solve_from_annotations`, and:
+
+        - **Replaces** any existing PnLCalib keyframe at the same
+          frame index with the manual one.
+        - **Appends** new keyframes for annotated frames PnLCalib
+          didn't sample.
+
+        The result is sorted by frame index and the camera world
+        position is re-anchored to the median of all keyframes (so
+        the manual anchors pull the static-camera position toward the
+        truth when PnLCalib's median was off).
+
+        Returns the number of manual anchors injected.
+        """
+        ann_path = self.output_dir / "calibration" / "annotations" / f"{shot_id}.json"
+        if not ann_path.exists():
+            return 0
+        try:
+            ann_data: dict = json.loads(ann_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("annotations: %s unreadable: %s", shot_id, exc)
+            return 0
+        if not ann_data:
+            return 0
+
+        # Look up clip dimensions for the solver
+        clip_path = self.output_dir / "shots" / f"{shot_id}.mp4"
+        if not clip_path.exists():
+            logger.warning("annotations: %s clip missing", shot_id)
+            return 0
+        cap = cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            return 0
+        try:
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        finally:
+            cap.release()
+
+        # fx_init from the median of existing PnLCalib outputs (if any),
+        # else a sensible default.
+        existing_fxs = [
+            float(cf.intrinsic_matrix[0][0]) for cf in result.frames
+        ]
+        fx_init = float(np.median(existing_fxs)) if existing_fxs else 3500.0
+
+        manual_frames: list[CameraFrame] = []
+        for frame_str, landmarks in ann_data.items():
+            try:
+                frame_idx = int(frame_str)
+            except ValueError:
+                continue
+            if not isinstance(landmarks, dict) or not landmarks:
+                continue
+            res = solve_from_annotations(
+                landmarks,
+                image_size=(width, height),
+                fx_init=fx_init,
+                frame_idx=frame_idx,
+            )
+            if res is None:
+                logger.warning(
+                    "annotations: %s frame %d failed (need ≥4 valid landmarks)",
+                    shot_id, frame_idx,
+                )
+                continue
+            manual_frames.append(res.camera_frame)
+
+        if not manual_frames:
+            return 0
+
+        # Replace any existing keyframe at the same frame index.
+        manual_indices = {cf.frame for cf in manual_frames}
+        kept = [cf for cf in result.frames if cf.frame not in manual_indices]
+        merged = sorted(kept + manual_frames, key=lambda cf: cf.frame)
+
+        # Mutate the input CalibrationResult in place so the caller
+        # sees the augmented keyframe set.
+        result.frames.clear()
+        result.frames.extend(merged)
+        return len(manual_frames)
 
     @staticmethod
     def _resolve_bounds(

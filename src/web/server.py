@@ -10,7 +10,7 @@ from queue import Empty, Queue
 from threading import Lock, Thread
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -703,6 +703,138 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             "frames": per_frame,
             "keyframe_indices": [cf.frame for cf in cal.frames],
         }
+
+    # ------------------------------------------------------------------
+    # GET /api/calibration/landmarks — list of canonical FIFA landmarks
+    # ------------------------------------------------------------------
+
+    @app.get("/api/calibration/landmarks")
+    def list_landmarks():
+        """Return the catalogue of canonical 3D pitch landmarks.
+
+        Each entry is ``{name, x, y, z}`` in pitch metres.  Used by the
+        dashboard's manual annotation tool so the user can pick which
+        landmark they're clicking.
+        """
+        from src.utils.pitch import FIFA_LANDMARKS
+        return {
+            "landmarks": [
+                {"name": name, "x": float(p[0]), "y": float(p[1]), "z": float(p[2])}
+                for name, p in FIFA_LANDMARKS.items()
+            ]
+        }
+
+    # ------------------------------------------------------------------
+    # GET / PUT / DELETE /api/calibration/{shot_id}/annotations/{frame}
+    # ------------------------------------------------------------------
+
+    def _annotations_path(shot_id: str):
+        ann_dir = output_dir / "calibration" / "annotations"
+        ann_dir.mkdir(parents=True, exist_ok=True)
+        return ann_dir / f"{shot_id}.json"
+
+    def _load_annotations(shot_id: str) -> dict:
+        p = _annotations_path(shot_id)
+        if not p.exists():
+            return {}
+        try:
+            return json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _save_annotations(shot_id: str, data: dict) -> None:
+        p = _annotations_path(shot_id)
+        p.write_text(json.dumps(data, indent=2, sort_keys=True))
+
+    @app.get("/api/calibration/{shot_id}/annotations")
+    def get_annotations(shot_id: str):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", shot_id):
+            raise HTTPException(status_code=400, detail="Invalid shot ID")
+        return {"shot_id": shot_id, "frames": _load_annotations(shot_id)}
+
+    @app.put("/api/calibration/{shot_id}/annotations/{frame}")
+    def put_annotations(shot_id: str, frame: int, payload: dict[str, Any] = Body(...)):
+        """Save manual landmark annotations for one frame and immediately
+        solve the calibration for that frame so the user gets feedback.
+        """
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", shot_id):
+            raise HTTPException(status_code=400, detail="Invalid shot ID")
+        clip_path = output_dir / "shots" / f"{shot_id}.mp4"
+        if not clip_path.exists():
+            raise HTTPException(status_code=404, detail="No clip for shot")
+
+        from src.utils.manual_calibration import solve_from_annotations
+        import cv2 as _cv2
+
+        cap = _cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            raise HTTPException(status_code=500, detail="Failed to open clip")
+        try:
+            width = int(cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
+        finally:
+            cap.release()
+
+        landmarks = payload.get("landmarks") or {}
+        if not isinstance(landmarks, dict):
+            raise HTTPException(status_code=400, detail="landmarks must be a dict")
+
+        # Pull a sane fx_init from the existing per-frame calibration
+        # so the solver doesn't start from a wild guess.
+        fx_init = 3500.0
+        cal_path = output_dir / "calibration" / f"{shot_id}_calibration.json"
+        if cal_path.exists():
+            try:
+                cal_data = json.loads(cal_path.read_text())
+                fxs = [
+                    float(cf["intrinsic_matrix"][0][0])
+                    for cf in cal_data.get("frames", [])
+                ]
+                if fxs:
+                    fx_init = float(sorted(fxs)[len(fxs) // 2])
+            except (json.JSONDecodeError, KeyError, IndexError):
+                pass
+
+        result = solve_from_annotations(
+            landmarks,
+            image_size=(width, height),
+            fx_init=fx_init,
+            frame_idx=frame,
+        )
+        # Persist whatever the user clicked even if the solve failed,
+        # so they can come back and add more points later.
+        store = _load_annotations(shot_id)
+        store[str(frame)] = landmarks
+        _save_annotations(shot_id, store)
+
+        if result is None:
+            return {
+                "saved": True,
+                "n_landmarks": len(landmarks),
+                "calibration": None,
+                "error": "Need at least 4 valid landmarks to solve",
+            }
+        cf = result.camera_frame
+        return {
+            "saved": True,
+            "n_landmarks": result.n_points,
+            "calibration": {
+                "K": cf.intrinsic_matrix,
+                "rvec": cf.rotation_vector,
+                "tvec": cf.translation_vector,
+                "reprojection_error_px": result.mean_reprojection_error_px,
+                "mode": result.mode,
+            },
+        }
+
+    @app.delete("/api/calibration/{shot_id}/annotations/{frame}")
+    def delete_annotations(shot_id: str, frame: int):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", shot_id):
+            raise HTTPException(status_code=400, detail="Invalid shot ID")
+        store = _load_annotations(shot_id)
+        store.pop(str(frame), None)
+        _save_annotations(shot_id, store)
+        return {"deleted": True}
 
     # ------------------------------------------------------------------
     # POST /api/tracks/auto-match — run cross-shot matching on existing tracks

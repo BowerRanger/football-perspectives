@@ -889,6 +889,30 @@ function renderCalibrationVideoOverlay(panel, data) {
   pickerBar.appendChild(status);
   body.appendChild(pickerBar);
 
+  // ── Annotation toolbar ──
+  const annotateBar = document.createElement('div');
+  annotateBar.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 10px;border-bottom:1px solid #1f2937;flex-wrap:wrap;';
+  const annotateBtn = document.createElement('button');
+  annotateBtn.textContent = '✏ Annotate';
+  annotateBtn.title = 'Manually click pitch landmarks on this frame to anchor the calibration.';
+  annotateBtn.style.cssText = 'background:#4f46e5;color:#fff;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;';
+  annotateBar.appendChild(annotateBtn);
+  const landmarkSelect = document.createElement('select');
+  landmarkSelect.style.cssText = 'background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:3px 6px;font-size:12px;display:none;max-width:280px;';
+  annotateBar.appendChild(landmarkSelect);
+  const annotateInfo = document.createElement('span');
+  annotateInfo.style.cssText = 'color:#94a3b8;font-size:11px;flex:1;';
+  annotateBar.appendChild(annotateInfo);
+  const saveAnchorBtn = document.createElement('button');
+  saveAnchorBtn.textContent = 'Save anchor';
+  saveAnchorBtn.style.cssText = 'background:#16a34a;color:#fff;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;display:none;';
+  annotateBar.appendChild(saveAnchorBtn);
+  const clearAnchorBtn = document.createElement('button');
+  clearAnchorBtn.textContent = 'Clear';
+  clearAnchorBtn.style.cssText = 'background:#475569;color:#fff;border:none;padding:5px 10px;border-radius:4px;cursor:pointer;font-size:12px;display:none;';
+  annotateBar.appendChild(clearAnchorBtn);
+  body.appendChild(annotateBar);
+
   // Video + canvas overlay container
   const stage = document.createElement('div');
   stage.style.cssText = 'position:relative;width:100%;background:#000;display:flex;justify-content:center;';
@@ -904,6 +928,11 @@ function renderCalibrationVideoOverlay(panel, data) {
   overlay.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;';
   stage.appendChild(overlay);
 
+  // Click-capture canvas (only enabled in annotation mode)
+  const clickLayer = document.createElement('canvas');
+  clickLayer.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;cursor:crosshair;display:none;';
+  stage.appendChild(clickLayer);
+
   // Frame indicator + keyframe scrubber
   const infoBar = document.createElement('div');
   infoBar.style.cssText = 'padding:6px 10px;color:#94a3b8;font-size:11px;display:flex;gap:14px;align-items:center;';
@@ -911,6 +940,9 @@ function renderCalibrationVideoOverlay(panel, data) {
 
   let currentShotId = null;
   let perFrame = null; // { frames: [...], keyframe_indices, fps, width, height, n_frames }
+  let annotationMode = false;
+  let currentAnnotations = {}; // {landmark_name: [px, py]}
+  let allLandmarks = []; // {name, x, y, z}
   const polylines = pitchPolylines();
 
   async function loadShot(shotId) {
@@ -961,7 +993,174 @@ function renderCalibrationVideoOverlay(panel, data) {
       const proj = projectPolyline(poly.pts, fc.K, fc.rvec, fc.tvec);
       drawProjectedPolyline(ctx, proj, poly.color, 2);
     }
+    // Draw any annotation markers for this exact frame on top
+    drawAnnotationMarkers(ctx);
   }
+
+  function drawAnnotationMarkers(ctx) {
+    if (!annotationMode) return;
+    for (const [name, pixel] of Object.entries(currentAnnotations)) {
+      const [px, py] = pixel;
+      ctx.fillStyle = '#fde047';
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(px, py, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      // Label
+      ctx.font = 'bold 14px sans-serif';
+      ctx.fillStyle = '#fde047';
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 3;
+      ctx.strokeText(name, px + 8, py + 4);
+      ctx.fillText(name, px + 8, py + 4);
+    }
+  }
+
+  // ── Annotation mode ──
+  async function loadLandmarks() {
+    if (allLandmarks.length) return;
+    const r = await fetch('/api/calibration/landmarks');
+    if (r.ok) {
+      const j = await r.json();
+      allLandmarks = j.landmarks || [];
+      landmarkSelect.innerHTML = '';
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = '-- pick a landmark --';
+      landmarkSelect.appendChild(placeholder);
+      for (const lm of allLandmarks) {
+        const opt = document.createElement('option');
+        opt.value = lm.name;
+        opt.textContent = `${lm.name}  (${lm.x.toFixed(1)}, ${lm.y.toFixed(1)}, ${lm.z.toFixed(2)})`;
+        landmarkSelect.appendChild(opt);
+      }
+    }
+  }
+
+  async function loadAnnotationsForCurrentFrame() {
+    if (!currentShotId || !perFrame) return;
+    const fi = Math.floor(videoEl.currentTime * perFrame.fps);
+    try {
+      const r = await fetch(`/api/calibration/${currentShotId}/annotations`);
+      if (r.ok) {
+        const j = await r.json();
+        currentAnnotations = (j.frames || {})[String(fi)] || {};
+      } else {
+        currentAnnotations = {};
+      }
+    } catch (e) {
+      currentAnnotations = {};
+    }
+    drawFrame();
+    updateAnnotateInfo();
+  }
+
+  function updateAnnotateInfo() {
+    const n = Object.keys(currentAnnotations).length;
+    const fi = perFrame ? Math.floor(videoEl.currentTime * perFrame.fps) : 0;
+    annotateInfo.textContent = annotationMode
+      ? `frame ${fi}: ${n} landmark${n === 1 ? '' : 's'} (need ≥4 for solve)`
+      : '';
+  }
+
+  annotateBtn.addEventListener('click', async () => {
+    annotationMode = !annotationMode;
+    annotateBtn.style.background = annotationMode ? '#dc2626' : '#4f46e5';
+    annotateBtn.textContent = annotationMode ? '✗ Exit annotate' : '✏ Annotate';
+    landmarkSelect.style.display = annotationMode ? '' : 'none';
+    saveAnchorBtn.style.display = annotationMode ? '' : 'none';
+    clearAnchorBtn.style.display = annotationMode ? '' : 'none';
+    clickLayer.style.display = annotationMode ? '' : 'none';
+    if (annotationMode) {
+      videoEl.pause();
+      await loadLandmarks();
+      // Match clickLayer pixel size to source video so clicks
+      // translate to source coordinates 1:1.
+      clickLayer.width = perFrame.width;
+      clickLayer.height = perFrame.height;
+      await loadAnnotationsForCurrentFrame();
+    } else {
+      currentAnnotations = {};
+      drawFrame();
+    }
+    updateAnnotateInfo();
+  });
+
+  clickLayer.addEventListener('click', (e) => {
+    if (!annotationMode || !perFrame) return;
+    const name = landmarkSelect.value;
+    if (!name) {
+      annotateInfo.textContent = 'Pick a landmark from the dropdown first';
+      return;
+    }
+    // Translate the click from layout pixels to source-video pixels
+    const rect = clickLayer.getBoundingClientRect();
+    const px = (e.clientX - rect.left) * (perFrame.width / rect.width);
+    const py = (e.clientY - rect.top) * (perFrame.height / rect.height);
+    currentAnnotations[name] = [px, py];
+    drawFrame();
+    // Auto-advance to the next undefined landmark
+    const idx = Array.from(landmarkSelect.options).findIndex(o => o.value === name);
+    if (idx >= 0) {
+      for (let j = idx + 1; j < landmarkSelect.options.length; j++) {
+        const next = landmarkSelect.options[j].value;
+        if (next && !(next in currentAnnotations)) {
+          landmarkSelect.value = next;
+          break;
+        }
+      }
+    }
+    updateAnnotateInfo();
+  });
+
+  saveAnchorBtn.addEventListener('click', async () => {
+    if (!currentShotId || !perFrame) return;
+    const fi = Math.floor(videoEl.currentTime * perFrame.fps);
+    saveAnchorBtn.disabled = true;
+    saveAnchorBtn.textContent = 'Saving…';
+    try {
+      const r = await fetch(`/api/calibration/${currentShotId}/annotations/${fi}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ landmarks: currentAnnotations }),
+      });
+      const j = await r.json();
+      if (j.calibration) {
+        saveAnchorBtn.textContent = `Saved (${j.calibration.reprojection_error_px.toFixed(1)}px residual, ${j.calibration.mode})`;
+        // Inject the new calibration into the per-frame data so the
+        // overlay updates immediately.
+        perFrame.frames[fi] = {
+          K: j.calibration.K,
+          rvec: j.calibration.rvec,
+          tvec: j.calibration.tvec,
+        };
+        if (!perFrame.keyframe_indices.includes(fi)) {
+          perFrame.keyframe_indices.push(fi);
+        }
+        drawFrame();
+      } else {
+        saveAnchorBtn.textContent = j.error || 'Saved (no solve)';
+      }
+    } catch (e) {
+      saveAnchorBtn.textContent = 'Save failed';
+    }
+    setTimeout(() => {
+      saveAnchorBtn.textContent = 'Save anchor';
+      saveAnchorBtn.disabled = false;
+    }, 2500);
+  });
+
+  clearAnchorBtn.addEventListener('click', async () => {
+    if (!currentShotId || !perFrame) return;
+    const fi = Math.floor(videoEl.currentTime * perFrame.fps);
+    if (!confirm(`Clear all annotations for frame ${fi}?`)) return;
+    await fetch(`/api/calibration/${currentShotId}/annotations/${fi}`, { method: 'DELETE' });
+    currentAnnotations = {};
+    drawFrame();
+    updateAnnotateInfo();
+  });
 
   // Sync overlay redraws with video playback at ~30 fps
   let rafId = null;
@@ -970,8 +1169,15 @@ function renderCalibrationVideoOverlay(panel, data) {
     rafId = requestAnimationFrame(tick);
   }
   videoEl.addEventListener('play', () => { if (!rafId) rafId = requestAnimationFrame(tick); });
-  videoEl.addEventListener('pause', () => { if (rafId) { cancelAnimationFrame(rafId); rafId = null; } drawFrame(); });
-  videoEl.addEventListener('seeked', drawFrame);
+  videoEl.addEventListener('pause', () => {
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    drawFrame();
+    if (annotationMode) loadAnnotationsForCurrentFrame();
+  });
+  videoEl.addEventListener('seeked', () => {
+    drawFrame();
+    if (annotationMode) loadAnnotationsForCurrentFrame();
+  });
   videoEl.addEventListener('loadeddata', drawFrame);
 
   select.addEventListener('change', () => loadShot(select.value));

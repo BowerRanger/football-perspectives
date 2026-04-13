@@ -425,16 +425,11 @@ def refine_shot_calibration(
     # the seed is silently preserved.
     refined, per_frame_diags = refine_per_frame(refined, clip_path)
 
-    # Final smoothing on the dense per-frame output: Hampel kills
-    # spikes, then Savgol smooths the per-frame ICL jitter while
-    # preserving real linear motion (real broadcast camera pans last
-    # several seconds at fairly constant angular rate).  A 15-frame
-    # window with order=2 fits a parabola to ~0.6 sec of footage,
-    # which preserves typical pan/zoom curves while damping the
-    # per-frame ICL noise that produces 3–5° rotation jumps between
-    # adjacent frames.
+    # Hampel-only post-pass: replace single-frame ICL spikes with
+    # the local median, but DON'T apply Savgol — we want every
+    # successfully-refined frame's ICL output to survive intact so
+    # the projected pitch lines hit their painted markings tightly.
     refined = smooth_calibration_temporally(refined, window=11)
-    refined = savgol_smooth_calibration(refined, window=15, order=2)
 
     # Stash the per-frame diagnostics on the returned list so the
     # calibration stage can surface them in its log without changing
@@ -454,6 +449,42 @@ class _DiagsList(list):
     without breaking callers that iterate it as a plain list.
     """
     pass
+
+
+def _build_seed(
+    frame_idx: int,
+    slerp_seed,  # InterpolatedCalibration
+    last_good_cf: CameraFrame | None,
+) -> CameraFrame:
+    """Pick the better of the SLERP seed and the previous frame's converged
+    calibration to use as the LM starting point for ``frame_idx``.
+
+    When ``last_good_cf`` is set, prefer it — propagated tracking is
+    much more accurate than the SLERP-of-noisy-keyframes value.  Fall
+    back to SLERP when no propagated value is available (start of
+    shot, or after a long unconverged gap).
+    """
+    if last_good_cf is not None:
+        return CameraFrame(
+            frame=frame_idx,
+            intrinsic_matrix=last_good_cf.intrinsic_matrix,
+            rotation_vector=last_good_cf.rotation_vector,
+            translation_vector=last_good_cf.translation_vector,
+            reprojection_error=0.0,
+            num_correspondences=0,
+            confidence=1.0,
+            tracked_landmark_types=[],
+        )
+    return CameraFrame(
+        frame=frame_idx,
+        intrinsic_matrix=slerp_seed.K.tolist(),
+        rotation_vector=slerp_seed.rvec.tolist(),
+        translation_vector=slerp_seed.tvec.tolist(),
+        reprojection_error=0.0,
+        num_correspondences=0,
+        confidence=1.0,
+        tracked_landmark_types=[],
+    )
 
 
 def refine_per_frame(
@@ -506,14 +537,22 @@ def refine_per_frame(
         logger.warning("refine_per_frame: cannot open %s", clip_path)
         return cal, []
 
-    new_frames: list[CameraFrame] = []
+    # Per-frame ICL is run as a forward pass that *carries* the most
+    # recent successfully-refined calibration as the next frame's seed.
+    # This makes the optimisation behave like camera tracking: each
+    # frame inherits the well-fit calibration from its predecessor,
+    # naturally encouraging temporal consistency and giving LM a much
+    # better starting point on the hard frames where the SLERP seed
+    # alone is too far off the truth.
+    n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    new_frames: list[CameraFrame | None] = [None] * n_total
     diagnostics: list[ICLResult] = []
+    last_good_cf: CameraFrame | None = None
+
     try:
-        n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         for fi in range(0, n_total, sample_every):
-            seed = interp.at_nearest(fi, max_extrapolation_frames=200)
-            if seed is None:
-                # No keyframe coverage for this frame — skip
+            slerp_seed = interp.at_nearest(fi, max_extrapolation_frames=200)
+            if slerp_seed is None:
                 cap.read()
                 continue
             cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
@@ -521,29 +560,64 @@ def refine_per_frame(
             if not ok:
                 continue
 
-            seed_cf = CameraFrame(
-                frame=fi,
-                intrinsic_matrix=seed.K.tolist(),
-                rotation_vector=seed.rvec.tolist(),
-                translation_vector=seed.tvec.tolist(),
-                reprojection_error=0.0,
-                num_correspondences=0,
-                confidence=1.0,
-                tracked_landmark_types=[],
-            )
-            # Per-frame ICL uses a single outer iteration and a tight
-            # rotation budget: the SLERP seed is already near-optimal,
-            # so additional iterations mainly waste time and any LM
-            # solution that diverges from the seed by more than 5° is
-            # almost certainly a wrong basin.  Reject those — the
-            # untouched seed is preferable to a wild ICL outlier.
+            # Build seed: prefer the previous frame's converged
+            # calibration; fall back to the SLERP value for the very
+            # first frame or after a long gap.
+            seed_cf = _build_seed(fi, slerp_seed, last_good_cf)
+
             refined_cf, diag = refine_with_lines(
-                seed_cf, frame, max_iters=1, max_rotation_delta_deg=5.0,
+                seed_cf, frame, max_iters=3,
             )
-            new_frames.append(refined_cf)
+            new_frames[fi] = refined_cf
             diagnostics.append(diag)
+
+            # Carry forward only when ICL was happy with the result —
+            # otherwise the next frame should start from the SLERP seed
+            # rather than inherit a possibly-bad value.
+            if diag.accepted:
+                last_good_cf = CameraFrame(
+                    frame=fi,
+                    intrinsic_matrix=refined_cf.intrinsic_matrix,
+                    rotation_vector=refined_cf.rotation_vector,
+                    translation_vector=refined_cf.translation_vector,
+                    reprojection_error=refined_cf.reprojection_error,
+                    num_correspondences=refined_cf.num_correspondences,
+                    confidence=refined_cf.confidence,
+                    tracked_landmark_types=list(refined_cf.tracked_landmark_types),
+                )
+
+        # Backward pass: any frame still using the SLERP seed (because
+        # ICL rejected it on the forward pass) gets a second chance
+        # with the NEXT frame's converged calibration as a seed.  This
+        # picks up the early-shot frames whose forward seed was the
+        # raw (often-wrong) SLERP value before the camera tracker
+        # locked on.
+        last_good_cf = None
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        for fi in range(n_total - 1, -1, -1):
+            existing = new_frames[fi]
+            existing_diag = diagnostics[-(n_total - fi)] if (n_total - fi) <= len(diagnostics) else None
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            slerp_seed = interp.at_nearest(fi, max_extrapolation_frames=200)
+            if slerp_seed is None:
+                continue
+            if existing is not None and existing_diag is not None and existing_diag.accepted:
+                # Already happy from the forward pass — carry it forward
+                last_good_cf = existing
+                continue
+            seed_cf = _build_seed(fi, slerp_seed, last_good_cf)
+            refined_cf, diag = refine_with_lines(seed_cf, frame, max_iters=3)
+            if diag.accepted:
+                new_frames[fi] = refined_cf
+                last_good_cf = refined_cf
     finally:
         cap.release()
+
+    # Any frames still None (no seed at all) are dropped.
+    new_frames = [cf for cf in new_frames if cf is not None]
 
     if not new_frames:
         return cal, diagnostics

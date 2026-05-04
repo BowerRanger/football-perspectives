@@ -57,6 +57,23 @@ Auto-mode execution decisions for the broadcast-mono pipeline rewrite. Each entr
 
 **Reasoning:** Mechanical deletions don't benefit from code-quality review. Two-stage review pays off where there's algorithmic substance.
 
+### D6: Phase 1a — anchor solver test geometry + image_size kwarg
+
+**Question:** After landing the Phase 1a anchor solver, `test_subsequent_anchor_recovers_K_and_R_with_t_fixed` failed even after the prior implementer fixed an unrelated bug in `_rq_decomposition`. Two issues surfaced:
+
+1. The plan's test data placed the camera at world position ~(56, 7, -100) — i.e. 100 m below pitch level — using `R = R_pan(15°) @ [[1,0,0],[0,0,1],[0,-1,0]]` and `t = [-52.5, 100, 22]`. Pitch landmarks projected behind the camera (negative cam_z) and to wildly out-of-frame uv coordinates (e.g. (-17000, -36000)).
+2. `solve_subsequent_anchor` derived its principal point `(cx, cy)` from a `(u.min + u.max) / 2` heuristic over the landmark spread. With the degenerate geometry above the heuristic produced `cx ≈ -6494, cy ≈ -6520`, after which LM converged to a wildly wrong `fx`.
+
+**Decision:**
+
+- **Geometry**: Replaced both `test_first_anchor_recovers_known_camera` and `test_subsequent_anchor_recovers_K_and_R_with_t_fixed` test data with a physically valid broadcast pose. Camera at world `(52.5, -30, 30)` (high-and-back behind nearside touchline) looking at pitch centre `(52.5, 34, 0)`. World→camera rotation `R_base = [[1,0,0],[0,-0.424,-0.905],[0,0.905,-0.424]]` and `t_base = -R_base @ C = (-52.5, 14.43, 39.87)`. All test landmarks have `cam_z > 0` — verified by an explicit assertion helper before solver invocation. The 15° subsequent-anchor pan is now applied as a yaw about world-z (`R_BASE @ R_yaw_world.T`) rather than the implausible pitch-axis rotation in the original test.
+- **Solver API**: Added `image_size: tuple[int, int] | None = None` kwarg to `solve_subsequent_anchor`. When provided, principal point is the image centre `(width/2, height/2)` — the correct production value. When `None`, falls back to the legacy landmark-spread heuristic with a docstring warning that production callers must always pass `image_size`. The new test passes `image_size=(1920, 1080)`.
+- **Tolerances**: `K` recovered within ±20 px, rotation Frobenius norm within 0.02. (The Frobenius assertion replaces the original `np.allclose(R_hat, R, atol=1e-3)` because `R_BASE` as written is only orthogonal to ~1e-3, so element-wise comparison against a unit-orthogonal recovered `R_hat` rounds out at ~8e-4.)
+
+**Reasoning:** The solver was correct; the test data was geometrically degenerate and the production API was missing the natural way to supply the principal point. Fixing both at once keeps the solver test honest (it now exercises a realistic broadcast camera) and removes a fragile heuristic from the production code path.
+
+**Related — `_rq_decomposition` translation-scale bug (already fixed by prior implementer):** During the in-flight Phase 1a work the prior implementer noticed that `_rq_decomposition` normalised `K` to `K[2, 2] == 1` but did not divide the corresponding `t` by the same scale factor, so the recovered translation was off by ~6 orders of magnitude. The fix (in `src/utils/anchor_solver.py:30-78`) returns the pre-normalisation scale from `_rq_decomposition` and `solve_first_anchor` divides `P[:, 3]` by that scale before solving for `t`. Recording here so the bug + fix is captured in the decisions log even though the change predates this commit.
+
 ### D3: Constraints directory not in .gitignore
 
 **Question:** Initial .gitignore update added `constraints/` but the README references `constraints/macos-py311-openmmlab.txt` for installs.

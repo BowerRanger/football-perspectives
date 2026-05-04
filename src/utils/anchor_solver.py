@@ -88,9 +88,20 @@ def solve_first_anchor(
 def solve_subsequent_anchor(
     landmarks: tuple[LandmarkObservation, ...],
     t_world: np.ndarray,
+    image_size: tuple[int, int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Solve (K, R) given a fixed t. Iterative LM minimising reprojection
     residual; K parameterised as fx=fy with principal point at image centre.
+
+    Args:
+        landmarks: at least 4 landmark observations.
+        t_world: world->camera translation inherited from the first anchor.
+        image_size: ``(width, height)`` of the source frame, in pixels. When
+            provided the principal point is set to the image centre
+            ``(width/2, height/2)`` — this is the correct production value.
+            When ``None``, falls back to a landmark-spread heuristic which is
+            fragile under wide pans or sparse landmarks; callers in production
+            must always pass ``image_size``.
 
     Returns (K, R).
     """
@@ -101,13 +112,17 @@ def solve_subsequent_anchor(
             f"subsequent anchor needs >=4 landmarks, got {len(landmarks)}"
         )
 
-    # Image centre: take from first landmark image_xy max as a proxy for size
-    # (caller passes image_size separately; we expose a helper if needed).
-    # Here we infer from the landmark spread — caller can also override.
-    us = np.array([lm.image_xy[0] for lm in landmarks])
-    vs = np.array([lm.image_xy[1] for lm in landmarks])
-    cx = float((us.min() + us.max()) / 2)
-    cy = float((vs.min() + vs.max()) / 2)
+    if image_size is not None:
+        width, height = image_size
+        cx = float(width) / 2.0
+        cy = float(height) / 2.0
+    else:
+        # Fallback heuristic when image_size is not supplied. Fragile —
+        # production callers should pass image_size.
+        us = np.array([lm.image_xy[0] for lm in landmarks])
+        vs = np.array([lm.image_xy[1] for lm in landmarks])
+        cx = float((us.min() + us.max()) / 2)
+        cy = float((vs.min() + vs.max()) / 2)
 
     world_pts = np.array([lm.world_xyz for lm in landmarks])
     image_pts = np.array([lm.image_xy for lm in landmarks])

@@ -70,3 +70,30 @@ def test_first_anchor_rejects_too_few_points():
     landmarks = _make_synthetic(K, R, t, [("a", (1.0, 2.0, 0.5))] * 3)
     with pytest.raises(AnchorSolveError):
         solve_first_anchor(landmarks[:3])
+
+
+@pytest.mark.unit
+def test_subsequent_anchor_recovers_K_and_R_with_t_fixed():
+    K_true = np.array([[1900.0, 0, 960], [0, 1900.0, 540], [0, 0, 1]])
+    angle = np.deg2rad(15.0)  # 15° pan from first anchor
+    R_true = np.array(
+        [[np.cos(angle), 0, np.sin(angle)],
+         [0, 1, 0],
+         [-np.sin(angle), 0, np.cos(angle)]],
+    ) @ np.array(
+        [[1, 0, 0],
+         [0, 0, 1],
+         [0, -1, 0]],
+        dtype=float,
+    )
+    t_true = np.array([-52.5, 100.0, 22.0])
+
+    landmarks = _make_synthetic(K_true, R_true, t_true, [
+        ("near_left_corner",            (0, 0, 0)),
+        ("near_right_corner",           (105, 0, 0)),
+        ("far_left_corner",             (0, 68, 0)),
+        ("halfway_near",                (52.5, 0, 0)),
+    ])
+    K_hat, R_hat = solve_subsequent_anchor(landmarks, t_true)
+    assert np.allclose(K_hat, K_true, atol=10.0)
+    assert np.allclose(R_hat, R_true, atol=1e-2)

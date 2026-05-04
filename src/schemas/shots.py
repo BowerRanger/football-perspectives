@@ -15,6 +15,7 @@ class Shot:
     start_time: float
     end_time: float
     clip_file: str
+    speed_factor: float = 1.0
 
 
 @dataclass
@@ -30,7 +31,15 @@ class ShotsManifest:
     @classmethod
     def load(cls, path: Path) -> "ShotsManifest":
         data = json.loads(path.read_text())
-        fields = {"id", "start_frame", "end_frame", "start_time", "end_time", "clip_file"}
+        fields = {
+            "id",
+            "start_frame",
+            "end_frame",
+            "start_time",
+            "end_time",
+            "clip_file",
+            "speed_factor",
+        }
         shots = [Shot(**{k: v for k, v in s.items() if k in fields}) for s in data.pop("shots")]
         return cls(shots=shots, **data)
 

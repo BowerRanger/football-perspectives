@@ -3,6 +3,7 @@
 import pytest
 from click.testing import CliRunner
 from pathlib import Path
+from unittest.mock import patch
 from src.stages.segmentation import ShotSegmentationStage
 
 
@@ -29,10 +30,32 @@ def test_run_help_shows_options():
 
 
 def test_run_missing_input_fails():
-    """Test that run command fails without --input."""
+    """Test that run command fails without --input when segmentation is active."""
     runner = CliRunner()
     result = runner.invoke(cli, ["run", "--output", "/tmp/out"])
     assert result.exit_code != 0
+
+
+def test_run_missing_input_allowed_when_starting_after_segmentation(tmp_path):
+    """--input should be optional when segmentation is excluded by --from-stage."""
+    runner = CliRunner()
+    output_dir = tmp_path / "output"
+
+    with patch("recon.run_pipeline") as run_pipeline:
+        result = runner.invoke(
+            cli,
+            [
+                "run",
+                "--output",
+                str(output_dir),
+                "--from-stage",
+                "calibration",
+            ],
+        )
+
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
+    _, kwargs = run_pipeline.call_args
+    assert kwargs["video_path"] is None
 
 
 @pytest.fixture(scope="module")
@@ -72,3 +95,28 @@ def test_run_produces_manifest(tmp_path, tiny_video):
     assert result.exit_code == 0, f"CLI failed: {result.output}"
     manifest_path = output_dir / "shots" / "shots_manifest.json"
     assert manifest_path.exists(), f"Manifest not found at {manifest_path}"
+
+
+def test_run_passes_device_to_runner(tmp_path, tiny_video):
+    runner = CliRunner()
+    output_dir = tmp_path / "output"
+
+    with patch("recon.run_pipeline") as run_pipeline:
+        result = runner.invoke(
+            cli,
+            [
+                "run",
+                "--input",
+                str(tiny_video),
+                "--output",
+                str(output_dir),
+                "--stages",
+                "5",
+                "--device",
+                "cpu",
+            ],
+        )
+
+    assert result.exit_code == 0, f"CLI failed: {result.output}"
+    _, kwargs = run_pipeline.call_args
+    assert kwargs["device"] == "cpu"

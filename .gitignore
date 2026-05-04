@@ -213,3 +213,7 @@ __marimo__/
 /output
 /checkpoints
 /data/models/
+.venv311/
+.DS_Store
+*.pt
+test-media/

@@ -138,15 +138,28 @@ def render_shot_overlays(
     *,
     n_frames: int = 6,
     line_thickness: int = 2,
+    cal_dir: Path | None = None,
+    debug_root: Path | None = None,
 ) -> list[Path]:
     """Render annotated frames for a shot's calibration.
 
     Picks ``n_frames`` evenly-spaced keyframes from the shot's
     calibration and writes one JPEG per keyframe to
-    ``calibration/debug/<shot_id>/``.  Returns the list of written
-    paths so callers can surface them in the web UI.
+    ``<debug_root>/<shot_id>/``.  Returns the list of written paths so
+    callers can surface them in the web UI.
+
+    By default reads ``output_dir/calibration/<shot_id>_calibration.json``
+    and writes to ``output_dir/calibration/debug/<shot_id>/``.  Pass
+    ``cal_dir`` to read a calibration from a backend-specific subdir
+    (e.g. ``output_dir/calibration/tvcalib``), and ``debug_root`` to
+    write overlays beside that subdir.
     """
-    cal_path = output_dir / "calibration" / f"{shot_id}_calibration.json"
+    if cal_dir is None:
+        cal_dir = output_dir / "calibration"
+    if debug_root is None:
+        debug_root = cal_dir / "debug"
+
+    cal_path = cal_dir / f"{shot_id}_calibration.json"
     if not cal_path.exists():
         logger.warning("calibration_debug: no calibration for %s", shot_id)
         return []
@@ -160,7 +173,7 @@ def render_shot_overlays(
         logger.warning("calibration_debug: clip not found %s", clip_path)
         return []
 
-    debug_dir = output_dir / "calibration" / "debug" / shot_id
+    debug_dir = debug_root / shot_id
     debug_dir.mkdir(parents=True, exist_ok=True)
     # Wipe stale frames so a re-render doesn't leave old ones behind.
     for stale in debug_dir.glob("*.jpg"):

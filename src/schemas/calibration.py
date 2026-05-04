@@ -12,6 +12,7 @@ class CameraFrame:
     reprojection_error: float
     num_correspondences: int
     confidence: float
+    tracked_landmark_types: list[str] = field(default_factory=list)
 
 
 @dataclass

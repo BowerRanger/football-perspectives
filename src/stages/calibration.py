@@ -33,7 +33,11 @@ from src.utils.calibration_propagation import propagate_calibration_across_gaps
 from src.utils.calibration_refine import refine_shot_calibration
 from src.utils.camera import camera_world_position
 from src.utils.manual_calibration import solve_from_annotations
-from src.utils.neural_calibrator import NeuralCalibration, PnLCalibrator
+from src.utils.neural_calibrator import (
+    CalibratorProtocol,
+    NeuralCalibration,
+    PnLCalibrator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -179,28 +183,76 @@ class CameraCalibrationStage(BaseStage):
         self,
         config: dict,
         output_dir: Path,
-        neural_calibrator: PnLCalibrator | None = None,
+        neural_calibrator: CalibratorProtocol | None = None,
         **_: object,
     ) -> None:
         super().__init__(config, output_dir)
         self._calibrator_ext = neural_calibrator
-        self._calibrator_cache: PnLCalibrator | None = None
+        self._calibrator_cache: CalibratorProtocol | None = None
 
-    def _calibrator(self) -> PnLCalibrator:
-        """Return the :class:`PnLCalibrator` instance, constructing one lazily
-        if none was injected.
+    def _calibrator(self) -> CalibratorProtocol:
+        """Return the calibrator instance, constructing one lazily.
+
+        Backend is chosen by ``calibration.backend`` in the config
+        (``pnlcalib`` — default — or ``tvcalib``).  An externally
+        injected calibrator (e.g. from tests) takes precedence.
         """
         if self._calibrator_ext is not None:
             return self._calibrator_ext
         if self._calibrator_cache is None:
             cfg = self.config.get("calibration", {})
-            self._calibrator_cache = PnLCalibrator(
-                device=str(cfg.get("device", "auto")),
-                kp_threshold=float(cfg.get("kp_threshold", 0.3434)),
-                line_threshold=float(cfg.get("line_threshold", 0.7867)),
-                pnl_refine=bool(cfg.get("pnl_refine", True)),
-            )
+            backend = str(cfg.get("backend", "pnlcalib")).strip().lower()
+            if backend == "pnlcalib":
+                self._calibrator_cache = PnLCalibrator(
+                    device=str(cfg.get("device", "auto")),
+                    kp_threshold=float(cfg.get("kp_threshold", 0.3434)),
+                    line_threshold=float(cfg.get("line_threshold", 0.7867)),
+                    pnl_refine=bool(cfg.get("pnl_refine", True)),
+                )
+            elif backend == "tvcalib":
+                # Lazy import so PnLCalib-only runs don't pull in
+                # TVCalib's optional deps (kornia, SoccerNet).
+                from src.utils.tvcalib_calibrator import TVCalibCalibrator
+
+                tv_cfg = cfg.get("tvcalib", {}) or {}
+                self._calibrator_cache = TVCalibCalibrator(
+                    device=str(cfg.get("device", "auto")),
+                    prior=str(tv_cfg.get("prior", "center")),
+                    optim_steps=int(tv_cfg.get("optim_steps", 800)),
+                    ndc_loss_threshold=float(
+                        tv_cfg.get("ndc_loss_threshold", 0.017),
+                    ),
+                    sigma_scale=float(tv_cfg.get("sigma_scale", 1.96)),
+                    image_width=int(tv_cfg.get("image_width", 1920)),
+                    image_height=int(tv_cfg.get("image_height", 1080)),
+                )
+            else:
+                raise ValueError(
+                    f"Unknown calibration backend {backend!r}; "
+                    "expected 'pnlcalib' or 'tvcalib'."
+                )
         return self._calibrator_cache
+
+    def _backend_plan(self) -> tuple[str, list[str]]:
+        """Return ``(primary_backend, extra_backends)`` from config.
+
+        The primary backend is the value of ``calibration.backend`` and
+        is what downstream stages (triangulation etc.) consume from the
+        top-level ``calibration/*_calibration.json``.  Extra backends
+        listed in ``calibration.compare_backends`` are additionally run
+        into per-backend subdirs so the web viewer can toggle between
+        them for side-by-side overlay comparison.  The primary is
+        deduplicated from the extras list.
+        """
+        cfg = self.config.get("calibration", {})
+        primary = str(cfg.get("backend", "pnlcalib")).strip().lower()
+        raw_extras = cfg.get("compare_backends", []) or []
+        extras: list[str] = []
+        for name in raw_extras:
+            key = str(name).strip().lower()
+            if key and key != primary and key not in extras:
+                extras.append(key)
+        return primary, extras
 
     def is_complete(self) -> bool:
         cal_dir = self.output_dir / "calibration"
@@ -211,30 +263,116 @@ class CameraCalibrationStage(BaseStage):
             manifest = ShotsManifest.load(manifest_path)
         except Exception:
             return False
-        return all(
-            (cal_dir / f"{shot.id}_calibration.json").exists()
-            for shot in manifest.shots
-        )
+
+        _primary, extras = self._backend_plan()
+        for shot in manifest.shots:
+            if not (cal_dir / f"{shot.id}_calibration.json").exists():
+                return False
+            for extra in extras:
+                if not (cal_dir / extra / f"{shot.id}_calibration.json").exists():
+                    return False
+        return True
 
     def run(self) -> None:
         cal_dir = self.output_dir / "calibration"
         cal_dir.mkdir(parents=True, exist_ok=True)
 
         cfg = self.config.get("calibration", {})
-        keyframe_interval = int(cfg.get("keyframe_interval", 30))
-        max_keyframes = int(cfg.get("max_keyframes_per_shot", 10))
-        bounds = self._resolve_bounds(cfg.get("plausibility_bounds"))
-
         shots_dir = self.output_dir / "shots"
         manifest_path = shots_dir / "shots_manifest.json"
         if not manifest_path.exists():
             print("  -> inferred shots_manifest.json from prepared clips")
         manifest = ShotsManifest.load_or_infer(shots_dir, persist=True)
 
+        primary, extras = self._backend_plan()
+        # Primary backend writes to the top-level cal_dir (downstream
+        # consumers read from there).  Extras write to per-backend
+        # subdirs purely for the web viewer's overlay comparison.
+        self._run_backend(
+            backend=primary,
+            target_dir=cal_dir,
+            manifest=manifest,
+            cfg=cfg,
+            variant_label=None,
+        )
+        for extra in extras:
+            extra_dir = cal_dir / extra
+            extra_dir.mkdir(parents=True, exist_ok=True)
+            print(f"  -> comparison backend: {extra}")
+            self._run_backend(
+                backend=extra,
+                target_dir=extra_dir,
+                manifest=manifest,
+                cfg=cfg,
+                variant_label=extra,
+            )
+
+    def _build_calibrator(self, backend: str) -> CalibratorProtocol:
+        """Construct a fresh calibrator for ``backend``.
+
+        Mirrors :meth:`_calibrator` but bypasses the injection +
+        cache so each backend in a ``compare_backends`` run gets its
+        own instance.
+        """
+        cfg = self.config.get("calibration", {})
+        if backend == "pnlcalib":
+            return PnLCalibrator(
+                device=str(cfg.get("device", "auto")),
+                kp_threshold=float(cfg.get("kp_threshold", 0.3434)),
+                line_threshold=float(cfg.get("line_threshold", 0.7867)),
+                pnl_refine=bool(cfg.get("pnl_refine", True)),
+            )
+        if backend == "tvcalib":
+            from src.utils.tvcalib_calibrator import TVCalibCalibrator
+
+            tv_cfg = cfg.get("tvcalib", {}) or {}
+            return TVCalibCalibrator(
+                device=str(cfg.get("device", "auto")),
+                prior=str(tv_cfg.get("prior", "center")),
+                optim_steps=int(tv_cfg.get("optim_steps", 800)),
+                ndc_loss_threshold=float(tv_cfg.get("ndc_loss_threshold", 0.017)),
+                sigma_scale=float(tv_cfg.get("sigma_scale", 1.96)),
+                image_width=int(tv_cfg.get("image_width", 1920)),
+                image_height=int(tv_cfg.get("image_height", 1080)),
+            )
+        raise ValueError(
+            f"Unknown calibration backend {backend!r}; "
+            "expected 'pnlcalib' or 'tvcalib'.",
+        )
+
+    def _run_backend(
+        self,
+        *,
+        backend: str,
+        target_dir: Path,
+        manifest: ShotsManifest,
+        cfg: dict,
+        variant_label: str | None,
+    ) -> None:
+        """Run the full per-shot calibration loop for one backend.
+
+        ``target_dir`` is where ``<shot_id>_calibration.json`` files are
+        written.  ``variant_label`` is the key shown in viewer variant
+        listings (``None`` for the primary backend at the top level).
+        """
+        keyframe_interval = int(cfg.get("keyframe_interval", 30))
+        max_keyframes = int(cfg.get("max_keyframes_per_shot", 10))
+        bounds = self._resolve_bounds(cfg.get("plausibility_bounds"))
         debug_overlay_enabled = bool(cfg.get("debug_overlay", True))
         debug_overlay_n_frames = int(cfg.get("debug_overlay_n_frames", 6))
         line_refine_enabled = bool(cfg.get("line_refine", True))
         propagate_gaps_enabled = bool(cfg.get("propagate_gaps", True))
+
+        # The primary backend path uses whatever was injected via the
+        # constructor (e.g. a test double); extras always build fresh.
+        if variant_label is None and self._calibrator_ext is not None:
+            calibrator: CalibratorProtocol = self._calibrator_ext
+        else:
+            calibrator = self._build_calibrator(backend)
+
+        # Debug overlays for extras go beside the calibration files so
+        # each backend has its own debug/ directory.
+        debug_root = target_dir / "debug"
 
         for shot in manifest.shots:
             result = self._calibrate_shot(
@@ -243,6 +381,7 @@ class CameraCalibrationStage(BaseStage):
                 keyframe_interval=keyframe_interval,
                 max_keyframes=max_keyframes,
                 bounds=bounds,
+                calibrator=calibrator,
             )
             # ── Apply manual landmark annotations (if any) ──
             # Each annotated frame becomes a high-trust keyframe that
@@ -308,16 +447,26 @@ class CameraCalibrationStage(BaseStage):
                         )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("gap propagation failed for %s: %s", shot.id, exc)
-            result.save(cal_dir / f"{shot.id}_calibration.json")
-            flag = " (no calibration frames — PnLCalib failed)" if not result.frames else ""
-            print(f"  -> {shot.id}: {len(result.frames)} frames calibrated{flag}")
+            result.save(target_dir / f"{shot.id}_calibration.json")
+            label = f" [{variant_label}]" if variant_label else ""
+            flag = " (no calibration frames)" if not result.frames else ""
+            print(
+                f"  -> {shot.id}{label}: {len(result.frames)} frames calibrated{flag}",
+            )
             if debug_overlay_enabled and result.frames:
                 try:
                     written = render_shot_overlays(
-                        self.output_dir, shot.id, n_frames=debug_overlay_n_frames,
+                        self.output_dir,
+                        shot.id,
+                        n_frames=debug_overlay_n_frames,
+                        cal_dir=target_dir,
+                        debug_root=debug_root,
                     )
                     if written:
-                        print(f"     debug overlay: {len(written)} frame(s) → calibration/debug/{shot.id}/")
+                        rel = debug_root.relative_to(self.output_dir)
+                        print(
+                            f"     debug overlay: {len(written)} frame(s) → {rel}/{shot.id}/",
+                        )
                 except Exception as exc:  # noqa: BLE001 — non-fatal diagnostic
                     logger.warning("debug overlay failed for %s: %s", shot.id, exc)
 
@@ -452,6 +601,7 @@ class CameraCalibrationStage(BaseStage):
         keyframe_interval: int,
         max_keyframes: int,
         bounds: dict[str, tuple[float, float]] | None = None,
+        calibrator: CalibratorProtocol | None = None,
     ) -> CalibrationResult:
         clip_path = self.output_dir / clip_file
         if bounds is None:
@@ -469,7 +619,8 @@ class CameraCalibrationStage(BaseStage):
                 logger.warning("%s: clip has no frames", shot_id)
                 return CalibrationResult(shot_id=shot_id, camera_type="static", frames=[])
 
-            calibrator = self._calibrator()
+            if calibrator is None:
+                calibrator = self._calibrator()
             per_frame: list[tuple[int, NeuralCalibration]] = []
             rejected_count = 0
             for frame_idx in keyframes:

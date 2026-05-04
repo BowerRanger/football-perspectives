@@ -27,6 +27,8 @@ class PlayerPoseFrame:
 @dataclass
 class PlayerPoses:
     track_id: str
+    player_id: str = ""
+    player_name: str = ""
     frames: list[PlayerPoseFrame] = field(default_factory=list)
 
 

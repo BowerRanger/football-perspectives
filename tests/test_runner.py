@@ -99,6 +99,7 @@ def test_run_pipeline_passes_device_to_pose_stage(tmp_path: Path, monkeypatch) -
             return None
 
     monkeypatch.setattr("src.pipeline.runner.STAGE_ORDER", [("pose", FakePoseStage)])
+    monkeypatch.setattr("src.pipeline.runner._STAGES_TRIANGULATION", [("pose", FakePoseStage)])
 
     run_pipeline(
         output_dir=tmp_path,

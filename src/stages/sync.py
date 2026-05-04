@@ -1854,6 +1854,35 @@ class TemporalSyncStage(BaseStage):
                 f"confidence={confidence:.2f} ({method}), residual={residual:.1f}f{flag}"
             )
 
+        # Preserve any manually-set offsets from a previous run so that
+        # web-viewer edits survive a pipeline re-run.
+        existing_sync_path = sync_dir / "sync_map.json"
+        if existing_sync_path.exists():
+            try:
+                existing = json.loads(existing_sync_path.read_text())
+                manual_overrides = {
+                    a["shot_id"]: a
+                    for a in existing.get("alignments", [])
+                    if a.get("method") == "manual"
+                }
+                if manual_overrides:
+                    alignments = [
+                        Alignment(
+                            shot_id=a.shot_id,
+                            frame_offset=manual_overrides[a.shot_id]["frame_offset"],
+                            confidence=manual_overrides[a.shot_id].get("confidence", 1.0),
+                            method="manual",
+                            overlap_frames=manual_overrides[a.shot_id].get("overlap_frames", a.overlap_frames),
+                            graph_residual_frames=a.graph_residual_frames,
+                        )
+                        if a.shot_id in manual_overrides else a
+                        for a in alignments
+                    ]
+                    preserved = list(manual_overrides.keys())
+                    logging.info("[sync] preserved manual offsets for: %s", preserved)
+            except Exception:
+                pass  # don't let a corrupt file block the stage
+
         SyncMap(reference_shot=reference, alignments=alignments).save(
             sync_dir / "sync_map.json"
         )

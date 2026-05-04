@@ -43,6 +43,23 @@ def _one_player_det() -> Detection:
     return Detection(bbox=(50.0, 30.0, 150.0, 200.0), confidence=0.9, class_name="player")
 
 
+class _RequiresFitTeamClassifier:
+    def __init__(self) -> None:
+        self._fitted = False
+        self.fit_call_count = 0
+
+    def fit(self, crops: list[np.ndarray]) -> None:
+        self.fit_call_count += 1
+        if not crops:
+            raise ValueError("Need at least one crop")
+        self._fitted = True
+
+    def classify(self, crops: list[np.ndarray]) -> list[str]:
+        if not self._fitted:
+            raise RuntimeError("Call fit() before classify()")
+        return ["A"] * len(crops)
+
+
 def test_tracking_stage_writes_tracks_file(tiny_shot_dir):
     cfg = load_config()
     stage = PlayerTrackingStage(
@@ -74,6 +91,25 @@ def test_tracking_stage_tracks_have_correct_schema(tiny_shot_dir):
     assert t.team == "A"
     assert len(t.frames) >= 1
     assert len(t.frames[0].bbox) == 4
+
+
+def test_tracking_stage_fits_team_classifier_before_classify(tiny_shot_dir):
+    cfg = load_config()
+    classifier = _RequiresFitTeamClassifier()
+    stage = PlayerTrackingStage(
+        config=cfg,
+        output_dir=tiny_shot_dir,
+        player_detector=FakePlayerDetector([[_one_player_det()]]),
+        team_classifier=classifier,
+    )
+
+    stage.run()
+
+    result = TracksResult.load(tiny_shot_dir / "tracks" / "shot_001_tracks.json")
+    assert classifier._fitted
+    assert classifier.fit_call_count >= 1
+    assert len(result.tracks) >= 1
+    assert result.tracks[0].team == "A"
 
 
 # Unit tests for PlayerDetector (from plan Task 2)

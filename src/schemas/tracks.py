@@ -16,6 +16,8 @@ class Track:
     track_id: str
     class_name: str             # "player" | "goalkeeper" | "referee" | "ball"
     team: str                   # "A" | "B" | "referee" | "unknown"
+    player_id: str = ""         # global ID across shots (e.g., "P001")
+    player_name: str = ""       # user-friendly name (e.g., "Salah")
     frames: list[TrackFrame] = field(default_factory=list)
 
 

@@ -471,6 +471,118 @@ def test_stage_fuses_per_frame_results_to_shared_position(tmp_path):
     assert 13.0 < shared[2] < 16.5
 
 
+def test_compare_backends_writes_to_subdir_and_top_level(
+    tmp_path, monkeypatch,
+):
+    """Config ``compare_backends`` should run every listed backend,
+    writing the primary to the top-level ``calibration/`` and each
+    extra to ``calibration/<backend>/``.
+    """
+    shots_dir = tmp_path / "shots"
+    shots_dir.mkdir()
+    _write_dummy_clip(shots_dir / "shot_001.mp4", num_frames=60)
+    manifest = ShotsManifest(
+        source_file="test.mp4",
+        fps=25.0,
+        total_frames=60,
+        shots=[
+            Shot(
+                id="shot_001",
+                start_frame=0,
+                end_frame=60,
+                start_time=0.0,
+                end_time=2.4,
+                clip_file="shots/shot_001.mp4",
+            ),
+        ],
+    )
+    manifest.save(shots_dir / "shots_manifest.json")
+
+    primary_fake = _FakeNeuralCalibrator(
+        {i: _fake_calibration(np.array([50.0, -30.0, 15.0])) for i in range(3)},
+    )
+    extra_fake = _FakeNeuralCalibrator(
+        {i: _fake_calibration(np.array([55.0, -25.0, 16.0])) for i in range(3)},
+    )
+
+    from src.stages import calibration as cal_mod
+
+    # _build_calibrator is only called for extras; the primary uses
+    # the injected neural_calibrator.
+    def fake_build(self, backend: str):
+        assert backend == "tvcalib"
+        return extra_fake
+
+    monkeypatch.setattr(
+        cal_mod.CameraCalibrationStage, "_build_calibrator", fake_build,
+    )
+
+    stage = cal_mod.CameraCalibrationStage(
+        config={
+            "calibration": {
+                "backend": "pnlcalib",
+                "compare_backends": ["tvcalib"],
+                "keyframe_interval": 20,
+                "max_keyframes_per_shot": 3,
+                "line_refine": False,
+                "propagate_gaps": False,
+                "debug_overlay": False,
+            },
+        },
+        output_dir=tmp_path,
+        neural_calibrator=primary_fake,
+    )
+    stage.run()
+
+    # Primary backend output lives at the top level for downstream.
+    primary_path = tmp_path / "calibration" / "shot_001_calibration.json"
+    assert primary_path.exists()
+
+    # Extra backend output lives in calibration/tvcalib/.
+    extra_path = tmp_path / "calibration" / "tvcalib" / "shot_001_calibration.json"
+    assert extra_path.exists()
+
+    primary_cal = CalibrationResult.load(primary_path)
+    extra_cal = CalibrationResult.load(extra_path)
+    assert primary_cal.frames
+    assert extra_cal.frames
+
+    # The two backends placed the camera at different positions, so
+    # the saved calibrations must reflect that.
+    primary_pos = camera_world_position(
+        np.asarray(primary_cal.frames[0].rotation_vector),
+        np.asarray(primary_cal.frames[0].translation_vector),
+    )
+    extra_pos = camera_world_position(
+        np.asarray(extra_cal.frames[0].rotation_vector),
+        np.asarray(extra_cal.frames[0].translation_vector),
+    )
+    assert not np.allclose(primary_pos, extra_pos, atol=0.5)
+
+    # is_complete must verify BOTH primary and extra subdirs.
+    assert stage.is_complete() is True
+
+    extra_path.unlink()
+    assert stage.is_complete() is False
+
+
+def test_backend_plan_dedupes_and_normalises(tmp_path):
+    from src.stages.calibration import CameraCalibrationStage
+
+    stage = CameraCalibrationStage(
+        config={
+            "calibration": {
+                "backend": "PnLCalib",  # case-insensitive
+                "compare_backends": ["tvcalib", "PNLCALIB", "tvcalib", ""],
+            },
+        },
+        output_dir=tmp_path,
+    )
+    primary, extras = stage._backend_plan()
+    assert primary == "pnlcalib"
+    assert extras == ["tvcalib"]
+
+
 def test_stage_writes_empty_calibration_when_all_frames_fail(tmp_path, caplog):
     shots_dir = tmp_path / "shots"
     shots_dir.mkdir()

@@ -42,8 +42,19 @@ _MIN_FEATURES = 40
 _MAX_FEATURES = 400
 _LK_WIN = (21, 21)
 _LK_LEVELS = 3
-_MIN_INLIERS_FOR_HOMOGRAPHY = 20
-_RANSAC_REPROJ_THRESHOLD_PX = 3.0
+_MIN_INLIERS_FOR_HOMOGRAPHY = 30
+# Tighter RANSAC: LK tracking on pitch features is typically sub-pixel;
+# anything >1.5 px off is probably tracking a moving player boundary.
+_RANSAC_REPROJ_THRESHOLD_PX = 1.5
+# Per-frame homography must be close to an identity-plus-pan — the
+# camera can't zoom by >5 % in one frame, so |det(M) - 1| should be
+# tiny.  Reject anything outside a safe band.
+_DET_MIN = 0.85
+_DET_MAX = 1.18
+# Round-trip LK check: after forward tracking a feature, track it
+# back and require the round-trip error to be <1 px.  Catches LK
+# drift onto moving content.
+_LK_ROUND_TRIP_MAX_PX = 1.0
 
 
 @dataclass(frozen=True)
@@ -280,54 +291,85 @@ def _estimate_frame_homography(
     """Estimate the 2D homography ``M`` such that ``p_b ~= M @ p_a``
     for pixels on the (nearly planar) pitch surface.
 
-    Uses ORB features on the pitch mask region of ``frame_a``
-    tracked via Lucas–Kanade optical flow to ``frame_b``, then
-    ``cv2.findHomography(RANSAC)`` on the surviving pairs.
+    Uses corner features on the pitch mask region of ``frame_a``
+    tracked forward via Lucas–Kanade to ``frame_b``, then tracked
+    back to ``frame_a`` as a round-trip consistency check.  Features
+    whose tracked point leaves the pitch mask in ``frame_b`` or
+    whose round-trip error exceeds a sub-pixel threshold are
+    rejected (they're likely following moving content such as
+    player silhouettes).  A RANSAC homography is then fit on the
+    surviving pairs.
 
     Returns ``(M, n_inliers)`` or ``None`` if the estimation is
     unreliable (too few features, too few inliers, or degenerate
     homography).
     """
-    mask = _largest_pitch_region(_pitch_mask(frame_a))
+    mask_a = _largest_pitch_region(_pitch_mask(frame_a))
+    mask_b = _largest_pitch_region(_pitch_mask(frame_b))
     gray_a = cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY)
     gray_b = cv2.cvtColor(frame_b, cv2.COLOR_BGR2GRAY)
 
-    # goodFeaturesToTrack gives us dense, well-distributed corners
-    # restricted to the pitch mask — ideal for homography fitting.
     corners_a = cv2.goodFeaturesToTrack(
         gray_a,
         maxCorners=_MAX_FEATURES,
         qualityLevel=0.01,
         minDistance=12,
-        mask=mask,
+        mask=mask_a,
     )
     if corners_a is None or len(corners_a) < _MIN_FEATURES:
         return None
 
-    tracked_b, status, _err = cv2.calcOpticalFlowPyrLK(
-        gray_a, gray_b, corners_a, None,
-        winSize=_LK_WIN, maxLevel=_LK_LEVELS,
+    lk_params = dict(winSize=_LK_WIN, maxLevel=_LK_LEVELS)
+
+    tracked_b, status_fwd, _ = cv2.calcOpticalFlowPyrLK(
+        gray_a, gray_b, corners_a, None, **lk_params,
     )
-    status = status.reshape(-1).astype(bool)
-    if int(status.sum()) < _MIN_FEATURES:
+    status_fwd = status_fwd.reshape(-1).astype(bool)
+    if int(status_fwd.sum()) < _MIN_FEATURES:
         return None
 
-    pts_a = corners_a[status].reshape(-1, 2)
-    pts_b = tracked_b[status].reshape(-1, 2)
+    # Round-trip check: track back and measure displacement
+    tracked_back, status_bwd, _ = cv2.calcOpticalFlowPyrLK(
+        gray_b, gray_a, tracked_b, None, **lk_params,
+    )
+    status_bwd = status_bwd.reshape(-1).astype(bool)
+    round_trip_err = np.linalg.norm(
+        corners_a.reshape(-1, 2) - tracked_back.reshape(-1, 2),
+        axis=1,
+    )
+    round_trip_ok = round_trip_err < _LK_ROUND_TRIP_MAX_PX
+
+    # Check tracked points are still inside the pitch mask in frame B
+    tracked_b_xy = tracked_b.reshape(-1, 2)
+    h_b, w_b = mask_b.shape
+    tb_int_x = np.clip(np.round(tracked_b_xy[:, 0]).astype(int), 0, w_b - 1)
+    tb_int_y = np.clip(np.round(tracked_b_xy[:, 1]).astype(int), 0, h_b - 1)
+    mask_b_ok = mask_b[tb_int_y, tb_int_x] > 0
+
+    valid = status_fwd & status_bwd & round_trip_ok & mask_b_ok
+    if int(valid.sum()) < _MIN_FEATURES:
+        return None
+
+    pts_a = corners_a[valid].reshape(-1, 2)
+    pts_b = tracked_b_xy[valid]
 
     M, inlier_mask = cv2.findHomography(
         pts_a, pts_b,
         method=cv2.RANSAC,
         ransacReprojThreshold=_RANSAC_REPROJ_THRESHOLD_PX,
+        maxIters=2000,
+        confidence=0.995,
     )
     if M is None:
         return None
     n_inliers = int(inlier_mask.sum()) if inlier_mask is not None else 0
     if n_inliers < _MIN_INLIERS_FOR_HOMOGRAPHY:
         return None
-    # Reject degenerate / near-singular homographies
+    # Reject homographies whose determinant is out of the safe
+    # per-frame band (camera can't zoom > ~18 % in one frame) or
+    # numerically degenerate.
     det = float(np.linalg.det(M))
-    if abs(det) < 1e-3 or abs(det) > 1e3:
+    if not (_DET_MIN < abs(det) < _DET_MAX):
         return None
     return M, n_inliers
 
@@ -400,24 +442,39 @@ def _fill_gap(
                 H_prev = H_cur
                 prev_frame_bgr = cur_frame_bgr
 
-    # Blend forward + backward estimates where both are available.
+    # For each frame pick the chain whose anchor is CLOSER — no
+    # matrix averaging.  Linear interpolation of two 3×3 homographies
+    # doesn't live on the homography manifold; blended matrices
+    # correspond to invalid camera transforms and the projected
+    # pitch lines sweep through degenerate rotations as the blend
+    # weight shifts.
     out: dict[int, CameraFrame] = {}
-    total_span = max(1, gap_end - gap_start + 2)  # avoid div-by-zero
+    anchor_before_frame = anchor_before.frame if anchor_before else None
+    anchor_after_frame = anchor_after.frame if anchor_after else None
     for fi in range(gap_start, gap_end + 1):
         H_f = forward.get(fi)
         H_b = backward.get(fi)
-        anchor = anchor_before if anchor_before is not None else anchor_after
+        dist_fwd = (fi - anchor_before_frame) if anchor_before_frame is not None else float("inf")
+        dist_bck = (anchor_after_frame - fi) if anchor_after_frame is not None else float("inf")
+
+        chosen_H: np.ndarray | None = None
+        anchor_for_K: CameraFrame | None = None
         if H_f is not None and H_b is not None:
-            # Linear blend weighted by distance to each anchor.
-            w_back = (fi - gap_start + 1) / total_span
-            w_fwd = 1.0 - w_back
-            H = w_fwd * H_f + w_back * H_b
-            out[fi] = _homography_to_camera_frame(H, anchor, fi)
+            if dist_fwd <= dist_bck:
+                chosen_H = H_f
+                anchor_for_K = anchor_before
+            else:
+                chosen_H = H_b
+                anchor_for_K = anchor_after
         elif H_f is not None:
-            out[fi] = _homography_to_camera_frame(H_f, anchor, fi)
+            chosen_H = H_f
+            anchor_for_K = anchor_before
         elif H_b is not None:
-            anchor_for_K = anchor_after or anchor_before
-            out[fi] = _homography_to_camera_frame(H_b, anchor_for_K, fi)
+            chosen_H = H_b
+            anchor_for_K = anchor_after
+
+        if chosen_H is not None and anchor_for_K is not None:
+            out[fi] = _homography_to_camera_frame(chosen_H, anchor_for_K, fi)
         # else: no estimate reaches this frame; leave missing
     return out
 

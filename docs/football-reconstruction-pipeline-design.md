@@ -46,23 +46,23 @@ A Python CLI tool that takes broadcast football footage (single file with multip
                        │
                        ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  STAGE 3: Temporal Synchronisation                           │
-│  Match visual events across shots to align timelines         │
-│  Output: sync_map.json with frame offsets between views      │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  STAGE 4: Player Detection & Tracking                        │
+│  STAGE 3: Player Detection & Tracking                        │
 │  Detect + track players and ball per shot                    │
 │  Output: tracks JSON per shot (bounding boxes + IDs)         │
 └──────────────────────┬───────────────────────────────────────┘
                        │
                        ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  STAGE 5: 2D Pose Estimation                                 │
+│  STAGE 4: 2D Pose Estimation                                 │
 │  Run ViTPose on each tracked player crop, per shot           │
 │  Output: 2D keypoints JSON per player per shot               │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│  STAGE 5: Temporal Synchronisation                           │
+│  Fuse ball and player-motion signals for frame alignment     │
+│  Output: sync_map.json with frame offsets between views      │
 └──────────────────────┬───────────────────────────────────────┘
                        │
                        ▼
@@ -188,7 +188,7 @@ Each shot is also extracted as a standalone video file using FFmpeg for downstre
 
 ---
 
-### 3.3 Temporal Synchronisation
+### 3.5 Temporal Synchronisation (Execution Stage 5)
 
 **Purpose**: Determine the precise frame offset between overlapping shots so that frame N in shot A corresponds to the same real-world moment as frame M in shot B.
 
@@ -207,9 +207,9 @@ Each shot is also extracted as a standalone video file using FFmpeg for downstre
 For each pair of overlapping shots (A, B):
   1. Project ball positions to pitch coordinates in both shots
   2. Compute normalised cross-correlation of ball trajectories
-  3. Select offset with highest correlation as coarse alignment
-  4. Refine using player formation matching within ±10 frames of coarse estimate
-  5. Compute confidence based on correlation peak sharpness
+  3. Compute player-motion signal from tracked pitch positions and correlate it
+  4. If both offsets agree within tolerance, fuse them; otherwise pick higher confidence
+  5. Compute confidence from aligned-signal correlation and overlap quality
 ```
 
 **Output schema** (`sync/sync_map.json`):
@@ -239,7 +239,7 @@ For failure cases, fall back to player formation matching, or flag for manual al
 
 ---
 
-### 3.4 Player Detection & Tracking
+### 3.3 Player Detection & Tracking (Execution Stage 3)
 
 **Purpose**: Detect all players (and the ball) in each shot and maintain consistent identity tracking across frames within a shot.
 
@@ -279,17 +279,18 @@ For failure cases, fall back to player formation matching, or flag for manual al
 
 ---
 
-### 3.5 2D Pose Estimation
+### 3.4 2D Pose Estimation (Execution Stage 4)
 
 **Purpose**: Extract 2D body keypoints for each tracked player in each frame.
 
-**Approach**: ViTPose (top-down). For each tracked bounding box, crop the player region (with padding), run ViTPose to detect 17 COCO-format keypoints.
+**Approach**: ViTPose (top-down via MMPose). For each tracked bounding box, crop the player region with padding, run pose inference on the crop, and normalize the result to 17 COCO-format keypoints.
 
 **Implementation**:
 ```
-Model: ViTPose-Large (via MMPose or HuggingFace Transformers)
+Backend: MMPose top-down inference
 Input: cropped player images from tracker bounding boxes (padded by 20%)
 Output: 17 keypoints in COCO format (x, y, confidence) per player per frame
+Notes: keypoints are remapped into original-frame pixel coordinates after crop inference
 ```
 
 **Keypoint set (COCO 17)**:
@@ -325,7 +326,7 @@ Coordinates are in the original video frame pixel space (not the crop space).
 
 ---
 
-### 3.6 Cross-View Player Matching
+### 3.6 Cross-View Player Matching (Execution Stage 6)
 
 **Purpose**: Determine which tracked player in shot A is the same person as which tracked player in shot B, so their 2D keypoints can be triangulated together.
 
@@ -333,7 +334,7 @@ Coordinates are in the original video frame pixel space (not the crop space).
 
 **Implementation**:
 
-1. For each pair of synchronised shots at matched frames, compute each player's pitch position (from Stage 3.4)
+1. For each pair of synchronised shots at matched frames, compute each player's pitch position (from Stage 3.3)
 2. Use the Hungarian algorithm to find the optimal assignment between players in shot A and shot B, minimising the sum of pitch-coordinate distances
 3. Validate assignments using visual appearance (team colour should match, rough height/build should be consistent)
 4. For players visible in only one view, mark as "single-view only" — these will fall back to monocular pose estimation
@@ -602,7 +603,9 @@ tracking:
   max_age: 30                  # frames to keep lost track alive
 
 pose_estimation:
-  model: vitpose-large         # vitpose-base | vitpose-large | vitpose-huge
+  model_config: td-hm_ViTPose-small_8xb64-210e_coco-256x192
+  checkpoint: null             # optional explicit checkpoint path
+  device: auto                 # auto | cpu | mps | cuda
   min_confidence: 0.3
   temporal_smoothing_sigma: 2.0
 
@@ -736,9 +739,13 @@ ultralytics                    # YOLOv8
 supervision                    # ByteTrack integration
 
 # Pose Estimation
-mmpose                         # or transformers (HuggingFace ViTPose)
-mmdet                          # person detector for top-down pose
+mmpose
+mmengine
 mmcv
+
+# Runtime note
+# This implementation runs pose on tracked player crops, so it does not require
+# a separate detector pass inside the pose stage.
 
 # Shot Detection
 scenedetect[opencv]

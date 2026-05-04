@@ -33,7 +33,7 @@ import sys
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import cv2
 import numpy as np
@@ -82,6 +82,19 @@ class NeuralCalibration:
     rvec: np.ndarray
     tvec: np.ndarray
     world_position: np.ndarray
+
+
+class CalibratorProtocol(Protocol):
+    """Interface implemented by per-frame neural calibrators.
+
+    Concrete implementations: :class:`PnLCalibrator` (this module) and
+    :class:`src.utils.tvcalib_calibrator.TVCalibCalibrator`.  The stage
+    :class:`src.stages.calibration.CameraCalibrationStage` dispatches on
+    this protocol so either backend plugs in without further changes.
+    """
+
+    def calibrate(self, frame_bgr: np.ndarray) -> NeuralCalibration | None:
+        ...
 
 
 def _normalize_device(device: str) -> str:

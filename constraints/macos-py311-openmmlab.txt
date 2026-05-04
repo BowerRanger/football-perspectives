@@ -1,0 +1,44 @@
+# Reproducible macOS (Apple Silicon) dependency lane for Stage 4 pose.
+#
+# IMPORTANT: mmcv does not publish standard PyPI wheels. Install it first
+# from the OpenMMLab CDN before running the constrained install:
+#
+#   pip install mmcv==2.1.0 -f https://download.openmmlab.com/mmcv/dist/cpu/torch2.1/index.html
+#
+# Then install everything else:
+#
+#   python -m pip install -c constraints/macos-py311-openmmlab.txt -e .
+
+setuptools>=68,<82
+wheel>=0.43
+cython>=3.0
+
+numpy==1.26.4
+scipy==1.13.1
+opencv-python==4.10.0.84
+
+torch==2.1.2
+torchvision==0.16.2
+
+fastapi>=0.111,<0.115
+uvicorn>=0.30,<0.35
+python-multipart>=0.0.9
+anyio>=4.4
+starlette>=0.37
+openmim>=0.3
+mmengine==0.10.7
+mmcv==2.1.0
+mmpretrain==1.2.0
+mmpose==1.3.2
+mmdet==3.3.0
+
+xtcocotools==1.14.3
+pycocotools==2.0.10
+
+# Keep these aligned with project requirements to avoid resolver churn.
+scenedetect==0.6.6
+ultralytics==8.3.56
+supervision==0.25.1
+transformers==4.48.3
+scikit-learn==1.5.2
+tqdm==4.67.1

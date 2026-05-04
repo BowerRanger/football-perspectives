@@ -31,6 +31,7 @@ STAGE_ORDER = [
     "sync",
     "triangulation",
     "smpl_fitting",
+    "hmr",
     "export",
 ]
 
@@ -43,6 +44,7 @@ _STAGE_ARTIFACTS: dict[str, list[str]] = {
     "sync": ["sync"],
     "triangulation": ["triangulated"],
     "smpl_fitting": ["smpl"],
+    "hmr": ["hmr"],
     "export": ["export"],
 }
 
@@ -54,6 +56,7 @@ _STAGE_COMPLETE: dict[str, Any] = {
     "sync": lambda d: (d / "sync" / "sync_map.json").exists(),
     "triangulation": lambda d: any((d / "triangulated").glob("*.npz")),
     "smpl_fitting": lambda d: any((d / "smpl").glob("*.npz")),
+    "hmr": lambda d: any((d / "hmr").glob("*_hmr.npz")),
     "export": lambda d: (d / "export" / "gltf" / "scene.glb").exists(),
 }
 
@@ -124,15 +127,78 @@ class RunRequest(BaseModel):
     device: str = "auto"
 
 
+def _emit(job: Job, line: str) -> None:
+    """Push a line to both the persistent log_lines list (for replay) and
+    the live queue (for streaming subscribers).  Use this anywhere we want
+    log output that bypasses the redirected stdout/logging hooks."""
+    job.log_lines.append(line)
+    job.log_queue.put(line)
+
+
 def _run_job(job: Job, output_dir: Path, config_path: Path | None, params: RunRequest) -> None:
+    # Persist logs to disk so a hard crash (e.g. SIGABRT from MPS) doesn't
+    # take the in-memory log buffer with it.
+    log_dir = output_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"job_{job.job_id}.log"
+    log_file = log_path.open("w", buffering=1)  # line-buffered
+
+    class _FileTeeHandler(logging.Handler):
+        def emit(self, record):
+            try:
+                log_file.write(self.format(record) + "\n")
+            except Exception:
+                pass
+
+    file_handler = _FileTeeHandler()
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    logging.root.addHandler(file_handler)
+
     handler = _LogQueueHandler(job)
+    handler.setLevel(logging.INFO)
     handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    # Root logger defaults to WARNING, which drops INFO messages from named
+    # loggers (like ``logging.getLogger("src.stages.hmr")``) before they
+    # reach our handler.  Lower it to INFO for the duration of the run so
+    # per-track progress lines surface in the web viewer.
+    prev_root_level = logging.root.level
+    logging.root.setLevel(logging.INFO)
     logging.root.addHandler(handler)
-    writer = _QueueWriter(job)
+    class _TeeWriter(io.TextIOBase):
+        """Write to both the in-memory queue and the log file."""
+
+        def __init__(self, base: _QueueWriter) -> None:
+            self.base = base
+
+        def write(self, s: str) -> int:
+            try:
+                log_file.write(s)
+            except Exception:
+                pass
+            return self.base.write(s)
+
+        def flush(self) -> None:
+            try:
+                log_file.flush()
+            except Exception:
+                pass
+
+    writer = _TeeWriter(_QueueWriter(job))
     old_stdout = sys.stdout
+    old_stderr = sys.stderr
     sys.stdout = writer  # type: ignore[assignment]
+    sys.stderr = writer  # type: ignore[assignment]
+    _emit(job, (
+        f"[job {job.job_id}] starting stages={params.stages!r} "
+        f"from_stage={params.from_stage!r} device={params.device!r}"
+    ))
+    log_file.write(f"[job {job.job_id}] log file at {log_path}\n")
     try:
+        _emit(job, "[job] loading config…")
         cfg = load_config(config_path)
+        _emit(job, f"[job] config loaded; pipeline.mode={cfg.get('pipeline', {}).get('mode', 'triangulation')}")
+        _emit(job, "[job] entering run_pipeline…")
         run_pipeline(
             output_dir=output_dir,
             stages=params.stages,
@@ -140,14 +206,32 @@ def _run_job(job: Job, output_dir: Path, config_path: Path | None, params: RunRe
             config=cfg,
             device=params.device,
         )
+        _emit(job, "[job] run_pipeline returned")
         job.status = "done"
     except Exception as exc:
+        import traceback
+
         job.status = "error"
         job.error = str(exc)
-        job.log_queue.put(f"ERROR: {exc}")
+        err_line = f"ERROR: {exc}"
+        job.log_lines.append(err_line)
+        job.log_queue.put(err_line)
+        # Surface the full traceback so the root cause is visible in
+        # the web viewer log panel — ``str(exc)`` alone often hides it.
+        for line in traceback.format_exc().splitlines():
+            job.log_lines.append(line)
+            job.log_queue.put(line)
     finally:
         sys.stdout = old_stdout
+        sys.stderr = old_stderr
         logging.root.removeHandler(handler)
+        logging.root.removeHandler(file_handler)
+        logging.root.setLevel(prev_root_level)
+        try:
+            log_file.flush()
+            log_file.close()
+        except Exception:
+            pass
         job.log_queue.put(None)  # sentinel
 
 
@@ -156,20 +240,34 @@ def _run_job(job: Job, output_dir: Path, config_path: Path | None, params: RunRe
 # ---------------------------------------------------------------------------
 
 
-def _log_stream(job: Job):
-    # Replay accumulated lines for late subscribers
+async def _log_stream(job: Job):
+    """Async SSE generator — yields control back to the event loop after
+    each event so uvicorn flushes promptly to the browser.  Uses anyio's
+    threadpool to wait on the (blocking) Queue without stalling the loop.
+    """
+    import asyncio
+
+    # Replay accumulated lines for late subscribers — snapshot first so
+    # we don't race with appends during iteration.
     for line in list(job.log_lines):
         yield f"event: log\ndata: {json.dumps({'line': line})}\n\n"
-    # Stream new lines until done
+
+    seen = len(job.log_lines)
     while True:
-        try:
-            item = job.log_queue.get(timeout=0.5)
-            if item is None:
-                break
-            yield f"event: log\ndata: {json.dumps({'line': item})}\n\n"
-        except Empty:
-            if job.status in ("done", "error"):
-                break
+        # Drain anything that was queued during/after the replay.
+        new_count = len(job.log_lines)
+        while seen < new_count:
+            line = job.log_lines[seen]
+            seen += 1
+            yield f"event: log\ndata: {json.dumps({'line': line})}\n\n"
+
+        if job.status in ("done", "error") and seen >= len(job.log_lines):
+            break
+
+        # Sleep briefly to avoid a busy loop, but keep latency low so
+        # logs appear in the browser as they're emitted.
+        await asyncio.sleep(0.1)
+
     yield f"event: done\ndata: {json.dumps({'status': job.status})}\n\n"
 
 
@@ -447,6 +545,33 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                 }
             return {"players": players, "ball": ball_payload}
 
+        if stage == "hmr":
+            import numpy as _np
+            hmr_dir = output_dir / "hmr"
+            npz_files = sorted(hmr_dir.glob("*_hmr.npz")) if hmr_dir.exists() else []
+            if not npz_files:
+                raise HTTPException(status_code=404, detail="Stage output not found")
+            # Group by shot_id
+            shots: dict[str, list[dict]] = {}
+            for npz_path in npz_files:
+                data = _np.load(npz_path, allow_pickle=False)
+                shot_id = str(data["shot_id"])
+                n_frames = int(data["frame_indices"].shape[0])
+                player_info = {
+                    "track_id": str(data["track_id"]),
+                    "player_id": str(data["player_id"]),
+                    "player_name": str(data["player_name"]),
+                    "team": str(data["team"]),
+                    "num_frames": n_frames,
+                    "fps": float(data["fps"]),
+                    "frame_start": int(data["frame_indices"][0]) if n_frames > 0 else 0,
+                    "frame_end": int(data["frame_indices"][-1]) if n_frames > 0 else 0,
+                    "mean_confidence": float(_np.mean(data["confidences"])) if n_frames > 0 else 0.0,
+                    "betas_norm": float(_np.linalg.norm(data["betas"])),
+                }
+                shots.setdefault(shot_id, []).append(player_info)
+            return {"shots": {sid: {"players": plist} for sid, plist in shots.items()}}
+
         if stage == "smpl_fitting":
             import numpy as _np
             smpl_dir = output_dir / "smpl"
@@ -491,6 +616,76 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         return {"shots": result}
 
     # ------------------------------------------------------------------
+    # HMR detail endpoints
+    # ------------------------------------------------------------------
+
+    @app.get("/api/output/hmr/{shot_id}")
+    def get_hmr_shot(shot_id: str):
+        """Full HMR data for a shot: per-player joints_3d, pred_cam, SMPL params."""
+        import numpy as _np
+        hmr_dir = output_dir / "hmr"
+        npz_files = sorted(hmr_dir.glob(f"{shot_id}_*_hmr.npz")) if hmr_dir.exists() else []
+        if not npz_files:
+            raise HTTPException(status_code=404, detail=f"No HMR data for {shot_id}")
+        players = []
+        for npz_path in npz_files:
+            data = _np.load(npz_path, allow_pickle=False)
+            n = int(data["frame_indices"].shape[0])
+            kp2d = (
+                data["kp2d"].tolist() if "kp2d" in data.files else None
+            )
+            players.append({
+                "track_id": str(data["track_id"]),
+                "player_id": str(data["player_id"]),
+                "player_name": str(data["player_name"]),
+                "team": str(data["team"]),
+                "fps": float(data["fps"]),
+                "frame_indices": data["frame_indices"].tolist(),
+                "joints_3d": data["joints_3d"].tolist(),
+                "pred_cam": data["pred_cam"].tolist(),
+                "bbx_xys": data["bbx_xys"].tolist(),
+                "confidences": data["confidences"].tolist(),
+                "betas": data["betas"].tolist(),
+                "global_orient": data["global_orient"].tolist(),
+                "body_pose": data["body_pose"].tolist(),
+                "transl": data["transl"].tolist(),
+                "kp2d": kp2d,
+            })
+        return {"shot_id": shot_id, "players": players}
+
+    @app.get("/api/output/hmr/{shot_id}/{track_id}")
+    def get_hmr_track(shot_id: str, track_id: str):
+        """Single player HMR data for focused debug."""
+        import numpy as _np
+        hmr_dir = output_dir / "hmr"
+        npz_path = hmr_dir / f"{shot_id}_{track_id}_hmr.npz"
+        if not npz_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"No HMR data for {shot_id}/{track_id}",
+            )
+        data = _np.load(npz_path, allow_pickle=False)
+        kp2d = data["kp2d"].tolist() if "kp2d" in data.files else None
+        return {
+            "shot_id": shot_id,
+            "track_id": str(data["track_id"]),
+            "player_id": str(data["player_id"]),
+            "player_name": str(data["player_name"]),
+            "team": str(data["team"]),
+            "fps": float(data["fps"]),
+            "frame_indices": data["frame_indices"].tolist(),
+            "joints_3d": data["joints_3d"].tolist(),
+            "pred_cam": data["pred_cam"].tolist(),
+            "bbx_xys": data["bbx_xys"].tolist(),
+            "confidences": data["confidences"].tolist(),
+            "betas": data["betas"].tolist(),
+            "global_orient": data["global_orient"].tolist(),
+            "body_pose": data["body_pose"].tolist(),
+            "transl": data["transl"].tolist(),
+            "kp2d": kp2d,
+        }
+
+    # ------------------------------------------------------------------
     # DELETE /api/output/{stage} — remove stage artifacts for re-run
     # ------------------------------------------------------------------
 
@@ -506,10 +701,25 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             if not target.exists():
                 continue
             if d == "calibration":
-                # Only delete generated calibration files
+                # Delete generated calibration files at the top level
+                # AND inside per-backend subdirs (compare_backends
+                # writes to calibration/<backend>/*_calibration.json).
+                # Leave sibling dirs like annotations/ and debug/
+                # alone — they're user state / non-generated.
                 for f in target.glob("*_calibration.json"):
                     f.unlink()
                     removed.append(f.name)
+                for sub in target.iterdir():
+                    if not sub.is_dir() or sub.name in {"annotations", "debug"}:
+                        continue
+                    for f in sub.glob("*_calibration.json"):
+                        f.unlink()
+                        removed.append(f"{sub.name}/{f.name}")
+                    # Wipe the subdir's own debug/ (per-backend
+                    # overlay renders) so stale JPEGs don't linger.
+                    sub_debug = sub / "debug"
+                    if sub_debug.exists():
+                        shutil.rmtree(sub_debug)
             else:
                 shutil.rmtree(target)
                 removed.append(d)
@@ -640,8 +850,51 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
     # GET /api/calibration/{shot_id}/interpolated — per-frame K, R, t
     # ------------------------------------------------------------------
 
+    @app.get("/api/calibration/variants")
+    def list_calibration_variants():
+        """List available calibration variants for overlay comparison.
+
+        Always includes ``"primary"`` when the top-level
+        ``calibration/*_calibration.json`` exists.  Adds one entry per
+        subdirectory under ``calibration/`` that contains at least one
+        ``*_calibration.json`` file — these come from the calibration
+        stage's ``compare_backends`` config (e.g. ``pnlcalib``,
+        ``tvcalib``).  The viewer uses this to populate a dropdown.
+        """
+        cal_dir = output_dir / "calibration"
+        variants: list[dict[str, str]] = []
+        if cal_dir.exists() and any(cal_dir.glob("*_calibration.json")):
+            variants.append({"id": "primary", "label": "Primary (downstream)"})
+        if cal_dir.exists():
+            for sub in sorted(cal_dir.iterdir()):
+                if not sub.is_dir():
+                    continue
+                if sub.name in {"debug", "annotations"}:
+                    continue
+                if any(sub.glob("*_calibration.json")):
+                    variants.append({"id": sub.name, "label": sub.name})
+        return {"variants": variants}
+
+    def _resolve_calibration_path(shot_id: str, variant: str | None) -> Path:
+        """Resolve a calibration JSON path under the active variant.
+
+        ``variant`` may be ``None`` / ``"primary"`` (top-level file used
+        by downstream) or the name of a subdir such as ``"tvcalib"``.
+        The subdir name is validated against a whitelist-by-existence
+        to keep the endpoint safe from path traversal.
+        """
+        cal_dir = output_dir / "calibration"
+        if variant is None or variant == "primary":
+            return cal_dir / f"{shot_id}_calibration.json"
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", variant):
+            raise HTTPException(status_code=400, detail="Invalid variant")
+        sub = cal_dir / variant
+        if not sub.is_dir():
+            raise HTTPException(status_code=404, detail="Unknown variant")
+        return sub / f"{shot_id}_calibration.json"
+
     @app.get("/api/calibration/{shot_id}/interpolated")
-    def get_interpolated_calibration(shot_id: str):
+    def get_interpolated_calibration(shot_id: str, variant: str | None = None):
         """Return per-frame interpolated calibration for one shot.
 
         For every frame in the shot's video clip, returns the
@@ -653,7 +906,9 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         ``single_shot_extrapolation_frames`` setting).
 
         The web dashboard's calibration viewer uses this to overlay
-        projected pitch lines on the source video, frame-perfect.
+        projected pitch lines on the source video, frame-perfect.  Pass
+        ``?variant=tvcalib`` to load a comparison backend written by
+        the calibration stage's ``compare_backends`` option.
         """
         if not re.fullmatch(r"[A-Za-z0-9_-]+", shot_id):
             raise HTTPException(status_code=400, detail="Invalid shot ID")
@@ -661,7 +916,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         from src.utils.triangulation_calib import CalibrationInterpolator
         import cv2 as _cv2
 
-        cal_path = output_dir / "calibration" / f"{shot_id}_calibration.json"
+        cal_path = _resolve_calibration_path(shot_id, variant)
         if not cal_path.exists():
             raise HTTPException(status_code=404, detail="No calibration for shot")
         cal = CalibrationResult.load(cal_path)
@@ -696,6 +951,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             })
         return {
             "shot_id": shot_id,
+            "variant": variant or "primary",
             "n_frames": n_frames,
             "fps": fps,
             "width": width,

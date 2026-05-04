@@ -34,6 +34,29 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "pytest-cov>=4.1"]
+tvcalib = [
+    "kornia>=0.7,<0.8",
+    "SoccerNet>=0.1.56",
+]
+hmr = [
+    "smplx>=0.1.28",
+    "roma>=1.4",
+    "pytorch_lightning>=2.0",
+    "hydra-core>=1.3",
+    "hydra-zen",
+    "hydra_colorlog",
+    "timm>=0.9",
+    "colorlog",
+    "imageio>=2.34",
+    "av>=11",
+    "ffmpeg-python",
+    "einops",
+    "chumpy",
+    "wis3d>=1.0",
+    "ultralytics>=8.2",
+    "cython_bbox",
+    "lapx",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

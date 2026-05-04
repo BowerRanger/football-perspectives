@@ -301,10 +301,14 @@
   <div id="main-body">
 
     <!-- Logs -->
-    <div class="panel" id="log-panel" style="display:none">
-      <div class="panel-title">Log Output</div>
-      <div class="panel-body" style="padding:0">
-        <pre id="log-output"></pre>
+    <div class="panel" id="log-panel" style="display:none;position:sticky;top:0;z-index:20;max-height:45vh;overflow:hidden;background:#0f172a;border:1px solid #1f2937;">
+      <div class="panel-title" style="display:flex;align-items:center;gap:8px;">
+        <span>Log Output</span>
+        <span id="log-status" style="font-size:11px;color:#64748b;"></span>
+        <button id="log-close-btn" title="Dismiss log" style="margin-left:auto;background:#334155;color:#e2e8f0;border:none;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">✕</button>
+      </div>
+      <div class="panel-body" style="padding:0;max-height:calc(45vh - 36px);overflow-y:auto;">
+        <pre id="log-output" style="white-space:pre-wrap;"></pre>
       </div>
     </div>
 
@@ -410,12 +414,30 @@ async function selectStage(name) {
     badge.className = 'badge badge-pending';
   }
 
-  // Dependency gating for Re-run button
+  // Dependency gating for Re-run button — explicit per-stage prereqs.
+  // 'hmr' is its own pipeline branch (segmentation → tracking → hmr) and
+  // does NOT depend on calibration / sync / pose / triangulation.  Listing
+  // dependencies explicitly avoids the "every earlier sidebar stage must
+  // be complete" trap when modes diverge.
+  const STAGE_DEPS = {
+    segmentation:  [],
+    tracking:      ['segmentation'],
+    calibration:   ['tracking'],
+    sync:          ['calibration'],
+    pose:          ['tracking'],
+    triangulation: ['pose', 'sync', 'calibration'],
+    smpl_fitting:  ['triangulation'],
+    hmr:           ['tracking'],
+    export:        [],  // satisfied by either smpl_fitting (tri mode) or hmr (hmr mode)
+  };
   const rerunBtn = document.getElementById('rerun-btn');
-  const stageIdx = currentStages.findIndex(x => x.name === name);
-  const depsComplete = currentStages.slice(0, stageIdx).every(x => x.complete);
-  rerunBtn.disabled = !depsComplete;
-  rerunBtn.title = depsComplete ? '' : 'Requires earlier stages to be complete';
+  const deps = STAGE_DEPS[name] || [];
+  const stageMap = Object.fromEntries(currentStages.map(s => [s.name, s.complete]));
+  const missing = deps.filter(d => !stageMap[d]);
+  rerunBtn.disabled = missing.length > 0;
+  rerunBtn.title = missing.length === 0
+    ? ''
+    : `Requires: ${missing.join(', ')}`;
 
   // clear output panel and reload
   document.getElementById('output-panel').innerHTML = '';
@@ -426,8 +448,15 @@ async function selectStage(name) {
 async function startRun(stages) {
   const logPanel = document.getElementById('log-panel');
   const logOutput = document.getElementById('log-output');
+  const logStatus = document.getElementById('log-status');
   logPanel.style.display = '';
+  logPanel.dataset.state = 'running';
+  logPanel.style.borderColor = '#1f2937';
   logOutput.textContent = '';
+  logStatus.textContent = 'running…';
+  logStatus.style.color = '#fbbf24';
+  // Keep the log in view even if the output panel below grows.
+  logPanel.scrollIntoView({ behavior: 'auto', block: 'start' });
 
   if (currentStage) setDot(currentStage, 'running');
   const badge = document.getElementById('stage-badge');
@@ -461,16 +490,34 @@ async function startRun(stages) {
     activeSource.close();
     activeSource = null;
     const { status } = JSON.parse(e.data);
+    logPanel.dataset.state = status;
     if (status === 'done') {
+      logStatus.textContent = 'done';
+      logStatus.style.color = '#4ade80';
+      logPanel.style.borderColor = '#166534';
       if (currentStage) setDot(currentStage, 'complete');
-      loadStages().then(() => { if (currentStage) loadOutput(currentStage); });
+      // Re-run the full per-stage render: refresh stage list (so the API
+      // reports complete=true), then re-select the current stage so the
+      // header badge, dependency gate, and output panel all sync up.
+      loadStages().then(() => { if (currentStage) selectStage(currentStage); });
     } else {
+      logStatus.textContent = 'ERROR — scroll log above for details';
+      logStatus.style.color = '#f87171';
+      logPanel.style.borderColor = '#b91c1c';
       if (currentStage) setDot(currentStage, 'error');
       badge.textContent = 'Error';
       badge.className = 'badge badge-error';
+      // Make sure the error is not hidden below the fold.
+      logPanel.scrollIntoView({ behavior: 'auto', block: 'start' });
+      logOutput.scrollTop = logOutput.scrollHeight;
     }
   });
 }
+
+// Dismiss the log panel manually — sticky-by-default, user-cleared.
+document.getElementById('log-close-btn').addEventListener('click', () => {
+  document.getElementById('log-panel').style.display = 'none';
+});
 
 document.getElementById('rerun-btn').addEventListener('click', async () => {
   if (!currentStage) return;
@@ -513,6 +560,7 @@ async function loadOutput(stageName) {
     case 'sync':           renderSync(panel, data); break;
     case 'triangulation':  renderTriangulation(panel, data); break;
     case 'smpl_fitting':   renderSmplFitting(panel, data); break;
+    case 'hmr':            renderHmr(panel, data); break;
     case 'export':         renderExport(panel, data); break;
   }
 }
@@ -574,6 +622,7 @@ function fmt(n, dec=1) {
 
 function humanizeStageName(name) {
   if (!name) return '—';
+  if (name === 'hmr') return 'HMR (Monocular 3D)';
   return name
     .split('_')
     .map(part => part.charAt(0).toUpperCase() + part.slice(1))
@@ -884,10 +933,52 @@ function renderCalibrationVideoOverlay(panel, data) {
     select.appendChild(opt);
   });
   pickerBar.appendChild(select);
+
+  // Variant picker — populated from /api/calibration/variants.  Lets the
+  // user toggle between calibration backends (e.g. pnlcalib vs tvcalib)
+  // when the stage was run with compare_backends.
+  pickerBar.appendChild(Object.assign(document.createElement('span'),
+    { textContent: 'Backend:', style: 'cssText: color:#94a3b8;font-size:12px;' }));
+  const variantSelect = document.createElement('select');
+  variantSelect.style.cssText = 'background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:3px 8px;font-size:12px;';
+  const defaultVariantOpt = document.createElement('option');
+  defaultVariantOpt.value = 'primary';
+  defaultVariantOpt.textContent = 'Primary';
+  variantSelect.appendChild(defaultVariantOpt);
+  pickerBar.appendChild(variantSelect);
+  let currentVariant = 'primary';
+
   const status = document.createElement('span');
   status.style.cssText = 'color:#64748b;font-size:11px;margin-left:auto;';
   pickerBar.appendChild(status);
   body.appendChild(pickerBar);
+
+  // Fetch available variants once when the panel loads.  Always show
+  // the dropdown (even with only "primary") so the control is
+  // discoverable — helps users notice the feature exists and know
+  // where to see TVCalib results after re-running with
+  // compare_backends.
+  (async () => {
+    try {
+      const r = await fetch('/api/calibration/variants');
+      if (!r.ok) return;
+      const j = await r.json();
+      const variants = j.variants || [];
+      if (variants.length === 0) return;
+      variantSelect.innerHTML = '';
+      for (const v of variants) {
+        const opt = document.createElement('option');
+        opt.value = v.id;
+        opt.textContent = v.label;
+        variantSelect.appendChild(opt);
+      }
+    } catch (e) { /* no-op */ }
+  })();
+
+  variantSelect.addEventListener('change', () => {
+    currentVariant = variantSelect.value || 'primary';
+    if (currentShotId) loadShot(currentShotId);
+  });
 
   // ── Annotation toolbar ──
   const annotateBar = document.createElement('div');
@@ -949,7 +1040,10 @@ function renderCalibrationVideoOverlay(panel, data) {
     currentShotId = shotId;
     status.textContent = 'loading…';
     try {
-      const res = await fetch(`/api/calibration/${shotId}/interpolated`);
+      const qs = currentVariant && currentVariant !== 'primary'
+        ? `?variant=${encodeURIComponent(currentVariant)}`
+        : '';
+      const res = await fetch(`/api/calibration/${shotId}/interpolated${qs}`);
       if (!res.ok) {
         status.textContent = 'failed';
         return;
@@ -964,7 +1058,9 @@ function renderCalibrationVideoOverlay(panel, data) {
       overlay.width = perFrame.width;
       overlay.height = perFrame.height;
       const nKf = perFrame.keyframe_indices.length;
-      status.textContent = `${perFrame.n_frames} frames @ ${perFrame.fps.toFixed(1)} fps · ${nKf} keyframes`;
+      const variantLbl = perFrame.variant && perFrame.variant !== 'primary'
+        ? ` · ${perFrame.variant}` : '';
+      status.textContent = `${perFrame.n_frames} frames @ ${perFrame.fps.toFixed(1)} fps · ${nKf} keyframes${variantLbl}`;
       drawFrame();
     } catch (e) {
       status.textContent = 'error: ' + e.message;
@@ -3450,6 +3546,489 @@ function renderSmplFitting(panel, data) {
   info.style.cssText = 'color:#64748b;font-size:12px;padding:8px 0;';
   info.textContent = 'SMPL parameters fitted. Run the Export stage (9) to generate the 3D viewer scene.';
   panel.appendChild(info);
+}
+
+// ── HMR renderer ────────────────────────────────────────────────────
+// SMPL 22-joint skeleton bones (child→parent pairs).
+const SMPL22_BONES = [
+  [1,0],[2,0],[3,0],[4,1],[5,2],[6,3],[7,4],[8,5],[9,6],
+  [10,7],[11,8],[12,9],[13,9],[14,9],[15,12],[16,13],[17,14],
+  [18,16],[19,17],[20,18],[21,19],
+];
+const SMPL22_NAMES = [
+  'pelvis','L_hip','R_hip','spine1','L_knee','R_knee','spine2',
+  'L_ankle','R_ankle','spine3','L_foot','R_foot','neck',
+  'L_collar','R_collar','head','L_shoulder','R_shoulder',
+  'L_elbow','R_elbow','L_wrist','R_wrist',
+];
+
+function renderHmr(panel, data) {
+  const shots = data.shots || {};
+  const shotIds = Object.keys(shots);
+  if (!shotIds.length) { renderNoOutput(); return; }
+
+  // ── Summary table ──────────────────────────────────────────────────
+  const { wrap: sumWrap, body: sumBody } = makePanel('HMR Results (Monocular)');
+  const { t: sumT, tbody: sumTb } = makeTable(
+    ['Shot', 'Players', 'Mean Confidence']
+  );
+  for (const sid of shotIds) {
+    const plist = shots[sid].players || [];
+    const avgConf = plist.length
+      ? plist.reduce((s, p) => s + p.mean_confidence, 0) / plist.length
+      : 0;
+    addRow(sumTb, [sid, plist.length, fmt(avgConf, 2)]);
+  }
+  sumBody.appendChild(sumT);
+  panel.appendChild(sumWrap);
+
+  // ── Per-shot detail ────────────────────────────────────────────────
+  for (const sid of shotIds) {
+    const plist = shots[sid].players || [];
+    const shotDiv = document.createElement('div');
+    shotDiv.className = 'shot-viewer';
+
+    const h4 = document.createElement('h4');
+    h4.textContent = `${sid} — ${plist.length} players`;
+    shotDiv.appendChild(h4);
+
+    // Player table
+    const { t: pt, tbody: ptb } = makeTable(
+      ['Track', 'Name', 'Team', 'Frames', 'Confidence', 'Shape Norm']
+    );
+    plist.forEach(p => {
+      addRow(ptb, [
+        p.track_id,
+        p.player_name || '—',
+        p.team || '—',
+        p.num_frames,
+        fmt(p.mean_confidence, 2),
+        fmt(p.betas_norm, 3),
+      ]);
+    });
+    shotDiv.appendChild(pt);
+
+    // Video + overlay (lazy-load detail data on click)
+    const viewerBtn = document.createElement('button');
+    viewerBtn.textContent = 'Open SMPL Overlay';
+    viewerBtn.style.cssText = 'margin:8px 0;padding:6px 14px;background:#4f46e5;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;';
+    shotDiv.appendChild(viewerBtn);
+
+    const overlayContainer = document.createElement('div');
+    shotDiv.appendChild(overlayContainer);
+
+    viewerBtn.addEventListener('click', async () => {
+      viewerBtn.disabled = true;
+      viewerBtn.textContent = 'Loading…';
+      try {
+        const res = await fetch(`/api/output/hmr/${sid}`);
+        if (!res.ok) throw new Error('Failed to load HMR detail');
+        const detail = await res.json();
+        overlayContainer.innerHTML = '';
+        renderHmrOverlay(overlayContainer, sid, detail);
+        viewerBtn.style.display = 'none';
+      } catch (e) {
+        viewerBtn.textContent = 'Error: ' + e.message;
+      }
+    });
+
+    panel.appendChild(shotDiv);
+  }
+}
+
+function renderHmrOverlay(container, shotId, detail) {
+  const players = detail.players || [];
+  if (!players.length) return;
+
+  // ── Video + canvas overlay ─────────────────────────────────────────
+  const wrap = document.createElement('div');
+  wrap.className = 'video-wrap';
+  const inner = document.createElement('div');
+  inner.className = 'video-inner';
+
+  const video = document.createElement('video');
+  video.src = `/api/video/${shotId}`;
+  video.controls = true;
+  video.preload = 'metadata';
+
+  const canvas = document.createElement('canvas');
+  canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
+
+  inner.appendChild(video);
+  inner.appendChild(canvas);
+  wrap.appendChild(inner);
+  container.appendChild(wrap);
+
+  // ── Player selector ────────────────────────────────────────────────
+  const controlRow = document.createElement('div');
+  controlRow.style.cssText = 'display:flex;gap:10px;align-items:center;margin:8px 0;font-size:12px;';
+
+  const playerSelect = document.createElement('select');
+  playerSelect.style.cssText = 'padding:4px 8px;border-radius:4px;border:1px solid #d1d5db;font-size:12px;';
+  const allOpt = document.createElement('option');
+  allOpt.value = '__all__';
+  allOpt.textContent = 'All players';
+  playerSelect.appendChild(allOpt);
+  players.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.track_id;
+    opt.textContent = `${p.track_id} ${p.player_name || ''}`.trim();
+    playerSelect.appendChild(opt);
+  });
+  controlRow.appendChild(playerSelect);
+
+  const confLabel = document.createElement('span');
+  confLabel.style.color = '#64748b';
+  controlRow.appendChild(confLabel);
+  container.appendChild(controlRow);
+
+  // ── Confidence sparkline ───────────────────────────────────────────
+  const sparkCanvas = document.createElement('canvas');
+  sparkCanvas.style.cssText = 'width:100%;height:30px;margin:4px 0;cursor:pointer;';
+  sparkCanvas.height = 30;
+  container.appendChild(sparkCanvas);
+
+  // ── 3D mini-viewer ─────────────────────────────────────────────────
+  const miniDiv = document.createElement('div');
+  miniDiv.style.cssText = 'width:100%;height:300px;margin:8px 0;border:1px solid #e5e7eb;border-radius:4px;position:relative;';
+  container.appendChild(miniDiv);
+  let miniViewer = null;
+
+  // ── Build index: Map<trackId, Map<frameIdx, {joints_3d, kp2d, conf, ...}>> ──
+  const hmrIndex = new Map();
+  players.forEach(p => {
+    const fm = new Map();
+    for (let i = 0; i < p.frame_indices.length; i++) {
+      fm.set(p.frame_indices[i], {
+        joints_3d: p.joints_3d[i],
+        pred_cam: p.pred_cam[i],
+        bbx_xys: p.bbx_xys[i],
+        conf: p.confidences[i],
+        transl: p.transl[i],
+        kp2d: p.kp2d ? p.kp2d[i] : null,
+      });
+    }
+    hmrIndex.set(p.track_id, fm);
+  });
+
+  // ── Draw function ──────────────────────────────────────────────────
+  function drawHmrFrame() {
+    const fps = getShotFps();
+    const frame = Math.round(video.currentTime * fps);
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const selectedTrack = playerSelect.value;
+    let totalConf = 0, confCount = 0;
+
+    let kp2dMissing = false;
+    for (const [trackId, frameMap] of hmrIndex) {
+      if (selectedTrack !== '__all__' && trackId !== selectedTrack) continue;
+      const fd = frameMap.get(frame);
+      if (!fd) continue;
+
+      totalConf += fd.conf;
+      confCount++;
+
+      // Preferred path: draw the ViTPose-Huge 2D keypoints directly.
+      // These come from GVHMR's preprocessing in image-pixel coords, so
+      // there's no projection math.  Same kind of data the pose stage
+      // shows but from a bigger model.
+      const kp = fd.kp2d;
+      if (kp) {
+        for (const [a, b] of SKELETON) {
+          const ka = kp[a], kb = kp[b];
+          if (!ka || !kb || ka[2] < 0.3 || kb[2] < 0.3) continue;
+          ctx.beginPath();
+          ctx.moveTo(ka[0], ka[1]);
+          ctx.lineTo(kb[0], kb[1]);
+          ctx.strokeStyle = 'rgba(99,102,241,0.75)';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        for (let j = 0; j < kp.length; j++) {
+          const k = kp[j];
+          if (!k || k[2] < 0.3) continue;
+          const hue = Math.round((k[2] - 0.3) / 0.7 * 120);
+          ctx.beginPath();
+          ctx.arc(k[0], k[1], 4, 0, 2 * Math.PI);
+          ctx.fillStyle = `hsl(${hue},100%,55%)`;
+          ctx.fill();
+        }
+        continue;
+      }
+
+      // Fallback for legacy .npz files that don't have kp2d yet:
+      // re-project the SMPL joints_3d via the weak-perspective pred_cam.
+      // Quality is poor (the camera was calibrated for in-camera joints,
+      // not gravity-view joints), but at least the panel isn't empty.
+      kp2dMissing = true;
+      const [s, tx, ty] = fd.pred_cam;
+      const [bcx, bcy, bsz] = fd.bbx_xys;
+      for (const [child, parent] of SMPL22_BONES) {
+        const jc = fd.joints_3d[child];
+        const jp = fd.joints_3d[parent];
+        if (!jc || !jp) continue;
+        const x1 = bcx + (s * jc[0] + tx) * bsz * 0.5;
+        const y1 = bcy + (s * jc[1] + ty) * bsz * 0.5;
+        const x2 = bcx + (s * jp[0] + tx) * bsz * 0.5;
+        const y2 = bcy + (s * jp[1] + ty) * bsz * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = 'rgba(168,85,247,0.55)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+      for (let j = 0; j < fd.joints_3d.length; j++) {
+        const jt = fd.joints_3d[j];
+        if (!jt) continue;
+        const x = bcx + (s * jt[0] + tx) * bsz * 0.5;
+        const y = bcy + (s * jt[1] + ty) * bsz * 0.5;
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, 2 * Math.PI);
+        ctx.fillStyle = 'rgba(168,85,247,0.7)';
+        ctx.fill();
+      }
+    }
+    // Banner so it's obvious the user is seeing the legacy fallback.
+    if (kp2dMissing) {
+      ctx.font = '14px sans-serif';
+      ctx.fillStyle = 'rgba(255,200,80,0.95)';
+      ctx.fillRect(8, 8, 380, 22);
+      ctx.fillStyle = '#1f1f1f';
+      ctx.fillText('Legacy .npz (no kp2d) — re-run HMR for proper overlay', 14, 24);
+    }
+
+    confLabel.textContent = confCount ? `Conf: ${(totalConf / confCount).toFixed(2)}` : '';
+
+    // Update 3D mini-viewer
+    if (miniViewer) {
+      const selectedId = selectedTrack === '__all__'
+        ? (players[0] ? players[0].track_id : null)
+        : selectedTrack;
+      if (selectedId) {
+        const fd = hmrIndex.get(selectedId)?.get(frame);
+        if (fd) miniViewer.update(fd.joints_3d, fd.transl);
+      }
+    }
+  }
+
+  // ── Video event wiring ─────────────────────────────────────────────
+  video.addEventListener('loadedmetadata', () => {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.style.width = video.offsetWidth + 'px';
+    canvas.style.height = video.offsetHeight + 'px';
+    sparkCanvas.width = sparkCanvas.offsetWidth;
+
+    // Draw sparkline
+    drawConfSparkline(sparkCanvas, players, playerSelect.value);
+  });
+
+  const ro = new ResizeObserver(() => {
+    if (video.videoWidth) {
+      canvas.style.width = video.offsetWidth + 'px';
+      canvas.style.height = video.offsetHeight + 'px';
+    }
+    sparkCanvas.width = sparkCanvas.offsetWidth;
+    drawConfSparkline(sparkCanvas, players, playerSelect.value);
+  });
+  ro.observe(video);
+  ro.observe(sparkCanvas);
+
+  let rafId = null;
+  function startLoop() {
+    if (rafId) return;
+    (function loop() { rafId = requestAnimationFrame(loop); drawHmrFrame(); })();
+  }
+  function stopLoop() {
+    cancelAnimationFrame(rafId);
+    rafId = null;
+    drawHmrFrame();
+  }
+  video.addEventListener('play', startLoop);
+  video.addEventListener('pause', stopLoop);
+  video.addEventListener('ended', stopLoop);
+  video.addEventListener('seeked', () => { if (video.paused) drawHmrFrame(); });
+
+  playerSelect.addEventListener('change', () => {
+    drawHmrFrame();
+    drawConfSparkline(sparkCanvas, players, playerSelect.value);
+  });
+
+  // Click sparkline to seek
+  sparkCanvas.addEventListener('click', (e) => {
+    const rect = sparkCanvas.getBoundingClientRect();
+    const frac = (e.clientX - rect.left) / rect.width;
+    if (video.duration) video.currentTime = frac * video.duration;
+  });
+
+  // ── Init 3D mini-viewer (Three.js) ────────────────────────────────
+  initHmrMiniViewer(miniDiv).then(v => { miniViewer = v; });
+
+  addOverlayFullscreen(wrap, inner, video, canvas);
+}
+
+function drawConfSparkline(canvas, players, selectedTrack) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const targets = selectedTrack === '__all__'
+    ? players
+    : players.filter(p => p.track_id === selectedTrack);
+  if (!targets.length) return;
+
+  // Merge all frame→confidence
+  let minFrame = Infinity, maxFrame = -Infinity;
+  const frameConf = new Map();
+  targets.forEach(p => {
+    for (let i = 0; i < p.frame_indices.length; i++) {
+      const fi = p.frame_indices[i];
+      minFrame = Math.min(minFrame, fi);
+      maxFrame = Math.max(maxFrame, fi);
+      const existing = frameConf.get(fi);
+      frameConf.set(fi, existing ? Math.max(existing, p.confidences[i]) : p.confidences[i]);
+    }
+  });
+
+  if (maxFrame <= minFrame) return;
+  const range = maxFrame - minFrame;
+
+  ctx.beginPath();
+  let first = true;
+  for (let fi = minFrame; fi <= maxFrame; fi++) {
+    const c = frameConf.get(fi) || 0;
+    const x = ((fi - minFrame) / range) * w;
+    const y = h - c * h;
+    if (first) { ctx.moveTo(x, y); first = false; }
+    else ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = '#a855f7';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Fill below
+  ctx.lineTo(w, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(168,85,247,0.1)';
+  ctx.fill();
+}
+
+async function initHmrMiniViewer(container) {
+  // Load Three.js from CDN if not already loaded
+  if (typeof THREE === 'undefined') {
+    await loadScript('https://unpkg.com/three@0.160.0/build/three.min.js');
+    await loadScript('https://unpkg.com/three@0.160.0/examples/js/controls/OrbitControls.js');
+  }
+
+  const w = container.clientWidth, h = container.clientHeight;
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x1e1e2e);
+
+  const camera = new THREE.PerspectiveCamera(50, w / h, 0.1, 100);
+  camera.position.set(0, 1.5, 3);
+  camera.lookAt(0, 1, 0);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(w, h);
+  container.appendChild(renderer.domElement);
+
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 1, 0);
+  controls.update();
+
+  // Ground plane
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(4, 4),
+    new THREE.MeshBasicMaterial({ color: 0x2a2a3e, side: THREE.DoubleSide })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  scene.add(ground);
+
+  // Grid
+  const grid = new THREE.GridHelper(4, 20, 0x444466, 0x333355);
+  scene.add(grid);
+
+  // Light
+  scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+
+  // Joint spheres + skeleton lines
+  const jointMeshes = [];
+  const boneLine = new THREE.LineSegments(
+    new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ color: 0xa855f7, linewidth: 2 })
+  );
+  scene.add(boneLine);
+
+  for (let i = 0; i < 22; i++) {
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.02, 8, 8),
+      new THREE.MeshBasicMaterial({ color: 0xa855f7 })
+    );
+    mesh.visible = false;
+    scene.add(mesh);
+    jointMeshes.push(mesh);
+  }
+
+  function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  // Resize
+  const resizer = new ResizeObserver(() => {
+    const nw = container.clientWidth, nh = container.clientHeight;
+    camera.aspect = nw / nh;
+    camera.updateProjectionMatrix();
+    renderer.setSize(nw, nh);
+  });
+  resizer.observe(container);
+
+  return {
+    update(joints_3d, transl) {
+      // GVHMR's 'ay' frame is post-processed Y-up (lowest body point at
+      // Y≈0, pelvis Y≈1m, head Y≈1.7m).  Three.js is also Y-up, so use
+      // Y directly.  Z is negated because GVHMR's +Z is camera-forward
+      // and Three.js's +Z is towards-camera.
+      if (!joints_3d) return;
+      for (let i = 0; i < 22; i++) {
+        const j = joints_3d[i];
+        if (!j) { jointMeshes[i].visible = false; continue; }
+        jointMeshes[i].position.set(j[0], j[1], -j[2]);
+        jointMeshes[i].visible = true;
+      }
+
+      // Update bone lines
+      const lineVerts = [];
+      for (const [child, parent] of SMPL22_BONES) {
+        const jc = joints_3d[child], jp = joints_3d[parent];
+        if (!jc || !jp) continue;
+        lineVerts.push(jc[0], jc[1], -jc[2]);
+        lineVerts.push(jp[0], jp[1], -jp[2]);
+      }
+      boneLine.geometry.setAttribute(
+        'position',
+        new THREE.Float32BufferAttribute(lineVerts, 3)
+      );
+      boneLine.geometry.attributes.position.needsUpdate = true;
+    },
+  };
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
 }
 
 // ── Export renderer ──────────────────────────────────────────────────

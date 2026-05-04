@@ -1,6 +1,7 @@
 import subprocess
 from pathlib import Path
 
+
 def extract_clip(src: Path, out: Path, start_s: float, end_s: float) -> None:
     """Extract a clip from src between start_s and end_s (seconds)."""
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -16,6 +17,7 @@ def extract_clip(src: Path, out: Path, start_s: float, end_s: float) -> None:
         check=True,
         capture_output=True,
     )
+
 
 def extract_thumbnail(src: Path, out: Path, time_s: float) -> None:
     """Extract a single frame as JPEG at time_s (seconds)."""

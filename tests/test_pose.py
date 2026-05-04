@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 import pytest
+import types
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 from src.pipeline.config import load_config
 from src.schemas.shots import Shot, ShotsManifest
@@ -111,3 +113,131 @@ def test_pose_estimator_is_abstract():
     assert issubclass(FakePoseEstimator, PoseEstimator)
     with pytest.raises(TypeError):
         PoseEstimator()
+
+
+def test_pose_stage_passes_device_to_mmpose_estimator(shot_with_tracks):
+    cfg = load_config()
+    cfg["pose_estimation"] = {
+        **cfg["pose_estimation"],
+        "model_config": "vitpose.py",
+        "checkpoint": "vitpose.pth",
+        "device": "cpu",
+    }
+
+    with patch(
+        "src.stages.pose.MMPoseEstimator",
+        side_effect=RuntimeError("Failed to initialize MMPoseEstimator for config 'vitpose.py'."),
+    ) as estimator_cls:
+        stage = PoseEstimationStage(
+            config=cfg,
+            output_dir=shot_with_tracks,
+            pose_estimator=None,
+            device="mps",
+        )
+        with pytest.raises(RuntimeError, match="Failed to initialize MMPoseEstimator"):
+            stage.run()
+
+    _, kwargs = estimator_cls.call_args
+    assert kwargs["device"] == "mps"
+
+
+def test_pose_config_includes_device_default():
+    cfg = load_config()
+    assert cfg["pose_estimation"]["device"] == "auto"
+
+
+def test_pose_stage_rejects_invalid_device(shot_with_tracks):
+    cfg = load_config()
+
+    with pytest.raises(ValueError, match="Invalid device"):
+        PoseEstimationStage(
+            config=cfg,
+            output_dir=shot_with_tracks,
+            pose_estimator=FakePoseEstimator(),
+            device="tpu",
+        )
+
+
+def test_mmpose_estimator_returns_17_keypoints():
+    fake_model = object()
+    fake_result = MagicMock()
+    fake_result.pred_instances.keypoints = np.array(
+        [[[float(i), float(i + 1)] for i in range(17)]]
+    )
+    fake_result.pred_instances.keypoint_scores = np.array([[0.9] * 17])
+    fake_apis = types.SimpleNamespace(
+        init_model=MagicMock(return_value=fake_model),
+        inference_topdown=MagicMock(return_value=[fake_result]),
+    )
+
+    with patch.dict(
+        "sys.modules",
+        {"mmpose": types.SimpleNamespace(apis=fake_apis), "mmpose.apis": fake_apis},
+    ), patch(
+        "src.utils.pose_estimator._resolve_mmpose_config",
+        return_value=("vitpose.py", "vitpose.pth"),
+    ):
+        from src.utils.pose_estimator import MMPoseEstimator
+
+        estimator = MMPoseEstimator(
+            model_config="vitpose.py",
+            checkpoint="vitpose.pth",
+            device="cpu",
+        )
+        keypoints = estimator.estimate(np.zeros((120, 60, 3), dtype=np.uint8), (0.0, 0.0))
+
+    assert len(keypoints) == 17
+    assert [kp.name for kp in keypoints] == COCO_KEYPOINT_NAMES
+
+
+def test_mmpose_estimator_applies_offset():
+    fake_model = object()
+    fake_result = MagicMock()
+    fake_result.pred_instances.keypoints = np.array([[[0.0, 0.0] for _ in range(17)]])
+    fake_result.pred_instances.keypoint_scores = np.array([[0.9] * 17])
+    fake_apis = types.SimpleNamespace(
+        init_model=MagicMock(return_value=fake_model),
+        inference_topdown=MagicMock(return_value=[fake_result]),
+    )
+
+    with patch.dict(
+        "sys.modules",
+        {"mmpose": types.SimpleNamespace(apis=fake_apis), "mmpose.apis": fake_apis},
+    ), patch(
+        "src.utils.pose_estimator._resolve_mmpose_config",
+        return_value=("vitpose.py", "vitpose.pth"),
+    ):
+        from src.utils.pose_estimator import MMPoseEstimator
+
+        estimator = MMPoseEstimator(
+            model_config="vitpose.py",
+            checkpoint="vitpose.pth",
+            device="cpu",
+        )
+        keypoints = estimator.estimate(np.zeros((120, 60, 3), dtype=np.uint8), (100.0, 50.0))
+
+    assert all(kp.x >= 100.0 for kp in keypoints)
+    assert all(kp.y >= 50.0 for kp in keypoints)
+
+
+def test_mmpose_estimator_raises_clear_error_for_init_failure():
+    fake_apis = types.SimpleNamespace(
+        init_model=MagicMock(side_effect=FileNotFoundError("missing checkpoint")),
+        inference_topdown=MagicMock(),
+    )
+
+    with patch.dict(
+        "sys.modules",
+        {"mmpose": types.SimpleNamespace(apis=fake_apis), "mmpose.apis": fake_apis},
+    ), patch(
+        "src.utils.pose_estimator._resolve_mmpose_config",
+        return_value=("vitpose.py", "missing.pth"),
+    ):
+        from src.utils.pose_estimator import MMPoseEstimator
+
+        with pytest.raises(RuntimeError, match="Failed to initialize MMPoseEstimator"):
+            MMPoseEstimator(
+                model_config="vitpose.py",
+                checkpoint="missing.pth",
+                device="cpu",
+            )

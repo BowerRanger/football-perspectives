@@ -5,7 +5,7 @@ from pathlib import Path
 class BaseStage(ABC):
     name: str
 
-    def __init__(self, config: dict, output_dir: Path) -> None:
+    def __init__(self, config: dict, output_dir: Path, **kwargs) -> None:
         self.config = config
         self.output_dir = output_dir
 

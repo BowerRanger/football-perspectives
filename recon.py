@@ -16,44 +16,35 @@ def cli() -> None:
 
 @cli.command()
 @click.option(
-    "--input",
-    "input_path",
-    required=False,
-    default=None,
+    "--input", "input_path", required=False, default=None,
     type=click.Path(exists=True, path_type=Path),
-    help="Input video file (required when segmentation runs).",
+    help="Input video file (required when prepare_shots runs).",
 )
 @click.option(
-    "--output",
-    "output_dir",
-    default="./output",
-    show_default=True,
-    type=click.Path(path_type=Path),
-    help="Output directory.",
+    "--output", "output_dir", default="./output", show_default=True,
+    type=click.Path(path_type=Path), help="Output directory.",
 )
 @click.option(
-    "--stages",
-    default="all",
-    show_default=True,
-    help="Stages to run: 'all' or comma-separated (e.g. '1,2,3' or 'segmentation,calibration').",
+    "--stages", default="all", show_default=True,
+    help="Stages to run: 'all' or comma-separated stage names "
+         "(prepare_shots,tracking,camera,pose_2d,hmr_world,ball,export).",
 )
 @click.option(
-    "--from-stage",
-    default=None,
+    "--from-stage", default=None,
     help="Resume from this stage (re-runs it even if cached, skips earlier stages).",
 )
 @click.option(
-    "--config",
-    "config_path",
-    default=None,
+    "--config", "config_path", default=None,
     type=click.Path(exists=True, path_type=Path),
     help="YAML config file (merged with defaults).",
 )
 @click.option(
-    "--device",
-    default="auto",
-    show_default=True,
+    "--device", default="auto", show_default=True,
     help="Compute device: cuda, cpu, mps, or auto.",
+)
+@click.option(
+    "--clean", is_flag=True, default=False,
+    help="Wipe legacy artefact directories (calibration, sync, triangulation, smpl, matching) before running.",
 )
 def run(
     input_path: Path | None,
@@ -62,13 +53,23 @@ def run(
     from_stage: str | None,
     config_path: Path | None,
     device: str,
+    clean: bool,
 ) -> None:
     """Run the reconstruction pipeline on a video file."""
+    import shutil
+
     cfg = load_config(config_path)
-    active_stages = resolve_stages(stages=stages, from_stage=from_stage, config=cfg)
-    if "segmentation" in active_stages and input_path is None:
+    if clean:
+        for legacy in ("calibration", "sync", "triangulation", "smpl", "matching"):
+            target = output_dir / legacy
+            if target.exists():
+                shutil.rmtree(target)
+                click.echo(f"Removed legacy: {target}")
+
+    active_stages = resolve_stages(stages=stages, from_stage=from_stage)
+    if "prepare_shots" in active_stages and input_path is None:
         raise click.UsageError(
-            "--input is required when segmentation is part of the active stages"
+            "--input is required when prepare_shots is part of the active stages"
         )
 
     click.echo(f"Input:  {input_path}")

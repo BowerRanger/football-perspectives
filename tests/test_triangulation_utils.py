@@ -1,3 +1,12 @@
+import pytest
+
+pytest.skip(
+    "awaiting later phase: imports a module deleted in Phase 0 of the "
+    "broadcast-mono pipeline rewrite",
+    allow_module_level=True,
+)
+
+
 import numpy as np
 import cv2
 import pytest

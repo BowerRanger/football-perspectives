@@ -2,9 +2,6 @@
 	path = third_party/PnLCalib
 	url = https://github.com/mguti97/PnLCalib.git
 	ignore = dirty
-[submodule "third_party/tvcalib"]
-	path = third_party/tvcalib
-	url = https://github.com/MM4SPA/tvcalib
 [submodule "third_party/gvhmr"]
 	path = third_party/gvhmr
 	url = https://github.com/zju3dv/GVHMR.git

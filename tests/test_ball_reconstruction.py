@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytest.skip(
+    "awaiting Phase 3: ball_reconstruction module removed; new BallStage "
+    "tests will replace this file",
+    allow_module_level=True,
+)
+
 import cv2
 import numpy as np
 

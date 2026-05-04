@@ -1,165 +1,69 @@
-# Pipeline mode: "triangulation" (classic multi-view) or "hmr" (monocular HMR-first).
-pipeline:
-  mode: triangulation
+# Pitch geometry — FIFA standard for v1.
+pitch:
+  length_m: 105.0
+  width_m: 68.0
+  goal_height_m: 2.44
+  corner_flag_height_m: 1.5
 
-shot_segmentation:
-  detector: content
-  threshold: 28.0
-  adaptive_threshold: 3.5
-  adaptive_min_content_val: 18.0
-  min_scene_len_frames: 15
-  min_shot_duration_s: 0.5
-  reaction_max_duration_s: 3.2
-  min_pitch_ratio: 0.12
-  reaction_max_peak_pitch_ratio: 0.2
-  reaction_sample_points: [0.2, 0.5, 0.8]
-  exclude_fade_transitions: true
-  fade_transition_max_duration_s: 1.0
-  fade_black_frame_threshold: 0.18
-  fade_min_brightness_range: 0.25
-  fade_sample_points: [0.15, 0.5, 0.85]
-  merge_short_shots_max_duration_s: 1.2
-  merge_max_gap_s: 0.08
-  require_ball_in_shot: true
-  remove_duplicate_frames: false
-
-calibration:
-  # Per-frame calibration backend. `pnlcalib` (default) uses keypoint +
-  # line HRNet heads with PnP; `tvcalib` uses a differentiable per-frame
-  # optimiser on top of a DeepLab pitch-line segmenter, which degrades
-  # gracefully on frames with only sparse pitch features. See
-  # src/utils/tvcalib_calibrator.py and the `tvcalib:` block below.
-  backend: pnlcalib             # pnlcalib|tvcalib
-  # Additional backends to run into `calibration/<backend>/` for
-  # side-by-side comparison in the web viewer.  Downstream stages
-  # always read the primary `backend` above; extras are viewer-only.
-  # Example: [tvcalib] runs both pnlcalib (primary) and tvcalib (extra).
-  compare_backends: [tvcalib]
-  # Per-frame calibration runs on every `keyframe_interval`-th frame,
-  # capped at `max_keyframes_per_shot` samples.  The per-frame (K, R, t)
-  # results are fused into a single static camera position per shot.
-  device: auto                  # auto|cpu|cuda|cuda:0|mps
-  # Dense sampling: PnLCalib fails on many frames of panning side-view
-  # shots (e.g. behind-goal angles).  Sampling every 5 frames gives the
-  # plausibility + consensus filter a much bigger pool to select from,
-  # which in turn widens the keyframe range that the triangulation
-  # interpolator can cover.
-  keyframe_interval: 5
-  max_keyframes_per_shot: 100
-  # PnLCalib detection thresholds (defaults match PnLCalib's inference.py)
-  kp_threshold: 0.3434
-  line_threshold: 0.7867
-  pnl_refine: true
-  # Per-frame plausibility bounds — PnLCalib occasionally returns numerically
-  # valid but physically impossible results (camera underground, fx of 5,
-  # etc.). Samples outside these bounds are dropped before fusing.
-  plausibility_bounds:
-    x: [-30.0, 135.0]           # x in metres from near-left corner
-    y: [-60.0, 130.0]           # y in metres
-    z: [3.0, 80.0]              # elevation above pitch
-    fx: [500.0, 15000.0]        # focal length in pixels
-  # Maximum distance (metres) a frame's PnLCalib position can be from the
-  # consensus median before it's dropped. PnLCalib sometimes returns a
-  # position that is plausible on its own but inconsistent with the
-  # majority; those frames' rotations + focal lengths are tied to a
-  # different camera location and must not be kept.
-  cluster_tolerance: 5.0
-  # Gap propagation: PnLCalib returns nothing on frames where the major
-  # pitch features (centre circle, penalty box) aren't visible.  Enable
-  # homography-chaining from bracketing good anchors to fill those
-  # gaps via frame-to-frame feature tracking.  See
-  # src/utils/calibration_propagation.py.
-  propagate_gaps: true
-  # TVCalib backend options (ignored when backend=pnlcalib).
-  tvcalib:
-    prior: center               # center|left|right|behind|tribune
-    optim_steps: 800            # AdamW steps per frame (paper uses ~1000-2000)
-    ndc_loss_threshold: 0.017   # paper's τ — above this, confidence is low
-    sigma_scale: 1.96           # std-dev multiplier on the cam_distr prior
-    image_width: 1920
-    image_height: 1080
-
-sync:
-  sample_fps: 5.0
-  formation_grid: [8, 5]
-  min_overlap_frames: 25
-  min_confidence: 0.3
-  reid_min_track_frames: 20
-  reid_min_similarity: 0.6
-  speed_factors: [1.0]
-  audio_min_zscore: 4.0
-  trajectory_refinement_enabled: true
-  trajectory_refinement_n_reference_frames: 50
-  trajectory_refinement_coarse_match_distance_m: 20.0
-  pass2_search_margin_frames: 30
-  graph_confidence_alpha: 0.4
-  graph_residual_flag_threshold_frames: 15
-
-detection:
-  ball_model: yolov8n.pt
-  confidence_threshold: 0.3
+prepare_shots:
+  expected_format: mp4
+  output_fps: null
 
 tracking:
   player_model: yolov8x.pt
+  ball_model: yolov8n.pt
   confidence_threshold: 0.3
   team_classifier: none
   default_team_label: unknown
   progress_every_frames: 150
 
-pose_estimation:
+camera:
+  first_anchor_min_landmarks: 6
+  subsequent_anchor_min_landmarks: 4
+  anchor_max_reprojection_px: 4.0
+  feature_detector: superpoint
+  max_features_per_frame: 1000
+  ransac_inlier_min_ratio: 0.4
+  redetect_threshold: 200
+  enable_bidirectional: true
+  pitch_line_consistency_max_px: 5.0
+  forward_backward_disagreement_warn_deg: 0.5
+
+pose_2d:
   model_config: td-hm_ViTPose-small_8xb64-210e_coco-256x192
   checkpoint: null
   device: auto
   min_confidence: 0.3
   smooth_sigma: 2.0
 
-matching:
-  max_distance_m: 5.0
-  n_reference_frames: 10
-
-triangulation:
-  min_keypoint_confidence: 0.3
-  ransac_threshold: 15.0
-  savgol_window: 11
-  savgol_order: 2
-  savgol_max_gap_fill: 5
-  method_switch_hysteresis: 3
-  bone_length_tolerance: 0.2
-  ground_snap_velocity: 0.1
-  dedupe_distance_m: 1.5
-  dedupe_min_overlap_frames: 30
-
-smpl_fitting:
-  model_path: data/smpl/SMPL_NEUTRAL.pkl
-  device: cpu
-  lr: 0.01
-  n_iterations: 100
-  lambda_joint: 1.0
-  lambda_prior: 0.01
-  lambda_shape: 0.1
-  lambda_smooth: 0.5
-  lambda_ground: 0.1
-
-# Monocular HMR via GVHMR (Architecture B). Only used when pipeline.mode=hmr.
-hmr:
-  # MPS hits a Metal-level assertion in GVHMR's RoPE / sliding-window
-  # attention for sequences longer than 120 frames (the model's
-  # ``max_len``).  PYTORCH_ENABLE_MPS_FALLBACK=1 only catches
-  # NotImplementedError, not the kernel-level assertion that crashes the
-  # whole process.  Pin to CPU until either the MPS bug is fixed
-  # upstream or we add a sliding-window patch.
-  device: cpu
+hmr_world:
+  device: auto
   checkpoint: third_party/gvhmr/inputs/checkpoints/gvhmr/gvhmr_siga24_release.ckpt
   batch_size: 16
+  max_sequence_length: 120
   min_track_frames: 10
-  # Broadcast cameras pan, so by default we run GVHMR's SimpleVO to
-  # estimate per-frame camera rotation and pass that to the model.
-  # Setting this to true forces the static-camera assumption (identity
-  # rotation, zero angular velocity) — only correct for genuine fixed
-  # tripod shots.
-  static_cam: false
+  beta_aggregation: median
+  theta_savgol_window: 11
+  theta_savgol_order: 2
+  ground_snap_velocity: 0.1
+  foot_anchor_max_occlusion_frames: 10
+
+ball:
+  flight_px_velocity: 25.0
+  min_flight_frames: 4
+  max_flight_frames: 60
+  flight_max_residual_px: 5.0
+  max_occlusion_frames: 8
+  ball_radius_m: 0.11
+  plausibility:
+    z_max_m: 50.0
+    horizontal_speed_max_m_s: 40.0
 
 export:
   gltf_enabled: true
-  fbx_enabled: false
+  fbx_enabled: true
   blender_path: blender
+  ue5:
+    forward_axis: -Y
+    up_axis: Z
+    scale: 1.0

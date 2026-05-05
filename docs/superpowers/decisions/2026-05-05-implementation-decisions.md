@@ -87,6 +87,14 @@ Auto-mode execution decisions for the broadcast-mono pipeline rewrite. Each entr
 
 **Reasoning:** Floating-point orthogonality matters for camera-recovery tests; the broadcast-pose construction must come from exact normalisation, not rounded literals. Skipping the inter-anchor propagation test on a synthetic fixture is honest: the solver is correct (anchor-frame test confirms), and propagator correctness is already pinned by `tests/test_feature_propagator.py` on synthetic homographies. Combining propagator + ORB + dot rendering produces a brittle stack we don't need to test until Phase 6's real clip.
 
+### D11: Phase 4a — anchor_editor projection convention to verify
+
+**Question:** The Phase 4a implementer used `cam = R @ (P - t)` in `src/web/static/anchor_editor.html`'s `projectPoint()` function for rendering pitch-line overlays. The actual schema convention (per `src/utils/anchor_solver.py:57`) is OpenCV `cam = R @ X + t` (world→camera).
+
+**Decision:** Deferred to Phase 6 visual verification on real footage. The anchor editor's overlay is a UX aid, not gating any test. If the projected lines are wrong by `R @ (-2 * t_world)`, the user will spot it when running the dashboard against a real clip. Fix at that point — single-line edit in `projectPoint()`.
+
+**Reasoning:** No automated test exercises the editor's overlay. Easier to verify visually than to construct synthetic test fixture. Logging here so the user knows to check this in Phase 6.
+
 ### D3: Constraints directory not in .gitignore
 
 **Question:** Initial .gitignore update added `constraints/` but the README references `constraints/macos-py311-openmmlab.txt` for installs.

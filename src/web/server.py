@@ -1,15 +1,36 @@
 """Football-perspectives web server (FastAPI dashboard).
 
-This Phase-0 stub keeps the server importable so ``recon.py serve`` and
-existing integration tests don't fail at import time.  Most legacy
-endpoints (calibration variants, sync patching, matching/triangulation
-output viewers, GLB serving) have been removed because they referenced
-deleted modules.
+Endpoints exposed:
 
-TODO(Phase 4a): Re-introduce endpoints for the broadcast-mono pipeline:
-anchor editor (POST/GET/DELETE /api/anchors/{frame}), camera-track viewer,
-HMR-world preview, ball-track viewer, and the new GLB endpoint.  See spec
-section 5.4.
+Pipeline control
+    GET    /api/stages
+    GET    /api/config
+    POST   /api/run
+    GET    /api/jobs/{job_id}/status
+    GET    /api/jobs/{job_id}/logs
+    DELETE /api/output/{stage}
+
+Video / clips
+    GET    /api/video/{shot_id}
+    GET    /api/video/{shot_id}/frame
+    GET    /api/output/shots          (list of available clip ids)
+
+Anchor editor (Phase 4a — broadcast-mono)
+    GET    /anchors                   (current AnchorSet)
+    POST   /anchors                   (write AnchorSet)
+    GET    /landmarks                 (FIFA landmark catalogue for the palette)
+
+Pipeline output viewers
+    GET    /camera/track              (camera_track.json)
+    GET    /hmr_world/preview         (lightweight summary for one player)
+    GET    /hmr_world/players         (list of available player_id strings)
+    GET    /ball/preview              (ball_track.json)
+
+Static / export
+    GET    /                          (dashboard)
+    GET    /viewer                    (3D viewer)
+    GET    /api/export/scene.glb
+    GET    /api/export/metadata
 """
 
 import io
@@ -18,11 +39,13 @@ import logging
 import re
 import sys
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from queue import Queue
 from threading import Lock, Thread
+from typing import Any
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,6 +53,10 @@ from pydantic import BaseModel
 
 from src.pipeline.config import load_config
 from src.pipeline.runner import run_pipeline
+from src.schemas.anchor import AnchorSet
+from src.schemas.ball_track import BallTrack
+from src.schemas.camera_track import CameraTrack
+from src.utils.pitch_landmarks import LANDMARK_CATALOGUE
 
 # ---------------------------------------------------------------------------
 # Stage completion (broadcast-mono)
@@ -419,4 +446,195 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="scene_metadata.json not found")
         return json.loads(meta_path.read_text())
 
+    # ------------------------------------------------------------------
+    # Anchor editor + pipeline-output viewers (broadcast-mono, Phase 4a)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/output/shots")
+    def list_shots():
+        shots_dir = output_dir / "shots"
+        if not shots_dir.exists():
+            return {"shots": []}
+        ids = sorted(p.stem for p in shots_dir.glob("*.mp4"))
+        return {"shots": ids}
+
+    @app.get("/landmarks")
+    def get_landmarks():
+        return {
+            "landmarks": [
+                {"name": lm.name, "world_xyz": list(lm.world_xyz)}
+                for lm in LANDMARK_CATALOGUE.values()
+            ]
+        }
+
+    @app.get("/anchors")
+    def get_anchors():
+        anchor_path = output_dir / "camera" / "anchors.json"
+        if not anchor_path.exists():
+            return {"clip_id": "", "image_size": [0, 0], "anchors": []}
+        try:
+            anchor_set = AnchorSet.load(anchor_path)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to load anchors: {exc}")
+        return _anchor_set_to_dict(anchor_set)
+
+    class AnchorPayload(BaseModel):
+        clip_id: str
+        image_size: tuple[int, int]
+        anchors: list[dict[str, Any]]
+
+    @app.post("/anchors")
+    def post_anchors(payload: AnchorPayload):
+        try:
+            anchor_set = _dict_to_anchor_set(payload.dict())
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid anchor payload: {exc}")
+        anchor_path = output_dir / "camera" / "anchors.json"
+        anchor_set.save(anchor_path)
+        return {"saved": True, "path": str(anchor_path), "count": len(anchor_set.anchors)}
+
+    @app.get("/camera/track")
+    def get_camera_track():
+        track_path = output_dir / "camera" / "camera_track.json"
+        if not track_path.exists():
+            return {"clip_id": "", "fps": 0.0, "image_size": [0, 0], "t_world": [0.0, 0.0, 0.0], "frames": []}
+        try:
+            track = CameraTrack.load(track_path)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to load camera track: {exc}")
+        return asdict(track)
+
+    @app.get("/hmr_world/players")
+    def list_hmr_players():
+        hmr_dir = output_dir / "hmr_world"
+        if not hmr_dir.exists():
+            return {"players": []}
+        ids: list[str] = []
+        for npz_path in sorted(hmr_dir.glob("*_hmr_world.npz")):
+            ids.append(npz_path.stem.replace("_hmr_world", ""))
+        return {"players": ids}
+
+    @app.get("/hmr_world/preview")
+    def get_hmr_preview(player_id: str):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", player_id):
+            raise HTTPException(status_code=400, detail="Invalid player_id")
+        npz_path = (output_dir / "hmr_world" / f"{player_id}_hmr_world.npz").resolve()
+        hmr_dir = (output_dir / "hmr_world").resolve()
+        if not npz_path.is_relative_to(hmr_dir):
+            raise HTTPException(status_code=400, detail="Invalid player_id")
+        if not npz_path.exists():
+            raise HTTPException(status_code=404, detail=f"hmr_world track not found: {player_id}")
+        try:
+            z = np.load(npz_path, allow_pickle=False)
+            frames = z["frames"].tolist()
+            root_t = z["root_t"].tolist()
+            confidence = z["confidence"].tolist()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to load hmr_world: {exc}")
+        return {
+            "player_id": player_id,
+            "frames": frames,
+            "root_t": root_t,
+            "confidence": confidence,
+        }
+
+    @app.get("/ball/preview")
+    def get_ball_preview():
+        ball_path = output_dir / "ball" / "ball_track.json"
+        if not ball_path.exists():
+            return {"clip_id": "", "fps": 0.0, "frames": [], "flight_segments": []}
+        try:
+            track = BallTrack.load(ball_path)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to load ball track: {exc}")
+        return _ball_track_to_dict(track)
+
+    @app.get("/anchor_editor")
+    def anchor_editor_page():
+        editor_path = static_dir / "anchor_editor.html"
+        if not editor_path.exists():
+            raise HTTPException(status_code=404, detail="anchor_editor.html not found")
+        return FileResponse(str(editor_path))
+
     return app
+
+
+# ---------------------------------------------------------------------------
+# Schema (de)serialisation helpers
+# ---------------------------------------------------------------------------
+
+
+def _anchor_set_to_dict(anchor_set: AnchorSet) -> dict[str, Any]:
+    return {
+        "clip_id": anchor_set.clip_id,
+        "image_size": list(anchor_set.image_size),
+        "anchors": [
+            {
+                "frame": a.frame,
+                "landmarks": [
+                    {
+                        "name": lm.name,
+                        "image_xy": list(lm.image_xy),
+                        "world_xyz": list(lm.world_xyz),
+                    }
+                    for lm in a.landmarks
+                ],
+            }
+            for a in anchor_set.anchors
+        ],
+    }
+
+
+def _dict_to_anchor_set(data: dict[str, Any]) -> AnchorSet:
+    from src.schemas.anchor import Anchor, LandmarkObservation
+
+    anchors = tuple(
+        Anchor(
+            frame=int(a["frame"]),
+            landmarks=tuple(
+                LandmarkObservation(
+                    name=str(lm["name"]),
+                    image_xy=(float(lm["image_xy"][0]), float(lm["image_xy"][1])),
+                    world_xyz=(
+                        float(lm["world_xyz"][0]),
+                        float(lm["world_xyz"][1]),
+                        float(lm["world_xyz"][2]),
+                    ),
+                )
+                for lm in a["landmarks"]
+            ),
+        )
+        for a in data.get("anchors", [])
+    )
+    image_size = tuple(data.get("image_size", (0, 0)))
+    return AnchorSet(
+        clip_id=str(data.get("clip_id", "")),
+        image_size=(int(image_size[0]), int(image_size[1])),
+        anchors=anchors,
+    )
+
+
+def _ball_track_to_dict(track: BallTrack) -> dict[str, Any]:
+    return {
+        "clip_id": track.clip_id,
+        "fps": track.fps,
+        "frames": [
+            {
+                "frame": f.frame,
+                "world_xyz": list(f.world_xyz) if f.world_xyz is not None else None,
+                "state": f.state,
+                "confidence": f.confidence,
+                "flight_segment_id": f.flight_segment_id,
+            }
+            for f in track.frames
+        ],
+        "flight_segments": [
+            {
+                "id": s.id,
+                "frame_range": list(s.frame_range),
+                "parabola": s.parabola,
+                "fit_residual_px": s.fit_residual_px,
+            }
+            for s in track.flight_segments
+        ],
+    }

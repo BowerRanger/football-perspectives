@@ -94,3 +94,32 @@ Auto-mode execution decisions for the broadcast-mono pipeline rewrite. Each entr
 **Decision:** Removed `constraints/` from .gitignore. Kept `.venv311/`, `.DS_Store`, `*.pt`, `test-media/` as ignores.
 
 **Reasoning:** Install instructions need that file. Not really a generated/transient directory.
+
+### D8: Phase 2a — Task 2.2 regression-pin test camera
+
+**Question:** The plan's `test_walking_forward_camera_tilted_down_keeps_pitch_up_axis_aligned` regression test specifies:
+
+```
+R_world_to_cam = [[1, 0, 0],
+                  [0, 0, 1],
+                  [0, -1, 0]]
+root_R_cam     = I
+avatar_up_local = (0, 1, 0)         # SMPL canonical +y (up)
+SMPL_TO_PITCH_STATIC = [[1, 0,  0],
+                        [0, 0, -1],
+                        [0, 1,  0]]
+```
+
+with assertion `avatar_up_world[2] > 0.9`. Tracing the formula `R_world @ v` where `R_world = R_world_to_cam.T @ SMPL_TO_PITCH_STATIC @ root_R_cam`:
+
+- `R_world_to_cam.T = [[1,0,0],[0,0,-1],[0,1,0]]`
+- `R_world_to_cam.T @ SMPL_TO_PITCH_STATIC = [[1,0,0],[0,-1,0],[0,0,-1]]`
+- Apply to `(0, 1, 0)`: result is `(0, -1, 0)` — z-component is 0, not > 0.9.
+
+The plan's test camera + the plan's static transform formula are inconsistent under the plan's composition order. The test will fail.
+
+**Decision:** Use `R_world_to_cam = I` for this regression-pin test. With identity world→camera (camera at origin, axes aligned with world), the test reduces to verifying that `SMPL_TO_PITCH_STATIC` maps SMPL canonical up `(0, 1, 0)` to pitch up `(0, 0, 1)`, which is the meaningful pin: SMPL's y-up axis lands on pitch's z-up axis. Adopted the static-transform formula and `smpl_root_in_pitch_frame` exactly as plan-specified — only the test fixture changes.
+
+A second regression test was added (`test_pitch_up_axis_recovered_under_yawed_camera`) to confirm the property holds under a non-trivial camera yaw — exercising that the formula is composing camera→world correctly, not just landing on the right answer when both rotations are identity.
+
+**Reasoning:** The user's task brief reaches the same conclusion (option (a) in the brief). The regression intent — "upright SMPL stays upright in pitch frame" — is preserved; the camera's specific orientation is not load-bearing for the pin. Documenting here so the user knows the test fixture deviates from the plan even though the production formula does not.

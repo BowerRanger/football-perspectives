@@ -11,11 +11,14 @@ import numpy as np
 from src.pipeline.base import BaseStage
 from src.schemas.anchor import Anchor, AnchorSet
 from src.schemas.camera_track import CameraFrame, CameraTrack
-from src.utils.anchor_solver import solve_first_anchor, solve_subsequent_anchor
+from src.utils.anchor_solver import (
+    AnchorSolveError,
+    reprojection_residual_for_anchor,
+    solve_anchors_jointly,
+)
 from src.utils.bidirectional_smoother import smooth_between_anchors
 from src.utils.camera_confidence import FrameSignals, confidence_from_signals
 from src.utils.feature_propagator import propagate_one_frame
-from src.utils.pitch_landmarks import has_non_coplanar
 
 logger = logging.getLogger(__name__)
 
@@ -24,46 +27,6 @@ def _angle_between(R1: np.ndarray, R2: np.ndarray) -> float:
     cos_t = (np.trace(R1.T @ R2) - 1) / 2
     cos_t = max(-1.0, min(1.0, cos_t))
     return float(np.degrees(np.arccos(cos_t)))
-
-
-def _pick_primary_anchor(
-    anchors: tuple[Anchor, ...], min_landmarks: int = 6
-) -> Anchor:
-    """Pick the anchor that drives the full (K, R, t) solve.
-
-    The broadcast assumption (fixed camera body) means ``t`` is shared by every
-    frame in the clip, so any anchor with enough non-coplanar landmarks can
-    solve the full pose; the rest then inherit ``t`` and only solve (K, R).
-    Picks the *earliest* qualifying anchor so the bidirectional smoother has
-    the most balanced span on either side. Raises if no anchor qualifies.
-    """
-    sorted_anchors = sorted(anchors, key=lambda a: a.frame)
-    for a in sorted_anchors:
-        if len(a.landmarks) >= min_landmarks and has_non_coplanar(a.landmarks):
-            return a
-    raise ValueError(
-        f"camera stage needs at least one anchor with ≥{min_landmarks} non-coplanar "
-        f"landmarks (e.g. 4 pitch corners + a corner-flag-top + a goal-crossbar "
-        f"endpoint). None of the {len(sorted_anchors)} placed anchors qualify."
-    )
-
-
-def _reprojection_residual(
-    landmarks: tuple, K: np.ndarray, R: np.ndarray, t: np.ndarray
-) -> float:
-    """Mean reprojection error (px) of landmark world points under (K, R, t).
-
-    Returns a large sentinel (1e9) if any landmark is behind the camera.
-    """
-    residuals: list[float] = []
-    for lm in landmarks:
-        cam = R @ np.array(lm.world_xyz) + t
-        if cam[2] <= 0:
-            return 1e9
-        pix = K @ cam
-        proj = pix[:2] / pix[2]
-        residuals.append(float(np.linalg.norm(np.array(lm.image_xy) - proj)))
-    return float(np.mean(residuals)) if residuals else 0.0
 
 
 class CameraStage(BaseStage):
@@ -97,48 +60,51 @@ class CameraStage(BaseStage):
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         anchor_max_residual = float(cfg.get("anchor_max_reprojection_px", 4.0))
-        primary_min_landmarks = int(cfg.get("first_anchor_min_landmarks", 6))
-
-        # Step 1: pick the primary anchor (any anchor with enough non-coplanar
-        # landmarks) and solve full (K, R, t) from it. Other anchors inherit
-        # t and solve only (K, R).
-        primary_anchor = _pick_primary_anchor(
-            anchors.anchors, min_landmarks=primary_min_landmarks
-        )
-        if primary_anchor.frame != min(a.frame for a in anchors.anchors):
-            logger.info(
-                "camera stage using anchor at frame %d as primary (full pose solve); "
-                "earlier anchors did not have ≥%d non-coplanar landmarks",
-                primary_anchor.frame, primary_min_landmarks,
-            )
-        K0, R0, t_world = solve_first_anchor(primary_anchor.landmarks)
-        anchor_solutions: dict[int, tuple[np.ndarray, np.ndarray]] = {
-            primary_anchor.frame: (K0, R0)
-        }
-        anchor_confidence_override: dict[int, float] = {}
         subsequent_min_landmarks = int(cfg.get("subsequent_anchor_min_landmarks", 4))
+        subsequent_min_lines = 2
+
+        # Step 1: filter anchors that don't have enough constraints to
+        # contribute to the joint solve, then call the joint solver.
+        qualifying: list[Anchor] = []
         for a in anchors.anchors:
-            if a.frame == primary_anchor.frame:
-                continue
-            if len(a.landmarks) < subsequent_min_landmarks:
+            if (
+                len(a.landmarks) >= subsequent_min_landmarks
+                or len(a.lines) >= subsequent_min_lines
+            ):
+                qualifying.append(a)
+            else:
                 logger.warning(
-                    "anchor at frame %d has only %d landmarks (need ≥%d to "
-                    "contribute to camera solution); skipping",
-                    a.frame, len(a.landmarks), subsequent_min_landmarks,
+                    "anchor at frame %d has only %d landmarks and %d lines "
+                    "(need ≥%d points or ≥%d lines); skipping",
+                    a.frame, len(a.landmarks), len(a.lines),
+                    subsequent_min_landmarks, subsequent_min_lines,
                 )
-                continue
-            K, R = solve_subsequent_anchor(
-                a.landmarks, t_world, image_size=anchors.image_size
+        if not qualifying:
+            raise AnchorSolveError(
+                "no anchor has enough landmarks or line correspondences to "
+                "contribute to the camera solve; place more anchors in the "
+                "web editor"
             )
-            anchor_solutions[a.frame] = (K, R)
-            residual = _reprojection_residual(a.landmarks, K, R, t_world)
+
+        try:
+            sol = solve_anchors_jointly(
+                tuple(qualifying), image_size=anchors.image_size,
+            )
+        except AnchorSolveError as exc:
+            raise RuntimeError(f"camera stage failed: {exc}") from exc
+
+        t_world = sol.t_world
+        principal_point = sol.principal_point
+        anchor_solutions: dict[int, tuple[np.ndarray, np.ndarray]] = sol.per_anchor_KR
+        anchor_confidence_override: dict[int, float] = {}
+        for af, residual in sol.per_anchor_residual_px.items():
             if residual > anchor_max_residual:
                 logger.warning(
                     "anchor at frame %d has reprojection residual %.2f px > "
                     "%.2f px threshold; flagging as low-confidence",
-                    a.frame, residual, anchor_max_residual,
+                    af, residual, anchor_max_residual,
                 )
-                anchor_confidence_override[a.frame] = 0.5
+                anchor_confidence_override[af] = 0.5
 
         # Step 2: per-frame propagate forward and backward between consecutive anchor pairs.
         per_frame_K: list[np.ndarray | None] = [None] * n_frames
@@ -199,6 +165,7 @@ class CameraStage(BaseStage):
             image_size=(w, h),
             t_world=list(t_world),
             frames=tuple(frames_out),
+            principal_point=(float(principal_point[0]), float(principal_point[1])),
         )
         track.save(self.output_dir / "camera" / "camera_track.json")
 

@@ -21,8 +21,12 @@ class CameraTrack:
     clip_id: str
     fps: float
     image_size: tuple[int, int]
-    t_world: list[float]       # length 3
+    t_world: list[float]                   # length 3
     frames: tuple[CameraFrame, ...]
+    # Shared principal point recovered by the joint bundle adjustment.
+    # Optional for backward compatibility with older camera_track.json files
+    # — when absent, viewers should fall back to (image_size[0]/2, image_size[1]/2).
+    principal_point: tuple[float, float] | None = None
 
     @classmethod
     def load(cls, path: Path) -> "CameraTrack":
@@ -38,12 +42,15 @@ class CameraTrack:
             )
             for f in data["frames"]
         )
+        pp_raw = data.get("principal_point")
+        principal_point = tuple(pp_raw) if pp_raw is not None else None
         return cls(
             clip_id=str(data["clip_id"]),
             fps=float(data["fps"]),
             image_size=tuple(data["image_size"]),
             t_world=list(data["t_world"]),
             frames=frames,
+            principal_point=principal_point,
         )
 
     def save(self, path: Path) -> None:

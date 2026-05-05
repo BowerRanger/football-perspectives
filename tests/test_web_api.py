@@ -78,3 +78,61 @@ def test_get_ball_preview_empty(client) -> None:
     body = resp.json()
     assert body["frames"] == []
     assert body["flight_segments"] == []
+
+
+@pytest.mark.integration
+def test_get_pitch_lines_returns_catalogue(client) -> None:
+    c, _ = client
+    resp = c.get("/pitch_lines")
+    assert resp.status_code == 200
+    body = resp.json()
+    names = [ln["name"] for ln in body["lines"]]
+    # Spot-check a few canonical lines and that the list is sorted.
+    assert "near_touchline" in names
+    assert "halfway_line" in names
+    assert "left_goal_left_post" in names
+    assert names == sorted(names)
+    # Each entry is ((x1,y1,z1),(x2,y2,z2))
+    halfway = next(ln for ln in body["lines"] if ln["name"] == "halfway_line")
+    assert halfway["world_segment"] == [[52.5, 0.0, 0.0], [52.5, 68.0, 0.0]]
+
+
+@pytest.mark.integration
+def test_post_anchors_round_trips_lines(client) -> None:
+    """An anchor with both points and lines round-trips through POST/GET."""
+    c, tmp = client
+    payload = {
+        "clip_id": "play_037",
+        "image_size": [1920, 1080],
+        "anchors": [
+            {
+                "frame": 50,
+                "landmarks": [
+                    {
+                        "name": "near_left_corner",
+                        "image_xy": [400.0, 900.0],
+                        "world_xyz": [0.0, 0.0, 0.0],
+                    }
+                ],
+                "lines": [
+                    {
+                        "name": "near_touchline",
+                        "image_segment": [[400.0, 900.0], [1500.0, 880.0]],
+                        "world_segment": [[0.0, 0.0, 0.0], [105.0, 0.0, 0.0]],
+                    }
+                ],
+            }
+        ],
+    }
+    resp = c.post("/anchors", json=payload)
+    assert resp.status_code == 200
+
+    resp2 = c.get("/anchors")
+    body = resp2.json()
+    a = body["anchors"][0]
+    assert len(a["landmarks"]) == 1
+    assert len(a["lines"]) == 1
+    line = a["lines"][0]
+    assert line["name"] == "near_touchline"
+    assert line["image_segment"] == [[400.0, 900.0], [1500.0, 880.0]]
+    assert line["world_segment"] == [[0.0, 0.0, 0.0], [105.0, 0.0, 0.0]]

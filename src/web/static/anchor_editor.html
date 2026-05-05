@@ -254,6 +254,11 @@
       <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;cursor:pointer;">
         <input type="checkbox" id="show-pitch" checked> projected pitch
       </label>
+      <span style="display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;">
+        Mode:
+        <label style="cursor:pointer;"><input type="radio" name="mode" id="mode-points" value="points" checked> points</label>
+        <label style="cursor:pointer;"><input type="radio" name="mode" id="mode-lines" value="lines"> lines</label>
+      </span>
     </div>
     <div class="conf-strip" id="conf-strip" title="Click to seek">
       <canvas id="conf-canvas" class="conf-canvas"></canvas>
@@ -276,13 +281,17 @@
 const state = {
   clipId: "",
   imageSize: [0, 0],     // [w, h] from anchors.json or video
-  landmarks: [],          // {name, world_xyz}
-  selectedLandmark: null, // landmark name pending placement
-  anchors: new Map(),     // frame -> [{name, image_xy, world_xyz}, ...]
+  landmarks: [],          // {name, world_xyz} — pitch-landmark catalogue
+  pitchLines: [],         // {name, world_segment} — pitch-line catalogue
+  selectedLandmark: null, // landmark name pending placement (Points mode)
+  selectedLine: null,     // pitch-line name pending placement (Lines mode)
+  pendingLineStart: null, // first click of a 2-click line (image_xy)
+  anchors: new Map(),     // frame -> {points: [...], lines: [...]}
   cameraTrack: null,      // {clip_id, fps, image_size, t_world, frames: [...]}
   fps: 25,
   frame: 0,
   totalFrames: 0,
+  mode: "points",
 };
 
 const els = {
@@ -290,6 +299,8 @@ const els = {
   status: document.getElementById("status"),
   saveBtn: document.getElementById("save-btn"),
   showPitch: document.getElementById("show-pitch"),
+  modePoints: document.getElementById("mode-points"),
+  modeLines: document.getElementById("mode-lines"),
   palette: document.getElementById("palette"),
   video: document.getElementById("video"),
   overlay: document.getElementById("overlay"),
@@ -321,11 +332,13 @@ function setStatus(msg, color = "#94a3b8") {
 // ── Init ────────────────────────────────────────────────────────────
 async function init() {
   try {
-    const [shots, lms] = await Promise.all([
+    const [shots, lms, pls] = await Promise.all([
       fetchJson("/api/output/shots"),
       fetchJson("/landmarks"),
+      fetchJson("/pitch_lines"),
     ]);
     state.landmarks = lms.landmarks || [];
+    state.pitchLines = pls.lines || [];
     renderPalette();
 
     const ids = shots.shots || [];
@@ -401,7 +414,10 @@ async function loadAnchors() {
     if (data && data.clip_id === state.clipId) {
       state.anchors = new Map();
       for (const a of data.anchors || []) {
-        state.anchors.set(a.frame, a.landmarks || []);
+        state.anchors.set(a.frame, {
+          points: a.landmarks || [],
+          lines: a.lines || [],
+        });
       }
       if (data.image_size && data.image_size[0] > 0) {
         state.imageSize = data.image_size;
@@ -435,17 +451,33 @@ async function loadCameraTrack() {
 // ── Palette ─────────────────────────────────────────────────────────
 function renderPalette() {
   els.palette.innerHTML = "";
-  for (const lm of state.landmarks) {
-    const row = document.createElement("div");
-    row.className = "landmark-row";
-    row.dataset.name = lm.name;
-    const xyz = lm.world_xyz.map((v) => v.toFixed(1)).join(",");
-    row.innerHTML = `
-      <span class="lm-name">${lm.name}</span>
-      <span class="lm-coord">${xyz}</span>
-    `;
-    row.addEventListener("click", () => selectLandmark(lm.name));
-    els.palette.appendChild(row);
+  if (state.mode === "points") {
+    for (const lm of state.landmarks) {
+      const row = document.createElement("div");
+      row.className = "landmark-row";
+      row.dataset.name = lm.name;
+      const xyz = lm.world_xyz.map((v) => v.toFixed(1)).join(",");
+      row.innerHTML = `
+        <span class="lm-name">${lm.name}</span>
+        <span class="lm-coord">${xyz}</span>
+      `;
+      row.addEventListener("click", () => selectLandmark(lm.name));
+      els.palette.appendChild(row);
+    }
+  } else {
+    for (const ln of state.pitchLines) {
+      const row = document.createElement("div");
+      row.className = "landmark-row";
+      row.dataset.name = ln.name;
+      const a = ln.world_segment[0].map((v) => v.toFixed(1)).join(",");
+      const b = ln.world_segment[1].map((v) => v.toFixed(1)).join(",");
+      row.innerHTML = `
+        <span class="lm-name">${ln.name}</span>
+        <span class="lm-coord" style="color:#fef08a;">${a} → ${b}</span>
+      `;
+      row.addEventListener("click", () => selectLine(ln.name));
+      els.palette.appendChild(row);
+    }
   }
 }
 
@@ -462,6 +494,34 @@ function clearLandmarkSelection() {
   state.selectedLandmark = null;
   for (const row of els.palette.children) row.classList.remove("selected");
   els.hint.style.display = "none";
+}
+
+function selectLine(name) {
+  state.selectedLine = name;
+  state.pendingLineStart = null;
+  for (const row of els.palette.children) {
+    row.classList.toggle("selected", row.dataset.name === name);
+  }
+  els.hint.style.display = "";
+  els.hint.textContent = `Click ONE end of "${name}", then the OTHER end`;
+  redrawOverlay();
+}
+
+function clearLineSelection() {
+  state.selectedLine = null;
+  state.pendingLineStart = null;
+  for (const row of els.palette.children) row.classList.remove("selected");
+  els.hint.style.display = "none";
+}
+
+function setMode(mode) {
+  state.mode = mode;
+  state.selectedLandmark = null;
+  state.selectedLine = null;
+  state.pendingLineStart = null;
+  els.hint.style.display = "none";
+  renderPalette();
+  redrawOverlay();
 }
 
 // ── Frame navigation ────────────────────────────────────────────────
@@ -531,40 +591,78 @@ function redrawOverlay() {
     drawProjectedPitch(ctx);
   }
 
-  // Draw landmark dots if at an anchor frame. Backing-store is in image
-  // pixels (see resizeOverlay) so x/y are in image-space coordinates.
-  // Stroke widths are scaled by the natural→display ratio so they appear
-  // at a consistent thickness on screen regardless of zoom.
+  // Draw landmark dots and line annotations if at an anchor frame.
+  // Backing-store is in image pixels (see resizeOverlay) so x/y are in
+  // image-space coordinates. Stroke widths are scaled by the natural→display
+  // ratio so they appear at a consistent thickness on screen regardless of zoom.
   const anchor = state.anchors.get(state.frame);
   if (anchor) {
     const rect = els.overlay.getBoundingClientRect();
     const scale = state.imageSize[0] > 0 && rect.width > 0
       ? state.imageSize[0] / rect.width
       : 1;
-    const dotR = 4 * scale;       // ~4 display px regardless of zoom
-    const ringR = 8 * scale;      // outer crosshair ring
+    const dotR = 4 * scale;
+    const ringR = 8 * scale;
     const lineW = 2 * scale;
-    for (const lm of anchor) {
+
+    // Lines first (drawn beneath points so anchor dots stay on top)
+    for (const ln of anchor.lines || []) {
+      const [[x1, y1], [x2, y2]] = ln.image_segment;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+      ctx.lineWidth = lineW * 1.5;
+      ctx.strokeStyle = "#facc15";  // amber/yellow
+      ctx.stroke();
+      // Endpoint markers
+      for (const [x, y] of [[x1, y1], [x2, y2]]) {
+        ctx.beginPath();
+        ctx.arc(x, y, dotR * 0.8, 0, 2 * Math.PI);
+        ctx.fillStyle = "#facc15";
+        ctx.fill();
+      }
+      // Label near segment midpoint
+      const mx = (x1 + x2) / 2;
+      const my = (y1 + y2) / 2;
+      ctx.font = `${11 * scale}px -apple-system, Segoe UI, sans-serif`;
+      ctx.fillStyle = "#fef9c3";
+      ctx.strokeStyle = "rgba(0,0,0,0.7)";
+      ctx.lineWidth = 3 * scale;
+      ctx.strokeText(ln.name, mx + 6 * scale, my - 4 * scale);
+      ctx.fillText(ln.name, mx + 6 * scale, my - 4 * scale);
+    }
+
+    // In-progress line: first click placed, waiting for second click.
+    if (state.pendingLineStart) {
+      const [px, py] = state.pendingLineStart;
+      ctx.beginPath();
+      ctx.arc(px, py, dotR, 0, 2 * Math.PI);
+      ctx.fillStyle = "#facc15";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(px, py, ringR, 0, 2 * Math.PI);
+      ctx.lineWidth = lineW;
+      ctx.strokeStyle = "#fef08a";
+      ctx.stroke();
+    }
+
+    // Points
+    for (const lm of anchor.points || []) {
       const [x, y] = lm.image_xy;
-      // Inner solid dot — exact click position.
       ctx.beginPath();
       ctx.arc(x, y, dotR, 0, 2 * Math.PI);
       ctx.fillStyle = "#22d3ee";
       ctx.fill();
-      // Outer ring for visibility against the projected-pitch line clutter.
       ctx.beginPath();
       ctx.arc(x, y, ringR, 0, 2 * Math.PI);
       ctx.lineWidth = lineW;
       ctx.strokeStyle = "#fff";
       ctx.stroke();
-      // Crosshair through dot centre.
       ctx.beginPath();
       ctx.moveTo(x - ringR * 1.5, y); ctx.lineTo(x + ringR * 1.5, y);
       ctx.moveTo(x, y - ringR * 1.5); ctx.lineTo(x, y + ringR * 1.5);
       ctx.lineWidth = lineW * 0.5;
       ctx.strokeStyle = "rgba(255, 255, 255, 0.6)";
       ctx.stroke();
-      // Label.
       ctx.font = `${12 * scale}px -apple-system, Segoe UI, sans-serif`;
       ctx.fillStyle = "#fff";
       ctx.strokeStyle = "rgba(0,0,0,0.7)";
@@ -638,29 +736,63 @@ function pitchPolylines() {
 }
 
 // ── Click placement ─────────────────────────────────────────────────
+function ensureAnchor(frame) {
+  let cur = state.anchors.get(frame);
+  if (!cur) {
+    cur = { points: [], lines: [] };
+    state.anchors.set(frame, cur);
+  }
+  if (!cur.points) cur.points = [];
+  if (!cur.lines) cur.lines = [];
+  return cur;
+}
+
 els.overlay.addEventListener("click", (ev) => {
-  if (!state.selectedLandmark) return;
   const [x, y] = videoEventToImageXY(ev);
-  const lm = state.landmarks.find((l) => l.name === state.selectedLandmark);
-  if (!lm) return;
+
+  if (state.mode === "points") {
+    if (!state.selectedLandmark) return;
+    const lm = state.landmarks.find((l) => l.name === state.selectedLandmark);
+    if (!lm) return;
+    const obs = { name: lm.name, image_xy: [x, y], world_xyz: lm.world_xyz };
+    const cur = ensureAnchor(state.frame);
+    const idx = cur.points.findIndex((o) => o.name === obs.name);
+    if (idx >= 0) cur.points[idx] = obs; else cur.points.push(obs);
+    clearLandmarkSelection();
+    redrawOverlay();
+    renderAnchorList();
+    return;
+  }
+
+  // Lines mode: 2-click sequence (start → end)
+  if (!state.selectedLine) return;
+  const ln = state.pitchLines.find((l) => l.name === state.selectedLine);
+  if (!ln) return;
+
+  if (state.pendingLineStart === null) {
+    state.pendingLineStart = [x, y];
+    setStatus(`Now click the OTHER end of "${ln.name}"`, "#facc15");
+    redrawOverlay();
+    return;
+  }
+  // Second click — complete the segment
   const obs = {
-    name: lm.name,
-    image_xy: [x, y],
-    world_xyz: lm.world_xyz,
+    name: ln.name,
+    image_segment: [state.pendingLineStart, [x, y]],
+    world_segment: ln.world_segment,
   };
-  let cur = state.anchors.get(state.frame);
-  if (!cur) { cur = []; state.anchors.set(state.frame, cur); }
-  // Replace existing observation of same landmark on this frame
-  const idx = cur.findIndex((o) => o.name === obs.name);
-  if (idx >= 0) cur[idx] = obs; else cur.push(obs);
-  clearLandmarkSelection();
+  const cur = ensureAnchor(state.frame);
+  const idx = cur.lines.findIndex((o) => o.name === obs.name);
+  if (idx >= 0) cur.lines[idx] = obs; else cur.lines.push(obs);
+  state.pendingLineStart = null;
+  clearLineSelection();
   redrawOverlay();
   renderAnchorList();
 });
 
 els.addAnchorBtn.addEventListener("click", () => {
   if (!state.anchors.has(state.frame)) {
-    state.anchors.set(state.frame, []);
+    state.anchors.set(state.frame, { points: [], lines: [] });
     renderAnchorList();
   }
 });
@@ -676,10 +808,13 @@ function renderAnchorList() {
   for (const f of frames) {
     const row = document.createElement("div");
     row.className = "anchor-row" + (f === state.frame ? " current" : "");
-    const lms = state.anchors.get(f) || [];
+    const a = state.anchors.get(f) || { points: [], lines: [] };
+    const np = (a.points || []).length;
+    const nl = (a.lines || []).length;
+    const lineSummary = nl ? ` + ${nl} line${nl === 1 ? "" : "s"}` : "";
     row.innerHTML = `
       <span>Frame ${f}</span>
-      <span class="lm-count">${lms.length} pt${lms.length === 1 ? "" : "s"}</span>
+      <span class="lm-count">${np} pt${np === 1 ? "" : "s"}${lineSummary}</span>
       <button class="del-btn" title="Delete anchor">×</button>
     `;
     row.addEventListener("click", (ev) => {
@@ -759,12 +894,17 @@ els.saveBtn.addEventListener("click", async () => {
     image_size: state.imageSize,
     anchors: [...state.anchors.entries()]
       .sort((a, b) => a[0] - b[0])
-      .map(([frame, lms]) => ({
+      .map(([frame, a]) => ({
         frame,
-        landmarks: lms.map((lm) => ({
+        landmarks: (a.points || []).map((lm) => ({
           name: lm.name,
           image_xy: lm.image_xy,
           world_xyz: lm.world_xyz,
+        })),
+        lines: (a.lines || []).map((ln) => ({
+          name: ln.name,
+          image_segment: ln.image_segment,
+          world_segment: ln.world_segment,
         })),
       })),
   };
@@ -817,6 +957,13 @@ window.addEventListener("resize", () => {
 
 if (els.showPitch) {
   els.showPitch.addEventListener("change", () => redrawOverlay());
+}
+
+if (els.modePoints) {
+  els.modePoints.addEventListener("change", () => { if (els.modePoints.checked) setMode("points"); });
+}
+if (els.modeLines) {
+  els.modeLines.addEventListener("change", () => { if (els.modeLines.checked) setMode("lines"); });
 }
 
 init();

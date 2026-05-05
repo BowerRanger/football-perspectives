@@ -475,6 +475,16 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             ]
         }
 
+    @app.get("/pitch_lines")
+    def get_pitch_lines():
+        from src.utils.pitch_lines_catalogue import LINE_CATALOGUE
+        return {
+            "lines": [
+                {"name": name, "world_segment": [list(seg[0]), list(seg[1])]}
+                for name, seg in sorted(LINE_CATALOGUE.items())
+            ]
+        }
+
     @app.get("/anchors")
     def get_anchors():
         anchor_path = output_dir / "camera" / "anchors.json"
@@ -587,6 +597,20 @@ def _anchor_set_to_dict(anchor_set: AnchorSet) -> dict[str, Any]:
                     }
                     for lm in a.landmarks
                 ],
+                "lines": [
+                    {
+                        "name": ln.name,
+                        "image_segment": [
+                            list(ln.image_segment[0]),
+                            list(ln.image_segment[1]),
+                        ],
+                        "world_segment": [
+                            list(ln.world_segment[0]),
+                            list(ln.world_segment[1]),
+                        ],
+                    }
+                    for ln in a.lines
+                ],
             }
             for a in anchor_set.anchors
         ],
@@ -594,7 +618,7 @@ def _anchor_set_to_dict(anchor_set: AnchorSet) -> dict[str, Any]:
 
 
 def _dict_to_anchor_set(data: dict[str, Any]) -> AnchorSet:
-    from src.schemas.anchor import Anchor, LandmarkObservation
+    from src.schemas.anchor import Anchor, LandmarkObservation, LineObservation
 
     anchors = tuple(
         Anchor(
@@ -609,7 +633,29 @@ def _dict_to_anchor_set(data: dict[str, Any]) -> AnchorSet:
                         float(lm["world_xyz"][2]),
                     ),
                 )
-                for lm in a["landmarks"]
+                for lm in a.get("landmarks", [])
+            ),
+            lines=tuple(
+                LineObservation(
+                    name=str(ln["name"]),
+                    image_segment=(
+                        (float(ln["image_segment"][0][0]), float(ln["image_segment"][0][1])),
+                        (float(ln["image_segment"][1][0]), float(ln["image_segment"][1][1])),
+                    ),
+                    world_segment=(
+                        (
+                            float(ln["world_segment"][0][0]),
+                            float(ln["world_segment"][0][1]),
+                            float(ln["world_segment"][0][2]),
+                        ),
+                        (
+                            float(ln["world_segment"][1][0]),
+                            float(ln["world_segment"][1][1]),
+                            float(ln["world_segment"][1][2]),
+                        ),
+                    ),
+                )
+                for ln in a.get("lines", [])
             ),
         )
         for a in data.get("anchors", [])

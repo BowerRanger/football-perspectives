@@ -376,10 +376,12 @@ async function loadClip(clipId) {
   const vh = els.video.videoHeight || 0;
   state.imageSize = [vw, vh];
 
-  // Try to use FPS from camera track if available
-  state.fps = 25;
+  // Default fps is 30 (broadcast standard); refined when camera_track.json
+  // loads with the actual clip fps.
+  state.fps = 30;
 
-  // Estimate total frames from duration (we'll refine when camera track loads)
+  // Estimate total frames from duration. Recomputed in loadCameraTrack
+  // once the real fps is known.
   state.totalFrames = Math.max(1, Math.round(els.video.duration * state.fps));
   els.seek.max = String(state.totalFrames - 1);
   els.frameInput.max = String(state.totalFrames - 1);
@@ -416,8 +418,12 @@ async function loadCameraTrack() {
       state.cameraTrack = data;
       if (data.fps && data.fps > 0) {
         state.fps = data.fps;
-        // Refine total frames
-        state.totalFrames = Math.max(state.totalFrames, data.frames.length);
+        // Recompute total frames from the *actual* fps and the video's
+        // duration, not from the camera_track frame count (which only
+        // covers the frames between the first and last anchor — typically
+        // a subset of the clip).
+        const fromDuration = Math.round(els.video.duration * state.fps);
+        state.totalFrames = Math.max(fromDuration, data.frames.length);
         els.seek.max = String(state.totalFrames - 1);
         els.frameInput.max = String(state.totalFrames - 1);
       }

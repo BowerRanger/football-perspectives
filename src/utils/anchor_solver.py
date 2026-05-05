@@ -536,6 +536,7 @@ def _solve_one_anchor_full(
     cy: float,
     fx_init: float,
     K_init: np.ndarray,
+    fallback_seed: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float] | None:
     """Solo solve: cv2.solvePnP for a (R, t) seed, then LM-refine (fx, R, t)
     using both point landmarks and line annotations.
@@ -546,6 +547,13 @@ def _solve_one_anchor_full(
     non-degenerate result. This handles real broadcast clips where the
     nearest-rich-anchor's fx differs enough from the thin anchor's true
     fx that LM falls into a wrong basin.
+
+    ``fallback_seed`` is an optional ``(rvec, tvec)`` pair used as the LM
+    starting pose when the anchor has too few point landmarks (<4) to
+    bootstrap from cv2.solvePnP. Pass the nearest rich anchor's pose so
+    the LM starts in a sensible region of the parameter space; without it
+    the fallback is identity-rotation + ``(0, 0, 50) m`` translation,
+    which is rarely close to truth on a thin line-heavy anchor.
 
     Returns ``(K, R, t, fx)`` or ``None`` on failure / no valid result.
     """
@@ -559,6 +567,9 @@ def _solve_one_anchor_full(
             if seed is None:
                 return None
             rvec_init, tvec_init = seed
+        elif fallback_seed is not None:
+            rvec_init = fallback_seed[0].copy()
+            tvec_init = fallback_seed[1].copy()
         else:
             rvec_init = np.array([0.001, 0.001, 0.001])
             tvec_init = np.array([0.0, 0.0, 50.0])
@@ -667,6 +678,7 @@ def solve_anchors_jointly(
         )
 
     rich_t: dict[int, np.ndarray] = {}
+    rich_rvec: dict[int, np.ndarray] = {}
     rich_fx: dict[int, float] = {}
     for a in sorted(rich_anchors, key=lambda x: x.frame):
         result = _solve_one_anchor_full(a, cx, cy, fx_init, K_init)
@@ -676,6 +688,8 @@ def solve_anchors_jointly(
         per_anchor_KRt[a.frame] = (K, R, t)
         per_anchor_res[a.frame] = reprojection_residual_for_anchor(a, K, R, t)
         rich_t[a.frame] = t
+        rvec_arr, _ = cv2.Rodrigues(R)
+        rich_rvec[a.frame] = rvec_arr.reshape(3)
         rich_fx[a.frame] = fx
 
     if not rich_t:
@@ -699,13 +713,21 @@ def solve_anchors_jointly(
             range(len(rich_frames_sorted)),
             key=lambda i: abs(rich_frames_sorted[i] - a.frame),
         )
-        fx_prior = rich_fx[rich_frames_sorted[nearest_idx]]
+        nearest_frame = rich_frames_sorted[nearest_idx]
+        fx_prior = rich_fx[nearest_frame]
         K_prior = _make_K(fx_prior, cx, cy)
+        # Warm-start the LM from the nearest rich anchor's pose. Crucial
+        # for line-heavy thin anchors (<4 points) where solvePnP can't
+        # bootstrap and the previous identity-rotation default landed the
+        # LM in arbitrary local minima.
+        fallback_seed = (rich_rvec[nearest_frame], rich_t[nearest_frame])
 
         # Candidate A: solo solve.
         solo_KRt: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
         solo_res = float("inf")
-        solo_result = _solve_one_anchor_full(a, cx, cy, fx_prior, K_prior)
+        solo_result = _solve_one_anchor_full(
+            a, cx, cy, fx_prior, K_prior, fallback_seed=fallback_seed,
+        )
         if solo_result is not None:
             K_s, R_s, t_s, _ = solo_result
             solo_res = reprojection_residual_for_anchor(a, K_s, R_s, t_s)
@@ -715,9 +737,9 @@ def solve_anchors_jointly(
         t_inherited = _interp_t(a.frame, rich_frames_sorted, rich_t)
         if len(a.landmarks) >= 4:
             seed = _seed_anchor_pose(a, K_prior)
-            rvec_init = seed[0] if seed is not None else np.array([0.001, 0.001, 0.001])
+            rvec_init = seed[0] if seed is not None else rich_rvec[nearest_frame].copy()
         else:
-            rvec_init = np.array([0.001, 0.001, 0.001])
+            rvec_init = rich_rvec[nearest_frame].copy()
         rvec, fx = _solve_anchor_with_t_fixed(
             a, t_inherited, cx, cy, fx_prior, rvec_init,
         )

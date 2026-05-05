@@ -230,3 +230,16 @@ The two intentional skips are:
 3. `output/ball/ball_track.json` — ground/flight transitions land on visually plausible frames.
 4. `output/export/gltf/scene.glb` opened in the browser viewer — players walk on the pitch, not above/below.
 5. `output/quality_report.json` — no stage flagged as low-confidence.
+
+
+### D13: Phase 7 — minimal prepare_shots and placeholder pose_2d
+
+**Context.** End-of-branch review found that `src/stages/prepare_shots.py` and `src/stages/pose_2d.py` were both unconditional `NotImplementedError` stubs; the default `python recon.py run --input clip.mp4 --output ./output/` therefore crashed at stage 1.
+
+**prepare_shots.** Implemented per spec section 5.1 — treats the input clip as one already-trimmed shot, copies it to `shots/{stem}.mp4`, and writes a single-shot `shots_manifest.json` (fps + frame_count read via cv2). No automatic scene segmentation. The user manually trims clips in CapCut (or similar) before invoking the pipeline.
+
+**pose_2d.** Implemented as a *placeholder* per the issue spec's allowance: walks the shots manifest + tracks and writes one `pose_2d/{player_id}_pose.json` per tracked player/goalkeeper with `{"player_id": ..., "shot_id": ..., "frames": []}`. The placeholder logs a clear `WARNING` on every run. Real ViTPose / MMPose integration is deferred — the `pose_estimator.py` utility was deleted in Phase 0 and would need to be reimplemented against the new `pose_2d` schema (see config.pose_2d block) plus current MMPose API.
+
+**Downstream impact.** `hmr_world` already treats a missing pose entry per frame as "unanchored" — `confidence` propagates the low score and `root_t` holds the last anchored value (or zero for the first frame). The placeholder therefore produces a fully-zero `confidence` track with zero translation, which is correct fallback behaviour and is reflected in `quality_report.json`'s `mean_per_player_confidence`. Consumers who need real foot-anchoring must port a ViTPose runner before relying on `hmr_world` output.
+
+**Tests.** No new tests added in this entry — running prepare_shots and pose_2d is exercised by the smoke check in the issue spec and (when fixtures land) by `tests/test_e2e_real_clip.py`. Phase 6's `test_prepare_shots.py` and `test_pose.py` were deleted as legacy (D12) and would need rewriting against the new schemas.

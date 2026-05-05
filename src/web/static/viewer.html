@@ -16,22 +16,19 @@
   #info { font-size: 12px; color: #94a3b8; min-width: 140px; text-align: right; }
   #sidebar { position: absolute; top: 10px; right: 10px; background: rgba(26,29,39,0.92); border-radius: 8px; padding: 12px; font-size: 12px; max-height: 60vh; overflow-y: auto; z-index: 10; min-width: 180px; }
   #sidebar h4 { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; font-weight: 600; }
-  .player-row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; cursor: pointer; border-radius: 3px; }
-  .player-row:hover { background: rgba(255,255,255,0.05); }
+  .player-row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 3px; }
   .player-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
   .player-name { font-size: 11px; color: #cbd5e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   select { background: #334155; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; padding: 4px 8px; font-size: 12px; }
   #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); font-size: 16px; color: #64748b; }
   #close-btn { position: absolute; top: 10px; left: 10px; z-index: 20; background: rgba(0,0,0,0.6); color: #e2e8f0; border: 1px solid #475569; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
   #close-btn:hover { background: rgba(0,0,0,0.8); }
-  #mode-badge { font-size: 10px; color: #a855f7; font-weight: 700; letter-spacing: 0.5px; padding: 2px 6px; border: 1px solid #a855f7; border-radius: 3px; }
-  #shot-label { font-size: 12px; color: #cbd5e1; }
 </style>
 </head>
 <body>
 
 <div id="viewport">
-  <button id="close-btn" onclick="window.close(); window.location.href='/';">✕ Close</button>
+  <button id="close-btn" onclick="window.location.href='/';">✕ Close</button>
   <div id="loading">Loading scene...</div>
 </div>
 
@@ -46,16 +43,12 @@
     <option value="1" selected>1x</option>
     <option value="2">2x</option>
   </select>
-  <select id="shot-select" style="display:none;">
-    <option value="">Loading shots…</option>
-  </select>
   <select id="camera-select">
-    <option value="default">Default</option>
-    <option value="top">Top-down</option>
-    <option value="side">Side</option>
+    <option value="broadcast">Broadcast</option>
+    <option value="tactical">Tactical (top)</option>
+    <option value="behind-goal">Behind Goal</option>
   </select>
-  <button id="skeleton-btn">Skeleton: ON</button>
-  <button id="pitch-btn" class="toggle-off">Pitch: OFF</button>
+  <button id="ball-btn">Ball: ON</button>
   <span id="info">Frame 0 / 0</span>
 </div>
 
@@ -75,13 +68,18 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 const TEAM_COLORS = { A: 0x3b82f6, B: 0xef4444, referee: 0xf59e0b, unknown: 0x6b7280 };
 const PITCH_L = 105, PITCH_W = 68;
 
-// ── Scene setup ──
+// ── Scene setup (pitch-registered scenes only) ──
+// Coordinate convention: pitch-world is x=along nearside touchline (0..L),
+// y=near→far (0..W), z=up. Three.js uses Y-up, so we map (x,y,z)_pitch →
+// (x, z, -y)_three.
+function pitchToThree(p) { return [p[0], p[2] || 0, -(p[1] || 0)]; }
+
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0a0a0a);
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
-camera.position.set(8, 5, 8);
-camera.lookAt(0, 0, 0);
+camera.position.set(52.5, 25, 50);
+camera.lookAt(52.5, 0, -34);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight - 60);
@@ -89,7 +87,7 @@ document.getElementById('viewport').appendChild(renderer.domElement);
 document.getElementById('loading').remove();
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 0, 0);
+controls.target.set(52.5, 0, -34);
 controls.enableDamping = true;
 controls.update();
 
@@ -99,22 +97,7 @@ const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
 dirLight.position.set(20, 40, 20);
 scene.add(dirLight);
 
-// ── Ground (single-shot HMR mode default) ──
-const hmrGroundGroup = new THREE.Group();
-{
-  const groundSize = 20;
-  const groundMat = new THREE.MeshStandardMaterial({ color: 0x18241a, side: THREE.DoubleSide });
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(groundSize, groundSize), groundMat);
-  ground.rotation.x = -Math.PI / 2;
-  hmrGroundGroup.add(ground);
-  // Grid for spatial reference
-  const grid = new THREE.GridHelper(groundSize, groundSize, 0x2d3a2e, 0x1f2820);
-  grid.position.y = 0.005;
-  hmrGroundGroup.add(grid);
-}
-scene.add(hmrGroundGroup);
-
-// ── Pitch (toggle-on, used for triangulation mode and HMR pitch reference) ──
+// ── Pitch model (always visible — pipeline always emits pitch coords) ──
 const pitchGroup = new THREE.Group();
 {
   const pitchGeom = new THREE.PlaneGeometry(PITCH_L, PITCH_W);
@@ -124,7 +107,7 @@ const pitchGroup = new THREE.Group();
   pitchMesh.position.set(PITCH_L / 2, 0, -PITCH_W / 2);
   pitchGroup.add(pitchMesh);
 
-  const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.4 });
+  const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 });
   function pitchLine(x1, z1, x2, z2) {
     const pts = [new THREE.Vector3(x1, 0.01, -z1), new THREE.Vector3(x2, 0.01, -z2)];
     pitchGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), lineMat));
@@ -134,151 +117,133 @@ const pitchGroup = new THREE.Group();
   pitchLine(PITCH_L, PITCH_W, 0, PITCH_W);
   pitchLine(0, PITCH_W, 0, 0);
   pitchLine(PITCH_L / 2, 0, PITCH_L / 2, PITCH_W);
+  // Centre circle
   const circPts = [];
   for (let a = 0; a <= Math.PI * 2; a += 0.1) {
     circPts.push(new THREE.Vector3(PITCH_L / 2 + 9.15 * Math.cos(a), 0.01, -(PITCH_W / 2 + 9.15 * Math.sin(a))));
   }
   pitchGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(circPts), lineMat));
+  // 18-yard boxes
+  const box18 = (xs, sign) => {
+    pitchLine(xs, 13.84, xs + sign * 16.5, 13.84);
+    pitchLine(xs + sign * 16.5, 13.84, xs + sign * 16.5, 54.16);
+    pitchLine(xs + sign * 16.5, 54.16, xs, 54.16);
+  };
+  box18(0, 1);
+  box18(PITCH_L, -1);
 }
-pitchGroup.visible = false;
 scene.add(pitchGroup);
 
 // ── State ──
-let metadata = null;
-let dataMode = 'none';      // 'triangulation' | 'hmr' | 'none'
 let totalFrames = 0;
 let currentFrame = 0;
 let playing = false;
 let speed = 1;
-let showSkeletons = true;
+let showBall = true;
+let fps = 25;
 
-// Triangulation state
-let animationData = null;
-let triPlayerMeshes = {};   // player_id -> jointGroup
-let triPlayerSkeletons = {}; // player_id -> { group, data, color }
+// Player markers, keyed by player_id. Each entry stores the per-frame
+// pelvis (root_t) positions and a Three.js mesh group.
+const playerObjects = new Map();   // player_id -> { mesh, frames, root_t, confidence, label }
+
+// Ball
 let ballMesh = null;
+let ballFrames = [];   // [{frame, world_xyz, state}]
 
-// HMR state
-let hmrSummary = null;       // { shots: { shotId: { players: [...] } } }
-let hmrShotCache = new Map(); // shotId -> full detail
-let currentShotId = null;
-let hmrPlayerObjects = [];    // [{ jointGroup, skelGroup, color, data }]
-let currentShotFps = 30;
+// ── Loaders ──
+async function fetchJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} → ${r.status}`);
+  return await r.json();
+}
 
-// SMPL 22-joint bones for HMR rendering
-const SMPL22_BONES = [
-  [1,0],[2,0],[3,0],[4,1],[5,2],[6,3],[7,4],[8,5],[9,6],
-  [10,7],[11,8],[12,9],[13,9],[14,9],[15,12],[16,13],[17,14],
-  [18,16],[19,17],[20,18],[21,19],
-];
-
-// COCO skeleton connections (for triangulation mode)
-const COCO_SKELETON = [
-  [0,1],[0,2],[1,3],[2,4],[5,6],[5,7],[7,9],[6,8],[8,10],
-  [5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16],
-];
-
-// ── Load data ──
 async function loadScene() {
+  const sidebar = document.getElementById('sidebar');
+  sidebar.innerHTML = '<h4>Pitch-registered scene</h4>';
+
+  // 1. Camera track tells us fps + frame-count bounds
+  let camTrack = null;
+  try { camTrack = await fetchJson('/camera/track'); } catch (_) {}
+  if (camTrack && camTrack.fps > 0) fps = camTrack.fps;
+  if (camTrack && camTrack.frames && camTrack.frames.length > 0) {
+    totalFrames = Math.max(totalFrames, camTrack.frames.length);
+  }
+
+  // 2. List available HMR-world player tracks
+  let players = [];
   try {
-    const mRes = await fetch('/api/export/metadata');
-    if (mRes.ok) metadata = await mRes.json();
+    const list = await fetchJson('/hmr_world/players');
+    players = list.players || [];
   } catch (_) {}
 
-  // Try triangulation data first
-  try {
-    const tRes = await fetch('/api/output/triangulation');
-    if (tRes.ok) {
-      animationData = await tRes.json();
-      if (animationData && animationData.players && animationData.players.length > 0) {
-        dataMode = 'triangulation';
-      }
-    }
-  } catch (_) {}
-
-  if (dataMode === 'none') {
-    // Try HMR summary
+  // 3. Fetch each player's preview (frames + root_t + confidence)
+  const playerEntries = [];
+  for (const pid of players) {
     try {
-      const hRes = await fetch('/api/output/hmr');
-      if (hRes.ok) {
-        hmrSummary = await hRes.json();
-        const shotIds = Object.keys(hmrSummary.shots || {}).filter(
-          sid => (hmrSummary.shots[sid].players || []).length > 0
-        );
-        if (shotIds.length > 0) dataMode = 'hmr';
+      const preview = await fetchJson(`/hmr_world/preview?player_id=${encodeURIComponent(pid)}`);
+      playerEntries.push(preview);
+      if (preview.frames && preview.frames.length > 0) {
+        const last = preview.frames[preview.frames.length - 1];
+        totalFrames = Math.max(totalFrames, last + 1);
       }
     } catch (_) {}
   }
 
-  if (dataMode === 'triangulation') {
-    setupTriangulationMode();
-  } else if (dataMode === 'hmr') {
-    await setupHmrMode();
-  } else {
-    document.getElementById('sidebar').innerHTML =
-      '<h4>No data</h4><div style="color:#94a3b8;font-size:11px;">'
-      + 'Run the pipeline first.</div>';
+  for (const p of playerEntries) addPlayerMarker(p, sidebar);
+
+  // 4. Ball
+  try {
+    const ball = await fetchJson('/ball/preview');
+    ballFrames = ball.frames || [];
+    if (ballFrames.length > 0) {
+      totalFrames = Math.max(totalFrames, ballFrames[ballFrames.length - 1].frame + 1);
+      const ballGeo = new THREE.SphereGeometry(0.18, 16, 16);
+      const ballMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+      ballMesh = new THREE.Mesh(ballGeo, ballMat);
+      ballMesh.visible = false;
+      scene.add(ballMesh);
+    }
+  } catch (_) {}
+
+  if (totalFrames === 0) {
+    sidebar.innerHTML += '<div style="color:#94a3b8;font-size:11px;">No data — run the pipeline first.</div>';
+    totalFrames = 1;
   }
 
   document.getElementById('timeline').max = String(Math.max(0, totalFrames - 1));
+  setCameraPreset('broadcast');
   updateFrame(0);
 }
 
-// ── Triangulation mode ──
-function setupTriangulationMode() {
-  // Pitch ON for triangulation (players are in pitch coords)
-  pitchGroup.visible = true;
-  hmrGroundGroup.visible = false;
-  document.getElementById('pitch-btn').textContent = 'Pitch: ON';
-  document.getElementById('pitch-btn').classList.remove('toggle-off');
+function addPlayerMarker(p, sidebar) {
+  const team = (p.team || 'unknown');
+  const color = TEAM_COLORS[team] || TEAM_COLORS.unknown;
 
-  // Pitch-anchored camera presets
-  cameraSelectEl.innerHTML = `
-    <option value="broadcast">Broadcast</option>
-    <option value="tactical">Tactical (top)</option>
-    <option value="behind-goal">Behind Goal</option>`;
-  setTriangulationCameraPreset('broadcast');
+  // Each player is rendered as a single tall capsule at root_t (pitch metres).
+  // The full SMPL mesh is in scene.glb if needed for export — the live viewer
+  // just shows pelvis-centred markers, which keeps it lightweight.
+  const geom = new THREE.CapsuleGeometry(0.35, 1.4, 4, 8);
+  const mat = new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.9 });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.visible = false;
+  scene.add(mesh);
 
-  if (!animationData || !animationData.players) return;
-  totalFrames = Math.max(...animationData.players.map(p => p.num_frames || 0));
-
-  if (animationData.ball) {
-    const ballGeo = new THREE.SphereGeometry(0.25, 16, 16);
-    const ballMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-    ballMesh = new THREE.Mesh(ballGeo, ballMat);
-    ballMesh.visible = false;
-    scene.add(ballMesh);
-  }
-
-  const sidebar = document.getElementById('sidebar');
-  sidebar.innerHTML = '<h4>Players</h4>';
-  animationData.players.forEach(p => {
-    const color = TEAM_COLORS[p.team] || TEAM_COLORS.unknown;
-
-    const skelGroup = new THREE.Group();
-    scene.add(skelGroup);
-    triPlayerSkeletons[p.player_id] = { group: skelGroup, data: p, color };
-
-    const jointGroup = new THREE.Group();
-    const jointMat = new THREE.MeshBasicMaterial({ color });
-    for (let j = 0; j < 17; j++) {
-      const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.15, 6, 6), jointMat);
-      sphere.visible = false;
-      jointGroup.add(sphere);
-    }
-    scene.add(jointGroup);
-    triPlayerMeshes[p.player_id] = jointGroup;
-
-    const row = document.createElement('div');
-    row.className = 'player-row';
-    row.innerHTML =
-      `<span class="player-dot" style="background:#${color.toString(16).padStart(6,'0')}"></span>`
-      + `<span class="player-name">${p.player_name || p.player_id}</span>`;
-    sidebar.appendChild(row);
+  playerObjects.set(p.player_id, {
+    mesh,
+    frames: p.frames || [],
+    root_t: p.root_t || [],
+    confidence: p.confidence || [],
   });
+
+  const row = document.createElement('div');
+  row.className = 'player-row';
+  row.innerHTML =
+    `<span class="player-dot" style="background:#${color.toString(16).padStart(6,'0')}"></span>`
+    + `<span class="player-name">${p.player_id}</span>`;
+  sidebar.appendChild(row);
 }
 
-function setTriangulationCameraPreset(preset) {
+function setCameraPreset(preset) {
   if (preset === 'broadcast') camera.position.set(52.5, 25, 50);
   else if (preset === 'tactical') camera.position.set(52.5, 80, -34);
   else if (preset === 'behind-goal') camera.position.set(-10, 10, -34);
@@ -286,275 +251,40 @@ function setTriangulationCameraPreset(preset) {
   controls.update();
 }
 
-function updateTriangulationFrame(fi) {
-  if (!animationData) return;
+// ── Frame update ──
+function updateFrame(fi) {
+  currentFrame = fi;
+  document.getElementById('info').textContent =
+    `Frame ${fi} / ${Math.max(0, totalFrames - 1)}`;
+  document.getElementById('timeline').value = String(fi);
 
-  if (ballMesh && animationData.ball && fi < animationData.ball.positions.length) {
-    const bp = animationData.ball.positions[fi];
-    if (bp && bp[0] !== null && !isNaN(bp[0])) {
-      ballMesh.position.set(bp[0], bp[2] || 0, -(bp[1] || 0));
+  for (const obj of playerObjects.values()) {
+    const idx = obj.frames.indexOf(fi);
+    if (idx < 0) {
+      obj.mesh.visible = false;
+      continue;
+    }
+    const t = obj.root_t[idx];
+    if (!t || t[0] === null || isNaN(t[0])) {
+      obj.mesh.visible = false;
+      continue;
+    }
+    const [tx, ty, tz] = pitchToThree(t);
+    // Pelvis is roughly mid-body; lift the capsule centre to clear the ground.
+    obj.mesh.position.set(tx, Math.max(ty, 0.9), tz);
+    obj.mesh.visible = true;
+  }
+
+  if (ballMesh && ballFrames.length > 0) {
+    const bf = ballFrames.find((f) => f.frame === fi);
+    if (showBall && bf && bf.world_xyz) {
+      const [bx, by, bz] = pitchToThree(bf.world_xyz);
+      ballMesh.position.set(bx, by, bz);
       ballMesh.visible = true;
     } else {
       ballMesh.visible = false;
     }
   }
-
-  for (const p of animationData.players) {
-    const jointGroup = triPlayerMeshes[p.player_id];
-    const skelInfo = triPlayerSkeletons[p.player_id];
-    if (!jointGroup || !skelInfo) continue;
-
-    while (skelInfo.group.children.length) skelInfo.group.remove(skelInfo.group.children[0]);
-
-    if (fi >= p.positions.length) {
-      jointGroup.children.forEach(c => c.visible = false);
-      continue;
-    }
-
-    const joints = p.positions[fi];
-    const confs = p.confidences[fi];
-
-    for (let j = 0; j < Math.min(17, joints.length); j++) {
-      const sphere = jointGroup.children[j];
-      const jt = joints[j];
-      if (!jt || isNaN(jt[0]) || confs[j] < 0.05) {
-        sphere.visible = false;
-        continue;
-      }
-      sphere.position.set(jt[0], jt[2] || 0, -(jt[1] || 0));
-      sphere.visible = true;
-    }
-
-    if (showSkeletons) {
-      const boneMat = new THREE.LineBasicMaterial({ color: skelInfo.color, transparent: true, opacity: 0.7 });
-      for (const [a, b] of COCO_SKELETON) {
-        const ja = joints[a], jb = joints[b];
-        if (!ja || !jb || isNaN(ja[0]) || isNaN(jb[0])) continue;
-        if (confs[a] < 0.05 || confs[b] < 0.05) continue;
-        const pts = [
-          new THREE.Vector3(ja[0], ja[2] || 0, -(ja[1] || 0)),
-          new THREE.Vector3(jb[0], jb[2] || 0, -(jb[1] || 0)),
-        ];
-        skelInfo.group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), boneMat));
-      }
-    }
-  }
-}
-
-// ── HMR mode (single-shot) ──
-async function setupHmrMode() {
-  // HMR mode: small ground, pitch off by default
-  pitchGroup.visible = false;
-  hmrGroundGroup.visible = true;
-
-  // Camera presets sized for a single-shot scene (~5–15m extent)
-  cameraSelectEl.innerHTML = `
-    <option value="default">Default</option>
-    <option value="top">Top-down</option>
-    <option value="side">Side</option>`;
-
-  // Populate shot picker
-  const shotIds = Object.keys(hmrSummary.shots || {})
-    .filter(sid => (hmrSummary.shots[sid].players || []).length > 0)
-    .sort();
-  const shotSelect = document.getElementById('shot-select');
-  shotSelect.innerHTML = '';
-  for (const sid of shotIds) {
-    const opt = document.createElement('option');
-    opt.value = sid;
-    const playerCount = (hmrSummary.shots[sid].players || []).length;
-    opt.textContent = `${sid} (${playerCount} player${playerCount === 1 ? '' : 's'})`;
-    shotSelect.appendChild(opt);
-  }
-  shotSelect.style.display = '';
-  shotSelect.addEventListener('change', () => switchShot(shotSelect.value));
-
-  // Mode badge in sidebar header
-  const sidebar = document.getElementById('sidebar');
-  sidebar.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-      <h4 style="margin:0;">Players</h4>
-      <span id="mode-badge">HMR</span>
-    </div>
-    <div id="shot-label" style="margin-bottom:8px;color:#94a3b8;font-size:11px;"></div>
-    <div id="player-list"></div>
-  `;
-
-  if (shotIds.length > 0) {
-    await switchShot(shotIds[0]);
-    shotSelect.value = shotIds[0];
-  }
-}
-
-async function loadShotDetail(shotId) {
-  if (hmrShotCache.has(shotId)) return hmrShotCache.get(shotId);
-  const res = await fetch(`/api/output/hmr/${shotId}`);
-  if (!res.ok) throw new Error(`Failed to load ${shotId}: ${res.status}`);
-  const detail = await res.json();
-  hmrShotCache.set(shotId, detail);
-  return detail;
-}
-
-async function switchShot(shotId) {
-  if (!shotId) return;
-  currentShotId = shotId;
-
-  // Reset playback
-  playing = false;
-  document.getElementById('play-btn').textContent = 'Play';
-  currentFrame = 0;
-
-  // Tear down previous shot's player objects
-  for (const obj of hmrPlayerObjects) {
-    scene.remove(obj.jointGroup);
-    scene.remove(obj.skelGroup);
-  }
-  hmrPlayerObjects = [];
-
-  let detail;
-  try {
-    detail = await loadShotDetail(shotId);
-  } catch (e) {
-    document.getElementById('info').textContent = 'Error loading shot: ' + e.message;
-    return;
-  }
-
-  const players = detail.players || [];
-  currentShotFps = (players[0] && players[0].fps) || 30;
-
-  // Compute per-shot frame count (max across players)
-  let maxFrames = 0;
-  for (const p of players) {
-    maxFrames = Math.max(maxFrames, (p.frame_indices || []).length);
-  }
-  totalFrames = maxFrames;
-  document.getElementById('timeline').max = String(Math.max(0, totalFrames - 1));
-  document.getElementById('timeline').value = '0';
-
-  // Update sidebar
-  document.getElementById('shot-label').textContent =
-    `${shotId} • ${players.length} player${players.length === 1 ? '' : 's'} • ${totalFrames} frames`;
-  const playerList = document.getElementById('player-list');
-  playerList.innerHTML = '';
-
-  // Build player objects
-  for (const p of players) {
-    const color = TEAM_COLORS[p.team] || TEAM_COLORS.unknown;
-    const jointGroup = new THREE.Group();
-    const jointMat = new THREE.MeshBasicMaterial({ color });
-    for (let j = 0; j < 22; j++) {
-      const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 8), jointMat);
-      sphere.visible = false;
-      jointGroup.add(sphere);
-    }
-    scene.add(jointGroup);
-
-    const skelGroup = new THREE.Group();
-    scene.add(skelGroup);
-
-    hmrPlayerObjects.push({ jointGroup, skelGroup, color, data: p });
-
-    const row = document.createElement('div');
-    row.className = 'player-row';
-    const hex = '#' + color.toString(16).padStart(6, '0');
-    const label = p.player_name ? `${p.player_name} (${p.track_id})` : p.track_id;
-    row.innerHTML = `<span class="player-dot" style="background:${hex}"></span><span class="player-name">${label}</span>`;
-    playerList.appendChild(row);
-  }
-
-  // Auto-frame the camera on the players' centroid
-  autoFrameHmrShot(players);
-
-  updateFrame(0);
-}
-
-function autoFrameHmrShot(players) {
-  if (!players.length) return;
-  // Compute centroid using first-frame pelvis position of each player —
-  // gives us a target near body-height, regardless of where GVHMR's
-  // own translation reference happens to land.
-  let cx = 0, cy = 0, cz = 0, n = 0;
-  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-  for (const p of players) {
-    const j = (p.joints_3d && p.joints_3d[0]) ? p.joints_3d[0] : null;
-    const pelvis = j && j[0] ? j[0] : null;
-    if (!pelvis) continue;
-    // ay → three.js: x=ay_x, y=ay_y (both Y-up), z=-ay_z
-    const tx = pelvis[0], ty = pelvis[1], tz = -pelvis[2];
-    cx += tx; cy += ty; cz += tz; n++;
-    if (tx < minX) minX = tx;
-    if (tx > maxX) maxX = tx;
-    if (tz < minZ) minZ = tz;
-    if (tz > maxZ) maxZ = tz;
-  }
-  if (n === 0) {
-    controls.target.set(0, 1, 0);
-    camera.position.set(8, 5, 8);
-  } else {
-    cx /= n; cy /= n; cz /= n;
-    const extentX = maxX - minX, extentZ = maxZ - minZ;
-    const extent = Math.max(2, Math.max(extentX, extentZ));
-    controls.target.set(cx, cy, cz);
-    camera.position.set(cx + extent + 4, cy + extent * 0.5 + 3, cz + extent + 4);
-  }
-  controls.update();
-}
-
-function updateHmrFrame(fi) {
-  for (const obj of hmrPlayerObjects) {
-    const p = obj.data;
-    while (obj.skelGroup.children.length) {
-      obj.skelGroup.remove(obj.skelGroup.children[0]);
-    }
-    const frameIndices = p.frame_indices || [];
-    if (fi >= frameIndices.length || !p.joints_3d) {
-      obj.jointGroup.children.forEach(c => c.visible = false);
-      continue;
-    }
-    const joints = p.joints_3d[fi];
-    if (!joints) {
-      obj.jointGroup.children.forEach(c => c.visible = false);
-      continue;
-    }
-
-    // GVHMR's "ay" frame is post-processed so the lowest body point
-    // sits at Y≈0 and Y increases upward (empirically: ankle Y≈0.1m,
-    // pelvis Y≈1.0m, head Y≈1.7m).  Three.js is also Y-up, so use Y
-    // directly.  X stays as-is; Z is negated because GVHMR's +Z is
-    // camera-forward and Three.js's +Z is towards-camera.
-    for (let j = 0; j < Math.min(22, joints.length); j++) {
-      const sphere = obj.jointGroup.children[j];
-      const jt = joints[j];
-      if (!jt) { sphere.visible = false; continue; }
-      sphere.position.set(jt[0], jt[1], -jt[2]);
-      sphere.visible = true;
-    }
-
-    if (showSkeletons) {
-      const boneMat = new THREE.LineBasicMaterial({
-        color: obj.color, transparent: true, opacity: 0.85,
-      });
-      for (const [child, parent] of SMPL22_BONES) {
-        const jc = joints[child], jp = joints[parent];
-        if (!jc || !jp) continue;
-        const pts = [
-          new THREE.Vector3(jc[0], jc[1], -jc[2]),
-          new THREE.Vector3(jp[0], jp[1], -jp[2]),
-        ];
-        obj.skelGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), boneMat));
-      }
-    }
-  }
-}
-
-// ── Frame update dispatch ──
-function updateFrame(fi) {
-  currentFrame = fi;
-  document.getElementById('info').textContent = `Frame ${fi} / ${Math.max(0, totalFrames - 1)}`;
-  document.getElementById('timeline').value = String(fi);
-
-  if (dataMode === 'triangulation') updateTriangulationFrame(fi);
-  else if (dataMode === 'hmr') updateHmrFrame(fi);
 }
 
 // ── Controls ──
@@ -562,8 +292,7 @@ const playBtn = document.getElementById('play-btn');
 const timeline = document.getElementById('timeline');
 const speedSelect = document.getElementById('speed-select');
 const cameraSelectEl = document.getElementById('camera-select');
-const skelBtn = document.getElementById('skeleton-btn');
-const pitchBtn = document.getElementById('pitch-btn');
+const ballBtn = document.getElementById('ball-btn');
 
 playBtn.addEventListener('click', () => {
   playing = !playing;
@@ -572,56 +301,17 @@ playBtn.addEventListener('click', () => {
 
 timeline.addEventListener('input', () => updateFrame(parseInt(timeline.value)));
 speedSelect.addEventListener('change', () => { speed = parseFloat(speedSelect.value); });
-
-cameraSelectEl.addEventListener('change', () => {
-  const preset = cameraSelectEl.value;
-  if (dataMode === 'triangulation') {
-    setTriangulationCameraPreset(preset);
-    return;
-  }
-  // HMR mode camera presets — relative to the controls.target the
-  // auto-frame placed near the player centroid.
-  const tgt = controls.target;
-  if (preset === 'top') {
-    camera.position.set(tgt.x, tgt.y + 12, tgt.z + 0.01);
-  } else if (preset === 'side') {
-    camera.position.set(tgt.x + 8, tgt.y + 1.5, tgt.z);
-  } else {
-    camera.position.set(tgt.x + 6, tgt.y + 4, tgt.z + 6);
-  }
-  controls.update();
-});
-
-skelBtn.addEventListener('click', () => {
-  showSkeletons = !showSkeletons;
-  skelBtn.textContent = `Skeleton: ${showSkeletons ? 'ON' : 'OFF'}`;
-  if (!showSkeletons) {
-    // Clear any drawn bones immediately
-    for (const obj of hmrPlayerObjects) {
-      while (obj.skelGroup.children.length) obj.skelGroup.remove(obj.skelGroup.children[0]);
-    }
-    for (const sid in triPlayerSkeletons) {
-      const g = triPlayerSkeletons[sid].group;
-      while (g.children.length) g.remove(g.children[0]);
-    }
-  }
+cameraSelectEl.addEventListener('change', () => setCameraPreset(cameraSelectEl.value));
+ballBtn.addEventListener('click', () => {
+  showBall = !showBall;
+  ballBtn.textContent = `Ball: ${showBall ? 'ON' : 'OFF'}`;
+  ballBtn.classList.toggle('toggle-off', !showBall);
   updateFrame(currentFrame);
-});
-
-pitchBtn.addEventListener('click', () => {
-  pitchGroup.visible = !pitchGroup.visible;
-  pitchBtn.textContent = `Pitch: ${pitchGroup.visible ? 'ON' : 'OFF'}`;
-  pitchBtn.classList.toggle('toggle-off', !pitchGroup.visible);
 });
 
 // ── Animation loop ──
 let lastTime = 0;
 let accumulator = 0;
-function getPlaybackFps() {
-  if (dataMode === 'hmr') return currentShotFps || 30;
-  if (metadata && metadata.fps && metadata.fps > 0) return metadata.fps;
-  return 30;
-}
 
 function animate(time) {
   requestAnimationFrame(animate);
@@ -630,7 +320,7 @@ function animate(time) {
 
   if (playing && totalFrames > 0) {
     accumulator += dt * speed;
-    const frameDt = 1 / getPlaybackFps();
+    const frameDt = 1 / Math.max(1, fps);
     while (accumulator >= frameDt) {
       accumulator -= frameDt;
       currentFrame = (currentFrame + 1) % totalFrames;
@@ -648,7 +338,6 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight - 60);
 });
 
-// ── Init ──
 loadScene();
 requestAnimationFrame(animate);
 </script>

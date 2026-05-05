@@ -152,47 +152,68 @@ def _seed_anchor_pose(
     return rvec.reshape(3), tvec.reshape(3)
 
 
-def _refine_seed_fx(
+_LINE_RESIDUAL_WEIGHT = 0.2
+
+
+def _refine_seed_pose(
     anchor: Anchor,
     rvec_init: np.ndarray,
     tvec_init: np.ndarray,
     cx: float,
     cy: float,
     fx_init: float,
-) -> float:
-    """One-anchor LM that refines fx + (R, t) starting from solvePnP output.
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """One-anchor LM that refines (fx, R, t) on the seed anchor.
 
-    Run before seeding the joint LM so the broadcast-prior fx (= image
-    width) is replaced by a value much closer to truth. Without this,
-    real broadcast clips (whose fx is often 0.5–0.8× image width) seed
-    other anchors with an fx so wrong that solvePnP places their points
-    behind the camera, and the joint LM can't escape.
+    Uses point landmarks (full weight) and line annotations (down-weighted
+    by ``_LINE_RESIDUAL_WEIGHT``). Lines have inherently large residual
+    magnitudes when the projected line is even slightly off; without
+    down-weighting they dominate the LM and pull the solution away from
+    the tight point-only fit (observed empirically on real data — frame
+    429's point-only residual jumped from 5 px to 117 px when lines
+    were given equal weight).
+
+    Returns ``(fx, rvec, tvec)`` — caller updates K and the seed pose.
     """
     if not anchor.landmarks:
-        return fx_init
+        return fx_init, rvec_init.copy(), tvec_init.copy()
     obj_pts = np.array([lm.world_xyz for lm in anchor.landmarks], dtype=np.float64)
     img_pts = np.array([lm.image_xy for lm in anchor.landmarks], dtype=np.float64)
+    # When the seed already has plenty of well-conditioned points (≥6 with
+    # non-coplanar), skip lines entirely on the seed solve — they only add
+    # noise. Lines kick in below this threshold to rescue thinner seeds.
+    n_pts = len(obj_pts)
+    z_levels = len({round(z, 3) for _, _, z in obj_pts})
+    use_lines_on_seed = anchor.lines and (n_pts < 6 or z_levels < 2)
 
     def _residuals(p: np.ndarray) -> np.ndarray:
         fx = float(p[0])
         rvec = p[1:4]
         tvec = p[4:7]
         R, _ = cv2.Rodrigues(rvec)
+        K = _make_K(fx, cx, cy)
         cam = obj_pts @ R.T + tvec
         safe_z = np.where(cam[:, 2] > 1e-3, cam[:, 2], 1e-3)
-        K = _make_K(fx, cx, cy)
         pix = cam @ K.T
         proj = pix[:, :2] / safe_z[:, None]
-        return (proj - img_pts).reshape(-1)
+        parts: list[np.ndarray] = [(proj - img_pts).reshape(-1)]
+        if use_lines_on_seed:
+            parts.append(
+                _LINE_RESIDUAL_WEIGHT
+                * _line_residuals(list(anchor.lines), K, R, tvec)
+            )
+        return np.concatenate(parts)
 
     p0 = np.concatenate([[fx_init], rvec_init, tvec_init])
     try:
-        result = least_squares(
-            _residuals, p0, method="lm", max_nfev=200,
+        result = least_squares(_residuals, p0, method="lm", max_nfev=300)
+        return (
+            float(np.clip(result.x[0], 50.0, 1e5)),
+            result.x[1:4].copy(),
+            result.x[4:7].copy(),
         )
-        return float(np.clip(result.x[0], 50.0, 1e5))
     except Exception:
-        return fx_init
+        return fx_init, rvec_init.copy(), tvec_init.copy()
 
 
 def _solve_anchor_with_t_fixed(
@@ -210,46 +231,6 @@ def _solve_anchor_with_t_fixed(
     when the K seed is uncertain). With t known, this is a 4-DOF problem
     (3 rotation + 1 fx) and the LM is well-determined for ≥3 points.
     """
-    obj_pts = np.array([lm.world_xyz for lm in anchor.landmarks], dtype=np.float64)
-    img_pts = np.array([lm.image_xy for lm in anchor.landmarks], dtype=np.float64)
-    if len(obj_pts) < 3:
-        # Fall back to seed defaults (caller should not have invoked this).
-        return rvec_init.copy(), fx_init
-
-    def _residuals(p: np.ndarray) -> np.ndarray:
-        fx = float(p[0])
-        rvec = p[1:4]
-        R, _ = cv2.Rodrigues(rvec)
-        cam = obj_pts @ R.T + t_fixed
-        safe_z = np.where(cam[:, 2] > 1e-3, cam[:, 2], 1e-3)
-        K = _make_K(fx, cx, cy)
-        pix = cam @ K.T
-        proj = pix[:, :2] / safe_z[:, None]
-        return (proj - img_pts).reshape(-1)
-
-    p0 = np.concatenate([[fx_init], rvec_init])
-    try:
-        result = least_squares(_residuals, p0, method="lm", max_nfev=200)
-        return result.x[1:4].copy(), float(np.clip(result.x[0], 50.0, 1e5))
-    except Exception:
-        return rvec_init.copy(), fx_init
-
-
-def _solve_anchor_with_t_fixed_lines(
-    anchor: Anchor,
-    t_fixed: np.ndarray,
-    cx: float,
-    cy: float,
-    fx_init: float,
-    rvec_init: np.ndarray,
-) -> tuple[np.ndarray, float]:
-    """Like ``_solve_anchor_with_t_fixed`` but uses line correspondences
-    instead of (or alongside) point landmarks. Used to seed line-only
-    anchors from the rich anchor's tvec.
-    """
-    if not anchor.lines and not anchor.landmarks:
-        return rvec_init.copy(), fx_init
-
     obj_pts = (
         np.array([lm.world_xyz for lm in anchor.landmarks], dtype=np.float64)
         if anchor.landmarks else np.empty((0, 3))
@@ -258,6 +239,8 @@ def _solve_anchor_with_t_fixed_lines(
         np.array([lm.image_xy for lm in anchor.landmarks], dtype=np.float64)
         if anchor.landmarks else np.empty((0, 2))
     )
+    if len(obj_pts) < 3 and not anchor.lines:
+        return rvec_init.copy(), fx_init
 
     def _residuals(p: np.ndarray) -> np.ndarray:
         fx = float(p[0])
@@ -272,8 +255,13 @@ def _solve_anchor_with_t_fixed_lines(
             proj = pix[:, :2] / safe_z[:, None]
             parts.append((proj - img_pts).reshape(-1))
         if anchor.lines:
-            parts.append(_line_residuals(list(anchor.lines), K, R, t_fixed))
-        return np.concatenate(parts)
+            # Down-weight lines (see _refine_seed_pose). Heavier weight when
+            # there are no points (line-only anchors rely entirely on lines).
+            weight = 1.0 if len(obj_pts) == 0 else _LINE_RESIDUAL_WEIGHT
+            parts.append(
+                weight * _line_residuals(list(anchor.lines), K, R, t_fixed)
+            )
+        return np.concatenate(parts) if parts else np.empty(0)
 
     p0 = np.concatenate([[fx_init], rvec_init])
     try:
@@ -494,16 +482,12 @@ def solve_anchors_jointly(
         )
     seed_rvec_init, seed_tvec_init = seed
 
-    fx_refined = _refine_seed_fx(
+    # Refine (fx, R, t) on the seed using its full set of constraints
+    # (point landmarks + line annotations).
+    fx_refined, seed_rvec_init, seed_tvec_init = _refine_seed_pose(
         seed_anchor, seed_rvec_init, seed_tvec_init, cx_init, cy_init, fx_init,
     )
     K_refined = _make_K(fx_refined, cx_init, cy_init)
-
-    # Re-run solvePnP on the seed anchor with the refined K for a more
-    # consistent (R, t) anchor.
-    seed = _seed_anchor_pose(seed_anchor, K_refined)
-    if seed is not None:
-        seed_rvec_init, seed_tvec_init = seed
 
     # Use the seed anchor's tvec as the shared t_world initial guess. Other
     # anchors' R and fx are seeded by a t-fixed LM (much more stable on
@@ -517,24 +501,19 @@ def solve_anchors_jointly(
             rvec_seeds.append(seed_rvec_init.copy())
             fx_seeds.append(fx_refined)
             continue
-        if len(a.landmarks) >= 3:
-            # Get a good rvec initial via solvePnP with the refined K, then
-            # let the t-fixed LM polish (R, fx) under the shared t_init.
+        # Get a good rvec initial via solvePnP with the refined K (when the
+        # anchor has enough points), then let the t-fixed LM polish (R, fx)
+        # under the shared t_init using BOTH points and lines.
+        if len(a.landmarks) >= 4:
             seeded = _seed_anchor_pose(a, K_refined)
             rvec_init = seeded[0] if seeded is not None else seed_rvec_init
-            rvec, fx = _solve_anchor_with_t_fixed(
-                a, t_init, cx_init, cy_init, fx_refined, rvec_init,
-            )
-            rvec_seeds.append(rvec)
-            fx_seeds.append(fx)
         else:
-            # Line-only anchor — initialise from seed; let line-aware
-            # t-fixed LM (below) refine (R, fx) using the line residuals.
-            rvec, fx = _solve_anchor_with_t_fixed_lines(
-                a, t_init, cx_init, cy_init, fx_refined, seed_rvec_init,
-            )
-            rvec_seeds.append(rvec)
-            fx_seeds.append(fx)
+            rvec_init = seed_rvec_init
+        rvec, fx = _solve_anchor_with_t_fixed(
+            a, t_init, cx_init, cy_init, fx_refined, rvec_init,
+        )
+        rvec_seeds.append(rvec)
+        fx_seeds.append(fx)
 
     # ── Compose result from staged seeds ──────────────────────────────────
     # The joint LM was originally meant to polish the seeds, but in

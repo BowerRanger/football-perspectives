@@ -148,9 +148,12 @@ def _seed_anchor_pose(
         [lm.image_xy for lm in anchor.landmarks], dtype=np.float64
     ).reshape(-1, 1, 2)
     dist_zero = np.zeros(5, dtype=np.float64)
-    # ITERATIVE needs ≥6 points and uses DLT internally; EPNP handles 4–5
-    # points and coplanar configurations gracefully. Pick by count.
-    flag = cv2.SOLVEPNP_EPNP if len(anchor.landmarks) < 6 else cv2.SOLVEPNP_ITERATIVE
+    # SOLVEPNP_SQPNP (OpenCV ≥ 4.5) is the modern globally-optimal PnP that
+    # handles ≥3 points including coplanar configurations more stably than
+    # EPNP, which is highly sensitive to small fx perturbations on coplanar
+    # data. Falls back to ITERATIVE for ≥6 points (well-conditioned non-
+    # coplanar cases benefit from its iterative refinement).
+    flag = cv2.SOLVEPNP_SQPNP if len(anchor.landmarks) < 6 else cv2.SOLVEPNP_ITERATIVE
     ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, dist_zero, flags=flag)
     if not ok:
         return None
@@ -513,6 +516,20 @@ def _jac_sparsity(anchors: tuple[Anchor, ...]) -> lil_matrix:
 # Public solver ---------------------------------------------------------------
 
 
+def _is_degenerate_solo(t: np.ndarray, fx: float) -> bool:
+    """Reject solo solves where the LM walked into a non-physical region:
+    camera position more than a soccer-field-and-a-half from the pitch, or
+    fx outside any realistic broadcast lens range. These configs sometimes
+    yield low local-residuals via massive K↔t compensation but the
+    geometry is meaningless.
+    """
+    if abs(t[0]) > 200 or abs(t[1]) > 200 or abs(t[2]) > 500:
+        return True
+    if fx < 200 or fx > 20000:
+        return True
+    return False
+
+
 def _solve_one_anchor_full(
     anchor: Anchor,
     cx: float,
@@ -520,37 +537,61 @@ def _solve_one_anchor_full(
     fx_init: float,
     K_init: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float] | None:
-    """Solo solve: cv2.solvePnP for a (R, t) seed at fx=fx_init, then LM-refine
-    (fx, R, t) using both point landmarks and line annotations.
+    """Solo solve: cv2.solvePnP for a (R, t) seed, then LM-refine (fx, R, t)
+    using both point landmarks and line annotations.
 
-    Returns ``(K, R, t, fx)`` or ``None`` if the anchor has too few points
-    AND too few lines for solvePnP to bootstrap.
+    Tries the caller-supplied ``fx_init`` first; if the LM lands in a
+    degenerate region (very small fx or very far |t|), retries with a
+    small ladder of alternative fx priors and returns the best
+    non-degenerate result. This handles real broadcast clips where the
+    nearest-rich-anchor's fx differs enough from the thin anchor's true
+    fx that LM falls into a wrong basin.
+
+    Returns ``(K, R, t, fx)`` or ``None`` on failure / no valid result.
     """
     if len(anchor.landmarks) < 4 and len(anchor.lines) < 2:
         return None
 
-    # Bootstrap from solvePnP if we have enough points; otherwise initialise
-    # from identity rotation + a guessed translation along the optical axis
-    # (LM with line residuals takes it from there).
-    if len(anchor.landmarks) >= 4:
-        seed = _seed_anchor_pose(anchor, K_init)
-        if seed is None:
-            return None
-        rvec_init, tvec_init = seed
-    else:
-        rvec_init = np.array([0.001, 0.001, 0.001])
-        tvec_init = np.array([0.0, 0.0, 50.0])  # 50 m down optical axis
+    def _try(fx_seed: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, float] | None:
+        K_seed = _make_K(fx_seed, cx, cy)
+        if len(anchor.landmarks) >= 4:
+            seed = _seed_anchor_pose(anchor, K_seed)
+            if seed is None:
+                return None
+            rvec_init, tvec_init = seed
+        else:
+            rvec_init = np.array([0.001, 0.001, 0.001])
+            tvec_init = np.array([0.0, 0.0, 50.0])
+        fx, rvec, tvec = _refine_seed_pose(
+            anchor, rvec_init, tvec_init, cx, cy, fx_seed,
+        )
+        K = _make_K(fx, cx, cy)
+        R = _rvec_to_R(rvec)
+        return K, R, tvec, fx
 
-    # Refine (fx, R, t) jointly. Both points and lines are weighted as in the
-    # seed-pose path, but here every anchor gets its own t (no shared-t
-    # constraint) — broadcast clips with steadicam motion or stitched
-    # camera feeds need this flexibility.
-    fx, rvec, tvec = _refine_seed_pose(
-        anchor, rvec_init, tvec_init, cx, cy, fx_init,
+    # First attempt with caller's prior.
+    primary = _try(fx_init)
+    if primary is not None and not _is_degenerate_solo(primary[2], primary[3]):
+        return primary
+
+    # Primary attempt was degenerate (or failed). Try alternative priors.
+    candidate_best = primary
+    candidate_res = (
+        reprojection_residual_for_anchor(anchor, primary[0], primary[1], primary[2])
+        if primary is not None and not _is_degenerate_solo(primary[2], primary[3])
+        else float("inf")
     )
-    K = _make_K(fx, cx, cy)
-    R = _rvec_to_R(rvec)
-    return K, R, tvec, fx
+    for mult in (1.1, 0.9, 1.2, 0.8, 1.5, 0.7, 2.0, 0.5, 3.0, 0.3):
+        alt = _try(fx_init * mult)
+        if alt is None:
+            continue
+        if _is_degenerate_solo(alt[2], alt[3]):
+            continue
+        res = reprojection_residual_for_anchor(anchor, alt[0], alt[1], alt[2])
+        if res < candidate_res:
+            candidate_res = res
+            candidate_best = alt
+    return candidate_best
 
 
 def _is_rich(anchor: Anchor, min_points: int = 6) -> bool:

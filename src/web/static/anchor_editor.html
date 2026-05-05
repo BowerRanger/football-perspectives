@@ -232,6 +232,11 @@
   <!-- Landmark palette -->
   <div class="panel">
     <h2>Landmark palette</h2>
+    <div class="palette-mode" style="padding:8px 12px;border-bottom:1px solid #1f2937;display:flex;align-items:center;gap:10px;font-size:12px;color:#94a3b8;">
+      <span>Mode:</span>
+      <label style="cursor:pointer;"><input type="radio" name="mode" id="mode-points" value="points" checked> points</label>
+      <label style="cursor:pointer;"><input type="radio" name="mode" id="mode-lines" value="lines"> lines</label>
+    </div>
     <div class="panel-body" id="palette"></div>
   </div>
 
@@ -254,11 +259,9 @@
       <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;cursor:pointer;">
         <input type="checkbox" id="show-pitch" checked> projected pitch
       </label>
-      <span style="display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;">
-        Mode:
-        <label style="cursor:pointer;"><input type="radio" name="mode" id="mode-points" value="points" checked> points</label>
-        <label style="cursor:pointer;"><input type="radio" name="mode" id="mode-lines" value="lines"> lines</label>
-      </span>
+      <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;cursor:pointer;">
+        <input type="checkbox" id="show-anchors" checked> anchors
+      </label>
     </div>
     <div class="conf-strip" id="conf-strip" title="Click to seek">
       <canvas id="conf-canvas" class="conf-canvas"></canvas>
@@ -299,6 +302,7 @@ const els = {
   status: document.getElementById("status"),
   saveBtn: document.getElementById("save-btn"),
   showPitch: document.getElementById("show-pitch"),
+  showAnchors: document.getElementById("show-anchors"),
   modePoints: document.getElementById("mode-points"),
   modeLines: document.getElementById("mode-lines"),
   palette: document.getElementById("palette"),
@@ -595,7 +599,8 @@ function redrawOverlay() {
   // Backing-store is in image pixels (see resizeOverlay) so x/y are in
   // image-space coordinates. Stroke widths are scaled by the natural→display
   // ratio so they appear at a consistent thickness on screen regardless of zoom.
-  const anchor = state.anchors.get(state.frame);
+  const anchorsVisible = !els.showAnchors || els.showAnchors.checked;
+  const anchor = anchorsVisible ? state.anchors.get(state.frame) : null;
   if (anchor) {
     const rect = els.overlay.getBoundingClientRect();
     const scale = state.imageSize[0] > 0 && rect.width > 0
@@ -957,6 +962,10 @@ window.addEventListener("resize", () => {
 
 if (els.showPitch) {
   els.showPitch.addEventListener("change", () => redrawOverlay());
+}
+
+if (els.showAnchors) {
+  els.showAnchors.addEventListener("change", () => redrawOverlay());
 }
 
 if (els.modePoints) {

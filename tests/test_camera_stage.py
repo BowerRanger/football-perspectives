@@ -152,3 +152,72 @@ def test_camera_stage_recovers_trajectory(tmp_path: Path) -> None:
     assert err_deg < 1.5, (
         f"frame {test_frame}: recovered R diverges {err_deg:.3f}° from truth"
     )
+
+
+@pytest.mark.integration
+def test_camera_stage_picks_later_anchor_as_primary_when_first_is_thin(
+    tmp_path: Path,
+) -> None:
+    """Earliest-by-frame anchor with only 2 landmarks should not block the run.
+
+    The stage promotes the first qualifying (≥6 non-coplanar) anchor to
+    primary and the thin one is solved as a subsequent anchor (≥4
+    landmarks) — except 2 < 4 too, so the thin anchor is dropped on
+    inheritance and only the primary + the rest contribute. This test
+    just verifies the run completes and the primary's frame is recovered.
+    """
+    clip = render_synthetic_clip(n_frames=40)
+    shots = tmp_path / "shots"
+    shots.mkdir()
+    _write_clip_mp4(clip, shots / "play.mp4")
+
+    # Anchor 0 has only 2 coplanar landmarks (corner + halfway) — not enough
+    # for either full or subsequent solve. Anchor 1 has the full 6 (matches
+    # _LANDMARK_WORLD). Anchor 2 also has the full 6.
+    sparse_landmark_world: list[tuple[str, np.ndarray]] = [
+        ("near_left_corner",  np.array([0, 0, 0], dtype=float)),
+        ("halfway_near",      np.array([52.5, 0, 0], dtype=float)),
+    ]
+    anchor_frames_sparse = [0]
+    anchor_frames_full = [20, 39]
+    anchors_list = []
+    for af in anchor_frames_sparse:
+        K, R, t = clip.Ks[af], clip.Rs[af], clip.t_world
+        lms = tuple(
+            LandmarkObservation(
+                name=name,
+                image_xy=_project(K, R, t, world),
+                world_xyz=tuple(world),
+            )
+            for name, world in sparse_landmark_world
+        )
+        anchors_list.append(Anchor(frame=af, landmarks=lms))
+    for af in anchor_frames_full:
+        K, R, t = clip.Ks[af], clip.Rs[af], clip.t_world
+        lms = tuple(
+            LandmarkObservation(
+                name=name,
+                image_xy=_project(K, R, t, world),
+                world_xyz=tuple(world),
+            )
+            for name, world in _LANDMARK_WORLD
+        )
+        anchors_list.append(Anchor(frame=af, landmarks=lms))
+    anchor_set = AnchorSet(
+        clip_id="play",
+        image_size=clip.image_size,
+        anchors=tuple(anchors_list),
+    )
+    anchor_set.save(tmp_path / "camera" / "anchors.json")
+
+    stage = CameraStage(config={"camera": {}}, output_dir=tmp_path)
+    stage.run()  # must not raise — frame 20 should be promoted to primary
+
+    track = CameraTrack.load(tmp_path / "camera" / "camera_track.json")
+    by_frame = {f.frame: f for f in track.frames}
+    # Primary anchor (frame 20) must be present and recovered exactly.
+    assert 20 in by_frame
+    cf = by_frame[20]
+    assert cf.is_anchor is True
+    err_deg = _angle_deg(np.array(cf.R), clip.Rs[20])
+    assert err_deg < 0.5

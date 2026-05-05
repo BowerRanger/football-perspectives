@@ -463,7 +463,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         return {
             "landmarks": [
                 {"name": lm.name, "world_xyz": list(lm.world_xyz)}
-                for lm in LANDMARK_CATALOGUE.values()
+                for lm in sorted(LANDMARK_CATALOGUE.values(), key=lambda lm: lm.name)
             ]
         }
 

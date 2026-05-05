@@ -19,8 +19,8 @@
 
   /* ── Sidebar ─────────────────────────────────────────────────── */
   #sidebar {
-    width: 220px;
-    min-width: 220px;
+    width: 240px;
+    min-width: 240px;
     background: #1a1d27;
     border-right: 1px solid #2d3148;
     display: flex;
@@ -72,6 +72,27 @@
   .stage-item.active .stage-label { color: #f1f5f9; font-weight: 500; }
   .stage-index { font-size: 11px; color: #64748b; margin-left: auto; }
 
+  /* ── Sidebar links (anchor editor, etc.) ─────────────────────── */
+  #sidebar-links {
+    margin-top: auto;
+    padding: 10px 16px 14px;
+    border-top: 1px solid #2d3148;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  #sidebar-links a {
+    color: #cbd5e1;
+    text-decoration: none;
+    font-size: 12px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    background: #252840;
+    border: 1px solid #2d3148;
+    transition: background 0.12s;
+  }
+  #sidebar-links a:hover { background: #303554; color: #fff; }
+
   /* ── Main panel ───────────────────────────────────────────────── */
   #main {
     flex: 1;
@@ -105,7 +126,6 @@
   .badge-running  { background: #451a03; color: #fbbf24; }
   .badge-error    { background: #450a0a; color: #fca5a5; }
 
-  /* ── Scrollable body ──────────────────────────────────────────── */
   #main-body {
     flex: 1;
     overflow-y: auto;
@@ -142,7 +162,6 @@
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    transition: opacity 0.12s;
   }
   .btn:hover { opacity: 0.85; }
   .btn:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -197,89 +216,12 @@
   }
   .conf-bar { height: 100%; border-radius: 3px; background: #6366f1; }
 
-  /* ── Video + canvas viewer ────────────────────────────────────── */
-  .shot-viewer { margin-bottom: 24px; }
-  .shot-viewer h4 {
-    font-size: 12px;
+  .empty-note {
     color: #64748b;
-    margin-bottom: 8px;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
+    font-size: 13px;
+    padding: 12px 0;
+    font-style: italic;
   }
-
-  .video-wrap {
-    position: relative;
-    display: block;
-    width: 100%;
-    background: #000;
-    border-radius: 6px;
-  }
-
-  /* Inner sizing wrapper — canvas is positioned relative to this, not video-wrap */
-  .video-inner {
-    position: relative;
-    display: block;
-    line-height: 0;
-    width: 100%;
-  }
-
-  .video-wrap video {
-    display: block;
-    width: 100%;
-  }
-
-  .video-wrap canvas {
-    position: absolute;
-    top: 0; left: 0;
-    pointer-events: none;
-  }
-
-  /* Fullscreen: video-wrap becomes the black centering container */
-  .video-wrap:fullscreen,
-  .video-wrap:-webkit-full-screen {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #000;
-    border-radius: 0;
-    width: 100vw;
-    height: 100vh;
-  }
-
-  /* Remove the normal max-height cap so video fills the screen */
-  .video-wrap:fullscreen video,
-  .video-wrap:-webkit-full-screen video {
-    max-height: 100vh;
-    max-height: 100dvh;
-    max-width: 100vw;
-  }
-
-  /* Custom fullscreen button — appears on hover, stays visible while in fullscreen */
-  .fs-btn {
-    position: absolute;
-    top: 6px; right: 6px;
-    z-index: 20;
-    background: rgba(0, 0, 0, 0.55);
-    color: #e2e8f0;
-    border: none;
-    border-radius: 4px;
-    padding: 4px 7px;
-    font-size: 14px;
-    line-height: 1;
-    cursor: pointer;
-    opacity: 0;
-    transition: opacity 0.15s;
-  }
-  .video-inner:hover .fs-btn,
-  .video-wrap:fullscreen .fs-btn,
-  .video-wrap:-webkit-full-screen .fs-btn { opacity: 1; }
-
-  /* ── Matching table ───────────────────────────────────────────── */
-  .team-a    { color: #60a5fa; }
-  .team-b    { color: #f87171; }
-  .team-ref  { color: #fbbf24; }
-  .team-unk  { color: #9ca3af; }
 </style>
 </head>
 <body>
@@ -288,6 +230,10 @@
 <div id="sidebar">
   <div id="sidebar-header">Pipeline Stages</div>
   <div id="stage-list"></div>
+  <div id="sidebar-links">
+    <a href="/anchor_editor">✎ Anchor Editor</a>
+    <a href="/viewer" target="_blank">▶ 3D Viewer</a>
+  </div>
 </div>
 
 <!-- ── Main ─────────────────────────────────────────────────────────── -->
@@ -295,12 +241,12 @@
   <div id="stage-header">
     <span id="stage-title">—</span>
     <span id="stage-badge" class="badge badge-pending">Not run</span>
-    <button id="rerun-btn" class="btn btn-primary" disabled style="margin-left:auto;font-size:12px;">Re-run Stage</button>
+    <button id="run-all-btn" class="btn btn-secondary" style="margin-left:auto;font-size:12px;">Run All</button>
+    <button id="rerun-btn" class="btn btn-primary" disabled style="font-size:12px;">Re-run Stage</button>
   </div>
 
   <div id="main-body">
 
-    <!-- Logs -->
     <div class="panel" id="log-panel" style="display:none;position:sticky;top:0;z-index:20;max-height:45vh;overflow:hidden;background:#0f172a;border:1px solid #1f2937;">
       <div class="panel-title" style="display:flex;align-items:center;gap:8px;">
         <span>Log Output</span>
@@ -312,73 +258,62 @@
       </div>
     </div>
 
-    <!-- Output -->
     <div id="output-panel"></div>
 
   </div>
 </div>
 
 <script>
+"use strict";
+
 // ── State ─────────────────────────────────────────────────────────────
 let currentStage = null;
 let currentStages = [];   // [{name, index, complete}]
-let globalManifest = null;  // shots manifest (fps, shots list)
-let activeSource = null;    // current EventSource
+let activeSource = null;  // current EventSource
 
-// ── COCO skeleton connections ─────────────────────────────────────────
-const SKELETON = [
-  [0,1],[0,2],[1,3],[2,4],
-  [5,6],
-  [5,7],[7,9],[6,8],[8,10],
-  [5,11],[6,12],[11,12],
-  [11,13],[13,15],[12,14],[14,16],
-];
-
-const TEAM_COLORS = {
-  A:        '#3b82f6',
-  B:        '#ef4444',
-  referee:  '#f59e0b',
-  unknown:  '#6b7280',
-  ball:     '#ffffff',
+// Stage dependency graph for the broadcast-mono pipeline
+const STAGE_DEPS = {
+  prepare_shots: [],
+  tracking:      ["prepare_shots"],
+  camera:        ["prepare_shots"],
+  pose_2d:       ["prepare_shots", "tracking"],
+  hmr_world:     ["tracking", "camera"],
+  ball:          ["camera"],
+  export:        ["camera", "hmr_world"],
 };
 
-// ── Initialise ───────────────────────────────────────────────────────��
+// ── Initialise ───────────────────────────────────────────────────────
 async function init() {
   await loadStages();
-  // pre-fetch manifest for fps
-  try {
-    const r = await fetch('/api/output/segmentation');
-    if (r.ok) globalManifest = await r.json();
-  } catch (_) {}
 }
 
-// ── Sidebar ───────────────────────────────────────────────────────────
+// ── Sidebar ──────────────────────────────────────────────────────────
 async function loadStages() {
-  const res = await fetch('/api/stages');
+  const res = await fetch("/api/stages");
   if (!res.ok) return;
   currentStages = await res.json();
   renderSidebar();
 }
 
 function renderSidebar() {
-  const list = document.getElementById('stage-list');
-  list.innerHTML = '';
+  const list = document.getElementById("stage-list");
+  list.innerHTML = "";
   for (const s of currentStages) {
-    const item = document.createElement('div');
-    item.className = 'stage-item' + (s.name === currentStage ? ' active' : '');
+    const item = document.createElement("div");
+    item.className = "stage-item" + (s.name === currentStage ? " active" : "");
     item.dataset.stage = s.name;
     item.onclick = () => selectStage(s.name);
 
-    const dot = document.createElement('span');
-    dot.className = 'stage-dot' + (s.complete ? ' complete' : '');
+    const dot = document.createElement("span");
+    dot.className = "stage-dot" + (s.complete ? " complete" : "");
     dot.id = `dot-${s.name}`;
 
-    const label = document.createElement('span');
-    label.className = 'stage-label';
+    const label = document.createElement("span");
+    label.className = "stage-label";
     label.textContent = humanizeStageName(s.name);
 
-    const idx = document.createElement('span');
-    idx.className = 'stage-index';
+    const idx = document.createElement("span");
+    idx.className = "stage-index";
     idx.textContent = s.index;
 
     item.appendChild(dot);
@@ -387,92 +322,69 @@ function renderSidebar() {
     list.appendChild(item);
   }
 
-  // auto-select first incomplete, or first stage
   if (!currentStage) {
-    const first = currentStages.find(s => !s.complete) || currentStages[0];
+    const first = currentStages.find((s) => !s.complete) || currentStages[0];
     if (first) selectStage(first.name);
   }
 }
 
-// ── Stage selection ───────────────────────────────────────────────────
+// ── Stage selection ──────────────────────────────────────────────────
 async function selectStage(name) {
   currentStage = name;
-  // highlight sidebar
-  document.querySelectorAll('.stage-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.stage === name);
+  document.querySelectorAll(".stage-item").forEach((el) => {
+    el.classList.toggle("active", el.dataset.stage === name);
   });
 
-  const s = currentStages.find(x => x.name === name);
-  document.getElementById('stage-title').textContent = humanizeStageName(name);
+  const s = currentStages.find((x) => x.name === name);
+  document.getElementById("stage-title").textContent = humanizeStageName(name);
 
-  const badge = document.getElementById('stage-badge');
+  const badge = document.getElementById("stage-badge");
   if (s && s.complete) {
-    badge.textContent = 'Complete';
-    badge.className = 'badge badge-complete';
+    badge.textContent = "Complete";
+    badge.className = "badge badge-complete";
   } else {
-    badge.textContent = 'Not run';
-    badge.className = 'badge badge-pending';
+    badge.textContent = "Not run";
+    badge.className = "badge badge-pending";
   }
 
-  // Dependency gating for Re-run button — explicit per-stage prereqs.
-  // 'hmr' is its own pipeline branch (segmentation → tracking → hmr) and
-  // does NOT depend on calibration / sync / pose / triangulation.  Listing
-  // dependencies explicitly avoids the "every earlier sidebar stage must
-  // be complete" trap when modes diverge.
-  const STAGE_DEPS = {
-    segmentation:  [],
-    tracking:      ['segmentation'],
-    calibration:   ['tracking'],
-    sync:          ['calibration'],
-    pose:          ['tracking'],
-    triangulation: ['pose', 'sync', 'calibration'],
-    smpl_fitting:  ['triangulation'],
-    hmr:           ['tracking'],
-    export:        [],  // satisfied by either smpl_fitting (tri mode) or hmr (hmr mode)
-  };
-  const rerunBtn = document.getElementById('rerun-btn');
+  const rerunBtn = document.getElementById("rerun-btn");
   const deps = STAGE_DEPS[name] || [];
-  const stageMap = Object.fromEntries(currentStages.map(s => [s.name, s.complete]));
-  const missing = deps.filter(d => !stageMap[d]);
+  const stageMap = Object.fromEntries(currentStages.map((s) => [s.name, s.complete]));
+  const missing = deps.filter((d) => !stageMap[d]);
   rerunBtn.disabled = missing.length > 0;
-  rerunBtn.title = missing.length === 0
-    ? ''
-    : `Requires: ${missing.join(', ')}`;
+  rerunBtn.title = missing.length === 0 ? "" : `Requires: ${missing.join(", ")}`;
 
-  // clear output panel and reload
-  document.getElementById('output-panel').innerHTML = '';
+  document.getElementById("output-panel").innerHTML = "";
   loadOutput(name);
 }
 
-// ── Run ───────────────────────────────────────────────────────────────
+// ── Run / log streaming ──────────────────────────────────────────────
 async function startRun(stages) {
-  const logPanel = document.getElementById('log-panel');
-  const logOutput = document.getElementById('log-output');
-  const logStatus = document.getElementById('log-status');
-  logPanel.style.display = '';
-  logPanel.dataset.state = 'running';
-  logPanel.style.borderColor = '#1f2937';
-  logOutput.textContent = '';
-  logStatus.textContent = 'running…';
-  logStatus.style.color = '#fbbf24';
-  // Keep the log in view even if the output panel below grows.
-  logPanel.scrollIntoView({ behavior: 'auto', block: 'start' });
+  const logPanel = document.getElementById("log-panel");
+  const logOutput = document.getElementById("log-output");
+  const logStatus = document.getElementById("log-status");
+  logPanel.style.display = "";
+  logPanel.style.borderColor = "#1f2937";
+  logOutput.textContent = "";
+  logStatus.textContent = "running…";
+  logStatus.style.color = "#fbbf24";
+  logPanel.scrollIntoView({ behavior: "auto", block: "start" });
 
-  if (currentStage) setDot(currentStage, 'running');
-  const badge = document.getElementById('stage-badge');
-  badge.textContent = 'Running';
-  badge.className = 'badge badge-running';
+  if (currentStage) setDot(currentStage, "running");
+  const badge = document.getElementById("stage-badge");
+  badge.textContent = "Running";
+  badge.className = "badge badge-running";
 
   const body = { stages };
-  const res = await fetch('/api/run', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+  const res = await fetch("/api/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 
   if (!res.ok) {
-    logOutput.textContent = 'Failed to start run';
-    if (currentStage) setDot(currentStage, 'error');
+    logOutput.textContent = "Failed to start run";
+    if (currentStage) setDot(currentStage, "error");
     return;
   }
 
@@ -480,129 +392,121 @@ async function startRun(stages) {
   if (activeSource) activeSource.close();
   activeSource = new EventSource(`/api/jobs/${job_id}/logs`);
 
-  activeSource.addEventListener('log', e => {
+  activeSource.addEventListener("log", (e) => {
     const { line } = JSON.parse(e.data);
-    logOutput.textContent += line + '\n';
+    logOutput.textContent += line + "\n";
     logOutput.scrollTop = logOutput.scrollHeight;
   });
 
-  activeSource.addEventListener('done', e => {
+  activeSource.addEventListener("done", (e) => {
     activeSource.close();
     activeSource = null;
     const { status } = JSON.parse(e.data);
-    logPanel.dataset.state = status;
-    if (status === 'done') {
-      logStatus.textContent = 'done';
-      logStatus.style.color = '#4ade80';
-      logPanel.style.borderColor = '#166534';
-      if (currentStage) setDot(currentStage, 'complete');
-      // Re-run the full per-stage render: refresh stage list (so the API
-      // reports complete=true), then re-select the current stage so the
-      // header badge, dependency gate, and output panel all sync up.
+    if (status === "done") {
+      logStatus.textContent = "done";
+      logStatus.style.color = "#4ade80";
+      logPanel.style.borderColor = "#166534";
+      if (currentStage) setDot(currentStage, "complete");
       loadStages().then(() => { if (currentStage) selectStage(currentStage); });
     } else {
-      logStatus.textContent = 'ERROR — scroll log above for details';
-      logStatus.style.color = '#f87171';
-      logPanel.style.borderColor = '#b91c1c';
-      if (currentStage) setDot(currentStage, 'error');
-      badge.textContent = 'Error';
-      badge.className = 'badge badge-error';
-      // Make sure the error is not hidden below the fold.
-      logPanel.scrollIntoView({ behavior: 'auto', block: 'start' });
+      logStatus.textContent = "ERROR — scroll log above for details";
+      logStatus.style.color = "#f87171";
+      logPanel.style.borderColor = "#b91c1c";
+      if (currentStage) setDot(currentStage, "error");
+      badge.textContent = "Error";
+      badge.className = "badge badge-error";
+      logPanel.scrollIntoView({ behavior: "auto", block: "start" });
       logOutput.scrollTop = logOutput.scrollHeight;
     }
   });
 }
 
-// Dismiss the log panel manually — sticky-by-default, user-cleared.
-document.getElementById('log-close-btn').addEventListener('click', () => {
-  document.getElementById('log-panel').style.display = 'none';
+document.getElementById("log-close-btn").addEventListener("click", () => {
+  document.getElementById("log-panel").style.display = "none";
 });
 
-document.getElementById('rerun-btn').addEventListener('click', async () => {
+document.getElementById("rerun-btn").addEventListener("click", async () => {
   if (!currentStage) return;
-  const btn = document.getElementById('rerun-btn');
+  const btn = document.getElementById("rerun-btn");
   btn.disabled = true;
-  // Delete existing artifacts
-  await fetch(`/api/output/${currentStage}`, { method: 'DELETE' });
-  // Re-run the stage
+  await fetch(`/api/output/${currentStage}`, { method: "DELETE" });
   startRun(currentStage);
+});
+
+document.getElementById("run-all-btn").addEventListener("click", () => {
+  startRun("all");
 });
 
 function setDot(stageName, state) {
   const dot = document.getElementById(`dot-${stageName}`);
-  if (dot) dot.className = 'stage-dot ' + state;
+  if (dot) dot.className = "stage-dot " + state;
 }
 
-// ── Output loading ────────────────────────────────────────────────────
+// ── Output loading ───────────────────────────────────────────────────
 async function loadOutput(stageName) {
-  const res = await fetch(`/api/output/${stageName}`);
-  const panel = document.getElementById('output-panel');
-  panel.innerHTML = '';
-
-  // Calibration runs automatically via PnLCalib — no pre-run annotation UI.
-  if (stageName === 'calibration') {
-    if (res.ok) {
-      renderCalibration(panel, await res.json());
-    } else {
-      renderNoOutput();
-    }
-    return;
-  }
-
-  if (!res.ok) { renderNoOutput(); return; }
-  const data = await res.json();
+  const panel = document.getElementById("output-panel");
+  panel.innerHTML = "";
 
   switch (stageName) {
-    case 'segmentation':   renderSegmentation(panel, data); break;
-    case 'tracking':       renderTracking(panel, data); break;
-    case 'pose':           renderPose(panel, data); break;
-    case 'sync':           renderSync(panel, data); break;
-    case 'triangulation':  renderTriangulation(panel, data); break;
-    case 'smpl_fitting':   renderSmplFitting(panel, data); break;
-    case 'hmr':            renderHmr(panel, data); break;
-    case 'export':         renderExport(panel, data); break;
+    case "prepare_shots":
+      await renderPrepareShots(panel);
+      break;
+    case "tracking":
+      await renderTracking(panel);
+      break;
+    case "camera":
+      await renderCamera(panel);
+      break;
+    case "pose_2d":
+      await renderPose2D(panel);
+      break;
+    case "hmr_world":
+      await renderHmrWorld(panel);
+      break;
+    case "ball":
+      await renderBall(panel);
+      break;
+    case "export":
+      await renderExport(panel);
+      break;
+    default:
+      panel.innerHTML = `<div class="empty-note">Unknown stage: ${stageName}</div>`;
   }
 }
 
-function renderNoOutput() {
-  const panel = document.getElementById('output-panel');
-  panel.innerHTML = `<div style="color:#4b5563;padding:12px 0;font-size:13px;">No output yet — run this stage to see results.</div>`;
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────
 function makePanel(title) {
-  const wrap = document.createElement('div');
-  wrap.className = 'panel';
+  const wrap = document.createElement("div");
+  wrap.className = "panel";
   wrap.innerHTML = `<div class="panel-title">${title}</div>`;
-  const body = document.createElement('div');
-  body.className = 'panel-body';
-  body.style.padding = '0';
+  const body = document.createElement("div");
+  body.className = "panel-body";
+  body.style.padding = "0";
   wrap.appendChild(body);
   return { wrap, body };
 }
 
 function makeTable(headers) {
-  const t = document.createElement('table');
-  const thead = document.createElement('thead');
-  const tr = document.createElement('tr');
-  headers.forEach(h => {
-    const th = document.createElement('th');
+  const t = document.createElement("table");
+  const thead = document.createElement("thead");
+  const tr = document.createElement("tr");
+  headers.forEach((h) => {
+    const th = document.createElement("th");
     th.textContent = h;
     tr.appendChild(th);
   });
   thead.appendChild(tr);
   t.appendChild(thead);
-  const tbody = document.createElement('tbody');
+  const tbody = document.createElement("tbody");
   t.appendChild(tbody);
   return { t, tbody };
 }
 
 function addRow(tbody, cells) {
-  const tr = document.createElement('tr');
-  cells.forEach(c => {
-    const td = document.createElement('td');
-    if (typeof c === 'string' || typeof c === 'number') {
+  const tr = document.createElement("tr");
+  cells.forEach((c) => {
+    const td = document.createElement("td");
+    if (typeof c === "string" || typeof c === "number") {
       td.textContent = c;
     } else if (c && c.html) {
       td.innerHTML = c.html;
@@ -615,3459 +519,197 @@ function addRow(tbody, cells) {
   tbody.appendChild(tr);
 }
 
-function fmt(n, dec=1) {
-  if (n == null) return '—';
+function fmt(n, dec = 1) {
+  if (n == null) return "—";
   return Number(n).toFixed(dec);
 }
 
 function humanizeStageName(name) {
-  if (!name) return '—';
-  if (name === 'hmr') return 'HMR (Monocular 3D)';
-  return name
-    .split('_')
-    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
+  if (!name) return "—";
+  const map = {
+    prepare_shots: "Prepare Shots",
+    tracking:      "Tracking",
+    camera:        "Camera Tracking",
+    pose_2d:       "2D Pose",
+    hmr_world:     "HMR World",
+    ball:          "Ball",
+    export:        "Export",
+  };
+  return map[name] || name;
 }
 
-function getShotFps() {
-  return (globalManifest && globalManifest.fps) ? globalManifest.fps : 30;
+function emptyNote(panel, msg) {
+  const div = document.createElement("div");
+  div.className = "empty-note";
+  div.textContent = msg;
+  panel.appendChild(div);
 }
 
-// ── Segmentation renderer ─────────────────────────────────────────────
-function renderSegmentation(panel, data) {
-  globalManifest = data;
-  const { wrap, body } = makePanel(`Shots (${data.shots.length})`);
-
-  const { t, tbody } = makeTable(['Shot ID', 'Start', 'End', 'Duration', 'Frames', 'Preview']);
-  data.shots.forEach(s => {
-    const dur = (s.end_time - s.start_time).toFixed(2) + 's';
-    const frames = (s.end_frame - s.start_frame);
-    const vid = document.createElement('video');
-    vid.src = `/api/video/${s.id}`;
-    vid.controls = true;
-    vid.preload = 'metadata';
-    vid.style.cssText = 'max-width:240px;max-height:80px;border-radius:4px;';
-    addRow(tbody, [
-      s.id,
-      fmt(s.start_time, 2) + 's',
-      fmt(s.end_time, 2) + 's',
-      dur,
-      frames,
-      { el: vid },
-    ]);
-  });
-
-  body.appendChild(t);
-  wrap.appendChild(body);  // already in wrap from makePanel but body is separate
-  panel.appendChild(wrap);
+async function fetchJsonOrNull(url) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (_) { return null; }
 }
 
-// ── Prepare Shots renderer ────────────────────────────────────────────
-function renderPrepareShots(panel, data) {
-  globalManifest = data;
-  const { wrap, body } = makePanel(`Prepared Shots (${data.shots.length})`);
+// ── Stage renderers ──────────────────────────────────────────────────
 
-  const { t, tbody } = makeTable([
-    'Shot ID',
-    'Start',
-    'End',
-    'Duration',
-    'Frames',
-    'Speed Factor',
-    'Preview',
-  ]);
-
-  data.shots.forEach(s => {
-    const dur = (s.end_time - s.start_time).toFixed(2) + 's';
-    const frames = (s.end_frame - s.start_frame + 1);
-    const speedFactor = (s.speed_factor ?? 1.0);
-    const speedCls = Math.abs(speedFactor - 1.0) > 0.15 ? 'cell-amber' : 'cell-green';
-
-    const vid = document.createElement('video');
-    vid.src = `/api/video/${s.id}`;
-    vid.controls = true;
-    vid.preload = 'metadata';
-    vid.style.cssText = 'max-width:240px;max-height:80px;border-radius:4px;';
-
-    addRow(tbody, [
-      s.id,
-      fmt(s.start_time, 2) + 's',
-      fmt(s.end_time, 2) + 's',
-      dur,
-      frames,
-      { html: `<span class="${speedCls}">${fmt(speedFactor, 3)}</span>` },
-      { el: vid },
-    ]);
-  });
-
-  body.appendChild(t);
-  panel.appendChild(wrap);
-}
-
-// ── Calibration renderer ──────────────────────────────────────────────
-function renderCalibration(panel, data) {
-  const shots = Object.values(data.shots);
-  const { wrap, body } = makePanel(`Calibration (${shots.length} shots)`);
-  const { t, tbody } = makeTable(['Shot', 'Type', 'Frames', 'Err', '']);
-
-  shots.forEach(s => {
-    const errors = s.frames.map(f => f.reprojection_error).filter(e => e != null);
-    const mean = errors.length ? errors.reduce((a,b) => a+b, 0) / errors.length : null;
-    const cls = mean == null ? '' : mean < 5 ? 'cell-green' : mean < 30 ? 'cell-amber' : 'cell-red';
-
-    const placeBtn = document.createElement('button');
-    placeBtn.textContent = 'Place Camera';
-    placeBtn.title = 'Manually override the camera for this shot. Useful when PnLCalib fails on extreme angles.';
-    placeBtn.style.cssText = 'background:#4f46e5;color:#fff;border:none;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px;';
-    placeBtn.addEventListener('click', () => renderCameraPlacement(panel, s.shot_id));
-
-    addRow(tbody, [
-      s.shot_id,
-      s.camera_type || '—',
-      s.frames.length,
-      { html: `<span class="${cls}">${fmt(mean,1)}</span>` },
-      { el: placeBtn },
-    ]);
-  });
-
-  body.appendChild(t);
-  panel.appendChild(wrap);
-
-  // ── Refine button (bundle adjustment using tracked players) ──
-  const refineBar = document.createElement('div');
-  refineBar.style.cssText = 'padding:8px 0;';
-  const refineBtn = document.createElement('button');
-  refineBtn.textContent = 'Refine Calibration (Bundle Adjustment)';
-  refineBtn.title = 'Refine camera positions using cross-view player tracking data. Requires Tracking, Sync, and Matching stages to have run.';
-  refineBtn.style.cssText = 'background:#4f46e5;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;';
-  refineBtn.addEventListener('click', async () => {
-    refineBtn.disabled = true; refineBtn.textContent = 'Refining…';
-    const res = await fetch('/api/calibration/refine', { method: 'POST' });
-    if (res.ok) {
-      const result = await res.json();
-      refineBtn.textContent = `Refined ${result.refined.length} shots. Reloading…`;
-      setTimeout(() => loadOutput('calibration'), 500);
-    } else {
-      const err = await res.json().catch(() => ({}));
-      refineBtn.textContent = err.detail || 'Refinement failed';
-      refineBtn.disabled = false;
-    }
-  });
-  refineBar.appendChild(refineBtn);
-  panel.appendChild(refineBar);
-
-  // ── Video + pitch-line overlay viewer ──
-  renderCalibrationVideoOverlay(panel, data);
-}
-
-// ── Canonical FIFA pitch line geometry (mirror of src/utils/pitch_lines.py) ──
-// Each entry is an (N, 3) world-coordinate polyline.  Linear interpolation
-// between samples is enough for a visually-smooth projection.
-const PITCH_L = 105.0;
-const PITCH_W = 68.0;
-const _CIRCLE_R_PL = 9.15;
-const _GOAL_HALF = 7.32 / 2.0;
-const _GOAL_HEIGHT = 2.44;
-const _18Y_INSET = 16.5;
-const _6Y_INSET = 5.5;
-const _PEN_X_LEFT = 11.0;
-const _PEN_X_RIGHT = PITCH_L - _PEN_X_LEFT;
-
-function _segmentLine(p0, p1, n) {
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const t = i / (n - 1);
-    out.push([
-      p0[0] + (p1[0] - p0[0]) * t,
-      p0[1] + (p1[1] - p0[1]) * t,
-      p0[2] + (p1[2] - p0[2]) * t,
-    ]);
-  }
-  return out;
-}
-
-function _arcPL(cx, cy, r, t0, t1, n) {
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const t = t0 + (t1 - t0) * (i / (n - 1));
-    out.push([cx + r * Math.cos(t), cy + r * Math.sin(t), 0]);
-  }
-  return out;
-}
-
-function pitchPolylines() {
-  const polys = [];
-  // 0 near touchline
-  polys.push({ name: 'near_touchline', color: '#ffff00', pts: _segmentLine([0,0,0], [PITCH_L,0,0], 64) });
-  // 1 far touchline
-  polys.push({ name: 'far_touchline', color: '#ffff00', pts: _segmentLine([0,PITCH_W,0], [PITCH_L,PITCH_W,0], 64) });
-  // 2 left goal line
-  polys.push({ name: 'left_goal_line', color: '#ffff00', pts: _segmentLine([0,0,0], [0,PITCH_W,0], 48) });
-  // 3 right goal line
-  polys.push({ name: 'right_goal_line', color: '#ffff00', pts: _segmentLine([PITCH_L,0,0], [PITCH_L,PITCH_W,0], 48) });
-  // 4 halfway
-  polys.push({ name: 'halfway', color: '#ffc800', pts: _segmentLine([PITCH_L/2,0,0], [PITCH_L/2,PITCH_W,0], 48) });
-  // 5 centre circle
-  polys.push({ name: 'centre_circle', color: '#00c800', pts: _arcPL(PITCH_L/2, PITCH_W/2, _CIRCLE_R_PL, 0, 2*Math.PI, 72) });
-  // 6 left 18yd box (3-segment U)
-  polys.push({ name: 'left_18yd', color: '#00c800', pts: [
-    ..._segmentLine([0,13.84,0], [_18Y_INSET,13.84,0], 24),
-    ..._segmentLine([_18Y_INSET,13.84,0], [_18Y_INSET,54.16,0], 24),
-    ..._segmentLine([_18Y_INSET,54.16,0], [0,54.16,0], 24),
-  ]});
-  // 7 right 18yd box
-  polys.push({ name: 'right_18yd', color: '#00c800', pts: [
-    ..._segmentLine([PITCH_L,13.84,0], [PITCH_L-_18Y_INSET,13.84,0], 24),
-    ..._segmentLine([PITCH_L-_18Y_INSET,13.84,0], [PITCH_L-_18Y_INSET,54.16,0], 24),
-    ..._segmentLine([PITCH_L-_18Y_INSET,54.16,0], [PITCH_L,54.16,0], 24),
-  ]});
-  // 8 left 6yd box
-  polys.push({ name: 'left_6yd', color: '#00c800', pts: [
-    ..._segmentLine([0,24.84,0], [_6Y_INSET,24.84,0], 12),
-    ..._segmentLine([_6Y_INSET,24.84,0], [_6Y_INSET,43.16,0], 12),
-    ..._segmentLine([_6Y_INSET,43.16,0], [0,43.16,0], 12),
-  ]});
-  // 9 right 6yd box
-  polys.push({ name: 'right_6yd', color: '#00c800', pts: [
-    ..._segmentLine([PITCH_L,24.84,0], [PITCH_L-_6Y_INSET,24.84,0], 12),
-    ..._segmentLine([PITCH_L-_6Y_INSET,24.84,0], [PITCH_L-_6Y_INSET,43.16,0], 12),
-    ..._segmentLine([PITCH_L-_6Y_INSET,43.16,0], [PITCH_L,43.16,0], 12),
-  ]});
-  // 10 left penalty arc
-  const dxLeft = _18Y_INSET - _PEN_X_LEFT;
-  const angAtBox = Math.acos(dxLeft / _CIRCLE_R_PL);
-  polys.push({ name: 'left_penalty_arc', color: '#00c8ff', pts: _arcPL(_PEN_X_LEFT, PITCH_W/2, _CIRCLE_R_PL, -angAtBox, angAtBox, 24) });
-  // 11 right penalty arc
-  polys.push({ name: 'right_penalty_arc', color: '#00c8ff', pts: _arcPL(_PEN_X_RIGHT, PITCH_W/2, _CIRCLE_R_PL, Math.PI - angAtBox, Math.PI + angAtBox, 24) });
-  // 12 left goal frame
-  polys.push({ name: 'left_goal', color: '#ff00ff', pts: [
-    ..._segmentLine([0, PITCH_W/2 - _GOAL_HALF, 0], [0, PITCH_W/2 - _GOAL_HALF, _GOAL_HEIGHT], 8),
-    ..._segmentLine([0, PITCH_W/2 - _GOAL_HALF, _GOAL_HEIGHT], [0, PITCH_W/2 + _GOAL_HALF, _GOAL_HEIGHT], 12),
-    ..._segmentLine([0, PITCH_W/2 + _GOAL_HALF, _GOAL_HEIGHT], [0, PITCH_W/2 + _GOAL_HALF, 0], 8),
-  ]});
-  // 13 right goal frame
-  polys.push({ name: 'right_goal', color: '#ff00ff', pts: [
-    ..._segmentLine([PITCH_L, PITCH_W/2 - _GOAL_HALF, 0], [PITCH_L, PITCH_W/2 - _GOAL_HALF, _GOAL_HEIGHT], 8),
-    ..._segmentLine([PITCH_L, PITCH_W/2 - _GOAL_HALF, _GOAL_HEIGHT], [PITCH_L, PITCH_W/2 + _GOAL_HALF, _GOAL_HEIGHT], 12),
-    ..._segmentLine([PITCH_L, PITCH_W/2 + _GOAL_HALF, _GOAL_HEIGHT], [PITCH_L, PITCH_W/2 + _GOAL_HALF, 0], 8),
-  ]});
-  return polys;
-}
-
-// Project a (N,3) world polyline to (N,2) pixel coords using the
-// supplied K (row-major 3x3), rvec (Rodrigues 3-vec), tvec (3-vec).
-// Points behind the camera (cam_z <= 0.05) are dropped.
-function projectPolyline(worldPts, K, rvec, tvec) {
-  // Build rotation matrix from Rodrigues
-  const theta = Math.sqrt(rvec[0]*rvec[0] + rvec[1]*rvec[1] + rvec[2]*rvec[2]);
-  let R;
-  if (theta < 1e-9) {
-    R = [[1,0,0],[0,1,0],[0,0,1]];
-  } else {
-    const k = [rvec[0]/theta, rvec[1]/theta, rvec[2]/theta];
-    const c = Math.cos(theta), s = Math.sin(theta), one_c = 1 - c;
-    R = [
-      [c + k[0]*k[0]*one_c,        k[0]*k[1]*one_c - k[2]*s,  k[0]*k[2]*one_c + k[1]*s],
-      [k[1]*k[0]*one_c + k[2]*s,   c + k[1]*k[1]*one_c,       k[1]*k[2]*one_c - k[0]*s],
-      [k[2]*k[0]*one_c - k[1]*s,   k[2]*k[1]*one_c + k[0]*s,  c + k[2]*k[2]*one_c],
-    ];
-  }
-  const out = [];
-  for (const p of worldPts) {
-    // R @ p + t
-    const cx = R[0][0]*p[0] + R[0][1]*p[1] + R[0][2]*p[2] + tvec[0];
-    const cy = R[1][0]*p[0] + R[1][1]*p[1] + R[1][2]*p[2] + tvec[1];
-    const cz = R[2][0]*p[0] + R[2][1]*p[1] + R[2][2]*p[2] + tvec[2];
-    if (cz <= 0.05) { out.push(null); continue; }
-    // K @ cam / cz
-    const u = (K[0][0]*cx + K[0][1]*cy + K[0][2]*cz) / cz;
-    const v = (K[1][0]*cx + K[1][1]*cy + K[1][2]*cz) / cz;
-    out.push([u, v]);
-  }
-  return out;
-}
-
-// Stroke a projected polyline onto a canvas, breaking the path
-// whenever a point is behind the camera (null).
-function drawProjectedPolyline(ctx, projected, color, lineWidth) {
-  ctx.strokeStyle = color;
-  ctx.lineWidth = lineWidth;
-  ctx.beginPath();
-  let drawing = false;
-  for (const pt of projected) {
-    if (pt === null) {
-      drawing = false;
-      continue;
-    }
-    if (!drawing) {
-      ctx.moveTo(pt[0], pt[1]);
-      drawing = true;
-    } else {
-      ctx.lineTo(pt[0], pt[1]);
-    }
-  }
-  ctx.stroke();
-}
-
-function renderCalibrationVideoOverlay(panel, data) {
-  const shotIds = Object.keys(data.shots).filter(sid => (data.shots[sid].frames || []).length > 0);
-  if (!shotIds.length) {
-    const note = document.createElement('div');
-    note.style.cssText = 'padding:12px;color:#94a3b8;font-size:12px;';
-    note.textContent = 'No calibrated shots to preview.';
-    panel.appendChild(note);
+async function renderPrepareShots(panel) {
+  const data = await fetchJsonOrNull("/api/output/shots");
+  if (!data || !data.shots || data.shots.length === 0) {
+    emptyNote(panel, "No prepared shots yet — run prepare_shots to extract clips.");
     return;
   }
-  const { wrap, body } = makePanel('Calibration Preview (video + projected pitch lines)');
-
-  // Shot picker
-  const pickerBar = document.createElement('div');
-  pickerBar.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid #1f2937;';
-  pickerBar.appendChild(Object.assign(document.createElement('span'),
-    { textContent: 'Shot:', style: 'cssText: color:#94a3b8;font-size:12px;' }));
-  const select = document.createElement('select');
-  select.style.cssText = 'background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:3px 8px;font-size:12px;';
-  shotIds.forEach(sid => {
-    const opt = document.createElement('option');
-    opt.value = sid; opt.textContent = sid;
-    select.appendChild(opt);
-  });
-  pickerBar.appendChild(select);
-
-  // Variant picker — populated from /api/calibration/variants.  Lets the
-  // user toggle between calibration backends (e.g. pnlcalib vs tvcalib)
-  // when the stage was run with compare_backends.
-  pickerBar.appendChild(Object.assign(document.createElement('span'),
-    { textContent: 'Backend:', style: 'cssText: color:#94a3b8;font-size:12px;' }));
-  const variantSelect = document.createElement('select');
-  variantSelect.style.cssText = 'background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:3px 8px;font-size:12px;';
-  const defaultVariantOpt = document.createElement('option');
-  defaultVariantOpt.value = 'primary';
-  defaultVariantOpt.textContent = 'Primary';
-  variantSelect.appendChild(defaultVariantOpt);
-  pickerBar.appendChild(variantSelect);
-  let currentVariant = 'primary';
-
-  const status = document.createElement('span');
-  status.style.cssText = 'color:#64748b;font-size:11px;margin-left:auto;';
-  pickerBar.appendChild(status);
-  body.appendChild(pickerBar);
-
-  // Fetch available variants once when the panel loads.  Always show
-  // the dropdown (even with only "primary") so the control is
-  // discoverable — helps users notice the feature exists and know
-  // where to see TVCalib results after re-running with
-  // compare_backends.
-  (async () => {
-    try {
-      const r = await fetch('/api/calibration/variants');
-      if (!r.ok) return;
-      const j = await r.json();
-      const variants = j.variants || [];
-      if (variants.length === 0) return;
-      variantSelect.innerHTML = '';
-      for (const v of variants) {
-        const opt = document.createElement('option');
-        opt.value = v.id;
-        opt.textContent = v.label;
-        variantSelect.appendChild(opt);
-      }
-    } catch (e) { /* no-op */ }
-  })();
-
-  variantSelect.addEventListener('change', () => {
-    currentVariant = variantSelect.value || 'primary';
-    if (currentShotId) loadShot(currentShotId);
-  });
-
-  // ── Annotation toolbar ──
-  const annotateBar = document.createElement('div');
-  annotateBar.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 10px;border-bottom:1px solid #1f2937;flex-wrap:wrap;';
-  const annotateBtn = document.createElement('button');
-  annotateBtn.textContent = '✏ Annotate';
-  annotateBtn.title = 'Manually click pitch landmarks on this frame to anchor the calibration.';
-  annotateBtn.style.cssText = 'background:#4f46e5;color:#fff;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;';
-  annotateBar.appendChild(annotateBtn);
-  const landmarkSelect = document.createElement('select');
-  landmarkSelect.style.cssText = 'background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:3px 6px;font-size:12px;display:none;max-width:280px;';
-  annotateBar.appendChild(landmarkSelect);
-  const annotateInfo = document.createElement('span');
-  annotateInfo.style.cssText = 'color:#94a3b8;font-size:11px;flex:1;';
-  annotateBar.appendChild(annotateInfo);
-  const saveAnchorBtn = document.createElement('button');
-  saveAnchorBtn.textContent = 'Save anchor';
-  saveAnchorBtn.style.cssText = 'background:#16a34a;color:#fff;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;display:none;';
-  annotateBar.appendChild(saveAnchorBtn);
-  const clearAnchorBtn = document.createElement('button');
-  clearAnchorBtn.textContent = 'Clear';
-  clearAnchorBtn.style.cssText = 'background:#475569;color:#fff;border:none;padding:5px 10px;border-radius:4px;cursor:pointer;font-size:12px;display:none;';
-  annotateBar.appendChild(clearAnchorBtn);
-  body.appendChild(annotateBar);
-
-  // Video + canvas overlay container
-  const stage = document.createElement('div');
-  stage.style.cssText = 'position:relative;width:100%;background:#000;display:flex;justify-content:center;';
-  body.appendChild(stage);
-
-  const videoEl = document.createElement('video');
-  videoEl.style.cssText = 'max-width:100%;display:block;';
-  videoEl.controls = true;
-  videoEl.muted = true;
-  stage.appendChild(videoEl);
-
-  const overlay = document.createElement('canvas');
-  overlay.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;';
-  stage.appendChild(overlay);
-
-  // Click-capture canvas (only enabled in annotation mode)
-  const clickLayer = document.createElement('canvas');
-  clickLayer.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;cursor:crosshair;display:none;';
-  stage.appendChild(clickLayer);
-
-  // Frame indicator + keyframe scrubber
-  const infoBar = document.createElement('div');
-  infoBar.style.cssText = 'padding:6px 10px;color:#94a3b8;font-size:11px;display:flex;gap:14px;align-items:center;';
-  body.appendChild(infoBar);
-
-  let currentShotId = null;
-  let perFrame = null; // { frames: [...], keyframe_indices, fps, width, height, n_frames }
-  let annotationMode = false;
-  let currentAnnotations = {}; // {landmark_name: [px, py]}
-  let allLandmarks = []; // {name, x, y, z}
-  const polylines = pitchPolylines();
-
-  async function loadShot(shotId) {
-    currentShotId = shotId;
-    status.textContent = 'loading…';
-    try {
-      const qs = currentVariant && currentVariant !== 'primary'
-        ? `?variant=${encodeURIComponent(currentVariant)}`
-        : '';
-      const res = await fetch(`/api/calibration/${shotId}/interpolated${qs}`);
-      if (!res.ok) {
-        status.textContent = 'failed';
-        return;
-      }
-      perFrame = await res.json();
-      videoEl.src = perFrame.video_url;
-      // Wait for the video to know its dimensions
-      await new Promise(resolve => {
-        videoEl.addEventListener('loadedmetadata', resolve, { once: true });
-      });
-      // Size the overlay canvas to match the source frame resolution
-      overlay.width = perFrame.width;
-      overlay.height = perFrame.height;
-      const nKf = perFrame.keyframe_indices.length;
-      const variantLbl = perFrame.variant && perFrame.variant !== 'primary'
-        ? ` · ${perFrame.variant}` : '';
-      status.textContent = `${perFrame.n_frames} frames @ ${perFrame.fps.toFixed(1)} fps · ${nKf} keyframes${variantLbl}`;
-      drawFrame();
-    } catch (e) {
-      status.textContent = 'error: ' + e.message;
-    }
+  const { wrap, body } = makePanel(`Prepared Shots (${data.shots.length})`);
+  const { t, tbody } = makeTable(["Shot ID", "Preview"]);
+  for (const id of data.shots) {
+    const vid = document.createElement("video");
+    vid.src = `/api/video/${id}`;
+    vid.controls = true;
+    vid.preload = "metadata";
+    vid.style.cssText = "max-width:240px;max-height:80px;border-radius:4px;";
+    addRow(tbody, [id, { el: vid }]);
   }
-
-  function drawFrame() {
-    if (!perFrame) return;
-    const ctx = overlay.getContext('2d');
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
-    const fi = Math.floor(videoEl.currentTime * perFrame.fps);
-    const fc = perFrame.frames[Math.max(0, Math.min(perFrame.n_frames - 1, fi))];
-    const isKf = perFrame.keyframe_indices.includes(fi);
-    infoBar.textContent = '';
-    const frameLbl = document.createElement('span');
-    frameLbl.textContent = `frame ${fi}${isKf ? ' (keyframe)' : ''}`;
-    infoBar.appendChild(frameLbl);
-    if (!fc) {
-      const note = document.createElement('span');
-      note.style.color = '#fca5a5';
-      note.textContent = '(no calibration data for this frame)';
-      infoBar.appendChild(note);
-      return;
-    }
-    for (const poly of polylines) {
-      const proj = projectPolyline(poly.pts, fc.K, fc.rvec, fc.tvec);
-      drawProjectedPolyline(ctx, proj, poly.color, 2);
-    }
-    // Draw any annotation markers for this exact frame on top
-    drawAnnotationMarkers(ctx);
-  }
-
-  function drawAnnotationMarkers(ctx) {
-    if (!annotationMode) return;
-    for (const [name, pixel] of Object.entries(currentAnnotations)) {
-      const [px, py] = pixel;
-      ctx.fillStyle = '#fde047';
-      ctx.strokeStyle = '#000';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(px, py, 6, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      // Label
-      ctx.font = 'bold 14px sans-serif';
-      ctx.fillStyle = '#fde047';
-      ctx.strokeStyle = '#000';
-      ctx.lineWidth = 3;
-      ctx.strokeText(name, px + 8, py + 4);
-      ctx.fillText(name, px + 8, py + 4);
-    }
-  }
-
-  // ── Annotation mode ──
-  async function loadLandmarks() {
-    if (allLandmarks.length) return;
-    const r = await fetch('/api/calibration/landmarks');
-    if (r.ok) {
-      const j = await r.json();
-      allLandmarks = j.landmarks || [];
-      landmarkSelect.innerHTML = '';
-      const placeholder = document.createElement('option');
-      placeholder.value = '';
-      placeholder.textContent = '-- pick a landmark --';
-      landmarkSelect.appendChild(placeholder);
-      for (const lm of allLandmarks) {
-        const opt = document.createElement('option');
-        opt.value = lm.name;
-        opt.textContent = `${lm.name}  (${lm.x.toFixed(1)}, ${lm.y.toFixed(1)}, ${lm.z.toFixed(2)})`;
-        landmarkSelect.appendChild(opt);
-      }
-    }
-  }
-
-  async function loadAnnotationsForCurrentFrame() {
-    if (!currentShotId || !perFrame) return;
-    const fi = Math.floor(videoEl.currentTime * perFrame.fps);
-    try {
-      const r = await fetch(`/api/calibration/${currentShotId}/annotations`);
-      if (r.ok) {
-        const j = await r.json();
-        currentAnnotations = (j.frames || {})[String(fi)] || {};
-      } else {
-        currentAnnotations = {};
-      }
-    } catch (e) {
-      currentAnnotations = {};
-    }
-    drawFrame();
-    updateAnnotateInfo();
-  }
-
-  function updateAnnotateInfo() {
-    const n = Object.keys(currentAnnotations).length;
-    const fi = perFrame ? Math.floor(videoEl.currentTime * perFrame.fps) : 0;
-    annotateInfo.textContent = annotationMode
-      ? `frame ${fi}: ${n} landmark${n === 1 ? '' : 's'} (need ≥4 for solve)`
-      : '';
-  }
-
-  annotateBtn.addEventListener('click', async () => {
-    annotationMode = !annotationMode;
-    annotateBtn.style.background = annotationMode ? '#dc2626' : '#4f46e5';
-    annotateBtn.textContent = annotationMode ? '✗ Exit annotate' : '✏ Annotate';
-    landmarkSelect.style.display = annotationMode ? '' : 'none';
-    saveAnchorBtn.style.display = annotationMode ? '' : 'none';
-    clearAnchorBtn.style.display = annotationMode ? '' : 'none';
-    clickLayer.style.display = annotationMode ? '' : 'none';
-    if (annotationMode) {
-      videoEl.pause();
-      await loadLandmarks();
-      // Match clickLayer pixel size to source video so clicks
-      // translate to source coordinates 1:1.
-      clickLayer.width = perFrame.width;
-      clickLayer.height = perFrame.height;
-      await loadAnnotationsForCurrentFrame();
-    } else {
-      currentAnnotations = {};
-      drawFrame();
-    }
-    updateAnnotateInfo();
-  });
-
-  clickLayer.addEventListener('click', (e) => {
-    if (!annotationMode || !perFrame) return;
-    const name = landmarkSelect.value;
-    if (!name) {
-      annotateInfo.textContent = 'Pick a landmark from the dropdown first';
-      return;
-    }
-    // Translate the click from layout pixels to source-video pixels
-    const rect = clickLayer.getBoundingClientRect();
-    const px = (e.clientX - rect.left) * (perFrame.width / rect.width);
-    const py = (e.clientY - rect.top) * (perFrame.height / rect.height);
-    currentAnnotations[name] = [px, py];
-    drawFrame();
-    // Auto-advance to the next undefined landmark
-    const idx = Array.from(landmarkSelect.options).findIndex(o => o.value === name);
-    if (idx >= 0) {
-      for (let j = idx + 1; j < landmarkSelect.options.length; j++) {
-        const next = landmarkSelect.options[j].value;
-        if (next && !(next in currentAnnotations)) {
-          landmarkSelect.value = next;
-          break;
-        }
-      }
-    }
-    updateAnnotateInfo();
-  });
-
-  saveAnchorBtn.addEventListener('click', async () => {
-    if (!currentShotId || !perFrame) return;
-    const fi = Math.floor(videoEl.currentTime * perFrame.fps);
-    saveAnchorBtn.disabled = true;
-    saveAnchorBtn.textContent = 'Saving…';
-    try {
-      const r = await fetch(`/api/calibration/${currentShotId}/annotations/${fi}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ landmarks: currentAnnotations }),
-      });
-      const j = await r.json();
-      if (j.calibration) {
-        saveAnchorBtn.textContent = `Saved (${j.calibration.reprojection_error_px.toFixed(1)}px residual, ${j.calibration.mode})`;
-        // Inject the new calibration into the per-frame data so the
-        // overlay updates immediately.
-        perFrame.frames[fi] = {
-          K: j.calibration.K,
-          rvec: j.calibration.rvec,
-          tvec: j.calibration.tvec,
-        };
-        if (!perFrame.keyframe_indices.includes(fi)) {
-          perFrame.keyframe_indices.push(fi);
-        }
-        drawFrame();
-      } else {
-        saveAnchorBtn.textContent = j.error || 'Saved (no solve)';
-      }
-    } catch (e) {
-      saveAnchorBtn.textContent = 'Save failed';
-    }
-    setTimeout(() => {
-      saveAnchorBtn.textContent = 'Save anchor';
-      saveAnchorBtn.disabled = false;
-    }, 2500);
-  });
-
-  clearAnchorBtn.addEventListener('click', async () => {
-    if (!currentShotId || !perFrame) return;
-    const fi = Math.floor(videoEl.currentTime * perFrame.fps);
-    if (!confirm(`Clear all annotations for frame ${fi}?`)) return;
-    await fetch(`/api/calibration/${currentShotId}/annotations/${fi}`, { method: 'DELETE' });
-    currentAnnotations = {};
-    drawFrame();
-    updateAnnotateInfo();
-  });
-
-  // Sync overlay redraws with video playback at ~30 fps
-  let rafId = null;
-  function tick() {
-    drawFrame();
-    rafId = requestAnimationFrame(tick);
-  }
-  videoEl.addEventListener('play', () => { if (!rafId) rafId = requestAnimationFrame(tick); });
-  videoEl.addEventListener('pause', () => {
-    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
-    drawFrame();
-    if (annotationMode) loadAnnotationsForCurrentFrame();
-  });
-  videoEl.addEventListener('seeked', () => {
-    drawFrame();
-    if (annotationMode) loadAnnotationsForCurrentFrame();
-  });
-  videoEl.addEventListener('loadeddata', drawFrame);
-
-  select.addEventListener('change', () => loadShot(select.value));
-  loadShot(shotIds[0]);
-
-  panel.appendChild(wrap);
-}
-
-function _renderCalibrationCameraView_DEPRECATED(panel, data) {
-  const { wrap: vizWrap, body: vizBody } = makePanel('Camera Positions (3D)');
-
-  const shotData = JSON.stringify(Object.entries(data.shots).map(([id, s]) => ({
-    id,
-    frames: s.frames.map(f => ({
-      rvec: f.rotation_vector,
-      tvec: f.translation_vector,
-      err: f.reprojection_error,
-    })),
-  })));
-
-  // Build srcdoc without literal script tags (which break the outer parser)
-  const S = 'scr' + 'ipt';
-  const srcdoc =
-    '<!DOCTYPE html><html><head>' +
-    '<style>*{margin:0;padding:0}body{overflow:hidden;background:#111118}</style>' +
-    '<' + S + ' type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.164.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.164.0/examples/jsm/"}}</' + S + '>' +
-    '</head><body><' + S + ' type="module">' +
-    'import*as THREE from"three";import{OrbitControls}from"three/addons/controls/OrbitControls.js";' +
-    'const shots=' + shotData + ';' +
-    `const w=window.innerWidth,h=window.innerHeight;
-const scene=new THREE.Scene();scene.background=new THREE.Color(0x111118);
-const camera=new THREE.PerspectiveCamera(50,w/h,0.1,1000);
-camera.position.set(52.5,40,60);camera.lookAt(52.5,0,-34);
-const renderer=new THREE.WebGLRenderer({antialias:true});
-renderer.setSize(w,h);document.body.appendChild(renderer.domElement);
-const controls=new OrbitControls(camera,renderer.domElement);
-controls.target.set(52.5,0,-34);controls.enableDamping=true;
-scene.add(new THREE.AmbientLight(0xffffff,0.5));
-const dl=new THREE.DirectionalLight(0xffffff,0.5);dl.position.set(52.5,50,-34);scene.add(dl);
-const pitch=new THREE.Mesh(new THREE.PlaneGeometry(105,68),new THREE.MeshStandardMaterial({color:0x1a5e1a,side:THREE.DoubleSide}));
-pitch.rotation.x=-Math.PI/2;pitch.position.set(52.5,0,-34);scene.add(pitch);
-const lm=new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.3});
-function al(x1,z1,x2,z2){scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(x1,0.05,-z1),new THREE.Vector3(x2,0.05,-z2)]),lm))}
-al(0,0,105,0);al(105,0,105,68);al(105,68,0,68);al(0,68,0,0);al(52.5,0,52.5,68);
-const cc=[];for(let a=0;a<=Math.PI*2;a+=0.1)cc.push(new THREE.Vector3(52.5+9.15*Math.cos(a),0.05,-(34+9.15*Math.sin(a))));
-scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(cc),lm));
-function addLabel(text,x,y,z,color){const c2=document.createElement('canvas');c2.width=192;c2.height=48;const cx=c2.getContext('2d');cx.fillStyle=color||'#ffffff';cx.font='bold 24px sans-serif';cx.fillText(text,4,32);const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c2)}));sp.scale.set(16,4,1);sp.position.set(x,y,z);scene.add(sp)}
-addLabel('LEFT GOAL (x=0)',0,3,-34,'#ff6b6b');
-addLabel('RIGHT GOAL (x=105)',105,3,-34,'#ff6b6b');
-addLabel('Near (y=0)',52.5,3,0,'#69db7c');
-addLabel('Far (y=68)',52.5,3,-68,'#69db7c');
-// Map our world (x=length, y=width, z=up) → Three.js (x right, y up, z toward viewer).
-// Pitch is rendered at three.js y=0 with x=[0,105] and z=[-68,0].
-// Our y=0 (near touchline) → three.js z=0; our y=68 (far) → three.js z=-68; our z=height → three.js y.
-function camPos(rv,tv){const ang=Math.sqrt(rv[0]**2+rv[1]**2+rv[2]**2);if(ang<1e-8)return new THREE.Vector3(-tv[0],-tv[2],tv[1]);const ax=new THREE.Vector3(rv[0]/ang,rv[1]/ang,rv[2]/ang);const R=new THREE.Matrix4().makeRotationAxis(ax,ang);const Rt=R.clone().transpose();const t=new THREE.Vector3(tv[0],tv[1],tv[2]);const C=t.applyMatrix4(Rt).negate();return new THREE.Vector3(C.x,C.z,-C.y)}
-const COLORS=[0x3b82f6,0xef4444,0xf59e0b,0x22c55e,0xa855f7,0xec4899];
-shots.forEach((shot,si)=>{const color=COLORS[si%COLORS.length];const mat=new THREE.MeshBasicMaterial({color});const trail=[];
-shot.frames.forEach(f=>{const pos=camPos(f.rvec,f.tvec);const sp=new THREE.Mesh(new THREE.SphereGeometry(1.2,8,8),mat);sp.position.copy(pos);scene.add(sp);trail.push(pos);
-scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([pos,new THREE.Vector3(52.5,0,-34)]),new THREE.LineBasicMaterial({color,transparent:true,opacity:0.1})))});
-if(trail.length>1)scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(trail),new THREE.LineBasicMaterial({color,transparent:true,opacity:0.6})));
-if(trail.length){const c2=document.createElement('canvas');c2.width=128;c2.height=32;const cx=c2.getContext('2d');cx.fillStyle='#'+color.toString(16).padStart(6,'0');cx.font='bold 18px sans-serif';cx.fillText(shot.id,4,22);
-const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c2)}));sp.scale.set(12,3,1);sp.position.copy(trail[0]).add(new THREE.Vector3(0,5,0));scene.add(sp)}});
-(function anim(){requestAnimationFrame(anim);controls.update();renderer.render(scene,camera)})();
-window.addEventListener('resize',()=>{camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight)});` +
-    '</' + S + '></body></html>';
-
-  const iframe = document.createElement('iframe');
-  iframe.style.cssText = 'width:100%;height:420px;border:none;border-radius:6px;';
-  iframe.srcdoc = srcdoc;
-  vizBody.appendChild(iframe);
-
-  // Legend
-  const LEGEND_COLORS = ['#3b82f6','#ef4444','#f59e0b','#22c55e','#a855f7','#ec4899'];
-  const legend = document.createElement('div');
-  legend.style.cssText = 'display:flex;gap:16px;padding:8px 10px;flex-wrap:wrap;';
-  Object.keys(data.shots).forEach((shotId, i) => {
-    const item = document.createElement('span');
-    item.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:12px;color:#cbd5e1;';
-    const dot = document.createElement('span');
-    dot.style.cssText = 'width:10px;height:10px;border-radius:50%;background:' + LEGEND_COLORS[i % LEGEND_COLORS.length] + ';';
-    item.appendChild(dot);
-    item.appendChild(document.createTextNode(shotId));
-    const n = data.shots[shotId].frames.length;
-    const note = document.createElement('span');
-    note.style.cssText = 'color:#64748b;font-size:11px;';
-    note.textContent = '(' + n + ' frame' + (n !== 1 ? 's' : '') + ')';
-    item.appendChild(note);
-    legend.appendChild(item);
-  });
-  vizBody.appendChild(legend);
-
-  panel.appendChild(vizWrap);
-}
-
-// ── Manual Landmark Annotation Tool (REMOVED) ────────────────────────
-// Manual landmark annotation was removed when calibration switched to the
-// PnLCalib neural solver. The `Place Camera` tool below remains available
-// as a last-resort manual override for extreme camera angles where
-// PnLCalib fails.
-
-// ── Camera Placement Tool (3D gizmo + video overlay) ──────────────────
-function renderCameraPlacement(panel, shotId) {
-  panel.innerHTML = '';
-
-  // Header
-  const header = document.createElement('div');
-  header.style.cssText = 'display:flex;align-items:center;gap:12px;padding:8px 0;';
-  const backBtn = document.createElement('button');
-  backBtn.textContent = '← Back';
-  backBtn.style.cssText = 'background:#334155;color:#e2e8f0;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;';
-  backBtn.addEventListener('click', () => loadOutput('calibration'));
-  header.appendChild(backBtn);
-  const titleSpan = document.createElement('span');
-  titleSpan.textContent = `Place Camera — ${shotId}`;
-  titleSpan.style.cssText = 'font-weight:600;font-size:14px;';
-  header.appendChild(titleSpan);
-  const saveBtn = document.createElement('button');
-  saveBtn.textContent = 'Save Camera Position';
-  saveBtn.style.cssText = 'background:#16a34a;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;margin-left:auto;';
-  header.appendChild(saveBtn);
-  panel.appendChild(header);
-
-  // Two-panel layout: 3D pitch (left) + video preview (right)
-  const row = document.createElement('div');
-  row.style.cssText = 'display:flex;gap:8px;align-items:stretch;height:450px;';
-
-  // Left: 3D pitch iframe
-  const leftCol = document.createElement('div');
-  leftCol.style.cssText = 'flex:1;min-width:0;border-radius:6px;overflow:hidden;background:#111118;';
-  row.appendChild(leftCol);
-
-  // Right: video + overlay
-  const rightCol = document.createElement('div');
-  rightCol.style.cssText = 'flex:1;min-width:0;position:relative;background:#000;border-radius:6px;overflow:hidden;';
-  const video = document.createElement('video');
-  video.src = `/api/video/${shotId}`;
-  video.preload = 'metadata';
-  video.style.cssText = 'display:block;width:100%;height:100%;object-fit:contain;';
-  const overlayCanvas = document.createElement('canvas');
-  overlayCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;';
-  rightCol.appendChild(video);
-  rightCol.appendChild(overlayCanvas);
-  row.appendChild(rightCol);
-  panel.appendChild(row);
-
-  // Numeric inputs below
-  const numRow = document.createElement('div');
-  numRow.style.cssText = 'display:grid;grid-template-columns:repeat(7,1fr);gap:6px;padding:8px 0;';
-  const fields = {x:52.5, y:-15, z:15, lookX:52.5, lookY:34, focal:1500, roll:0};
-  const fieldLabels = {x:'X pos', y:'Y pos', z:'Height', lookX:'Look X', lookY:'Look Y', focal:'Focal', roll:'Roll °'};
-  const inputs = {};
-  for (const [key, val] of Object.entries(fields)) {
-    const g = document.createElement('div');
-    const l = document.createElement('label');
-    l.textContent = fieldLabels[key];
-    l.style.cssText = 'display:block;font-size:10px;color:#64748b;margin-bottom:2px;';
-    const inp = document.createElement('input');
-    inp.type = 'number'; inp.step = key === 'focal' ? '10' : '0.5';
-    inp.value = String(val);
-    inp.style.cssText = 'width:100%;background:#1e293b;color:#e2e8f0;border:1px solid #334155;padding:3px 5px;border-radius:3px;font-size:12px;';
-    g.appendChild(l); g.appendChild(inp);
-    numRow.appendChild(g);
-    inputs[key] = inp;
-    inp.addEventListener('input', () => updateOverlay());
-  }
-  panel.appendChild(numRow);
-
-  // Help
-  const help = document.createElement('div');
-  help.style.cssText = 'color:#64748b;font-size:11px;padding:4px 0;';
-  help.textContent = 'Left: 3D pitch view — drag gizmo to position/rotate camera. Right: video with projected pitch lines. Adjust until green lines match the video.';
-  panel.appendChild(help);
-
-  // Overlay setup
-  video.addEventListener('loadedmetadata', () => {
-    overlayCanvas.width = video.videoWidth;
-    overlayCanvas.height = video.videoHeight;
-    updateOverlay();
-  });
-
-  // Pitch lines for overlay projection
-  const PITCH_LINES = [
-    [[0,0],[105,0]],[[105,0],[105,68]],[[105,68],[0,68]],[[0,68],[0,0]],
-    [[52.5,0],[52.5,68]],
-    [[0,13.84],[16.5,13.84]],[[16.5,13.84],[16.5,54.16]],[[16.5,54.16],[0,54.16]],
-    [[105,13.84],[88.5,13.84]],[[88.5,13.84],[88.5,54.16]],[[88.5,54.16],[105,54.16]],
-    [[0,24.84],[5.5,24.84]],[[5.5,24.84],[5.5,43.16]],[[5.5,43.16],[0,43.16]],
-    [[105,24.84],[99.5,24.84]],[[99.5,24.84],[99.5,43.16]],[[99.5,43.16],[105,43.16]],
-  ];
-  const CIRCLE_PTS = [];
-  for (let a = 0; a <= Math.PI*2; a += 0.12) CIRCLE_PTS.push([52.5+9.15*Math.cos(a),34+9.15*Math.sin(a)]);
-
-  function proj(pt, K, R, t) {
-    const cx=R[0][0]*pt[0]+R[0][1]*pt[1]+t[0];
-    const cy=R[1][0]*pt[0]+R[1][1]*pt[1]+t[1];
-    const cz=R[2][0]*pt[0]+R[2][1]*pt[1]+t[2];
-    if(cz<=0.1) return null;
-    return [K[0]*cx/cz+K[2], K[4]*cy/cz+K[5]];
-  }
-
-  function computeCam() {
-    const x=+inputs.x.value, y=+inputs.y.value, z=+inputs.z.value;
-    const lx=+inputs.lookX.value, ly=+inputs.lookY.value;
-    const focal=+inputs.focal.value, roll=(+inputs.roll.value)*Math.PI/180;
-    const C=[x,y,z], tgt=[lx,ly,0];
-    let fwd=[tgt[0]-C[0],tgt[1]-C[1],tgt[2]-C[2]];
-    const fl=Math.sqrt(fwd[0]**2+fwd[1]**2+fwd[2]**2);
-    if(fl<0.01) return null;
-    fwd=[fwd[0]/fl,fwd[1]/fl,fwd[2]/fl];
-    let wup=[0,0,1];
-    let right=[fwd[1]*wup[2]-fwd[2]*wup[1],fwd[2]*wup[0]-fwd[0]*wup[2],fwd[0]*wup[1]-fwd[1]*wup[0]];
-    let rl=Math.sqrt(right[0]**2+right[1]**2+right[2]**2);
-    if(rl<0.01){wup=[0,1,0];right=[fwd[1]*wup[2]-fwd[2]*wup[1],fwd[2]*wup[0]-fwd[0]*wup[2],fwd[0]*wup[1]-fwd[1]*wup[0]];rl=Math.sqrt(right[0]**2+right[1]**2+right[2]**2);}
-    right=[right[0]/rl,right[1]/rl,right[2]/rl];
-    let up=[right[1]*fwd[2]-right[2]*fwd[1],right[2]*fwd[0]-right[0]*fwd[2],right[0]*fwd[1]-right[1]*fwd[0]];
-    // Apply roll
-    if(roll!==0){
-      const cr=Math.cos(roll),sr=Math.sin(roll);
-      const nr=[cr*right[0]+sr*up[0],cr*right[1]+sr*up[1],cr*right[2]+sr*up[2]];
-      const nu=[-sr*right[0]+cr*up[0],-sr*right[1]+cr*up[1],-sr*right[2]+cr*up[2]];
-      right=nr; up=nu;
-    }
-    const R=[[right[0],right[1],right[2]],[-up[0],-up[1],-up[2]],[fwd[0],fwd[1],fwd[2]]];
-    const t=[-(R[0][0]*C[0]+R[0][1]*C[1]+R[0][2]*C[2]),-(R[1][0]*C[0]+R[1][1]*C[1]+R[1][2]*C[2]),-(R[2][0]*C[0]+R[2][1]*C[1]+R[2][2]*C[2])];
-    return {R,t,K:[focal,0,960,0,focal,540,0,0,1]};
-  }
-
-  function updateOverlay() {
-    const ctx = overlayCanvas.getContext('2d');
-    ctx.clearRect(0,0,overlayCanvas.width,overlayCanvas.height);
-    const cam = computeCam();
-    if(!cam) return;
-    ctx.strokeStyle='rgba(0,255,100,0.6)'; ctx.lineWidth=2;
-    for(const [a,b] of PITCH_LINES){
-      const pa=proj(a,cam.K,cam.R,cam.t), pb=proj(b,cam.K,cam.R,cam.t);
-      if(!pa||!pb) continue;
-      ctx.beginPath();ctx.moveTo(pa[0],pa[1]);ctx.lineTo(pb[0],pb[1]);ctx.stroke();
-    }
-    ctx.beginPath(); let s=false;
-    for(const pt of CIRCLE_PTS){const pp=proj(pt,cam.K,cam.R,cam.t);if(!pp){s=false;continue;}if(!s){ctx.moveTo(pp[0],pp[1]);s=true;}else ctx.lineTo(pp[0],pp[1]);}
-    ctx.stroke();
-    const cs=proj([52.5,34],cam.K,cam.R,cam.t);
-    if(cs){ctx.fillStyle='rgba(0,255,100,0.8)';ctx.beginPath();ctx.arc(cs[0],cs[1],4,0,Math.PI*2);ctx.fill();}
-    // Notify iframe of camera state for gizmo sync
-    if(leftCol._iframe) leftCol._iframe.contentWindow?.postMessage({type:'camUpdate',x:+inputs.x.value,y:+inputs.y.value,z:+inputs.z.value,lookX:+inputs.lookX.value,lookY:+inputs.lookY.value},'*');
-  }
-
-  // Save
-  saveBtn.addEventListener('click', async () => {
-    saveBtn.disabled=true; saveBtn.textContent='Saving…';
-    const res = await fetch(`/api/calibration/camera-position/${shotId}`,{
-      method:'PUT', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({x:+inputs.x.value,y:+inputs.y.value,z:+inputs.z.value,lookX:+inputs.lookX.value,lookY:+inputs.lookY.value,focal:+inputs.focal.value,frame:0}),
-    });
-    if(res.ok){saveBtn.textContent='Saved!';setTimeout(()=>loadOutput('calibration'),500);}
-    else{saveBtn.textContent='Error';saveBtn.disabled=false;}
-  });
-
-  // Build 3D pitch iframe with TransformControls gizmo
-  const S='scr'+'ipt';
-  const iframeSrc =
-    '<!DOCTYPE html><html><head><style>*{margin:0;padding:0}body{overflow:hidden;background:#111118}</style>' +
-    '<'+S+' type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.164.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.164.0/examples/jsm/"}}</'+S+'>' +
-    '</head><body><'+S+' type="module">' +
-    'import*as THREE from"three";import{OrbitControls}from"three/addons/controls/OrbitControls.js";import{TransformControls}from"three/addons/controls/TransformControls.js";' +
-    `const w=window.innerWidth,h=window.innerHeight;
-const scene=new THREE.Scene();scene.background=new THREE.Color(0x111118);
-const cam=new THREE.PerspectiveCamera(50,w/h,0.1,500);cam.position.set(52.5,40,60);cam.lookAt(52.5,0,-34);
-const rend=new THREE.WebGLRenderer({antialias:true});rend.setSize(w,h);document.body.appendChild(rend.domElement);
-const orbit=new OrbitControls(cam,rend.domElement);orbit.target.set(52.5,0,-34);orbit.enableDamping=true;
-scene.add(new THREE.AmbientLight(0xffffff,0.5));
-const dl=new THREE.DirectionalLight(0xffffff,0.5);dl.position.set(52.5,50,-34);scene.add(dl);
-const pitch=new THREE.Mesh(new THREE.PlaneGeometry(105,68),new THREE.MeshStandardMaterial({color:0x1a5e1a,side:THREE.DoubleSide}));
-pitch.rotation.x=-Math.PI/2;pitch.position.set(52.5,0,-34);scene.add(pitch);
-const lm=new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.3});
-function al(x1,z1,x2,z2){scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(x1,0.05,-z1),new THREE.Vector3(x2,0.05,-z2)]),lm))}
-al(0,0,105,0);al(105,0,105,68);al(105,68,0,68);al(0,68,0,0);al(52.5,0,52.5,68);
-const cc=[];for(let a=0;a<=Math.PI*2;a+=0.1)cc.push(new THREE.Vector3(52.5+9.15*Math.cos(a),0.05,-(34+9.15*Math.sin(a))));
-scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(cc),lm));
-function addLabel(text,x,y,z,color){const c2=document.createElement('canvas');c2.width=192;c2.height=48;const cx=c2.getContext('2d');cx.fillStyle=color||'#fff';cx.font='bold 20px sans-serif';cx.fillText(text,4,32);const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c2)}));sp.scale.set(14,3.5,1);sp.position.set(x,y,z);scene.add(sp)}
-addLabel('LEFT GOAL (x=0)',0,2,-34,'#ff6b6b');addLabel('RIGHT GOAL (x=105)',105,2,-34,'#ff6b6b');
-const camMarker=new THREE.Mesh(new THREE.SphereGeometry(1.5,12,12),new THREE.MeshBasicMaterial({color:0xf59e0b}));
-camMarker.position.set(52.5,15,15);scene.add(camMarker);
-const tc=new TransformControls(cam,rend.domElement);
-tc.attach(camMarker);tc.setMode('translate');tc.setSize(0.8);
-scene.add(tc);
-tc.addEventListener('dragging-changed',e=>{orbit.enabled=!e.value});
-tc.addEventListener('objectChange',()=>{
-  const p=camMarker.position;
-  // Forward direction in Three.js is +Z, transformed by object quaternion
-  const fwd=new THREE.Vector3(0,0,1).applyQuaternion(camMarker.quaternion);
-  // Project forward ray to pitch plane (y=0 in Three.js = z=0 in FIFA)
-  // Camera pos in FIFA: x=p.x, y=-p.z, z=p.y
-  // Forward in FIFA: fx=fwd.x, fy=-fwd.z, fz=fwd.y
-  const camZ=p.y; // height in FIFA
-  const fwdZ=fwd.y; // vertical component of forward in FIFA
-  let lookX=52.5, lookY=34; // default: centre
-  if(Math.abs(fwdZ)>0.01){
-    const tGround=-camZ/fwdZ; // parameter where ray hits z=0
-    if(tGround>0){
-      lookX=p.x+fwd.x*tGround;
-      lookY=-p.z+(-fwd.z)*tGround;
-    }
-  }
-  window.parent.postMessage({type:'gizmoMove',x:p.x,y:-p.z,z:p.y,lookX,lookY},'*');
-});
-const modeBtn=document.createElement('button');
-modeBtn.textContent='Mode: Move';
-modeBtn.style.cssText='position:absolute;top:8px;left:8px;z-index:10;background:rgba(0,0,0,0.6);color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px;';
-document.body.appendChild(modeBtn);
-modeBtn.addEventListener('click',()=>{
-  if(tc.mode==='translate'){tc.setMode('rotate');modeBtn.textContent='Mode: Rotate';}
-  else{tc.setMode('translate');modeBtn.textContent='Mode: Move';}
-});
-window.addEventListener('message',e=>{
-  if(e.data?.type==='camUpdate'){
-    camMarker.position.set(e.data.x, e.data.z, -e.data.y);
-    if(e.data.lookX!==undefined&&e.data.lookY!==undefined){
-      // Point the marker toward the look-at target
-      const tgt=new THREE.Vector3(e.data.lookX,0,-e.data.lookY);
-      camMarker.lookAt(tgt);
-    }
-  }
-});
-(function anim(){requestAnimationFrame(anim);orbit.update();rend.render(scene,cam)})();
-window.addEventListener('resize',()=>{cam.aspect=window.innerWidth/window.innerHeight;cam.updateProjectionMatrix();rend.setSize(window.innerWidth,window.innerHeight)});` +
-    '</'+S+'></body></html>';
-
-  const iframe = document.createElement('iframe');
-  iframe.style.cssText = 'width:100%;height:100%;border:none;';
-  iframe.srcdoc = iframeSrc;
-  leftCol.appendChild(iframe);
-  leftCol._iframe = iframe;
-
-  // Listen for gizmo moves from the iframe
-  window.addEventListener('message', e => {
-    if (e.data?.type === 'gizmoMove') {
-      inputs.x.value = e.data.x.toFixed(1);
-      inputs.y.value = e.data.y.toFixed(1);
-      inputs.z.value = e.data.z.toFixed(1);
-      if (e.data.lookX !== undefined) inputs.lookX.value = e.data.lookX.toFixed(1);
-      if (e.data.lookY !== undefined) inputs.lookY.value = e.data.lookY.toFixed(1);
-      updateOverlay();
-    }
-  });
-
-  updateOverlay();
-}
-
-// ── Fullscreen overlay helper ─────────────────────────────────────────
-// Adds a custom fullscreen button to video-inner and wires up fullscreen
-// so the video-wrap (not the <video> itself) is fullscreened, keeping the
-// canvas overlay in the same stacking context as the video.
-function addOverlayFullscreen(wrap, inner, video, canvas) {
-  const btn = document.createElement('button');
-  btn.className = 'fs-btn';
-  btn.title = 'Fullscreen with overlay';
-  btn.textContent = '⛶';
-  inner.appendChild(btn);
-
-  btn.addEventListener('click', e => {
-    e.stopPropagation();
-    if (document.fullscreenElement === wrap) document.exitFullscreen();
-    else wrap.requestFullscreen().catch(() => {});
-  });
-
-  // If the browser's native video fullscreen button is clicked, redirect it
-  // to the wrap so the canvas overlay is included.
-  video.addEventListener('fullscreenchange', () => {
-    if (document.fullscreenElement === video) {
-      document.exitFullscreen()
-        .then(() => wrap.requestFullscreen())
-        .catch(() => {});
-    }
-  });
-
-  // After the fullscreen transition the video's displayed size changes.
-  // Update canvas CSS size so it stays matched to the video bounds.
-  wrap.addEventListener('fullscreenchange', () => {
-    const isFs = document.fullscreenElement === wrap;
-    btn.textContent = isFs ? '✕' : '⛶';
-    // Layout hasn't necessarily settled yet — defer one frame.
-    requestAnimationFrame(() => {
-      if (!video.videoWidth) return;
-      canvas.style.width = video.offsetWidth + 'px';
-      canvas.style.height = video.offsetHeight + 'px';
-    });
-  });
-}
-
-// ── Tracking renderer ─────────────────────────────────────────────────
-function renderTracking(panel, data) {
-  const shots = Object.entries(data.shots);
-  if (!shots.length) { renderNoOutput(); return; }
-
-  // Collect all known player names across all shots for the suggestion datalist
-  const allNames = new Set();
-  shots.forEach(([, sd]) => (sd.tracks || []).forEach(t => { if (t.player_name) allNames.add(t.player_name); }));
-
-  // ── Auto-match button ──
-  const matchBar = document.createElement('div');
-  matchBar.style.cssText = 'padding:0 0 10px;';
-  const matchBtn = document.createElement('button');
-  matchBtn.textContent = 'Auto-Match Players Across Shots';
-  matchBtn.style.cssText = 'background:#4f46e5;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;';
-  matchBtn.addEventListener('click', async () => {
-    matchBtn.disabled = true; matchBtn.textContent = 'Matching…';
-    const res = await fetch('/api/tracks/auto-match', { method: 'POST' });
-    matchBtn.textContent = res.ok ? 'Done! Reloading…' : 'Failed';
-    if (res.ok) setTimeout(() => loadOutput('tracking'), 500);
-    else matchBtn.disabled = false;
-  });
-  matchBar.appendChild(matchBtn);
-
-  // De-dupe button: merge tracks that share the same player_name into one player_id
-  const dedupeBtn = document.createElement('button');
-  dedupeBtn.textContent = 'De-dupe by Name';
-  dedupeBtn.title = 'Merge tracks with the same player name into a single player ID';
-  dedupeBtn.style.cssText = 'background:#334155;color:#e2e8f0;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;margin-left:8px;';
-  dedupeBtn.addEventListener('click', async () => {
-    dedupeBtn.disabled = true; dedupeBtn.textContent = 'Merging…';
-    const res = await fetch('/api/tracks/dedupe-by-name', { method: 'POST' });
-    if (res.ok) {
-      const result = await res.json();
-      dedupeBtn.textContent = `Merged ${result.merged} players. Reloading…`;
-      setTimeout(() => loadOutput('tracking'), 500);
-    } else {
-      dedupeBtn.textContent = 'Failed'; dedupeBtn.disabled = false;
-    }
-  });
-  matchBar.appendChild(dedupeBtn);
-
-  // Ignore Unknown — marks all unnamed players in the active shot as "ignore"
-  const ignoreBtn = document.createElement('button');
-  ignoreBtn.textContent = 'Ignore Unknown';
-  ignoreBtn.title = 'Set all unnamed players in the current shot to "ignore"';
-  ignoreBtn.style.cssText = 'background:#334155;color:#e2e8f0;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;margin-left:8px;';
-  ignoreBtn.addEventListener('click', async () => {
-    if (!activeTab) return;
-    ignoreBtn.disabled = true; ignoreBtn.textContent = 'Updating…';
-    const res = await fetch(`/api/tracks/ignore-unknown/${activeTab}`, { method: 'POST' });
-    if (res.ok) {
-      const result = await res.json();
-      ignoreBtn.textContent = `Ignored ${result.count} players. Reloading…`;
-      setTimeout(() => loadOutput('tracking'), 500);
-    } else {
-      ignoreBtn.textContent = 'Failed'; ignoreBtn.disabled = false;
-    }
-  });
-  matchBar.appendChild(ignoreBtn);
-
-  // Delete Ignores — removes all tracks marked with player_name "ignore"
-  const deleteIgnBtn = document.createElement('button');
-  deleteIgnBtn.textContent = 'Delete Ignores';
-  deleteIgnBtn.title = 'Remove all tracks named "ignore" from all shots';
-  deleteIgnBtn.style.cssText = 'background:#7f1d1d;color:#fca5a5;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;margin-left:8px;';
-  deleteIgnBtn.addEventListener('click', async () => {
-    deleteIgnBtn.disabled = true; deleteIgnBtn.textContent = 'Deleting…';
-    const res = await fetch('/api/tracks/delete-ignored', { method: 'POST' });
-    if (res.ok) {
-      const result = await res.json();
-      deleteIgnBtn.textContent = `Deleted ${result.deleted} tracks. Reloading…`;
-      setTimeout(() => loadOutput('tracking'), 500);
-    } else {
-      deleteIgnBtn.textContent = 'Failed'; deleteIgnBtn.disabled = false;
-    }
-  });
-  matchBar.appendChild(deleteIgnBtn);
-
-  panel.appendChild(matchBar);
-
-  // ── Shot tabs ──
-  const tabBar = document.createElement('div');
-  tabBar.style.cssText = 'display:flex;gap:0;border-bottom:2px solid #2d3148;margin-bottom:12px;';
-  const shotPanels = {};
-  let activeTab = null;
-
-  shots.forEach(([shotId], i) => {
-    const tab = document.createElement('button');
-    tab.textContent = shotId;
-    tab.style.cssText = 'background:none;border:none;color:#94a3b8;padding:8px 16px;font-size:13px;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;';
-    tab.addEventListener('click', () => selectShotTab(shotId));
-    tabBar.appendChild(tab);
-    shotPanels[shotId] = { tab };
-  });
-  panel.appendChild(tabBar);
-
-  // ── Content area (swapped per tab) ──
-  const contentArea = document.createElement('div');
-  panel.appendChild(contentArea);
-
-  // Name suggestion datalist (shared across all shots)
-  const datalistId = 'player-name-suggestions';
-  const datalist = document.createElement('datalist');
-  datalist.id = datalistId;
-  allNames.forEach(n => { const o = document.createElement('option'); o.value = n; datalist.appendChild(o); });
-  panel.appendChild(datalist);
-
-  function selectShotTab(shotId) {
-    if (activeTab === shotId) return;
-    activeTab = shotId;
-    // Update tab styling
-    for (const [sid, sp] of Object.entries(shotPanels)) {
-      const active = sid === shotId;
-      sp.tab.style.color = active ? '#f1f5f9' : '#94a3b8';
-      sp.tab.style.fontWeight = active ? '600' : '400';
-      sp.tab.style.borderBottomColor = active ? '#6366f1' : 'transparent';
-    }
-    // Render shot content
-    contentArea.innerHTML = '';
-    renderShotTrackingView(contentArea, shotId, data.shots[shotId], datalistId, allNames);
-  }
-
-  selectShotTab(shots[0][0]);
-}
-
-function renderShotTrackingView(container, shotId, tracksData, datalistId, allNames) {
-  const row = document.createElement('div');
-  row.style.cssText = 'display:flex;gap:14px;align-items:flex-start;';
-
-  // ── Left: video with overlay + custom timeline ──
-  const videoCol = document.createElement('div');
-  videoCol.style.cssText = 'flex:1;min-width:0;overflow:hidden;';
-
-  const wrap = document.createElement('div');
-  wrap.className = 'video-wrap';
-  wrap.style.display = 'block';
-  const inner = document.createElement('div');
-  inner.className = 'video-inner';
-  const video = document.createElement('video');
-  video.src = `/api/video/${shotId}`;
-  video.preload = 'metadata';
-  video.style.cssText = 'display:block;width:100%;';
-  const canvas = document.createElement('canvas');
-  canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:auto;cursor:crosshair;';
-  inner.appendChild(video);
-  inner.appendChild(canvas);
-  wrap.appendChild(inner);
-  videoCol.appendChild(wrap);
-
-  // ── Timeline controls ──
-  const controls = document.createElement('div');
-  controls.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 0;';
-
-  const playBtn = document.createElement('button');
-  playBtn.textContent = '▶';
-  playBtn.style.cssText = 'background:#4f46e5;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:14px;width:36px;';
-  controls.appendChild(playBtn);
-
-  // Step back
-  const stepBackBtn = document.createElement('button');
-  stepBackBtn.textContent = '◀';
-  stepBackBtn.title = 'Previous frame';
-  stepBackBtn.style.cssText = 'background:#334155;color:#e2e8f0;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:11px;';
-  controls.appendChild(stepBackBtn);
-
-  // Step forward
-  const stepFwdBtn = document.createElement('button');
-  stepFwdBtn.textContent = '▶';
-  stepFwdBtn.title = 'Next frame';
-  stepFwdBtn.style.cssText = 'background:#334155;color:#e2e8f0;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:11px;';
-  controls.appendChild(stepFwdBtn);
-
-  const timeline = document.createElement('input');
-  timeline.type = 'range';
-  timeline.min = '0';
-  timeline.max = '1000';
-  timeline.value = '0';
-  timeline.style.cssText = 'flex:1;';
-  controls.appendChild(timeline);
-
-  const frameLabel = document.createElement('span');
-  frameLabel.style.cssText = 'font-size:11px;color:#94a3b8;min-width:90px;text-align:right;font-variant-numeric:tabular-nums;';
-  frameLabel.textContent = 'Frame 0';
-  controls.appendChild(frameLabel);
-
-  videoCol.appendChild(controls);
-  row.appendChild(videoCol);
-
-  // Wire up timeline
-  let seeking = false;
-  video.addEventListener('loadedmetadata', () => {
-    const totalFrames = Math.round(video.duration * fps);
-    timeline.max = String(totalFrames);
-  });
-
-  video.addEventListener('timeupdate', () => {
-    if (seeking) return;
-    const frame = Math.round(video.currentTime * fps);
-    timeline.value = String(frame);
-    frameLabel.textContent = `Frame ${frame}`;
-  });
-
-  timeline.addEventListener('input', () => {
-    seeking = true;
-    const frame = parseInt(timeline.value);
-    video.currentTime = frame / fps;
-    frameLabel.textContent = `Frame ${frame}`;
-    seeking = false;
-  });
-
-  playBtn.addEventListener('click', () => {
-    if (video.paused) { video.play(); playBtn.textContent = '⏸'; }
-    else { video.pause(); playBtn.textContent = '▶'; }
-  });
-  video.addEventListener('pause', () => { playBtn.textContent = '▶'; });
-  video.addEventListener('play', () => { playBtn.textContent = '⏸'; });
-  video.addEventListener('ended', () => { playBtn.textContent = '▶'; });
-
-  stepBackBtn.addEventListener('click', () => {
-    video.pause();
-    video.currentTime = Math.max(0, video.currentTime - 1 / fps);
-  });
-  stepFwdBtn.addEventListener('click', () => {
-    video.pause();
-    video.currentTime = Math.min(video.duration || 0, video.currentTime + 1 / fps);
-  });
-
-  // ── Right: independently scrollable player list ──
-  const listCol = document.createElement('div');
-  listCol.style.cssText = 'width:280px;min-width:280px;overflow-y:auto;background:#1a1d27;border-radius:6px;border:1px solid #2d3148;position:sticky;top:0;';
-
-  const listHeader = document.createElement('div');
-  listHeader.style.cssText = 'padding:8px 10px;font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.06em;border-bottom:1px solid #2d3148;position:sticky;top:0;background:#1a1d27;z-index:1;';
-  listHeader.textContent = `Players — ${shotId}`;
-  listCol.appendChild(listHeader);
-
-  const playerTracks = (tracksData.tracks || []).filter(t => t.class_name !== 'ball');
-  const fps = getShotFps();
-
-  // Build frame index for overlay + click hit-testing (shared between overlay and click handler)
-  const frameIndex = new Map();
-  for (const track of tracksData.tracks) {
-    for (const tf of track.frames) {
-      if (!frameIndex.has(tf.frame)) frameIndex.set(tf.frame, []);
-      frameIndex.get(tf.frame).push({ track, tf });
-    }
-  }
-
-  // Canvas click → find player bbox → focus their name input in the list
-  canvas.addEventListener('click', e => {
-    const rect = canvas.getBoundingClientRect();
-    if (!canvas.width) return;
-    const sx = canvas.width / rect.width, sy = canvas.height / rect.height;
-    const cx = (e.clientX - rect.left) * sx, cy = (e.clientY - rect.top) * sy;
-    const frame = Math.round(video.currentTime * fps);
-    const entries = frameIndex.get(frame) || [];
-    for (const { track } of entries) {
-      // Find this track's bbox at this frame
-      const tf = track.frames?.find(f => f.frame === frame);
-      if (!tf) continue;
-      const [x1, y1, x2, y2] = tf.bbox;
-      if (cx >= x1 && cx <= x2 && cy >= y1 && cy <= y2) {
-        const pid = track.player_id || track.track_id;
-        const rowEl = listCol.querySelector(`[data-player-id="${CSS.escape(pid)}"]`);
-        if (rowEl) {
-          rowEl.scrollIntoView({ block: 'nearest' });
-          const inp = rowEl.querySelector('input');
-          if (inp) inp.focus();
-          // Brief highlight
-          rowEl.style.background = '#2d3148';
-          setTimeout(() => { rowEl.style.background = ''; }, 800);
-        }
-        return;
-      }
-    }
-    // No bbox hit — toggle play/pause
-    video.paused ? video.play() : video.pause();
-  });
-
-  // Group tracks by player_id so de-duped players show one row
-  const grouped = {};
-  playerTracks.forEach(track => {
-    const key = track.player_id || track.track_id;
-    if (!grouped[key]) grouped[key] = [];
-    grouped[key].push(track);
-  });
-
-  for (const [pid, tracks] of Object.entries(grouped)) {
-    const firstTrack = tracks[0];
-    const hasName = !!firstTrack.player_name;
-
-    const item = document.createElement('div');
-    item.dataset.playerId = pid;
-    item.style.cssText = 'display:flex;align-items:center;gap:5px;padding:5px 8px;border-bottom:1px solid #1e293b;transition:background 0.2s;';
-
-    // Color dot
-    const dot = document.createElement('span');
-    dot.style.cssText = `width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${hasName ? '#22c55e' : '#ef4444'};`;
-    item.appendChild(dot);
-
-    // Clickable ID label — seeks video to a frame where this player is visible
-    const idLabel = document.createElement('a');
-    idLabel.textContent = pid;
-    idLabel.href = '#';
-    idLabel.style.cssText = 'font-size:11px;color:#818cf8;min-width:32px;text-decoration:none;cursor:pointer;flex-shrink:0;';
-    idLabel.title = 'Jump to this player';
-    idLabel.addEventListener('click', e => {
-      e.preventDefault();
-      const allFrames = tracks.flatMap(t => (t.frames || []).map(f => f.frame));
-      if (allFrames.length) {
-        allFrames.sort((a, b) => a - b);
-        video.currentTime = allFrames[Math.floor(allFrames.length / 2)] / fps;
-      }
-    });
-    item.appendChild(idLabel);
-
-    // Name input
-    const nameInput = document.createElement('input');
-    nameInput.type = 'text';
-    nameInput.value = firstTrack.player_name || '';
-    nameInput.placeholder = 'Name…';
-    nameInput.setAttribute('list', datalistId);
-    nameInput.style.cssText = 'flex:1;min-width:0;background:#0f1117;color:#e2e8f0;border:1px solid #334155;padding:3px 5px;border-radius:3px;font-size:12px;';
-    nameInput.addEventListener('change', async () => {
-      const newName = nameInput.value.trim();
-      for (const t of tracks) {
-        await fetch(`/api/tracks/${shotId}/${t.track_id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ player_name: newName }),
-        });
-        t.player_name = newName;
-      }
-      dot.style.background = newName ? '#22c55e' : '#ef4444';
-      if (newName && !allNames.has(newName)) {
-        allNames.add(newName);
-        const o = document.createElement('option');
-        o.value = newName;
-        document.getElementById(datalistId).appendChild(o);
-      }
-    });
-    item.appendChild(nameInput);
-
-    // Team badge
-    const team = firstTrack.team || 'unknown';
-    const teamCls = team === 'A' ? 'team-a' : team === 'B' ? 'team-b' : team === 'referee' ? 'team-ref' : 'team-unk';
-    const teamBadge = document.createElement('span');
-    teamBadge.textContent = team;
-    teamBadge.className = teamCls;
-    teamBadge.style.cssText = 'font-size:10px;flex-shrink:0;';
-    item.appendChild(teamBadge);
-
-    // Split button — splits track at current video frame
-    const splitBtn = document.createElement('button');
-    splitBtn.textContent = '✂';
-    splitBtn.title = 'Split track at current frame (for when tracker swapped two players)';
-    splitBtn.style.cssText = 'background:none;border:1px solid #475569;color:#94a3b8;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:12px;flex-shrink:0;';
-    splitBtn.addEventListener('click', async () => {
-      const frame = Math.round(video.currentTime * fps);
-      splitBtn.disabled = true; splitBtn.textContent = '…';
-      const res = await fetch('/api/tracks/split', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ shot_id: shotId, track_id: tracks[0].track_id, split_frame: frame }),
-      });
-      if (res.ok) {
-        loadOutput('tracking');
-      } else {
-        const err = await res.json().catch(() => ({}));
-        splitBtn.textContent = '✂';
-        splitBtn.disabled = false;
-        alert(err.detail || 'Split failed');
-      }
-    });
-    item.appendChild(splitBtn);
-
-    listCol.appendChild(item);
-  }
-
-  row.appendChild(listCol);
-  container.appendChild(row);
-
-  setupTrackOverlay(video, canvas, frameIndex);
-  addOverlayFullscreen(wrap, inner, video, canvas);
-}
-
-function setupTrackOverlay(video, canvas, frameIndex) {
-
-  video.addEventListener('loadedmetadata', () => {
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.style.width = video.offsetWidth + 'px';
-    canvas.style.height = video.offsetHeight + 'px';
-  });
-
-  const ro = new ResizeObserver(() => {
-    if (video.videoWidth) {
-      canvas.style.width = video.offsetWidth + 'px';
-      canvas.style.height = video.offsetHeight + 'px';
-    }
-  });
-  ro.observe(video);
-
-  let lastFrame = -1;
-  let rafId = null;
-
-  function drawFrame() {
-    const frame = Math.round(video.currentTime * getShotFps());
-    if (frame !== lastFrame) {
-      drawTracks(canvas, frameIndex, frame);
-      lastFrame = frame;
-    }
-  }
-
-  function startLoop() {
-    if (rafId) return;
-    (function loop() { rafId = requestAnimationFrame(loop); drawFrame(); })();
-  }
-
-  function stopLoop() {
-    cancelAnimationFrame(rafId);
-    rafId = null;
-    drawFrame();
-  }
-
-  video.addEventListener('play', startLoop);
-  video.addEventListener('pause', stopLoop);
-  video.addEventListener('ended', stopLoop);
-  video.addEventListener('seeked', () => { if (video.paused) drawFrame(); });
-}
-
-function drawTracks(canvas, frameIndex, frame) {
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const entries = frameIndex.get(frame) || [];
-  for (const { track, tf } of entries) {
-    const [x1, y1, x2, y2] = tf.bbox;
-    const hasName = !!track.player_name;
-    // Red if unnamed, green if named
-    const color = hasName ? '#22c55e' : '#ef4444';
-    const label = hasName ? track.player_name : (track.player_id || track.track_id);
-
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-
-    // Label background
-    ctx.font = 'bold 11px sans-serif';
-    const textW = ctx.measureText(label).width;
-    const labelY = y1 - 4 < 12 ? y1 + 14 : y1 - 4;
-    const bgY = labelY - 11;
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(x1, bgY, textW + 6, 14);
-    ctx.fillStyle = color;
-    ctx.fillText(label, x1 + 3, labelY);
-  }
-}
-
-// ── Pose renderer ─────────────────────────────────────────────────────
-function renderPose(panel, data) {
-  const shots = Object.entries(data.shots);
-  shots.forEach(([shotId, poseData]) => {
-    const div = document.createElement('div');
-    div.className = 'shot-viewer';
-
-    const h4 = document.createElement('h4');
-    h4.textContent = shotId + ` (${poseData.players.length} players)`;
-    div.appendChild(h4);
-
-    const wrap = document.createElement('div');
-    wrap.className = 'video-wrap';
-
-    const inner = document.createElement('div');
-    inner.className = 'video-inner';
-
-    const video = document.createElement('video');
-    video.src = `/api/video/${shotId}`;
-    video.controls = true;
-    video.preload = 'metadata';
-
-    const canvas = document.createElement('canvas');
-    canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
-
-    inner.appendChild(video);
-    inner.appendChild(canvas);
-    wrap.appendChild(inner);
-    div.appendChild(wrap);
-    panel.appendChild(div);
-
-    setupPoseOverlay(video, canvas, poseData);
-    addOverlayFullscreen(wrap, inner, video, canvas);
-  });
-}
-
-function setupPoseOverlay(video, canvas, poseData) {
-  // Pre-index: Map<trackId, Map<frame, keypoints[]>>
-  const poseIndex = new Map();
-  for (const player of poseData.players) {
-    const frameMap = new Map();
-    for (const pf of player.frames) {
-      frameMap.set(pf.frame, pf.keypoints);
-    }
-    poseIndex.set(player.track_id, frameMap);
-  }
-
-  video.addEventListener('loadedmetadata', () => {
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.style.width = video.offsetWidth + 'px';
-    canvas.style.height = video.offsetHeight + 'px';
-  });
-
-  const ro = new ResizeObserver(() => {
-    if (video.videoWidth) {
-      canvas.style.width = video.offsetWidth + 'px';
-      canvas.style.height = video.offsetHeight + 'px';
-    }
-  });
-  ro.observe(video);
-
-  let lastFrame = -1;
-  let rafId = null;
-
-  function drawFrame() {
-    const frame = Math.round(video.currentTime * getShotFps());
-    if (frame !== lastFrame) {
-      drawPoses(canvas, poseIndex, frame);
-      lastFrame = frame;
-    }
-  }
-
-  function startLoop() {
-    if (rafId) return;
-    (function loop() { rafId = requestAnimationFrame(loop); drawFrame(); })();
-  }
-
-  function stopLoop() {
-    cancelAnimationFrame(rafId);
-    rafId = null;
-    drawFrame();
-  }
-
-  video.addEventListener('play', startLoop);
-  video.addEventListener('pause', stopLoop);
-  video.addEventListener('ended', stopLoop);
-  video.addEventListener('seeked', () => { if (video.paused) drawFrame(); });
-}
-
-function drawPoses(canvas, poseIndex, frame) {
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  for (const [, frameMap] of poseIndex) {
-    const kps = frameMap.get(frame);
-    if (!kps) continue;
-
-    // Draw skeleton bones
-    for (const [a, b] of SKELETON) {
-      const kpA = kps[a], kpB = kps[b];
-      if (!kpA || !kpB || kpA.conf < 0.3 || kpB.conf < 0.3) continue;
-      ctx.beginPath();
-      ctx.moveTo(kpA.x, kpA.y);
-      ctx.lineTo(kpB.x, kpB.y);
-      ctx.strokeStyle = 'rgba(99,102,241,0.75)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
-
-    // Draw joints
-    for (const kp of kps) {
-      if (kp.conf < 0.3) continue;
-      const hue = Math.round((kp.conf - 0.3) / 0.7 * 120);
-      ctx.beginPath();
-      ctx.arc(kp.x, kp.y, 4, 0, 2 * Math.PI);
-      ctx.fillStyle = `hsl(${hue},100%,55%)`;
-      ctx.fill();
-    }
-  }
-}
-
-// ── Sync renderer ─────────────────────────────────────────────────────
-function renderSync(panel, data) {
-  // ── 1. Alignment table ────────────────────────────────────────────
-  const { wrap: tableWrap, body: tableBody } = makePanel('Sync Map');
-  tableBody.style.padding = '12px 16px';
-
-  const ref = document.createElement('p');
-  ref.style.cssText = 'font-size:12px;color:#64748b;margin-bottom:12px;';
-  ref.textContent = `Reference shot: ${data.reference_shot}`;
-  tableBody.appendChild(ref);
-
-  const { t, tbody } = makeTable(['Shot', 'Frame Offset', 'Confidence', 'Method', 'Overlap']);
-  (data.alignments || []).forEach(a => {
-    const conf = a.confidence != null ? a.confidence : 0;
-    const confHtml = `
-      <span class="conf-bar-wrap"><span class="conf-bar" style="width:${Math.round(conf*100)}%"></span></span>
-      ${(conf*100).toFixed(0)}%`;
-    const overlap = a.overlap_frames ? `${a.overlap_frames[0]}–${a.overlap_frames[1]}` : '—';
-    addRow(tbody, [
-      a.shot_id,
-      a.frame_offset != null ? a.frame_offset : '—',
-      { html: confHtml },
-      a.method || '—',
-      overlap,
-    ]);
-  });
-  tableBody.appendChild(t);
-  panel.appendChild(tableWrap);
-
-  // ── 2. Multi-view sync player ─────────────────────────────────────
-  renderSyncPlayer(panel, data);
-}
-
-function renderSyncPlayer(panel, data) {
-  const fps = getShotFps();
-  const refId = data.reference_shot;
-
-  // Convention: frame_in_reference = frame_in_shot + offset
-  //   → at virtual time T, shot plays at  T − offset/fps
-  // offsets is mutable state: updated by drag and nudge controls.
-  const offsets = {};  // shotId → integer frame offset
-  const methods = {};  // shotId → method string
-  offsets[refId] = 0;
-  methods[refId] = 'reference';
-  (data.alignments || []).forEach(a => {
-    offsets[a.shot_id] = a.frame_offset || 0;
-    methods[a.shot_id] = a.method || 'auto';
-  });
-
-  const shots = [
-    { shotId: refId, isRef: true, confidence: null },
-    ...(data.alignments || []).map(a => ({
-      shotId: a.shot_id,
-      isRef: false,
-      confidence: a.confidence,
-    })),
-  ];
-
-  // ── Sticky panel: two-column — reference video left, timeline right ──
-  const { wrap, body } = makePanel('Sync Timeline');
-  // body is a flex row: refSide | timelineSide
-  body.style.cssText = 'padding:0;display:flex;align-items:stretch;';
-
-  const refSide = document.createElement('div');
-  refSide.style.cssText = `
-    flex: 0 0 300px;
-    min-width: 220px;
-    border-right: 1px solid #2d3148;
-    display: flex;
-    flex-direction: column;
-  `;
-
-  const timelineSide = document.createElement('div');
-  timelineSide.style.cssText = `
-    flex: 1;
-    min-width: 0;
-    padding: 12px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  `;
-
-  body.appendChild(refSide);
-  body.appendChild(timelineSide);
-
-  // Sticky shell — sits directly inside #main-body's scroll container.
-  // .panel's overflow:hidden is on `wrap`, not on stickyShell, so sticky works.
-  const stickyShell = document.createElement('div');
-  stickyShell.style.cssText = `
-    position: sticky;
-    top: 0;
-    z-index: 50;
-    background: #0f1117;
-    padding-bottom: 4px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.6);
-  `;
-  stickyShell.appendChild(wrap);
-
-  // ── Video grid panel (scrolls normally below the sticky panel) ──
-  const { wrap: videoWrap, body: videoBody } = makePanel('Clip Previews');
-  videoBody.style.padding = '16px';
-
-  const grid = document.createElement('div');
-  grid.style.cssText = `
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
-    gap: 12px;
-  `;
-
-  const videoEls = {};   // shotId → <video>
-
-  shots.forEach(({ shotId, isRef, confidence }) => {
-    const offset = offsets[shotId];
-    const cell = document.createElement('div');
-    cell.style.cssText = `
-      background: #0a0c12;
-      border-radius: 6px;
-      overflow: hidden;
-      border: 1px solid ${isRef ? '#6366f1' : '#2d3148'};
-      ${isRef ? 'flex:1;' : ''}
-    `;
-
-    const label = document.createElement('div');
-    label.style.cssText = `
-      padding: 5px 10px;
-      font-size: 11px;
-      font-weight: 600;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      background: ${isRef ? '#1e1f3a' : '#111827'};
-      color: ${isRef ? '#a5b4fc' : '#94a3b8'};
-    `;
-    const offsetLabel = isRef ? 'reference' :
-      (offset === 0 ? '±0 frames' : `${offset > 0 ? '+' : ''}${offset} frames`);
-    const confLabel = confidence != null ? ` · ${(confidence * 100).toFixed(0)}%` : '';
-    label.innerHTML = `<span>${shotId}${isRef ? ' ★' : ''}</span><span>${offsetLabel}${confLabel}</span>`;
-
-    const video = document.createElement('video');
-    video.src = `/api/video/${shotId}`;
-    video.preload = 'metadata';
-    video.muted = !isRef;
-    // Reference video fills the sticky panel column; others are large in the scrollable grid
-    video.style.cssText = isRef
-      ? 'width:100%;display:block;flex:1;min-height:0;object-fit:contain;'
-      : 'width:100%;display:block;max-height:480px;object-fit:contain;';
-
-    const timeBar = document.createElement('div');
-    timeBar.id = `sync-time-${shotId}`;
-    timeBar.style.cssText = `
-      padding: 3px 10px;
-      font-size: 10px;
-      font-family: monospace;
-      color: #4b5563;
-      background: #0a0c12;
-      flex-shrink: 0;
-    `;
-    timeBar.textContent = '0:00.0';
-
-    cell.appendChild(label);
-    cell.appendChild(video);
-    cell.appendChild(timeBar);
-
-    if (isRef) {
-      refSide.appendChild(cell);    // pinned in the sticky panel's left column
-    } else {
-      grid.appendChild(cell);       // scrolls in the clip previews grid below
-    }
-    videoEls[shotId] = video;
-  });
-
-  videoBody.appendChild(grid);
-  // videoWrap appended after the timeline so DOM order is: timeline (sticky) → videos
-
-  // ── Timeline panel ────────────────────────────────────────────────
-  // Shared state
-  let pxPerSec = 40;          // zoom level; steps: 10, 20, 40, 80, 160
-  const PX_STEPS = [10, 20, 40, 80, 160];
-  const ROW_H = 36;           // px height per clip row
-  const RULER_H = 24;         // px height of time ruler
-  const LABEL_W = 80;         // px width of left label column
-  const NUDGE_W = 220;        // px width of nudge control column
-
-  const timelineWrap = document.createElement('div');
-  timelineWrap.style.cssText = `
-    background: #0a0c12;
-    border-radius: 6px;
-    border: 1px solid #1e2130;
-    margin-bottom: 12px;
-    overflow: hidden;
-    user-select: none;
-  `;
-
-  // ── Ruler header row ──────────────────────────────────────────────
-  const rulerRow = document.createElement('div');
-  rulerRow.style.cssText = `
-    display: flex;
-    align-items: stretch;
-    border-bottom: 1px solid #1e2130;
-    height: ${RULER_H}px;
-  `;
-
-  const rulerLabelCell = document.createElement('div');
-  rulerLabelCell.style.cssText = `
-    width: ${LABEL_W}px;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    padding-right: 8px;
-    gap: 4px;
-  `;
-
-  const zoomOut = document.createElement('button');
-  zoomOut.textContent = '−';
-  zoomOut.title = 'Zoom out';
-  zoomOut.style.cssText = 'background:#1e2130;border:1px solid #2d3148;color:#94a3b8;border-radius:3px;width:20px;height:20px;cursor:pointer;font-size:14px;line-height:1;padding:0;';
-  const zoomIn = document.createElement('button');
-  zoomIn.textContent = '+';
-  zoomIn.title = 'Zoom in';
-  zoomIn.style.cssText = zoomOut.style.cssText;
-  rulerLabelCell.appendChild(zoomOut);
-  rulerLabelCell.appendChild(zoomIn);
-
-  const rulerScroll = document.createElement('div');
-  rulerScroll.style.cssText = `flex:1;overflow:hidden;position:relative;`;
-
-  const rulerCanvas = document.createElement('div');
-  rulerCanvas.style.cssText = `position:absolute;top:0;left:0;height:100%;`;
-
-  rulerScroll.appendChild(rulerCanvas);
-  rulerRow.appendChild(rulerLabelCell);
-  rulerRow.appendChild(rulerScroll);
-  timelineWrap.appendChild(rulerRow);
-
-  // ── Clip rows ─────────────────────────────────────────────────────
-  const rowsArea = document.createElement('div');
-  rowsArea.style.cssText = `position:relative;`;
-
-  // Playhead: absolute-positioned full-height line over the rows area
-  const playheadWrap = document.createElement('div');
-  playheadWrap.style.cssText = `
-    position:absolute; top:0; left:${LABEL_W}px; right:${NUDGE_W}px;
-    height:100%; pointer-events:none; overflow:hidden; z-index:10;
-  `;
-  const playheadLine = document.createElement('div');
-  playheadLine.style.cssText = `
-    position:absolute;top:0;bottom:0;width:2px;
-    background:#6366f1;opacity:0.85;
-    transform:translateX(0);
-    pointer-events:all;cursor:col-resize;
-  `;
-  playheadWrap.appendChild(playheadLine);
-  rowsArea.appendChild(playheadWrap);
-
-  // Clip row elements: rowEl, barEl, barTextEl, offsetLabelEl, nudgeControlEl per shot
-  const rowEls = {};         // shotId → { rowEl, barEl, barTextEl, offLabel, methodBadge, nudgeBtns } (non-ref only)
-  const barElsByShot = {};   // shotId → barEl (all shots, including ref)
-
-  shots.forEach(({ shotId, isRef }) => {
-    const rowEl = document.createElement('div');
-    rowEl.style.cssText = `
-      display:flex;align-items:center;
-      height:${ROW_H}px;border-bottom:1px solid #111520;position:relative;
-    `;
-
-    // Left label
-    const labelCell = document.createElement('div');
-    labelCell.style.cssText = `
-      width:${LABEL_W}px;flex-shrink:0;
-      font-size:10px;font-weight:600;color:${isRef ? '#a5b4fc' : '#64748b'};
-      padding-right:8px;text-align:right;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
-    `;
-    labelCell.textContent = shotId + (isRef ? ' ★' : '');
-
-    // Scrollable bar zone
-    const barZone = document.createElement('div');
-    barZone.style.cssText = `flex:1;position:relative;height:100%;overflow:hidden;`;
-
-    const barEl = document.createElement('div');
-    barEl.style.cssText = `
-      position:absolute;top:6px;height:${ROW_H - 12}px;
-      background:${isRef ? '#4f46e5' : '#2d3148'};
-      border-radius:3px;min-width:4px;
-      cursor:${isRef ? 'default' : 'ew-resize'};
-      border:1px solid ${isRef ? '#6366f1' : '#3d4060'};
-      display:flex;align-items:center;overflow:hidden;
-    `;
-
-    const barTextEl = document.createElement('span');
-    barTextEl.style.cssText = `
-      font-size:9px;color:${isRef ? '#a5b4fc' : '#94a3b8'};
-      padding:0 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;
-    `;
-    barTextEl.textContent = isRef ? '★ ref' : shotId;
-    barEl.appendChild(barTextEl);
-
-    // Track barEl for all shots (used by redrawTimeline)
-    barElsByShot[shotId] = barEl;
-
-    // Hover highlight for non-ref bars
-    if (!isRef) {
-      barEl.addEventListener('mouseenter', () => { if (!dragState) barEl.style.background = '#3d4168'; });
-      barEl.addEventListener('mouseleave', () => { if (!dragState) barEl.style.background = '#2d3148'; });
-    }
-
-    barZone.appendChild(barEl);
-
-    // Right nudge area
-    const nudgeCell = document.createElement('div');
-    nudgeCell.style.cssText = `
-      width:${NUDGE_W}px;flex-shrink:0;display:flex;align-items:center;
-      gap:3px;padding-left:8px;
-    `;
-
-    if (isRef) {
-      nudgeCell.innerHTML = `<span style="font-size:10px;color:#4b5563;font-style:italic;">reference (fixed)</span>`;
-    } else {
-      const fmtOff = (v) => (v === 0 ? '±0' : (v > 0 ? '+' : '') + v) + ' fr';
-
-      const nudgeBtns = [-10, -1, 1, 10].map(delta => {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.textContent = delta > 0 ? `+${delta}` : `${delta}`;
-        btn.dataset.delta = delta;
-        btn.style.cssText = `
-          background:#1e2130;border:1px solid #2d3148;color:#94a3b8;
-          border-radius:3px;padding:1px 4px;font-size:10px;cursor:pointer;flex-shrink:0;
-        `;
-        btn.addEventListener('click', () => commitOffset(shotId, offsets[shotId] + delta));
-        return btn;
-      });
-
-      const offLabel = document.createElement('span');
-      offLabel.style.cssText = `
-        font-size:10px;font-family:monospace;color:#64748b;
-        min-width:52px;text-align:center;flex-shrink:0;
-      `;
-      offLabel.textContent = fmtOff(offsets[shotId]);
-
-      const methodBadge = document.createElement('span');
-      methodBadge.style.cssText = `
-        font-size:9px;padding:1px 4px;border-radius:3px;flex-shrink:0;
-        background:${methods[shotId] === 'manual' ? '#312e81' : '#1e2130'};
-        color:${methods[shotId] === 'manual' ? '#a5b4fc' : '#4b5563'};
-        border:1px solid ${methods[shotId] === 'manual' ? '#4f46e5' : '#2d3148'};
-      `;
-      methodBadge.textContent = methods[shotId] === 'manual' ? 'manual' : 'auto';
-
-      // Insert: -10 -1 [label] +1 +10 [badge]
-      nudgeCell.appendChild(nudgeBtns[0]);
-      nudgeCell.appendChild(nudgeBtns[1]);
-      nudgeCell.appendChild(offLabel);
-      nudgeCell.appendChild(nudgeBtns[2]);
-      nudgeCell.appendChild(nudgeBtns[3]);
-      nudgeCell.appendChild(methodBadge);
-
-      rowEls[shotId] = { rowEl, barEl, barTextEl, offLabel, methodBadge, nudgeBtns };
-    }
-
-    rowEl.appendChild(labelCell);
-    rowEl.appendChild(barZone);
-    rowEl.appendChild(nudgeCell);
-    rowsArea.appendChild(rowEl);
-  });
-
-  rowsArea.appendChild(playheadWrap);  // keep playhead on top
-  timelineWrap.appendChild(rowsArea);
-  timelineSide.appendChild(timelineWrap);
-
-  // ── Controls row ──────────────────────────────────────────────────
-  const controls = document.createElement('div');
-  controls.style.cssText = `
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px;
-    background: #0a0c12;
-    border-radius: 6px;
-  `;
-
-  const playBtn = document.createElement('button');
-  playBtn.className = 'btn btn-primary';
-  playBtn.style.cssText = 'width:80px;flex-shrink:0;font-size:16px;padding:6px 0;';
-  playBtn.textContent = '▶';
-
-  const timeLabel = document.createElement('span');
-  timeLabel.style.cssText = 'font-size:12px;color:#64748b;font-family:monospace;flex-shrink:0;min-width:55px;';
-  timeLabel.textContent = '0:00.0';
-
-  const durLabel = document.createElement('span');
-  durLabel.style.cssText = 'font-size:12px;color:#4b5563;font-family:monospace;flex-shrink:0;';
-  durLabel.textContent = '—';
-
-  controls.appendChild(playBtn);
-  controls.appendChild(timeLabel);
-  controls.appendChild(durLabel);
-  timelineSide.appendChild(controls);
-  panel.appendChild(stickyShell);  // sticky timeline — first in DOM, stays pinned at top on scroll
-  panel.appendChild(videoWrap);    // video grid — scrolls normally below the sticky timeline
-
-  // ── Shared virtual-clock state ────────────────────────────────────
-  // Start at the overlap point (latest offset) so all shots are in range
-  const _initT = shots.filter(s => !s.isRef)
-    .reduce((m, s) => Math.max(m, offsets[s.shotId] / fps), 0);
-  let virtualT = _initT;
-  let globalDuration = 0;
-  let playing = false;
-  let rafId = null;
-  let lastWallMs = null;
-  const durations = {};   // shotId → seconds
-  shots.forEach(s => { durations[s.shotId] = null; });
-
-  function fmtTime(t) {
-    if (!isFinite(t) || t < 0) return '—';
-    const m = Math.floor(t / 60);
-    const s = (t % 60).toFixed(1).padStart(4, '0');
-    return `${m}:${s}`;
-  }
-
-  function computeGlobalDuration() {
-    let end = 0;
-    shots.forEach(({ shotId }) => {
-      const d = durations[shotId];
-      if (d == null) return;
-      end = Math.max(end, offsets[shotId] / fps + d);
-    });
-    return end;
-  }
-
-  // ── Timeline drawing ──────────────────────────────────────────────
-  function timelineWidth() {
-    return rulerScroll.clientWidth || 400;
-  }
-
-  function redrawTimeline() {
-    globalDuration = computeGlobalDuration();
-    const totalPx = Math.max(timelineWidth(), globalDuration * pxPerSec + 20);
-
-    // ── Ruler ticks ──
-    rulerCanvas.style.width = totalPx + 'px';
-    rulerCanvas.innerHTML = '';
-    const tickStep = pxPerSec >= 80 ? 1 : pxPerSec >= 40 ? 2 : pxPerSec >= 20 ? 5 : 10;
-    const labelStep = pxPerSec >= 40 ? 5 : 10;
-    const totalSecs = Math.ceil(globalDuration) + 5;
-    for (let s = 0; s <= totalSecs; s += tickStep) {
-      const x = s * pxPerSec;
-      const isMajor = s % labelStep === 0;
-      const tick = document.createElement('div');
-      tick.style.cssText = `
-        position:absolute;left:${x}px;bottom:0;
-        width:1px;height:${isMajor ? 12 : 5}px;
-        background:${isMajor ? '#3d4060' : '#1e2130'};
-      `;
-      rulerCanvas.appendChild(tick);
-      if (isMajor) {
-        const lbl = document.createElement('span');
-        lbl.textContent = s + 's';
-        lbl.style.cssText = `
-          position:absolute;left:${x + 3}px;top:2px;
-          font-size:9px;color:#4b5563;font-family:monospace;
-          white-space:nowrap;
-        `;
-        rulerCanvas.appendChild(lbl);
-      }
-    }
-
-    // ── Bars ──
-    shots.forEach(({ shotId }) => {
-      const barEl = barElsByShot[shotId];
-      if (!barEl) return;
-      const offset = offsets[shotId];
-      const dur = durations[shotId];
-      const barLeft = (offset / fps) * pxPerSec;
-      const barWidth = dur != null ? dur * pxPerSec : 0;
-      barEl.style.left = barLeft + 'px';
-      barEl.style.width = (barWidth || 40) + 'px';
-    });
-
-    // Also update playhead position
-    updatePlayhead();
-  }
-
-  function updatePlayhead() {
-    const x = virtualT * pxPerSec;
-    playheadLine.style.transform = `translateX(${x}px)`;
-  }
-
-  function onDurationKnown(shotId, d) {
-    durations[shotId] = d;
-    globalDuration = computeGlobalDuration();
-    if (globalDuration > 0) {
-      durLabel.textContent = fmtTime(globalDuration);
-    }
-    redrawTimeline();
-    applyVirtualT(virtualT);
-  }
-
-  function applyVirtualT(t) {
-    virtualT = Math.max(0, globalDuration > 0 ? Math.min(globalDuration, t) : t);
-    timeLabel.textContent = fmtTime(virtualT);
-    updatePlayhead();
-
-    shots.forEach(({ shotId }) => {
-      const vid = videoEls[shotId];
-      if (!vid) return;
-      const localT = virtualT - offsets[shotId] / fps;
-      const dur = durations[shotId] || vid.duration || 0;
-      const inRange = localT >= 0 && localT <= dur;
-      vid.style.opacity = inRange ? '1' : '0.3';
-      const tEl = document.getElementById(`sync-time-${shotId}`);
-      if (tEl) tEl.textContent = inRange ? fmtTime(localT) : 'out of range';
-      if (!inRange) return;
-      const clamped = Math.max(0, Math.min(dur, localT));
-      const seekThreshold = 1.5 / fps;
-      if (Math.abs(vid.currentTime - clamped) > seekThreshold) {
-        vid.currentTime = clamped;
-      }
-    });
-  }
-
-  function startPlayback() {
-    playing = true;
-    playBtn.textContent = '⏸';
-    lastWallMs = performance.now();
-    shots.forEach(({ shotId }) => {
-      const vid = videoEls[shotId];
-      if (!vid) return;
-      const localT = virtualT - offsets[shotId] / fps;
-      const dur = durations[shotId] || vid.duration || 0;
-      if (localT >= 0 && localT <= dur) vid.play().catch(() => {});
-    });
-
-    function tick(nowMs) {
-      if (!playing) return;
-      const dt = (nowMs - lastWallMs) / 1000;
-      lastWallMs = nowMs;
-      const next = virtualT + dt;
-
-      if (next >= globalDuration) {
-        stopPlayback();
-        applyVirtualT(globalDuration);
-        return;
-      }
-
-      virtualT = next;
-      timeLabel.textContent = fmtTime(virtualT);
-      updatePlayhead();
-
-      shots.forEach(({ shotId }) => {
-        const vid = videoEls[shotId];
-        if (!vid) return;
-        const localT = virtualT - offsets[shotId] / fps;
-        const dur = durations[shotId] || vid.duration || 0;
-        const inRange = localT >= 0 && localT <= dur;
-        vid.style.opacity = inRange ? '1' : '0.3';
-        const tEl = document.getElementById(`sync-time-${shotId}`);
-        if (tEl) tEl.textContent = inRange ? fmtTime(localT) : 'out of range';
-        if (inRange) {
-          if (vid.paused) vid.play().catch(() => {});
-          if (Math.abs(vid.currentTime - localT) > 0.25) vid.currentTime = localT;
-        } else {
-          if (!vid.paused) vid.pause();
-        }
-      });
-
-      rafId = requestAnimationFrame(tick);
-    }
-    rafId = requestAnimationFrame(tick);
-  }
-
-  function stopPlayback() {
-    playing = false;
-    playBtn.textContent = '▶';
-    if (rafId != null) { cancelAnimationFrame(rafId); rafId = null; }
-    shots.forEach(({ shotId }) => videoEls[shotId]?.pause());
-  }
-
-  // ── Save offset to server ─────────────────────────────────────────
-  // prevOffsetOverride lets the drag pass its pre-drag startOffset so the
-  // error-revert goes back to the value before the drag, not after mousemove.
-  function commitOffset(shotId, newOffset, prevOffsetOverride = null) {
-    const row = rowEls[shotId];
-    if (!row) return;
-    const prevOffset = prevOffsetOverride !== null ? prevOffsetOverride : offsets[shotId];
-    offsets[shotId] = newOffset;
-
-    // Update offset label immediately
-    const fmtOff = (v) => (v === 0 ? '±0' : (v > 0 ? '+' : '') + v) + ' fr';
-    row.offLabel.textContent = '…';
-    row.nudgeBtns.forEach(btn => { btn.disabled = true; btn.style.opacity = '0.4'; });
-
-    redrawTimeline();
-    applyVirtualT(virtualT);
-
-    const patchPayload = { shot_id: shotId, frame_offset: newOffset };
-    console.debug('[sync] PATCH payload', patchPayload);
-    fetch('/api/sync', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patchPayload),
-    })
-      .then(async r => {
-        if (!r.ok) {
-          // Extract server detail without letting the parse error mask the real message
-          let detail = String(r.status);
-          try { const b = await r.json(); detail = b.detail || detail; } catch (_) {}
-          console.debug('[sync] PATCH response error', r.status, detail);
-          throw new Error(`HTTP ${r.status}: ${detail}`);
-        }
-        return r.json();
-      })
-      .then(updated => {
-        offsets[shotId] = updated.frame_offset;
-        methods[shotId] = updated.method || 'manual';
-        row.offLabel.textContent = fmtOff(offsets[shotId]);
-        row.methodBadge.textContent = 'manual';
-        row.methodBadge.style.background = '#312e81';
-        row.methodBadge.style.color = '#a5b4fc';
-        row.methodBadge.style.borderColor = '#4f46e5';
-
-        // Flash ✓
-        const orig = row.offLabel.style.color;
-        row.offLabel.style.color = '#4ade80';
-        setTimeout(() => { row.offLabel.style.color = orig; }, 1500);
-      })
-      .catch(err => {
-        // Revert to the value that was in place before this commit
-        console.error('[sync] PATCH /api/sync failed:', err.message);
-        offsets[shotId] = prevOffset;
-        row.offLabel.textContent = fmtOff(prevOffset);
-        row.offLabel.style.color = '#f87171';
-        row.offLabel.title = err.message;
-        showSyncError(err.message);
-        setTimeout(() => { row.offLabel.style.color = ''; row.offLabel.title = ''; }, 5000);
-        redrawTimeline();
-        applyVirtualT(virtualT);
-      })
-      .finally(() => {
-        row.nudgeBtns.forEach(btn => { btn.disabled = false; btn.style.opacity = ''; });
-      });
-  }
-
-  // ── Transient error banner ────────────────────────────────────────
-  function showSyncError(msg) {
-    let banner = document.getElementById('sync-error-banner');
-    if (!banner) {
-      banner = document.createElement('div');
-      banner.id = 'sync-error-banner';
-      banner.style.cssText = `
-        position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
-        background:#450a0a;color:#fca5a5;border:1px solid #7f1d1d;
-        border-radius:6px;padding:10px 20px;font-size:13px;z-index:9999;
-        box-shadow:0 4px 12px rgba(0,0,0,0.5);
-      `;
-      document.body.appendChild(banner);
-    }
-    banner.textContent = msg;
-    banner.style.display = 'block';
-    clearTimeout(banner._hideTimeout);
-    banner._hideTimeout = setTimeout(() => { banner.style.display = 'none'; }, 6000);
-  }
-
-  // ── Clip bar drag ─────────────────────────────────────────────────
-  let dragState = null;  // { shotId, startX, startOffset }
-
-  shots.forEach(({ shotId, isRef }, i) => {
-    if (isRef) return;
-    const row = rowEls[shotId];
-    if (!row) return;
-    row.barEl.addEventListener('mousedown', e => {
-      e.preventDefault();
-      dragState = { shotId, startX: e.clientX, startOffset: offsets[shotId] };
-    });
-  });
-
-  // ── Document-level handlers — registered once per sync-player instance.
-  // If renderSyncPlayer is called again (stage re-visit), first remove the old
-  // handlers so they don't accumulate.
-  if (window._syncCleanup) window._syncCleanup();
-
-  function onDocMousemoveBar(e) {
-    if (!dragState) return;
-    const dx = e.clientX - dragState.startX;
-    const deltaFrames = Math.round(dx / pxPerSec * fps);
-    const newOffset = dragState.startOffset + deltaFrames;
-    offsets[dragState.shotId] = newOffset;
-    // Update offset label live
-    const row = rowEls[dragState.shotId];
-    if (row) {
-      const fmtOff = (v) => (v === 0 ? '±0' : (v > 0 ? '+' : '') + v) + ' fr';
-      row.offLabel.textContent = fmtOff(newOffset);
-    }
-    redrawTimeline();
-    applyVirtualT(virtualT);
-  }
-
-  function onDocMouseupBar(e) {
-    if (!dragState) return;
-    const { shotId, startOffset } = dragState;
-    dragState = null;
-    // Reset bar hover style
-    const row = rowEls[shotId];
-    if (row) row.barEl.style.background = '#2d3148';
-    // Only save if offset actually changed; pass startOffset so error-revert
-    // goes back to the pre-drag value (offsets[shotId] was already mutated by mousemove).
-    if (offsets[shotId] !== startOffset) {
-      commitOffset(shotId, offsets[shotId], startOffset);
-    }
-  }
-
-  document.addEventListener('mousemove', onDocMousemoveBar);
-  document.addEventListener('mouseup', onDocMouseupBar);
-
-  // ── Playhead drag to seek ─────────────────────────────────────────
-  let seekDragging = false;
-
-  playheadLine.addEventListener('mousedown', e => {
-    e.preventDefault();
-    seekDragging = true;
-    if (playing) stopPlayback();
-  });
-
-  function onDocMousemoveSeek(e) {
-    if (!seekDragging) return;
-    const rect = rulerScroll.getBoundingClientRect();
-    const x = Math.max(0, e.clientX - rect.left);
-    applyVirtualT(x / pxPerSec);
-  }
-
-  function onDocMouseupSeek() { seekDragging = false; }
-
-  document.addEventListener('mousemove', onDocMousemoveSeek);
-  document.addEventListener('mouseup', onDocMouseupSeek);
-
-  // Store cleanup so next call can remove these listeners
-  window._syncCleanup = () => {
-    document.removeEventListener('mousemove', onDocMousemoveBar);
-    document.removeEventListener('mouseup', onDocMouseupBar);
-    document.removeEventListener('mousemove', onDocMousemoveSeek);
-    document.removeEventListener('mouseup', onDocMouseupSeek);
-    window._syncCleanup = null;
-  };
-
-  // Click on ruler area to seek
-  rulerScroll.addEventListener('click', e => {
-    if (seekDragging) return;
-    const rect = rulerScroll.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    applyVirtualT(x / pxPerSec);
-  });
-
-  // ── Zoom controls ─────────────────────────────────────────────────
-  zoomOut.addEventListener('click', () => {
-    const idx = PX_STEPS.indexOf(pxPerSec);
-    if (idx > 0) { pxPerSec = PX_STEPS[idx - 1]; redrawTimeline(); }
-  });
-  zoomIn.addEventListener('click', () => {
-    const idx = PX_STEPS.indexOf(pxPerSec);
-    if (idx < PX_STEPS.length - 1) { pxPerSec = PX_STEPS[idx + 1]; redrawTimeline(); }
-  });
-
-  // ── Duration listeners + play/pause ──────────────────────────────
-  shots.forEach(({ shotId }) => {
-    const vid = videoEls[shotId];
-    if (!vid) return;
-    vid.addEventListener('loadedmetadata', () => onDurationKnown(shotId, vid.duration));
-  });
-
-  playBtn.addEventListener('click', () => {
-    if (playing) stopPlayback();
-    else startPlayback();
-  });
-
-  // Initial draw (before durations known); seek to overlap point
-  redrawTimeline();
-  applyVirtualT(_initT);
-}
-
-// ── Pitch drawing utilities (reused by matching, triangulation viewers) ──
-const PITCH_LENGTH = 105;  // metres (FIFA standard)
-const PITCH_WIDTH  = 68;
-
-function pitchToCanvas(px, py, cw, ch) {
-  const pad = 20;
-  const drawW = cw - 2 * pad;
-  const drawH = ch - 2 * pad;
-  return {
-    x: pad + (px / PITCH_LENGTH) * drawW,
-    y: pad + (py / PITCH_WIDTH) * drawH,
-  };
-}
-
-function drawPitch(ctx, cw, ch) {
-  const pad = 20;
-  const drawW = cw - 2 * pad;
-  const drawH = ch - 2 * pad;
-
-  ctx.fillStyle = '#1a3a1a';
-  ctx.fillRect(0, 0, cw, ch);
-
-  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-  ctx.lineWidth = 1.5;
-
-  // Outer boundary
-  ctx.strokeRect(pad, pad, drawW, drawH);
-
-  // Centre line
-  const cx = pad + drawW / 2;
-  ctx.beginPath(); ctx.moveTo(cx, pad); ctx.lineTo(cx, pad + drawH); ctx.stroke();
-
-  // Centre circle (r = 9.15m)
-  const cy = pad + drawH / 2;
-  const r = (9.15 / PITCH_LENGTH) * drawW;
-  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
-
-  // Centre spot
-  ctx.fillStyle = 'rgba(255,255,255,0.5)';
-  ctx.beginPath(); ctx.arc(cx, cy, 2, 0, Math.PI * 2); ctx.fill();
-
-  // Penalty areas (16.5m deep, 40.32m wide)
-  const paW = (16.5 / PITCH_LENGTH) * drawW;
-  const paH = (40.32 / PITCH_WIDTH) * drawH;
-  const paY = pad + (drawH - paH) / 2;
-  ctx.strokeRect(pad, paY, paW, paH);
-  ctx.strokeRect(pad + drawW - paW, paY, paW, paH);
-
-  // Goal areas (5.5m deep, 18.32m wide)
-  const gaW = (5.5 / PITCH_LENGTH) * drawW;
-  const gaH = (18.32 / PITCH_WIDTH) * drawH;
-  const gaY = pad + (drawH - gaH) / 2;
-  ctx.strokeRect(pad, gaY, gaW, gaH);
-  ctx.strokeRect(pad + drawW - gaW, gaY, gaW, gaH);
-}
-
-// ── Triangulation renderer ────────────────────────────────────────────
-function renderTriangulation(panel, data) {
-  const players = data.players || [];
-  const ball = data.ball || null;
-  if (!players.length) { renderNoOutput(); return; }
-
-  // Count non-null valid frames per player (NaN is null in JSON).
-  const validFramesCount = p => {
-    let n = 0;
-    for (let fi = 0; fi < p.positions.length; fi++) {
-      const frame = p.positions[fi];
-      for (let ji = 0; ji < frame.length; ji++) {
-        const j = frame[ji];
-        if (j && j[0] !== null && !isNaN(j[0])) { n++; break; }
-      }
-    }
-    return n;
-  };
-
-  // ── Summary table ──
-  const { wrap, body } = makePanel(`Triangulated Players (${players.length})`);
-  const { t, tbody } = makeTable(['Player', 'Name', 'Team', 'Valid Frames', 'Avg Confidence']);
-
-  players.forEach(p => {
-    const confs = (p.confidences || []).flat().filter(c => c !== null && !isNaN(c));
-    const validConfs = confs.filter(c => c > 0);
-    const avgConf = validConfs.length ? validConfs.reduce((a,b)=>a+b,0)/validConfs.length : 0;
-    const teamCls = p.team === 'A' ? 'team-a' : p.team === 'B' ? 'team-b' :
-                    p.team === 'referee' ? 'team-ref' : 'team-unk';
-    addRow(tbody, [
-      p.player_id,
-      p.player_name || '—',
-      { html: `<span class="${teamCls}">${p.team}</span>` },
-      `${validFramesCount(p)} / ${p.num_frames}`,
-      { html: `<span class="${avgConf>0.5?'cell-green':avgConf>0.2?'cell-amber':'cell-red'}">${avgConf.toFixed(2)}</span>` },
-    ]);
-  });
-
-  // ── Preview panel: bird's-eye canvas + reference shot video ──
-  const { wrap: vizWrap, body: vizBody } = makePanel('Bird\'s-Eye View + Reference Shot');
-
-  const row = document.createElement('div');
-  row.style.cssText = 'display:flex;gap:14px;padding:8px;align-items:flex-start;flex-wrap:wrap;';
-
-  // Left: bird's eye canvas
-  const canvas = document.createElement('canvas');
-  const cw = 640, ch = 420;
-  canvas.width = cw; canvas.height = ch;
-  canvas.style.cssText = 'display:block;border-radius:6px;flex:0 0 auto;';
-  row.appendChild(canvas);
-
-  // Right: reference shot <video> + 2D pose overlay canvas
-  const rightCol = document.createElement('div');
-  rightCol.style.cssText = 'position:relative;flex:0 0 auto;width:640px;';
-  const refVideo = document.createElement('video');
-  refVideo.preload = 'metadata';
-  refVideo.muted = true;
-  refVideo.playsInline = true;
-  refVideo.style.cssText = 'display:block;width:100%;height:auto;border-radius:6px;background:#000;';
-  const refOverlay = document.createElement('canvas');
-  refOverlay.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;width:100%;height:100%;';
-  const refLabel = document.createElement('div');
-  refLabel.style.cssText = 'font-size:11px;color:#94a3b8;padding:4px 0;';
-  refLabel.textContent = 'Loading reference shot…';
-  rightCol.appendChild(refVideo);
-  rightCol.appendChild(refOverlay);
-  rightCol.appendChild(refLabel);
-  row.appendChild(rightCol);
-
-  vizBody.appendChild(row);
-
-  // Controls bar (drives BOTH canvases — unified playhead)
-  const controls = document.createElement('div');
-  controls.style.cssText = 'display:flex;align-items:center;gap:12px;padding:8px 12px;';
-
-  const playBtn = document.createElement('button');
-  playBtn.textContent = '▶';
-  playBtn.style.cssText = 'background:#4f46e5;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:14px;';
-  controls.appendChild(playBtn);
-
-  const slider = document.createElement('input');
-  slider.type = 'range'; slider.min = '0'; slider.max = String(Math.max(0, (players[0]?.num_frames || 1) - 1));
-  slider.value = '0'; slider.style.cssText = 'flex:1;';
-  controls.appendChild(slider);
-
-  const frameInfo = document.createElement('span');
-  frameInfo.style.cssText = 'font-size:12px;color:#94a3b8;min-width:100px;';
-  controls.appendChild(frameInfo);
-
-  vizBody.appendChild(controls);
-  panel.appendChild(vizWrap);
-
-  // ── Drawing logic ──
-  let currentFrame = 0;
-  let playing = false;
-  let animId = null;
-  // Force playback at 30 fps regardless of the source clip's native fps so
-  // the preview animation doesn't depend on the browser's refresh rate.
-  const fps = 30;
-
-  // Pitch-plus-margin coordinate system: the pitch always occupies a fixed
-  // region of the canvas, with a 10m margin on every side so mildly outlying
-  // joints (noisy wrists/ankles, keepers behind the goal line) stay visible.
-  // Joints more than 10m off-pitch clip at the canvas edge — that's a clear
-  // "this joint is wrong" diagnostic.
-  //
-  // The y axis is FLIPPED so the camera-side touchline (pitch y=0, "near")
-  // appears at the BOTTOM of the canvas and the far touchline (y=68) at the
-  // top.  This matches how the broadcast camera sees the pitch.
-  const OUTSIDE_MARGIN_M = 10;
-  const mappedW = PITCH_LENGTH + 2 * OUTSIDE_MARGIN_M;
-  const mappedH = PITCH_WIDTH + 2 * OUTSIDE_MARGIN_M;
-  const pad = 20;
-  const drawW = cw - 2 * pad, drawH = ch - 2 * pad;
-  // toX is unchanged.  toY now inverts: pitch y=0 → canvas bottom.
-  const toX = x => pad + ((x + OUTSIDE_MARGIN_M) / mappedW) * drawW;
-  const toY = y => pad + drawH - ((y + OUTSIDE_MARGIN_M) / mappedH) * drawH;
-
-  // Pre-compute pitch geometry anchors for drawPitchInline().
-  // After the y-flip, "NEAR" (y=0) maps to a high canvas-y (bottom) and
-  // "FAR" (y=68) maps to a low canvas-y (top).
-  const PITCH_LEFT = toX(0);
-  const PITCH_RIGHT = toX(PITCH_LENGTH);
-  const PITCH_NEAR_Y = toY(0);            // canvas y of near touchline (bottom)
-  const PITCH_FAR_Y = toY(PITCH_WIDTH);   // canvas y of far touchline (top)
-
-  function drawPitchInline(ctx) {
-    // Background: dark green filling the whole canvas.
-    ctx.fillStyle = '#1a3a1a';
-    ctx.fillRect(0, 0, cw, ch);
-
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.lineWidth = 1.5;
-
-    // Outer boundary — note PITCH_FAR_Y is the smaller value (canvas top).
-    const pitchH = PITCH_NEAR_Y - PITCH_FAR_Y;
-    ctx.strokeRect(PITCH_LEFT, PITCH_FAR_Y, PITCH_RIGHT - PITCH_LEFT, pitchH);
-
-    // Centre line
-    const midX = toX(PITCH_LENGTH / 2);
-    ctx.beginPath();
-    ctx.moveTo(midX, PITCH_FAR_Y);
-    ctx.lineTo(midX, PITCH_NEAR_Y);
-    ctx.stroke();
-
-    // Centre circle (r = 9.15m)
-    const midY = toY(PITCH_WIDTH / 2);
-    const circleR = toX(9.15) - toX(0);
-    ctx.beginPath(); ctx.arc(midX, midY, circleR, 0, Math.PI * 2); ctx.stroke();
-
-    // Centre spot
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    ctx.beginPath(); ctx.arc(midX, midY, 2, 0, Math.PI * 2); ctx.fill();
-
-    // Penalty areas (16.5m deep, 40.32m wide, centred on pitch width).
-    // After the y-flip, the "lower" pitch-y is at HIGHER canvas y so we
-    // sort the canvas y values by max/min before passing to strokeRect.
-    const penA = toY((PITCH_WIDTH - 40.32) / 2);
-    const penB = toY((PITCH_WIDTH + 40.32) / 2);
-    const penTop = Math.min(penA, penB);
-    const penBot = Math.max(penA, penB);
-    const penH = penBot - penTop;
-    const penLeftX = toX(16.5);
-    const penRightX = toX(PITCH_LENGTH - 16.5);
-    ctx.strokeRect(PITCH_LEFT, penTop, penLeftX - PITCH_LEFT, penH);
-    ctx.strokeRect(penRightX, penTop, PITCH_RIGHT - penRightX, penH);
-
-    // Goal areas (5.5m deep, 18.32m wide)
-    const gaA = toY((PITCH_WIDTH - 18.32) / 2);
-    const gaB = toY((PITCH_WIDTH + 18.32) / 2);
-    const gaTop = Math.min(gaA, gaB);
-    const gaBot = Math.max(gaA, gaB);
-    const gaH = gaBot - gaTop;
-    const gaLeftX = toX(5.5);
-    const gaRightX = toX(PITCH_LENGTH - 5.5);
-    ctx.strokeRect(PITCH_LEFT, gaTop, gaLeftX - PITCH_LEFT, gaH);
-    ctx.strokeRect(gaRightX, gaTop, PITCH_RIGHT - gaRightX, gaH);
-  }
-
-  // Valid-joint predicate — positions carry `null` for NaN values from the
-  // API, so we check both `null` and `NaN`.
-  const _isValid = v => v !== null && v !== undefined && !isNaN(v);
-
-  function drawFrame(fi) {
-    const ctx = canvas.getContext('2d');
-    drawPitchInline(ctx);
-
-    // Draw skeletons (bird's-eye, top-down pitch coords)
-    players.forEach(p => {
-      if (fi >= p.positions.length) return;
-      const joints = p.positions[fi];
-      const confs = p.confidences[fi];
-      const color = TEAM_COLORS[p.team] || TEAM_COLORS.unknown;
-
-      // Bones
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      ctx.globalAlpha = 0.7;
-      for (const [a, b] of SKELETON) {
-        const ja = joints[a], jb = joints[b];
-        if (!ja || !jb) continue;
-        if (!_isValid(ja[0]) || !_isValid(jb[0])) continue;
-        const ca = confs ? confs[a] : 1, cb = confs ? confs[b] : 1;
-        if ((ca ?? 0) < 0.05 || (cb ?? 0) < 0.05) continue;
-        ctx.beginPath();
-        ctx.moveTo(toX(ja[0]), toY(ja[1]));
-        ctx.lineTo(toX(jb[0]), toY(jb[1]));
-        ctx.stroke();
-      }
-
-      // Joints
-      ctx.globalAlpha = 1.0;
-      for (let j = 0; j < joints.length; j++) {
-        const jt = joints[j];
-        if (!jt || !_isValid(jt[0])) continue;
-        const c = confs ? (confs[j] ?? 0) : 1;
-        if (c < 0.05) continue;
-        const r = Math.round(255 * (1 - c));
-        const g = Math.round(255 * c);
-        ctx.fillStyle = `rgb(${r},${g},60)`;
-        ctx.beginPath();
-        ctx.arc(toX(jt[0]), toY(jt[1]), 3, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    });
-
-    // Ball: white circle scaled by world height (visible bounce/peak)
-    if (ball && fi < ball.positions.length) {
-      const bp = ball.positions[fi];
-      if (bp && bp[0] !== null && !isNaN(bp[0])) {
-        const bx = toX(bp[0]);
-        const by = toY(bp[1]);
-        const z = bp[2] || 0;
-        // Show altitude as a vertical drop-line + radius scaling
-        ctx.strokeStyle = 'rgba(255,255,255,0.4)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(bx, by);
-        ctx.lineTo(bx, by - Math.min(20, z * 4));
-        ctx.stroke();
-        const r = 4 + Math.min(4, z * 0.5);
-        ctx.fillStyle = '#ffffff';
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.arc(bx, by - Math.min(20, z * 4), r, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-      }
-    }
-
-    // Pose overlay is drawn alongside the reference shot video.  The
-    // video plays itself (refVideo.play()) so its timing stays at the
-    // native source fps; we just refresh the overlay every animation
-    // tick using the current playhead.
-    drawPoseOverlay(fi);
-
-    const refFrame = fi + (players[0]?.start_frame || 0);
-    frameInfo.textContent = `Frame ${refFrame} / ${slider.max}`;
-  }
-
-  // ── Reference shot video + 2D pose overlay ──
-  // Async state populated after fetches resolve.  drawFrame() guards
-  // on these before accessing them.
-  let refShotId = null;
-  let refPoseByTrack = null; // { track_id: {frame_int: keypoints[]} }
-  let refVideoReady = false;
-  let refVideoDurationS = 0;
-
-  function drawPoseOverlay(fi) {
-    if (!refOverlay.width || !refPoseByTrack) return;
-    const ctx = refOverlay.getContext('2d');
-    ctx.clearRect(0, 0, refOverlay.width, refOverlay.height);
-
-    // Prefer the video's currentTime (when loaded) over the bird's-eye
-    // index, so the overlay is always frame-perfect with whatever the
-    // <video> element is showing right now.
-    let refFrame;
-    if (refVideoReady) {
-      refFrame = Math.round(refVideo.currentTime * fps);
-    } else {
-      refFrame = fi + (players[0]?.start_frame || 0);
-    }
-
-    ctx.lineWidth = 2.5;
-    ctx.strokeStyle = 'rgba(99, 102, 241, 0.9)';
-    ctx.fillStyle = 'rgba(245, 245, 245, 1.0)';
-
-    for (const trackId in refPoseByTrack) {
-      const kps = refPoseByTrack[trackId][refFrame];
-      if (!kps) continue;
-      // Bones
-      for (const [a, b] of SKELETON) {
-        const ka = kps[a], kb = kps[b];
-        if (!ka || !kb) continue;
-        if ((ka.conf ?? 0) < 0.3 || (kb.conf ?? 0) < 0.3) continue;
-        ctx.beginPath();
-        ctx.moveTo(ka.x, ka.y);
-        ctx.lineTo(kb.x, kb.y);
-        ctx.stroke();
-      }
-      // Joints
-      for (const kp of kps) {
-        if ((kp.conf ?? 0) < 0.3) continue;
-        ctx.beginPath();
-        ctx.arc(kp.x, kp.y, 3, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-  }
-
-  function seekReferenceShot(fi) {
-    // Used by slider scrub and pause-time seeks.
-    if (!refVideoReady) return;
-    const refFrame = fi + (players[0]?.start_frame || 0);
-    const targetTime = refFrame / fps;
-    if (targetTime < 0 || targetTime > refVideoDurationS) return;
-    refVideo.currentTime = targetTime;
-  }
-
-  // Fire-and-forget load of reference-shot video + pose data
-  (async () => {
-    try {
-      const syncRes = await fetch('/api/output/sync');
-      if (syncRes.ok) {
-        const sync = await syncRes.json();
-        refShotId = sync.reference_shot;
-      }
-    } catch (_) {}
-    if (!refShotId) {
-      refLabel.textContent = 'No reference shot found in sync map.';
-      return;
-    }
-    refLabel.textContent = `Reference shot: ${refShotId}`;
-
-    refVideo.src = `/api/video/${refShotId}`;
-    refVideo.addEventListener('loadedmetadata', () => {
-      refOverlay.width = refVideo.videoWidth || 1920;
-      refOverlay.height = refVideo.videoHeight || 1080;
-      refVideoDurationS = refVideo.duration || 0;
-      refVideoReady = true;
-      drawFrame(currentFrame);
-    });
-    refVideo.addEventListener('error', () => {
-      refLabel.textContent = `Reference shot: ${refShotId} — video failed to load`;
-    });
-
-    try {
-      const poseRes = await fetch('/api/output/pose');
-      if (poseRes.ok) {
-        const poseData = await poseRes.json();
-        const shotBlock = poseData.shots?.[refShotId];
-        if (shotBlock && Array.isArray(shotBlock.players)) {
-          refPoseByTrack = {};
-          for (const pl of shotBlock.players) {
-            const map = {};
-            for (const pf of (pl.frames || [])) {
-              map[pf.frame] = pf.keypoints;
-            }
-            refPoseByTrack[pl.track_id] = map;
-          }
-          drawFrame(currentFrame);
-        }
-      }
-    } catch (_) {}
-  })();
-
-  // Playback strategy:
-  //   - When the reference video is loaded, it is the source of truth.
-  //     We call refVideo.play() / pause() to advance time naturally; the
-  //     bird's-eye and pose overlay derive `currentFrame` from
-  //     refVideo.currentTime each animation tick.
-  //   - When the video isn't ready (still loading / load failed), we fall
-  //     back to wall-clock advancement at the configured fps so the
-  //     bird's-eye preview still works.
-  let lastTickMs = 0;
-  let frameAccum = 0;
-  const startFrameOffset = players[0]?.start_frame || 0;
-
-  function tick(nowMs) {
-    if (!playing) return;
-    const maxFrame = parseInt(slider.max);
-
-    if (refVideoReady && !refVideo.paused) {
-      // Video is the clock.  Convert its currentTime to a bird's-eye frame.
-      const videoFrame = Math.round(refVideo.currentTime * fps);
-      currentFrame = Math.max(0, Math.min(maxFrame - 1, videoFrame - startFrameOffset));
-      // Loop the bird's-eye when the video reaches the end of the
-      // visible range.
-      if (currentFrame >= maxFrame - 1 && refVideo.currentTime >= (startFrameOffset + maxFrame - 1) / fps - 0.05) {
-        currentFrame = 0;
-        refVideo.currentTime = startFrameOffset / fps;
-      }
-    } else {
-      // Wall-clock fallback (no video loaded).
-      if (lastTickMs === 0) lastTickMs = nowMs;
-      const dt = (nowMs - lastTickMs) / 1000;
-      lastTickMs = nowMs;
-      frameAccum += dt * fps;
-      while (frameAccum >= 1) {
-        frameAccum -= 1;
-        currentFrame++;
-        if (currentFrame >= maxFrame) currentFrame = 0;
-      }
-    }
-
-    slider.value = String(currentFrame);
-    drawFrame(currentFrame);
-    animId = requestAnimationFrame(tick);
-  }
-
-  playBtn.addEventListener('click', () => {
-    playing = !playing;
-    playBtn.textContent = playing ? '⏸' : '▶';
-    if (playing) {
-      lastTickMs = 0;
-      frameAccum = 0;
-      if (refVideoReady) {
-        // Make sure the video is at the current playhead, then start it.
-        seekReferenceShot(currentFrame);
-        refVideo.play().catch(() => { /* autoplay denied — fall back to wall-clock */ });
-      }
-      animId = requestAnimationFrame(tick);
-    } else {
-      if (refVideoReady) refVideo.pause();
-      if (animId) cancelAnimationFrame(animId);
-    }
-  });
-
-  slider.addEventListener('input', () => {
-    currentFrame = parseInt(slider.value);
-    seekReferenceShot(currentFrame);
-    drawFrame(currentFrame);
-  });
-
-  drawFrame(0);
-
-  // ── Summary table (below the viewer) ──
   body.appendChild(t);
   panel.appendChild(wrap);
 }
 
-// ── SMPL Fitting renderer ─────────────────────────────────────────────
-function renderSmplFitting(panel, data) {
-  const players = data.players || [];
-  if (!players.length) { renderNoOutput(); return; }
+async function renderTracking(panel) {
+  emptyNote(panel,
+    "Tracking output is consumed downstream (camera, pose_2d, hmr_world). " +
+    "Re-run this stage to regenerate per-clip tracks.");
+}
 
-  const { wrap, body } = makePanel(`SMPL Fitting (${players.length} players)`);
-  const { t, tbody } = makeTable(['Player', 'Frames', 'FPS', 'Shape Norm']);
+async function renderCamera(panel) {
+  const track = await fetchJsonOrNull("/camera/track");
+  const anchors = await fetchJsonOrNull("/anchors");
 
-  players.forEach(p => {
-    addRow(tbody, [
-      p.player_id,
-      p.num_frames,
-      fmt(p.fps, 1),
-      fmt(p.betas_norm, 3),
-    ]);
-  });
+  const { wrap, body } = makePanel("Camera Track");
+  const summary = document.createElement("div");
+  summary.style.cssText = "padding:14px 16px;font-size:13px;color:#cbd5e1;";
 
+  if (!track || !track.frames || track.frames.length === 0) {
+    summary.innerHTML = '<span class="cell-dim">No camera_track.json yet.</span>';
+  } else {
+    const N = track.frames.length;
+    const meanConf = track.frames.reduce((s, f) => s + (f.confidence || 0), 0) / N;
+    const anchorCount = track.frames.filter((f) => f.is_anchor).length;
+    summary.innerHTML = `
+      <div>Clip: <strong>${track.clip_id}</strong></div>
+      <div>Frames: ${N}, FPS: ${fmt(track.fps, 2)}, image ${track.image_size.join("×")}</div>
+      <div>Camera position (t_world): [${track.t_world.map((v) => fmt(v, 2)).join(", ")}]</div>
+      <div>Mean confidence: <span class="${meanConf > 0.7 ? "cell-green" : meanConf > 0.4 ? "cell-amber" : "cell-red"}">${fmt(meanConf, 3)}</span></div>
+      <div>Anchored frames: ${anchorCount} / ${N}</div>
+    `;
+  }
+
+  if (anchors && anchors.anchors && anchors.anchors.length > 0) {
+    summary.innerHTML += `
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid #2d3148;">
+        Anchor set: ${anchors.anchors.length} anchor frame${anchors.anchors.length === 1 ? "" : "s"}
+        (clip <strong>${anchors.clip_id || "—"}</strong>)
+      </div>`;
+  } else {
+    summary.innerHTML += `
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid #2d3148;color:#94a3b8;">
+        No anchors yet — open the
+        <a href="/anchor_editor" style="color:#a5b4fc;">Anchor Editor</a>
+        to mark landmarks before running this stage.
+      </div>`;
+  }
+
+  body.appendChild(summary);
+  panel.appendChild(wrap);
+}
+
+async function renderPose2D(panel) {
+  emptyNote(panel,
+    "2D pose output is consumed by hmr_world. Re-run this stage to regenerate per-track keypoints.");
+}
+
+async function renderHmrWorld(panel) {
+  const data = await fetchJsonOrNull("/hmr_world/players");
+  if (!data || !data.players || data.players.length === 0) {
+    emptyNote(panel, "No hmr_world tracks yet — run hmr_world to fit SMPL bodies.");
+    return;
+  }
+  const { wrap, body } = makePanel(`HMR World (${data.players.length} player${data.players.length === 1 ? "" : "s"})`);
+  const { t, tbody } = makeTable(["Player ID", "Frames", "Mean confidence"]);
+  for (const pid of data.players) {
+    const preview = await fetchJsonOrNull(`/hmr_world/preview?player_id=${encodeURIComponent(pid)}`);
+    if (!preview) {
+      addRow(tbody, [pid, "—", "—"]);
+      continue;
+    }
+    const N = (preview.frames || []).length;
+    const conf = preview.confidence || [];
+    const mean = conf.length ? conf.reduce((s, x) => s + x, 0) / conf.length : 0;
+    const cls = mean > 0.7 ? "cell-green" : mean > 0.4 ? "cell-amber" : "cell-red";
+    addRow(tbody, [pid, N, { html: `<span class="${cls}">${fmt(mean, 3)}</span>` }]);
+  }
   body.appendChild(t);
   panel.appendChild(wrap);
-
-  const info = document.createElement('div');
-  info.style.cssText = 'color:#64748b;font-size:12px;padding:8px 0;';
-  info.textContent = 'SMPL parameters fitted. Run the Export stage (9) to generate the 3D viewer scene.';
-  panel.appendChild(info);
 }
 
-// ── HMR renderer ────────────────────────────────────────────────────
-// SMPL 22-joint skeleton bones (child→parent pairs).
-const SMPL22_BONES = [
-  [1,0],[2,0],[3,0],[4,1],[5,2],[6,3],[7,4],[8,5],[9,6],
-  [10,7],[11,8],[12,9],[13,9],[14,9],[15,12],[16,13],[17,14],
-  [18,16],[19,17],[20,18],[21,19],
-];
-const SMPL22_NAMES = [
-  'pelvis','L_hip','R_hip','spine1','L_knee','R_knee','spine2',
-  'L_ankle','R_ankle','spine3','L_foot','R_foot','neck',
-  'L_collar','R_collar','head','L_shoulder','R_shoulder',
-  'L_elbow','R_elbow','L_wrist','R_wrist',
-];
-
-function renderHmr(panel, data) {
-  const shots = data.shots || {};
-  const shotIds = Object.keys(shots);
-  if (!shotIds.length) { renderNoOutput(); return; }
-
-  // ── Summary table ──────────────────────────────────────────────────
-  const { wrap: sumWrap, body: sumBody } = makePanel('HMR Results (Monocular)');
-  const { t: sumT, tbody: sumTb } = makeTable(
-    ['Shot', 'Players', 'Mean Confidence']
-  );
-  for (const sid of shotIds) {
-    const plist = shots[sid].players || [];
-    const avgConf = plist.length
-      ? plist.reduce((s, p) => s + p.mean_confidence, 0) / plist.length
-      : 0;
-    addRow(sumTb, [sid, plist.length, fmt(avgConf, 2)]);
+async function renderBall(panel) {
+  const data = await fetchJsonOrNull("/ball/preview");
+  if (!data || !data.frames || data.frames.length === 0) {
+    emptyNote(panel, "No ball track yet — run ball to detect ball positions.");
+    return;
   }
-  sumBody.appendChild(sumT);
-  panel.appendChild(sumWrap);
-
-  // ── Per-shot detail ────────────────────────────────────────────────
-  for (const sid of shotIds) {
-    const plist = shots[sid].players || [];
-    const shotDiv = document.createElement('div');
-    shotDiv.className = 'shot-viewer';
-
-    const h4 = document.createElement('h4');
-    h4.textContent = `${sid} — ${plist.length} players`;
-    shotDiv.appendChild(h4);
-
-    // Player table
-    const { t: pt, tbody: ptb } = makeTable(
-      ['Track', 'Name', 'Team', 'Frames', 'Confidence', 'Shape Norm']
-    );
-    plist.forEach(p => {
-      addRow(ptb, [
-        p.track_id,
-        p.player_name || '—',
-        p.team || '—',
-        p.num_frames,
-        fmt(p.mean_confidence, 2),
-        fmt(p.betas_norm, 3),
-      ]);
-    });
-    shotDiv.appendChild(pt);
-
-    // Video + overlay (lazy-load detail data on click)
-    const viewerBtn = document.createElement('button');
-    viewerBtn.textContent = 'Open SMPL Overlay';
-    viewerBtn.style.cssText = 'margin:8px 0;padding:6px 14px;background:#4f46e5;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;';
-    shotDiv.appendChild(viewerBtn);
-
-    const overlayContainer = document.createElement('div');
-    shotDiv.appendChild(overlayContainer);
-
-    viewerBtn.addEventListener('click', async () => {
-      viewerBtn.disabled = true;
-      viewerBtn.textContent = 'Loading…';
-      try {
-        const res = await fetch(`/api/output/hmr/${sid}`);
-        if (!res.ok) throw new Error('Failed to load HMR detail');
-        const detail = await res.json();
-        overlayContainer.innerHTML = '';
-        renderHmrOverlay(overlayContainer, sid, detail);
-        viewerBtn.style.display = 'none';
-      } catch (e) {
-        viewerBtn.textContent = 'Error: ' + e.message;
-      }
-    });
-
-    panel.appendChild(shotDiv);
+  const { wrap, body } = makePanel("Ball Track");
+  const N = data.frames.length;
+  const states = {};
+  for (const f of data.frames) {
+    states[f.state] = (states[f.state] || 0) + 1;
   }
+  const stateSummary = Object.entries(states)
+    .map(([s, n]) => `${s}: ${n} (${fmt((n / N) * 100, 1)}%)`)
+    .join(", ");
+  const summary = document.createElement("div");
+  summary.style.cssText = "padding:14px 16px;font-size:13px;color:#cbd5e1;line-height:1.7;";
+  summary.innerHTML = `
+    <div>Clip: <strong>${data.clip_id}</strong>, FPS: ${fmt(data.fps, 2)}</div>
+    <div>Frames: ${N}</div>
+    <div>State distribution: ${stateSummary}</div>
+    <div>Flight segments: ${(data.flight_segments || []).length}</div>
+  `;
+  body.appendChild(summary);
+  panel.appendChild(wrap);
 }
 
-function renderHmrOverlay(container, shotId, detail) {
-  const players = detail.players || [];
-  if (!players.length) return;
-
-  // ── Video + canvas overlay ─────────────────────────────────────────
-  const wrap = document.createElement('div');
-  wrap.className = 'video-wrap';
-  const inner = document.createElement('div');
-  inner.className = 'video-inner';
-
-  const video = document.createElement('video');
-  video.src = `/api/video/${shotId}`;
-  video.controls = true;
-  video.preload = 'metadata';
-
-  const canvas = document.createElement('canvas');
-  canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
-
-  inner.appendChild(video);
-  inner.appendChild(canvas);
-  wrap.appendChild(inner);
-  container.appendChild(wrap);
-
-  // ── Player selector ────────────────────────────────────────────────
-  const controlRow = document.createElement('div');
-  controlRow.style.cssText = 'display:flex;gap:10px;align-items:center;margin:8px 0;font-size:12px;';
-
-  const playerSelect = document.createElement('select');
-  playerSelect.style.cssText = 'padding:4px 8px;border-radius:4px;border:1px solid #d1d5db;font-size:12px;';
-  const allOpt = document.createElement('option');
-  allOpt.value = '__all__';
-  allOpt.textContent = 'All players';
-  playerSelect.appendChild(allOpt);
-  players.forEach(p => {
-    const opt = document.createElement('option');
-    opt.value = p.track_id;
-    opt.textContent = `${p.track_id} ${p.player_name || ''}`.trim();
-    playerSelect.appendChild(opt);
-  });
-  controlRow.appendChild(playerSelect);
-
-  const confLabel = document.createElement('span');
-  confLabel.style.color = '#64748b';
-  controlRow.appendChild(confLabel);
-  container.appendChild(controlRow);
-
-  // ── Confidence sparkline ───────────────────────────────────────────
-  const sparkCanvas = document.createElement('canvas');
-  sparkCanvas.style.cssText = 'width:100%;height:30px;margin:4px 0;cursor:pointer;';
-  sparkCanvas.height = 30;
-  container.appendChild(sparkCanvas);
-
-  // ── 3D mini-viewer ─────────────────────────────────────────────────
-  const miniDiv = document.createElement('div');
-  miniDiv.style.cssText = 'width:100%;height:300px;margin:8px 0;border:1px solid #e5e7eb;border-radius:4px;position:relative;';
-  container.appendChild(miniDiv);
-  let miniViewer = null;
-
-  // ── Build index: Map<trackId, Map<frameIdx, {joints_3d, kp2d, conf, ...}>> ──
-  const hmrIndex = new Map();
-  players.forEach(p => {
-    const fm = new Map();
-    for (let i = 0; i < p.frame_indices.length; i++) {
-      fm.set(p.frame_indices[i], {
-        joints_3d: p.joints_3d[i],
-        pred_cam: p.pred_cam[i],
-        bbx_xys: p.bbx_xys[i],
-        conf: p.confidences[i],
-        transl: p.transl[i],
-        kp2d: p.kp2d ? p.kp2d[i] : null,
-      });
-    }
-    hmrIndex.set(p.track_id, fm);
-  });
-
-  // ── Draw function ──────────────────────────────────────────────────
-  function drawHmrFrame() {
-    const fps = getShotFps();
-    const frame = Math.round(video.currentTime * fps);
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    const selectedTrack = playerSelect.value;
-    let totalConf = 0, confCount = 0;
-
-    let kp2dMissing = false;
-    for (const [trackId, frameMap] of hmrIndex) {
-      if (selectedTrack !== '__all__' && trackId !== selectedTrack) continue;
-      const fd = frameMap.get(frame);
-      if (!fd) continue;
-
-      totalConf += fd.conf;
-      confCount++;
-
-      // Preferred path: draw the ViTPose-Huge 2D keypoints directly.
-      // These come from GVHMR's preprocessing in image-pixel coords, so
-      // there's no projection math.  Same kind of data the pose stage
-      // shows but from a bigger model.
-      const kp = fd.kp2d;
-      if (kp) {
-        for (const [a, b] of SKELETON) {
-          const ka = kp[a], kb = kp[b];
-          if (!ka || !kb || ka[2] < 0.3 || kb[2] < 0.3) continue;
-          ctx.beginPath();
-          ctx.moveTo(ka[0], ka[1]);
-          ctx.lineTo(kb[0], kb[1]);
-          ctx.strokeStyle = 'rgba(99,102,241,0.75)';
-          ctx.lineWidth = 2;
-          ctx.stroke();
-        }
-        for (let j = 0; j < kp.length; j++) {
-          const k = kp[j];
-          if (!k || k[2] < 0.3) continue;
-          const hue = Math.round((k[2] - 0.3) / 0.7 * 120);
-          ctx.beginPath();
-          ctx.arc(k[0], k[1], 4, 0, 2 * Math.PI);
-          ctx.fillStyle = `hsl(${hue},100%,55%)`;
-          ctx.fill();
-        }
-        continue;
-      }
-
-      // Fallback for legacy .npz files that don't have kp2d yet:
-      // re-project the SMPL joints_3d via the weak-perspective pred_cam.
-      // Quality is poor (the camera was calibrated for in-camera joints,
-      // not gravity-view joints), but at least the panel isn't empty.
-      kp2dMissing = true;
-      const [s, tx, ty] = fd.pred_cam;
-      const [bcx, bcy, bsz] = fd.bbx_xys;
-      for (const [child, parent] of SMPL22_BONES) {
-        const jc = fd.joints_3d[child];
-        const jp = fd.joints_3d[parent];
-        if (!jc || !jp) continue;
-        const x1 = bcx + (s * jc[0] + tx) * bsz * 0.5;
-        const y1 = bcy + (s * jc[1] + ty) * bsz * 0.5;
-        const x2 = bcx + (s * jp[0] + tx) * bsz * 0.5;
-        const y2 = bcy + (s * jp[1] + ty) * bsz * 0.5;
-        ctx.beginPath();
-        ctx.moveTo(x1, y1);
-        ctx.lineTo(x2, y2);
-        ctx.strokeStyle = 'rgba(168,85,247,0.55)';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      }
-      for (let j = 0; j < fd.joints_3d.length; j++) {
-        const jt = fd.joints_3d[j];
-        if (!jt) continue;
-        const x = bcx + (s * jt[0] + tx) * bsz * 0.5;
-        const y = bcy + (s * jt[1] + ty) * bsz * 0.5;
-        ctx.beginPath();
-        ctx.arc(x, y, 3, 0, 2 * Math.PI);
-        ctx.fillStyle = 'rgba(168,85,247,0.7)';
-        ctx.fill();
-      }
-    }
-    // Banner so it's obvious the user is seeing the legacy fallback.
-    if (kp2dMissing) {
-      ctx.font = '14px sans-serif';
-      ctx.fillStyle = 'rgba(255,200,80,0.95)';
-      ctx.fillRect(8, 8, 380, 22);
-      ctx.fillStyle = '#1f1f1f';
-      ctx.fillText('Legacy .npz (no kp2d) — re-run HMR for proper overlay', 14, 24);
-    }
-
-    confLabel.textContent = confCount ? `Conf: ${(totalConf / confCount).toFixed(2)}` : '';
-
-    // Update 3D mini-viewer
-    if (miniViewer) {
-      const selectedId = selectedTrack === '__all__'
-        ? (players[0] ? players[0].track_id : null)
-        : selectedTrack;
-      if (selectedId) {
-        const fd = hmrIndex.get(selectedId)?.get(frame);
-        if (fd) miniViewer.update(fd.joints_3d, fd.transl);
-      }
-    }
+async function renderExport(panel) {
+  const meta = await fetchJsonOrNull("/api/export/metadata");
+  if (!meta) {
+    emptyNote(panel, "No export yet — run export to produce scene.glb / FBX files.");
+    return;
   }
-
-  // ── Video event wiring ─────────────────────────────────────────────
-  video.addEventListener('loadedmetadata', () => {
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.style.width = video.offsetWidth + 'px';
-    canvas.style.height = video.offsetHeight + 'px';
-    sparkCanvas.width = sparkCanvas.offsetWidth;
-
-    // Draw sparkline
-    drawConfSparkline(sparkCanvas, players, playerSelect.value);
-  });
-
-  const ro = new ResizeObserver(() => {
-    if (video.videoWidth) {
-      canvas.style.width = video.offsetWidth + 'px';
-      canvas.style.height = video.offsetHeight + 'px';
-    }
-    sparkCanvas.width = sparkCanvas.offsetWidth;
-    drawConfSparkline(sparkCanvas, players, playerSelect.value);
-  });
-  ro.observe(video);
-  ro.observe(sparkCanvas);
-
-  let rafId = null;
-  function startLoop() {
-    if (rafId) return;
-    (function loop() { rafId = requestAnimationFrame(loop); drawHmrFrame(); })();
-  }
-  function stopLoop() {
-    cancelAnimationFrame(rafId);
-    rafId = null;
-    drawHmrFrame();
-  }
-  video.addEventListener('play', startLoop);
-  video.addEventListener('pause', stopLoop);
-  video.addEventListener('ended', stopLoop);
-  video.addEventListener('seeked', () => { if (video.paused) drawHmrFrame(); });
-
-  playerSelect.addEventListener('change', () => {
-    drawHmrFrame();
-    drawConfSparkline(sparkCanvas, players, playerSelect.value);
-  });
-
-  // Click sparkline to seek
-  sparkCanvas.addEventListener('click', (e) => {
-    const rect = sparkCanvas.getBoundingClientRect();
-    const frac = (e.clientX - rect.left) / rect.width;
-    if (video.duration) video.currentTime = frac * video.duration;
-  });
-
-  // ── Init 3D mini-viewer (Three.js) ────────────────────────────────
-  initHmrMiniViewer(miniDiv).then(v => { miniViewer = v; });
-
-  addOverlayFullscreen(wrap, inner, video, canvas);
-}
-
-function drawConfSparkline(canvas, players, selectedTrack) {
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width, h = canvas.height;
-  ctx.clearRect(0, 0, w, h);
-
-  const targets = selectedTrack === '__all__'
-    ? players
-    : players.filter(p => p.track_id === selectedTrack);
-  if (!targets.length) return;
-
-  // Merge all frame→confidence
-  let minFrame = Infinity, maxFrame = -Infinity;
-  const frameConf = new Map();
-  targets.forEach(p => {
-    for (let i = 0; i < p.frame_indices.length; i++) {
-      const fi = p.frame_indices[i];
-      minFrame = Math.min(minFrame, fi);
-      maxFrame = Math.max(maxFrame, fi);
-      const existing = frameConf.get(fi);
-      frameConf.set(fi, existing ? Math.max(existing, p.confidences[i]) : p.confidences[i]);
-    }
-  });
-
-  if (maxFrame <= minFrame) return;
-  const range = maxFrame - minFrame;
-
-  ctx.beginPath();
-  let first = true;
-  for (let fi = minFrame; fi <= maxFrame; fi++) {
-    const c = frameConf.get(fi) || 0;
-    const x = ((fi - minFrame) / range) * w;
-    const y = h - c * h;
-    if (first) { ctx.moveTo(x, y); first = false; }
-    else ctx.lineTo(x, y);
-  }
-  ctx.strokeStyle = '#a855f7';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  // Fill below
-  ctx.lineTo(w, h);
-  ctx.lineTo(0, h);
-  ctx.closePath();
-  ctx.fillStyle = 'rgba(168,85,247,0.1)';
-  ctx.fill();
-}
-
-async function initHmrMiniViewer(container) {
-  // Load Three.js from CDN if not already loaded
-  if (typeof THREE === 'undefined') {
-    await loadScript('https://unpkg.com/three@0.160.0/build/three.min.js');
-    await loadScript('https://unpkg.com/three@0.160.0/examples/js/controls/OrbitControls.js');
-  }
-
-  const w = container.clientWidth, h = container.clientHeight;
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x1e1e2e);
-
-  const camera = new THREE.PerspectiveCamera(50, w / h, 0.1, 100);
-  camera.position.set(0, 1.5, 3);
-  camera.lookAt(0, 1, 0);
-
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setSize(w, h);
-  container.appendChild(renderer.domElement);
-
-  const controls = new THREE.OrbitControls(camera, renderer.domElement);
-  controls.target.set(0, 1, 0);
-  controls.update();
-
-  // Ground plane
-  const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(4, 4),
-    new THREE.MeshBasicMaterial({ color: 0x2a2a3e, side: THREE.DoubleSide })
-  );
-  ground.rotation.x = -Math.PI / 2;
-  scene.add(ground);
-
-  // Grid
-  const grid = new THREE.GridHelper(4, 20, 0x444466, 0x333355);
-  scene.add(grid);
-
-  // Light
-  scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-
-  // Joint spheres + skeleton lines
-  const jointMeshes = [];
-  const boneLine = new THREE.LineSegments(
-    new THREE.BufferGeometry(),
-    new THREE.LineBasicMaterial({ color: 0xa855f7, linewidth: 2 })
-  );
-  scene.add(boneLine);
-
-  for (let i = 0; i < 22; i++) {
-    const mesh = new THREE.Mesh(
-      new THREE.SphereGeometry(0.02, 8, 8),
-      new THREE.MeshBasicMaterial({ color: 0xa855f7 })
-    );
-    mesh.visible = false;
-    scene.add(mesh);
-    jointMeshes.push(mesh);
-  }
-
-  function animate() {
-    requestAnimationFrame(animate);
-    controls.update();
-    renderer.render(scene, camera);
-  }
-  animate();
-
-  // Resize
-  const resizer = new ResizeObserver(() => {
-    const nw = container.clientWidth, nh = container.clientHeight;
-    camera.aspect = nw / nh;
-    camera.updateProjectionMatrix();
-    renderer.setSize(nw, nh);
-  });
-  resizer.observe(container);
-
-  return {
-    update(joints_3d, transl) {
-      // GVHMR's 'ay' frame is post-processed Y-up (lowest body point at
-      // Y≈0, pelvis Y≈1m, head Y≈1.7m).  Three.js is also Y-up, so use
-      // Y directly.  Z is negated because GVHMR's +Z is camera-forward
-      // and Three.js's +Z is towards-camera.
-      if (!joints_3d) return;
-      for (let i = 0; i < 22; i++) {
-        const j = joints_3d[i];
-        if (!j) { jointMeshes[i].visible = false; continue; }
-        jointMeshes[i].position.set(j[0], j[1], -j[2]);
-        jointMeshes[i].visible = true;
-      }
-
-      // Update bone lines
-      const lineVerts = [];
-      for (const [child, parent] of SMPL22_BONES) {
-        const jc = joints_3d[child], jp = joints_3d[parent];
-        if (!jc || !jp) continue;
-        lineVerts.push(jc[0], jc[1], -jc[2]);
-        lineVerts.push(jp[0], jp[1], -jp[2]);
-      }
-      boneLine.geometry.setAttribute(
-        'position',
-        new THREE.Float32BufferAttribute(lineVerts, 3)
-      );
-      boneLine.geometry.attributes.position.needsUpdate = true;
-    },
-  };
-}
-
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
-    const s = document.createElement('script');
-    s.src = src;
-    s.onload = resolve;
-    s.onerror = reject;
-    document.head.appendChild(s);
-  });
-}
-
-// ── Export renderer ──────────────────────────────────────────────────
-function renderExport(panel, data) {
-  const { wrap, body } = makePanel('Export');
+  const { wrap, body } = makePanel("Export");
+  const summary = document.createElement("div");
+  summary.style.cssText = "padding:14px 16px;font-size:13px;color:#cbd5e1;line-height:1.7;";
   const items = [];
+  if (meta.gltf_file) items.push(`glTF: ${meta.gltf_file}`);
+  if (meta.metadata_file) items.push(`Metadata: ${meta.metadata_file}`);
+  if (meta.fbx_files && meta.fbx_files.length) items.push(`FBX files: ${meta.fbx_files.length}`);
+  if (meta.players) items.push(`Players: ${(meta.players || []).join(", ")}`);
+  summary.innerHTML = items.map((s) => `<div>${s}</div>`).join("");
 
-  if (data.gltf_file) items.push(`glTF: ${data.gltf_file}`);
-  if (data.metadata_file) items.push(`Metadata: ${data.metadata_file}`);
-  if (data.fbx_files && data.fbx_files.length) items.push(`FBX files: ${data.fbx_files.length}`);
-  items.push(`Players: ${(data.players || []).join(', ')}`);
-
-  const list = document.createElement('ul');
-  list.style.cssText = 'padding:8px 24px;margin:0;font-size:13px;color:#cbd5e1;';
-  items.forEach(text => {
-    const li = document.createElement('li');
-    li.textContent = text;
-    li.style.padding = '2px 0';
-    list.appendChild(li);
-  });
-  body.appendChild(list);
-
-  if (data.gltf_file) {
-    const btnWrap = document.createElement('div');
-    btnWrap.style.cssText = 'padding:8px 12px;';
-    const viewerBtn = document.createElement('a');
-    viewerBtn.href = '/viewer';
-    viewerBtn.target = '_blank';
-    viewerBtn.textContent = 'Open 3D Viewer';
-    viewerBtn.style.cssText = 'display:inline-block;background:#4f46e5;color:#fff;padding:8px 20px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:500;';
-    btnWrap.appendChild(viewerBtn);
-    body.appendChild(btnWrap);
-  }
-
+  const btnWrap = document.createElement("div");
+  btnWrap.style.cssText = "padding:8px 12px;";
+  const viewerBtn = document.createElement("a");
+  viewerBtn.href = "/viewer";
+  viewerBtn.target = "_blank";
+  viewerBtn.textContent = "Open 3D Viewer";
+  viewerBtn.style.cssText = "display:inline-block;background:#4f46e5;color:#fff;padding:8px 20px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:500;";
+  btnWrap.appendChild(viewerBtn);
+  body.appendChild(summary);
+  body.appendChild(btnWrap);
   panel.appendChild(wrap);
 }
 
-// ── Boot ──────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', init);
+// ── Boot ─────────────────────────────────────────────────────────────
+document.addEventListener("DOMContentLoaded", init);
 </script>
 </body>
 </html>

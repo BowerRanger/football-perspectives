@@ -1,131 +1,69 @@
-import pytest
+"""Tests for the CLI entry point (recon.py)."""
 
-pytest.skip(
-    "awaiting later phase: imports a module deleted in Phase 0 of the "
-    "broadcast-mono pipeline rewrite",
-    allow_module_level=True,
-)
-
-
-"""Tests for the CLI entry point."""
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-from pathlib import Path
-from unittest.mock import patch
-from src.stages.segmentation import ShotSegmentationStage
 
-
-# Import the CLI we're about to create
 from recon import cli
 
 
-def test_cli_help():
-    """Test that the main CLI group shows help."""
+@pytest.mark.unit
+def test_cli_help_lists_subcommands():
     runner = CliRunner()
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
-    assert "reconstruction" in result.output.lower()
+    assert "run" in result.output
+    assert "serve" in result.output
 
 
-def test_run_help_shows_options():
-    """Test that run command help shows required options."""
+@pytest.mark.unit
+def test_run_help_shows_named_stages_and_clean_flag():
     runner = CliRunner()
     result = runner.invoke(cli, ["run", "--help"])
     assert result.exit_code == 0
     assert "--input" in result.output
     assert "--stages" in result.output
     assert "--from-stage" in result.output
+    assert "--clean" in result.output
+    # Named stages from the new pipeline appear in --stages help text.
+    for stage in (
+        "prepare_shots",
+        "tracking",
+        "camera",
+        "pose_2d",
+        "hmr_world",
+        "ball",
+        "export",
+    ):
+        assert stage in result.output
 
 
-def test_run_missing_input_fails():
-    """Test that run command fails without --input when segmentation is active."""
+@pytest.mark.unit
+def test_run_rejects_prepare_shots_without_input(tmp_path: Path):
     runner = CliRunner()
-    result = runner.invoke(cli, ["run", "--output", "/tmp/out"])
+    result = runner.invoke(
+        cli,
+        ["run", "--output", str(tmp_path), "--stages", "prepare_shots"],
+    )
+    assert result.exit_code != 0
+    assert "--input" in result.output
+
+
+@pytest.mark.unit
+def test_run_rejects_unknown_stage(tmp_path: Path):
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["run", "--output", str(tmp_path), "--stages", "calibration"],
+    )
     assert result.exit_code != 0
 
 
-def test_run_missing_input_allowed_when_starting_after_segmentation(tmp_path):
-    """--input should be optional when segmentation is excluded by --from-stage."""
+@pytest.mark.unit
+def test_serve_help_shows_host_and_port():
     runner = CliRunner()
-    output_dir = tmp_path / "output"
-
-    with patch("recon.run_pipeline") as run_pipeline:
-        result = runner.invoke(
-            cli,
-            [
-                "run",
-                "--output",
-                str(output_dir),
-                "--from-stage",
-                "calibration",
-            ],
-        )
-
-    assert result.exit_code == 0, f"CLI failed: {result.output}"
-    _, kwargs = run_pipeline.call_args
-    assert kwargs["video_path"] is None
-
-
-@pytest.fixture(scope="module")
-def tiny_video(tmp_path_factory) -> Path:
-    """Synthetic 2-second video with a hard cut at 1 second."""
-    import cv2
-    import numpy as np
-
-    path = tmp_path_factory.mktemp("fixtures") / "test.mp4"
-    writer = cv2.VideoWriter(
-        str(path), cv2.VideoWriter_fourcc(*"mp4v"), 25, (320, 240)
-    )
-    for _ in range(25):  # blue frames
-        writer.write(np.full((240, 320, 3), [200, 50, 50], dtype=np.uint8))
-    for _ in range(25):  # green frames (new shot)
-        writer.write(np.full((240, 320, 3), [50, 200, 50], dtype=np.uint8))
-    writer.release()
-    return path
-
-
-def test_run_produces_manifest(tmp_path, tiny_video):
-    """Test that run command produces shots/shots_manifest.json."""
-    runner = CliRunner()
-    output_dir = tmp_path / "output"
-    result = runner.invoke(
-        cli,
-        [
-            "run",
-            "--input",
-            str(tiny_video),
-            "--output",
-            str(output_dir),
-            "--stages",
-            "1",
-        ],
-    )
-    assert result.exit_code == 0, f"CLI failed: {result.output}"
-    manifest_path = output_dir / "shots" / "shots_manifest.json"
-    assert manifest_path.exists(), f"Manifest not found at {manifest_path}"
-
-
-def test_run_passes_device_to_runner(tmp_path, tiny_video):
-    runner = CliRunner()
-    output_dir = tmp_path / "output"
-
-    with patch("recon.run_pipeline") as run_pipeline:
-        result = runner.invoke(
-            cli,
-            [
-                "run",
-                "--input",
-                str(tiny_video),
-                "--output",
-                str(output_dir),
-                "--stages",
-                "5",
-                "--device",
-                "cpu",
-            ],
-        )
-
-    assert result.exit_code == 0, f"CLI failed: {result.output}"
-    _, kwargs = run_pipeline.call_args
-    assert kwargs["device"] == "cpu"
+    result = runner.invoke(cli, ["serve", "--help"])
+    assert result.exit_code == 0
+    assert "--host" in result.output
+    assert "--port" in result.output

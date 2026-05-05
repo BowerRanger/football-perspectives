@@ -60,3 +60,8 @@ hmr = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "unit: fast unit tests (no external deps)",
+    "integration: tests that hit local services (web API, file IO)",
+    "e2e: end-to-end tests requiring real fixtures or GPU (skipped by default)",
+]

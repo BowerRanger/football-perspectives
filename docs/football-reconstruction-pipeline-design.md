@@ -1,828 +1,571 @@
-# Football Match Reconstruction Pipeline — Technical Design Document
+# Football Reconstruction Pipeline — Design Reference
 
-## 1. Overview
-
-A Python CLI tool that takes broadcast football footage (single file with multiple replay angles, or multiple files), automatically segments it into individual camera shots, synchronises overlapping views via visual event matching, runs 2D pose estimation per view, calibrates cameras against pitch geometry, triangulates 3D joint positions, fits SMPL body models, and exports animation assets compatible with Unreal Engine 5 and a browser-based 3D preview viewer.
-
-### 1.1 Design Goals
-
-- **Single entry point**: one command, feed in video(s), get 3D assets out
-- **Modular stages**: each pipeline stage writes intermediate outputs to disk, so any stage can be re-run or inspected independently
-- **UE5-native output**: FBX files with skeleton animation that import directly into Unreal Engine 5's retargeting system
-- **Browser preview**: a lightweight Three.js viewer that loads pipeline output for quick validation without launching UE5
-- **Honest about limitations**: the pipeline should surface confidence metrics at each stage so the user knows where manual cleanup is needed
-
-### 1.2 Non-Goals (for v1)
-
-- Real-time processing
-- Crowd or coaching staff reconstruction (players and ball only)
-- Facial expression capture
-- Finger/hand pose estimation
-- Automatic MetaHuman likeness generation
+Implementation reference for the single-camera pipeline. The
+authoritative spec is the brainstorming-skill output at
+`docs/superpowers/specs/2026-05-04-broadcast-mono-pipeline-design.md`;
+this file is kept in sync with it.
 
 ---
 
-## 2. Pipeline Architecture
+# Broadcast Single-Camera Pipeline — Design
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        INPUT                                │
-│  Single video file with replays  OR  multiple video files   │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  STAGE 1: Shot Segmentation                                  │
-│  Split video into individual camera shots                    │
-│  Output: shots/ directory with clip files + metadata JSON    │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  STAGE 2: Camera Calibration                                 │
-│  Detect pitch lines → solve camera intrinsics/extrinsics     │
-│  Output: calibration JSON per shot                           │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  STAGE 3: Player Detection & Tracking                        │
-│  Detect + track players and ball per shot                    │
-│  Output: tracks JSON per shot (bounding boxes + IDs)         │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  STAGE 4: 2D Pose Estimation                                 │
-│  Run ViTPose on each tracked player crop, per shot           │
-│  Output: 2D keypoints JSON per player per shot               │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  STAGE 5: Temporal Synchronisation                           │
-│  Fuse ball and player-motion signals for frame alignment     │
-│  Output: sync_map.json with frame offsets between views      │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  STAGE 6: Cross-View Player Matching                         │
-│  Match player identities across synchronised views           │
-│  Output: player_matches.json mapping IDs across shots        │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  STAGE 7: 3D Triangulation                                   │
-│  Triangulate 3D joint positions from matched 2D keypoints    │
-│  Output: 3D skeleton sequences per player (NumPy arrays)     │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  STAGE 8: SMPL Fitting                                       │
-│  Fit SMPL body model to triangulated 3D joints               │
-│  Output: SMPL parameters (pose, shape, translation) per frame│
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  STAGE 9: Export                                             │
-│  Convert SMPL sequences → FBX (UE5) + glTF (browser viewer) │
-│  Output: export/ directory with FBX and glTF files           │
-└──────────────────────────────────────────────────────────────┘
-```
+**Date:** 2026-05-04
+**Status:** Approved (pending implementation plan)
+**Supersedes:** the 8-stage multi-view triangulation pipeline described in `docs/football-reconstruction-pipeline-design.md`.
 
----
+## 1. Goals and scope
 
-## 3. Stage Details
+Replace the current pipeline with a focused single-camera reconstruction system that produces three artefacts per clip:
 
-### 3.1 Shot Segmentation
+1. **Per-frame camera pose** (K, R, t) in pitch metres, suitable for driving a virtual camera in UE5/Blender.
+2. **Per-player skeletal animation** as SMPL parameters in the pitch frame, exportable to glTF (web viewer) and FBX (UE5 retarget).
+3. **Per-frame ball position** in pitch metres, with full 3D reconstruction during flight.
 
-**Purpose**: Split a single video containing multiple replay angles into individual clips, each representing a continuous camera shot.
+### Input assumptions (locked for v1)
 
-**Approach**: Use PySceneDetect with the ContentDetector algorithm, which identifies shot boundaries by measuring pixel-level changes between consecutive frames. Broadcast football footage has hard cuts between angles during replays, making content-based detection highly reliable.
+- Single camera per clip. Multi-angle fusion is a possible future layer; not in scope.
+- Manually trimmed clip (CapCut or equivalent). No automatic shot segmentation.
+- Broadcast wide angle: camera body fixed (effectively a pan-tilt-zoom head). Pan up to ~60° per clip is supported. Translating cameras (steadicam) are out of scope; the pipeline detects this via low confidence and the user re-shoots / skips.
+- FIFA-standard 105 × 68 m pitch geometry. Custom pitch dimensions deferred to a future enhancement (see `docs/FEATURE_IDEAS.md`).
 
-**Implementation**:
-```
-Library: PySceneDetect (scenedetect)
-Detector: ContentDetector(threshold=30.0)
-```
+### Output target
 
-For each detected shot, extract:
-- Start/end frame numbers and timestamps
-- A representative thumbnail (middle frame)
-- Average brightness and dominant colour histogram (used later for camera matching)
+Pitch-relative reconstruction. The end use is recreating the play in UE5 with a virtual camera matching the real camera, players animated as MetaHumans driven by the SMPL output, and the ball as a rigid body following the recovered trajectory.
 
-**Output schema** (`shots/shots_manifest.json`):
-```json
-{
-  "source_file": "input.mp4",
-  "fps": 25.0,
-  "total_frames": 5000,
-  "shots": [
-    {
-      "id": "shot_001",
-      "start_frame": 0,
-      "end_frame": 312,
-      "start_time": 0.0,
-      "end_time": 12.48,
-      "clip_file": "shots/shot_001.mp4",
-      "thumbnail": "shots/shot_001_thumb.jpg"
-    }
-  ]
-}
-```
+### Pragmatic posture
 
-Each shot is also extracted as a standalone video file using FFmpeg for downstream processing.
+Manual keyframe annotation is a first-class input, not a fallback. Where a manual + propagation approach gives a working clip in minutes and a fully automated approach has been chronically flaky, the manual approach wins.
 
-**Edge cases**:
-- Slow dissolves or wipes between angles: increase ContentDetector sensitivity or add a secondary AdaptiveDetector pass
-- Picture-in-picture overlays: not handled in v1; user should crop input if present
-- Broadcast graphics overlays (score bug, replay banner): these persist across cuts and shouldn't trigger false positives, but the calibration stage needs to mask them
+## 2. Pipeline shape
 
----
+Seven stages, single mode, no `pipeline.mode` switch.
 
-### 3.2 Camera Calibration
+| # | Stage | Purpose |
+|---|-------|---------|
+| 1 | `prepare_shots` | Treats input as one already-trimmed clip; no auto-segmentation. |
+| 2 | `tracking` | YOLOv8x + ByteTrack for players, YOLOv8 ball model for ball. Manual dedupe UI kept. |
+| 3 | `camera` | **NEW.** Per-frame K, R, t in pitch metres via keyframe-anchored propagation. |
+| 4 | `pose_2d` | ViTPose, COCO 17. Used for foot anchoring and overlays; not for 3D joint positions. |
+| 5 | `hmr_world` | **NEW.** GVHMR per track → SMPL params transformed into pitch frame, foot-anchored. |
+| 6 | `ball` | **NEW.** Ground-projection on grounded frames, parabolic 3D fit on flight segments. |
+| 7 | `export` | glTF for web viewer + FBX via Blender headless for UE5. |
 
-**Purpose**: For each shot, determine the camera's position, orientation, and lens parameters relative to the football pitch.
+### Stages and code deleted from the repository
 
-**Approach**: Detect pitch line segments and known geometric features (centre circle, penalty arcs, goal area lines), match them to the FIFA standard pitch model (105m × 68m), and solve for camera parameters using PnP (Perspective-n-Point).
+Source files, tests, schemas, and runner wiring all go:
 
-**Implementation**:
+- `src/stages/`: `segmentation.py`, `sync.py`, `matching.py`, `triangulation.py`, `smpl_fitting.py`, the legacy `calibration.py`, the legacy `hmr.py`.
+- `src/utils/`: `tvcalib_calibrator.py`, `neural_calibrator.py`, `calibration_propagation.py`, `calibration_debug.py`, plus any helper that is only used by the removed stages.
+- `src/schemas/`: legacy multi-backend calibration block, sync-related fields on `tracks.py`, segmentation metadata on `shots.py`, per-shot-island fields on `hmr_result.py`.
+- Tests: legacy `test_calibration.py`, sync portions of `test_tracking.py`, `test_patch_sync.py`, `test_web_calibration_variants.py`, segmentation portions of `test_prepare_shots.py`, legacy-mode portions of `test_runner.py`, legacy `test_hmr*` (rewritten for `hmr_world`), legacy parts of `test_export.py`. `test_pose.py` is renamed to `test_pose_2d.py` and retained — the underlying ViTPose path is unchanged.
+- `third_party/tvcalib` submodule and the `.gitmodules` entry.
 
-1. **Pitch line detection**: Use a semantic segmentation model trained on football pitch markings. The SoccerNet Camera Calibration challenge has produced several suitable models, including line detection networks that output pitch keypoints (line intersections, arc tangent points, etc.).
+### Code retained
 
-2. **2D-3D correspondence**: Map detected 2D pitch keypoints to their known 3D coordinates on the standard pitch model. The pitch is treated as the z=0 ground plane.
+- `src/utils/bundle_adjust.py` — parabolic LM is reused by `ball`.
+- `src/utils/ffmpeg.py` — generic.
+- `src/utils/gvhmr_estimator.py`, `gvhmr_register.py`, `third_party/gvhmr_shims/` — `hmr_world` uses GVHMR.
+- `third_party/gvhmr` submodule.
+- The temporal-smoothing helpers from `triangulation.py` (Savgol, foot-ground snap) — extracted into a small util used by `hmr_world`.
 
-3. **Camera solve**: Use OpenCV's `solvePnP` with RANSAC to estimate the camera extrinsic matrix (rotation + translation) from the 2D-3D correspondences. For intrinsics, start with reasonable broadcast camera defaults (focal length ~2000-4000px equivalent, no distortion) and refine using bundle adjustment if multiple pitch features are visible.
-
-4. **Tracking camera motion**: For shots where the camera pans/zooms (the main broadcast camera), solve calibration per-frame or at regular intervals (every 5-10 frames) and interpolate. For static replay cameras (e.g., behind-goal), a single calibration per shot is sufficient.
-
-**Output schema** (`calibration/shot_001_calibration.json`):
-```json
-{
-  "shot_id": "shot_001",
-  "camera_type": "static|tracking",
-  "frames": [
-    {
-      "frame": 0,
-      "intrinsic_matrix": [[fx, 0, cx], [0, fy, cy], [0, 0, 1]],
-      "rotation_vector": [rx, ry, rz],
-      "translation_vector": [tx, ty, tz],
-      "reprojection_error": 2.3,
-      "num_correspondences": 12,
-      "confidence": 0.87
-    }
-  ]
-}
-```
-
-**Confidence metric**: reprojection error (average pixel distance between projected 3D pitch points and detected 2D keypoints). Values under 5px are good; over 15px suggests unreliable calibration. Shots with poor calibration are flagged and can be excluded from triangulation.
-
-**Known challenges**:
-- Tight close-ups may show very few pitch markings → low confidence or calibration failure
-- Zoomed-in shots distort the relationship between focal length and position → degenerate solutions possible
-- Rain/snow obscuring pitch lines
-
----
-
-### 3.5 Temporal Synchronisation (Execution Stage 5)
-
-**Purpose**: Determine the precise frame offset between overlapping shots so that frame N in shot A corresponds to the same real-world moment as frame M in shot B.
-
-**Approach**: Visual event matching using the ball trajectory and player positions. Since audio is often the live feed overlaid on replays (as you noted), we rely entirely on visual cues.
-
-**Implementation — multi-signal approach**:
-
-1. **Ball position matching**: The ball's trajectory through space is the strongest synchronisation signal. Detect the ball in each shot (using a specialised ball detector — YOLO-based, trained on football-specific data), project its 2D position to pitch coordinates using the calibrated camera, and cross-correlate ball trajectories across shots. The moment of foot-to-ball contact during a shot or pass creates a distinctive trajectory inflection that should be identifiable across all angles.
-
-2. **Player formation matching**: As a secondary signal, compute the spatial arrangement of all detected players in pitch coordinates at each frame. Use a distance metric (e.g., Procrustes analysis or Hungarian matching on player positions) to find the frame alignment that minimises the total position discrepancy across players.
-
-3. **Distinctive event detection**: Identify high-confidence anchor events — goal net ripple, goalkeeper dive apex, ball crossing the goal line. These can be detected with simple heuristics (e.g., ball velocity near zero after a shot on goal) and serve as coarse alignment anchors before fine-grained cross-correlation.
-
-**Algorithm**:
-```
-For each pair of overlapping shots (A, B):
-  1. Project ball positions to pitch coordinates in both shots
-  2. Compute normalised cross-correlation of ball trajectories
-  3. Compute player-motion signal from tracked pitch positions and correlate it
-  4. If both offsets agree within tolerance, fuse them; otherwise pick higher confidence
-  5. Compute confidence from aligned-signal correlation and overlap quality
-```
-
-**Output schema** (`sync/sync_map.json`):
-```json
-{
-  "reference_shot": "shot_001",
-  "alignments": [
-    {
-      "shot_id": "shot_003",
-      "frame_offset": -47,
-      "confidence": 0.92,
-      "method": "ball_trajectory",
-      "overlap_frames": [120, 280]
-    }
-  ]
-}
-```
-
-**Frame offset convention**: `frame_offset = -47` means shot_003's frame 0 corresponds to shot_001's frame 47. So to find the matching frame: `frame_in_reference = frame_in_shot + offset`.
-
-**Failure modes**:
-- Ball occluded in one or more views during the key moment
-- Very short shots (< 1 second) with insufficient trajectory data
-- Static ball (e.g., before a free kick) provides no temporal signal
-
-For failure cases, fall back to player formation matching, or flag for manual alignment (the viewer tool should support manual frame offset input).
-
----
-
-### 3.3 Player Detection & Tracking (Execution Stage 3)
-
-**Purpose**: Detect all players (and the ball) in each shot and maintain consistent identity tracking across frames within a shot.
-
-**Approach**: YOLOv8 for detection, ByteTrack for multi-object tracking, SigLIP embeddings for team classification.
-
-**Implementation**:
-
-1. **Detection**: YOLOv8 model fine-tuned on football data (SoccerNet or similar). Detect classes: player, goalkeeper, referee, ball. Ball detection uses a separate specialised model due to its small size in frame.
-
-2. **Tracking**: ByteTrack associates detections across frames using motion prediction (Kalman filter) and appearance similarity. Each tracked entity gets a persistent ID within the shot.
-
-3. **Team classification**: Extract visual embeddings (SigLIP or CLIP) from each player crop, cluster using K-means (k=3: team A, team B, referee), assign team labels. Goalkeepers are assigned to the nearest team by pitch position.
-
-**Output schema** (`tracks/shot_001_tracks.json`):
-```json
-{
-  "shot_id": "shot_001",
-  "tracks": [
-    {
-      "track_id": "T001",
-      "class": "player",
-      "team": "A",
-      "frames": [
-        {
-          "frame": 0,
-          "bbox": [x1, y1, x2, y2],
-          "confidence": 0.94,
-          "pitch_position": [34.2, 21.5]
-        }
-      ]
-    }
-  ]
-}
-```
-
-`pitch_position` is computed using the camera calibration from Stage 2 — project the bottom-centre of the bounding box (foot position) onto the pitch ground plane.
-
----
-
-### 3.4 2D Pose Estimation (Execution Stage 4)
-
-**Purpose**: Extract 2D body keypoints for each tracked player in each frame.
-
-**Approach**: ViTPose (top-down via MMPose). For each tracked bounding box, crop the player region with padding, run pose inference on the crop, and normalize the result to 17 COCO-format keypoints.
-
-**Implementation**:
-```
-Backend: MMPose top-down inference
-Input: cropped player images from tracker bounding boxes (padded by 20%)
-Output: 17 keypoints in COCO format (x, y, confidence) per player per frame
-Notes: keypoints are remapped into original-frame pixel coordinates after crop inference
-```
-
-**Keypoint set (COCO 17)**:
-nose, left_eye, right_eye, left_ear, right_ear, left_shoulder, right_shoulder, left_elbow, right_elbow, left_wrist, right_wrist, left_hip, right_hip, left_knee, right_knee, left_ankle, right_ankle
-
-**Output schema** (`poses/shot_001_poses.json`):
-```json
-{
-  "shot_id": "shot_001",
-  "players": [
-    {
-      "track_id": "T001",
-      "frames": [
-        {
-          "frame": 0,
-          "keypoints": [
-            {"name": "nose", "x": 412.3, "y": 156.7, "conf": 0.91},
-            {"name": "left_shoulder", "x": 398.1, "y": 189.2, "conf": 0.88}
-          ]
-        }
-      ]
-    }
-  ]
-}
-```
-
-Coordinates are in the original video frame pixel space (not the crop space).
-
-**Quality considerations**:
-- Low-confidence keypoints (< 0.3) should be marked as occluded and excluded from triangulation
-- Apply temporal smoothing (1D Gaussian filter, σ=2 frames) to reduce jitter before triangulation
-- For players occupying < 60px height in frame, flag as "low resolution" — pose estimates will be unreliable
-
----
-
-### 3.6 Cross-View Player Matching (Execution Stage 6)
-
-**Purpose**: Determine which tracked player in shot A is the same person as which tracked player in shot B, so their 2D keypoints can be triangulated together.
-
-**Approach**: Match players across synchronised views using their projected pitch positions plus visual appearance.
-
-**Implementation**:
-
-1. For each pair of synchronised shots at matched frames, compute each player's pitch position (from Stage 3.3)
-2. Use the Hungarian algorithm to find the optimal assignment between players in shot A and shot B, minimising the sum of pitch-coordinate distances
-3. Validate assignments using visual appearance (team colour should match, rough height/build should be consistent)
-4. For players visible in only one view, mark as "single-view only" — these will fall back to monocular pose estimation
-
-**Output schema** (`matching/player_matches.json`):
-```json
-{
-  "matched_players": [
-    {
-      "player_id": "P001",
-      "team": "A",
-      "views": [
-        {"shot_id": "shot_001", "track_id": "T003"},
-        {"shot_id": "shot_003", "track_id": "T007"},
-        {"shot_id": "shot_005", "track_id": "T001"}
-      ]
-    }
-  ]
-}
-```
-
----
-
-### 3.7 3D Triangulation
-
-**Purpose**: Combine 2D keypoints from multiple calibrated views to compute 3D joint positions.
-
-**Approach**: For each matched player at each synchronised frame, take the 2D keypoint observations from all available views and triangulate using Direct Linear Transform (DLT), weighted by keypoint confidence.
-
-**Implementation**:
-
-1. For each joint, collect all 2D observations across views (with confidence > 0.3)
-2. If ≥ 2 views available: triangulate using weighted DLT
-   - Weight each observation by its ViTPose confidence score
-   - Use RANSAC to reject outlier observations (a view where the keypoint is clearly misdetected)
-3. If only 1 view available: use monocular depth estimation as fallback (or mark joint as low-confidence)
-4. Compute reprojection error: project the triangulated 3D point back into each camera and measure pixel distance from the original 2D detection
-
-```python
-# Pseudocode for weighted DLT triangulation
-def triangulate_joint(observations, cameras, confidences):
-    """
-    observations: list of (u, v) pixel coordinates
-    cameras: list of 3x4 projection matrices
-    confidences: list of float confidence scores
-    """
-    A = []
-    for (u, v), P, w in zip(observations, cameras, confidences):
-        A.append(w * (u * P[2] - P[0]))
-        A.append(w * (v * P[2] - P[1]))
-    A = np.array(A)
-    _, _, Vt = np.linalg.svd(A)
-    X = Vt[-1]
-    return X[:3] / X[3]  # dehomogenise
-```
-
-**Post-processing**:
-- Temporal smoothing: apply a Savitzky-Golay filter (window=7, order=3) to each joint trajectory
-- Anatomical constraint enforcement: reject frames where bone lengths deviate > 20% from the running median
-- Foot-ground contact: snap ankle joints to z=0 when velocity is near zero (prevents floating/underground feet)
-
-**Output**: NumPy arrays saved as `.npz` files per player:
-```
-triangulated/P001_3d_joints.npz
-  - positions: (num_frames, 17, 3) float32 — joint positions in pitch coordinates (metres)
-  - confidences: (num_frames, 17) float32 — per-joint confidence
-  - reprojection_errors: (num_frames, 17) float32 — per-joint reprojection error in pixels
-  - num_views: (num_frames, 17) int8 — number of views contributing to each joint
-  - fps: float — frame rate
-```
-
----
-
-### 3.8 SMPL Fitting
-
-**Purpose**: Fit the SMPL parametric body model to the triangulated 3D joints, producing smooth, anatomically valid body poses with a full mesh surface.
-
-**Approach**: Optimisation-based fitting (SMPLify-style). Given known 3D joint targets, optimise SMPL pose (θ), shape (β), and global translation (t) parameters to minimise the distance between the SMPL joint regressor output and the triangulated joints.
-
-**Implementation**:
-
-```python
-# Optimisation objective (per frame)
-L = λ_joint * ||J(θ,β) - J_target||² +    # joint position loss
-    λ_prior * L_pose_prior(θ) +              # penalise unlikely poses (GMM prior)
-    λ_shape * ||β||² +                        # shape regularisation
-    λ_smooth * ||θ_t - θ_{t-1}||² +          # temporal smoothness
-    λ_ground * L_ground_contact               # foot-ground penetration penalty
-```
-
-**Key details**:
-- Use the SMPL neutral model (10 shape parameters, 72 pose parameters for 24 joints)
-- Initialise from a standing pose and optimise per-frame, using the previous frame's result as initialisation
-- The joint regressor maps SMPL's 24 joints to the COCO 17 keypoints (a well-established mapping exists)
-- Shape parameters (β) should be shared across all frames for a given player (body shape doesn't change)
-- For single-view-only frames, apply stronger pose priors to prevent implausible solutions
-
-**Library options**:
-- `smplx` (official SMPL-X Python package from MPI) for the body model
-- PyTorch optimiser (Adam, lr=0.01, 100 iterations per frame) for the fitting
-- VPoser (learned pose prior from MPI) as an alternative to GMM priors
-
-**Output schema** (`smpl/P001_smpl.npz`):
-```
-  - betas: (10,) float32 — body shape parameters (shared across all frames)
-  - poses: (num_frames, 72) float32 — axis-angle rotations for 24 joints per frame
-  - transl: (num_frames, 3) float32 — global translation per frame
-  - fps: float
-```
-
----
-
-### 3.9 Export
-
-**Purpose**: Convert SMPL parameter sequences into industry-standard animation files.
-
-#### 3.9.1 FBX Export (UE5 target)
-
-**Approach**: Use Blender in headless mode as the conversion bridge. SMPL parameters → Blender armature animation → FBX export.
-
-**Pipeline**:
-1. Load the SMPL mesh and skeleton into Blender using the `smplx-blender-addon`
-2. Apply pose and shape parameters per frame as keyframed bone rotations
-3. Export as FBX with the following settings:
-   - Scale: 1.0 (metres)
-   - Forward axis: -Y (UE5 convention)
-   - Up axis: Z
-   - Armature: include, with bone hierarchy
-   - Animation: baked, all frames
-   - Mesh: include SMPL mesh (optional — useful for preview but will be replaced by MetaHuman in UE5)
-
-**UE5 import workflow** (documented for the user):
-1. Import FBX into UE5 — set skeleton to `SK_Meshcapade_fbx` (from Meshcapade plugin) or create a new skeleton
-2. Use UE5's IK Retargeter to map from SMPL skeleton → MetaHuman skeleton
-3. Right-click animation → "Retarget Animations" → select MetaHuman target
-
-#### 3.9.2 glTF Export (browser viewer target)
-
-**Approach**: Export a simplified skeleton + animation as glTF 2.0 binary (.glb) for loading into Three.js.
-
-**Pipeline**:
-1. Build a simplified skeleton (24 joints, matching SMPL topology) as a glTF skin
-2. Encode joint rotations as quaternion animation channels (sampled)
-3. Optionally include a low-poly mesh (decimated SMPL mesh, ~2000 triangles) for visual preview
-4. Include ball trajectory as a separate animated node
-5. Include a ground plane mesh representing the pitch (105m × 68m, textured with pitch markings)
-
-**Output files**:
-```
-export/
-  ├── fbx/
-  │   ├── P001_animation.fbx
-  │   ├── P002_animation.fbx
-  │   └── ball_trajectory.fbx
-  ├── gltf/
-  │   ├── scene.glb          # all players + ball + pitch in one file
-  │   └── scene_metadata.json # player IDs, teams, frame range, etc.
-  └── pitch_model.fbx        # static pitch mesh for UE5
-```
-
----
-
-## 4. Browser-Based 3D Viewer
-
-A standalone HTML file that loads the glTF output and provides an interactive 3D preview.
-
-### 4.1 Features
-
-- **Load scene**: drag-and-drop or file picker for the `.glb` file
-- **Playback controls**: play/pause, scrub timeline, speed control (0.25x–2x), frame-by-frame stepping
-- **Camera controls**: orbit (Three.js OrbitControls), preset camera positions (broadcast angle, behind goal, bird's eye, player POV)
-- **Player selection**: click a player to highlight them and lock camera follow
-- **Skeleton overlay**: toggle wireframe skeleton visualisation over the mesh
-- **Joint confidence heatmap**: colour joints by confidence score (green = high, red = low) to quickly identify where the pipeline struggled
-- **Grid/pitch toggle**: show/hide pitch markings and coordinate grid
-- **Export camera**: copy current virtual camera position/rotation as JSON (for recreating the same angle in UE5)
-
-### 4.2 Technical Stack
-
-- Three.js (r128 or later) for rendering
-- GLTFLoader for scene import
-- OrbitControls for camera interaction
-- AnimationMixer for playback
-- Single HTML file, no build step required — can be opened directly from the filesystem
-
-### 4.3 Data Flow
-
-The viewer reads:
-1. `scene.glb` — the 3D scene with all animations
-2. `scene_metadata.json` — player names/IDs, team assignments, confidence data per joint per frame, frame rate, original video timestamps
-
-Confidence data is stored as a custom glTF extension or as a separate JSON sidecar to avoid bloating the binary.
-
----
-
-## 5. CLI Interface
-
-### 5.1 Main Command
-
-```bash
-python recon.py \
-  --input match_replay.mp4 \
-  --output ./output/ \
-  --stages all \
-  --fps 25 \
-  --viewer
-```
-
-### 5.2 Arguments
-
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--input` | Video file(s). Accepts single file or glob pattern | required |
-| `--output` | Output directory for all pipeline artifacts | `./output/` |
-| `--stages` | Which stages to run: `all`, or comma-separated list like `1,2,3` or `segmentation,calibration,sync` | `all` |
-| `--from-stage` | Resume from a specific stage (uses cached outputs from previous stages) | `1` |
-| `--fps` | Target frame rate for processing (downsample if source is higher) | source fps |
-| `--players` | Filter to specific players by track ID (e.g., `P001,P003`) | all players |
-| `--viewer` | Launch browser viewer after export | false |
-| `--device` | Compute device: `cuda`, `cpu`, `mps` | auto-detect |
-| `--config` | Path to YAML config file for advanced settings | `config/default.yaml` |
-
-### 5.3 Stage-Specific Overrides
-
-```bash
-# Re-run only triangulation and export with different smoothing
-python recon.py \
-  --input match_replay.mp4 \
-  --output ./output/ \
-  --from-stage triangulation \
-  --config config/smooth_heavy.yaml
-
-# Run just the viewer on existing output
-python recon.py \
-  --output ./output/ \
-  --viewer
-```
-
-### 5.4 Configuration File
-
-```yaml
-# config/default.yaml
-
-shot_segmentation:
-  detector: content          # content | adaptive | threshold
-  threshold: 30.0
-  min_shot_duration_s: 0.5
-
-calibration:
-  pitch_model: fifa_standard  # 105m x 68m
-  max_reprojection_error: 15.0
-  keyframe_interval: 5        # frames between calibration solves for tracking cameras
-
-sync:
-  method: ball_trajectory     # ball_trajectory | player_formation | hybrid
-  search_window_s: 5.0        # max offset to search
-  min_overlap_frames: 25
-
-detection:
-  model: yolov8x              # yolov8n | yolov8s | yolov8m | yolov8l | yolov8x
-  ball_model: yolov8_ball_custom
-  confidence_threshold: 0.5
-
-tracking:
-  algorithm: bytetrack
-  max_age: 30                  # frames to keep lost track alive
-
-pose_estimation:
-  model_config: td-hm_ViTPose-small_8xb64-210e_coco-256x192
-  checkpoint: null             # optional explicit checkpoint path
-  device: auto                 # auto | cpu | mps | cuda
-  min_confidence: 0.3
-  temporal_smoothing_sigma: 2.0
-
-triangulation:
-  method: weighted_dlt
-  ransac_threshold: 15.0       # pixels
-  min_views: 2
-  temporal_filter: savgol       # savgol | gaussian | none
-  temporal_filter_window: 7
-  bone_length_tolerance: 0.2
-
-smpl_fitting:
-  iterations: 100
-  learning_rate: 0.01
-  use_vposer: true
-  lambda_joint: 1.0
-  lambda_prior: 0.01
-  lambda_shape: 0.05
-  lambda_smooth: 0.5
-  lambda_ground: 10.0
-
-export:
-  fbx: true
-  gltf: true
-  include_mesh: true
-  gltf_mesh_decimation: 2000   # target face count for preview mesh
-  coordinate_system: unreal    # unreal | blender | unity
-```
-
----
-
-## 6. Output Directory Structure
+### Output layout
 
 ```
 output/
-├── shots/
-│   ├── shots_manifest.json
-│   ├── shot_001.mp4
-│   ├── shot_001_thumb.jpg
-│   ├── shot_002.mp4
-│   └── ...
-├── calibration/
-│   ├── shot_001_calibration.json
-│   └── ...
-├── sync/
-│   └── sync_map.json
-├── tracks/
-│   ├── shot_001_tracks.json
-│   └── ...
-├── poses/
-│   ├── shot_001_poses.json
-│   └── ...
-├── matching/
-│   └── player_matches.json
-├── triangulated/
-│   ├── P001_3d_joints.npz
-│   ├── P002_3d_joints.npz
-│   └── ...
-├── smpl/
-│   ├── P001_smpl.npz
-│   └── ...
+├── shots/                  # single trimmed clip + manifest
+├── tracks/                 # ByteTrack output (players + ball)
+├── camera/                 # NEW: per-frame K, R, t + anchor metadata
+│   ├── anchors.json        # user-annotated keyframes
+│   ├── camera_track.json   # per-frame K, R, t with confidence
+│   └── debug/              # overlay frames for visual inspection
+├── pose_2d/                # ViTPose output
+├── hmr_world/              # NEW: per-player SMPL params in pitch frame
+│   ├── PXXX_smpl_world.npz
+│   └── debug/              # overlay GIFs for visual inspection
+├── ball/                   # NEW: per-frame ball position + flight segments
+│   └── ball_track.json
 ├── export/
-│   ├── fbx/
-│   │   ├── P001_animation.fbx
-│   │   └── ...
-│   ├── gltf/
-│   │   ├── scene.glb
-│   │   └── scene_metadata.json
-│   └── pitch_model.fbx
-├── viewer/
-│   └── index.html
-├── logs/
-│   ├── pipeline.log
-│   └── stage_timings.json
-└── quality_report.json          # per-stage confidence summary
+│   ├── gltf/               # web viewer
+│   └── fbx/                # UE5
+└── quality_report.json     # extended with per-frame camera/anchor confidence
 ```
 
----
+### Web viewer cleanup
 
-## 7. Quality Report
+`src/web/`:
 
-The pipeline generates a summary report highlighting areas that may need manual attention.
+- `index.html`: drop the triangulation panel, sync diagnostic UI, multi-shot/per-shot-island rendering, and the calibration-backend comparison split-pane. Repurpose the existing manual landmark tool as the **anchor editor**.
+- `viewer.html`: drop per-shot islands and the "no calibration" fallback. The viewer always renders pitch-registered scenes.
+- `server.py`: drop `/sync/*`, `/triangulation/*`, `/calibration/compare`. Add `/anchors`, `/camera/track`, `/hmr_world/preview`, `/ball/preview`.
+- New panels: anchor editor, camera-track confidence timeline, ball-flight inspector.
 
-```json
+## 3. Camera tracking (`camera` stage)
+
+Three components: anchor solver, frame-to-frame propagator, bidirectional smoother. Plus a web UI driving anchor placement.
+
+### Anchor data model
+
+An anchor is a user-annotated keyframe with pitch-landmark correspondences:
+
+```jsonc
+// output/camera/anchors.json
 {
-  "overall_confidence": 0.74,
-  "stages": {
-    "calibration": {
-      "shots_calibrated": 5,
-      "shots_failed": 1,
-      "avg_reprojection_error": 4.2,
-      "worst_shot": {"id": "shot_004", "error": 18.7, "reason": "insufficient pitch lines visible"}
-    },
-    "sync": {
-      "pairs_synced": 4,
-      "avg_confidence": 0.88,
-      "worst_pair": {"shots": ["shot_001", "shot_004"], "confidence": 0.43}
-    },
-    "triangulation": {
-      "players_reconstructed": 8,
-      "avg_views_per_joint": 2.7,
-      "low_confidence_joints": [
-        {"player": "P003", "joint": "left_wrist", "frames": [45, 46, 47], "reason": "single view only"}
+  "clip_id": "play_037",
+  "image_size": [1920, 1080],
+  "anchors": [
+    {
+      "frame": 0,
+      "landmarks": [
+        {"name": "near_left_corner",   "image_xy": [412, 904], "world_xyz": [0, 0, 0]},
+        {"name": "near_right_corner",  "image_xy": [1612, 901],"world_xyz": [105, 0, 0]},
+        {"name": "far_left_corner",    "image_xy": [610, 312], "world_xyz": [0, 68, 0]},
+        {"name": "halfway_near",       "image_xy": [965, 870], "world_xyz": [52.5, 0, 0]},
+        {"name": "left_goal_crossbar_left", "image_xy": [430, 845], "world_xyz": [0, 30.34, 2.44]}
       ]
-    },
-    "smpl_fitting": {
-      "avg_joint_error_mm": 34.2,
-      "players_with_ground_penetration": ["P005"],
-      "temporal_jitter_score": 0.12
     }
+  ]
+}
+```
+
+The pitch landmark catalogue (FIFA standard) **must include non-coplanar points** (crossbar at z = 2.44, corner flags at z = 1.5). Purely-on-pitch landmarks are degenerate for K recovery; non-coplanar anchors are what make K solvable from a single anchor without ambiguity.
+
+### Anchor solver
+
+- **First anchor** of a clip: full 3×4 projection-matrix DLT from ≥6 landmarks, then RQ decomposition into (K, R, t). K parameterised as `fx = fy, principal point at image centre, no skew` (1 unknown). Total unknowns 7; 6 non-coplanar points give 12 equations. Well-constrained.
+- **Subsequent anchors**: t inherited from the first anchor (camera body fixed). Solve only (fx, R) with ≥4 points.
+- Reprojection-residual gate: subsequent anchor's residual > `anchor_max_reprojection_px` (default 4 px) flags either bad annotation *or* a clip where t isn't actually fixed. Viewer surfaces; user re-anchors or skips clip.
+
+### Frame-to-frame propagator
+
+Between anchors, per-frame (K, R) is propagated by image-based feature tracking:
+
+1. Feature detection (SuperPoint or ORB) on stable image regions. Mask out: central pitch turf, tracked player bboxes, the ball.
+2. Rolling KLT/LK from frame N → N+1, with re-detection when feature count drops below `redetect_threshold` (handles long pans where features continuously enter/leave the FOV).
+3. RANSAC homography H from frame N → N+1, gated by inlier ratio ≥ `ransac_inlier_min_ratio` (default 0.4).
+4. Decomposition: assuming pure rotation + zoom (which `t` fixed implies for a far scene), `H ≈ K_{N+1} · ΔR · K_N⁻¹`. With (K_N, R_N) known, solve ΔR and the K_{N+1}/K_N zoom ratio. Apply to get (K_{N+1}, R_{N+1}).
+
+This solves only the *relative* per-frame change. Drift accumulates over time and is bounded by the smoother below.
+
+### Bidirectional smoother
+
+For each pair of adjacent anchors (A at frame `i`, B at frame `j`), the propagator runs forward from A and backward from B over `[i, j]`. Per-frame fused estimate:
+
+```
+w(t) = (j - t) / (j - i)
+K_t  = w(t) · K_t^fwd + (1 - w(t)) · K_t^bwd
+R_t  = SLERP(R_t^fwd, R_t^bwd, 1 - w(t))
+```
+
+Guarantees: at `t = i`, only forward contributes (matches anchor A exactly); at `t = j`, only backward (matches anchor B exactly). Maximum drift is bounded by the *minimum* of forward and backward error at the midpoint, empirically ~half of one-way error.
+
+### Per-frame confidence
+
+Scalar in [0, 1]:
+
+- Inlier ratio in homography RANSAC (drops on motion blur / occlusion).
+- Forward/backward disagreement in (R, K).
+- Pitch-line consistency: project FIFA pitch lines through (K_t, R_t, t) and measure pixel distance to detected pitch lines. PnLCalib's *line head* is reused as a soft check (not as a calibration source). Confidence drops when projected lines miss painted lines by > `pitch_line_consistency_max_px` (default 5 px).
+
+### Web UI: anchor editor
+
+Repurposed manual landmark tool:
+
+- Top: video player with overlay (projected pitch lines, anchored landmarks, optional camera frustum).
+- Middle: pitch landmark catalogue palette.
+- Bottom: per-frame confidence timeline with red bands for low-confidence regions. Click → seek → "add anchor here" → click 4–8 landmarks → that anchor span re-runs.
+
+Re-running a single anchor span is fast (< 5 s) because tracking, pose, HMR are pre-computed; only the camera span between two anchors recomputes.
+
+### Output format
+
+```jsonc
+// output/camera/camera_track.json
+{
+  "clip_id": "play_037",
+  "fps": 30.0,
+  "image_size": [1920, 1080],
+  "t_world": [55.4, -12.7, 22.3],   // fixed for the clip
+  "frames": [
+    {
+      "frame": 0,
+      "K": [[1820.0, 0, 960.0], [0, 1820.0, 540.0], [0, 0, 1]],
+      "R": [[...], [...], [...]],
+      "confidence": 1.0,
+      "is_anchor": true
+    }
+  ]
+}
+```
+
+### Edge cases
+
+- **Feature-poor frames**: anchor density goes up, viewer flags. No silent failure.
+- **Rolling shutter**: out of scope; flag and skip.
+- **Custom pitch dimensions**: deferred to future enhancement; v1 assumes 105 × 68 m.
+
+## 4. Player skeletal animation (`hmr_world` stage)
+
+Produces SMPL params per player **in the pitch frame**, foot-anchored on the pitch plane.
+
+### Inputs and output
+
+**In:** `tracks/PXXX_track.json`, `pose_2d/PXXX_pose.json`, `camera/camera_track.json`.
+
+**Out:**
+
+```jsonc
+// output/hmr_world/PXXX_smpl_world.npz
+{
+  "player_id": "P037",
+  "frames":     [...],          // global frame indices
+  "betas":      [10],           // shape, constant per player across clip
+  "thetas":     [N, 24, 3],     // per-frame body pose (axis-angle), root excluded
+  "root_R":     [N, 3, 3],      // per-frame root orientation IN PITCH FRAME
+  "root_t":     [N, 3],         // per-frame world translation in pitch metres
+  "confidence": [N]
+}
+```
+
+This is the canonical internal format. Both glTF (web) and FBX (UE5) export read this.
+
+### Per-track HMR
+
+Run GVHMR on the tracked bbox crop sequence. Existing `gvhmr_estimator.py` + shims kept. β is taken as the **median** over the track (shape constant per player; GVHMR over-estimates per-frame variance). GVHMR's SimpleVO output (its monocular camera estimate) is **discarded** — we have a real camera now.
+
+### Coordinate-frame transform — the upside-down fix
+
+GVHMR emits root rotations in its internal SMPL world (z-up, character facing -y). Pitch frame is FIFA-standard (z-up, x along nearside touchline, y toward far side). Per frame:
+
+```
+R_smpl_to_pitch_static = fixed 3x3 rotation, computed once
+R_world_root_pitch_t   = R_t^T · R_smpl_to_pitch_static · root_R_t^cam
+```
+
+where `R_t` is from `camera_track.json` (world→camera rotation, standard OpenCV extrinsic convention; `R_t^T` is therefore camera→world, which is what we apply to a quantity in the camera frame to express it in pitch metres). This is the regression-pinned fix for the upside-down problem: currently the SMPL-world transform is applied but never composed with the camera, so when the camera tilts down at the pitch the player rotates into the ground plane. The exact composition order is pinned by `test_hmr_world_frame_transform.py`.
+
+### Foot anchoring (world translation)
+
+GVHMR's monocular world translation is unreliable. Replace it:
+
+1. From `pose_2d`, take the midpoint of left+right ankle keypoints (image coords).
+2. From SMPL output (now in pitch frame), compute foot position relative to the SMPL root via forward kinematics.
+3. Cast a ray from camera centre through the ankle-midpoint pixel and intersect with z = 0.05 m.
+4. World translation `root_t_t = ray_intersection - foot_offset_in_root_frame`.
+
+Ankle-occlusion fallback: when ankle confidence < 0.3, propagate translation forward from previous frame using image-space velocity projected to pitch metres via the camera. Both ankles occluded for > `foot_anchor_max_occlusion_frames` (default 10) → frame flagged low-confidence.
+
+### Temporal smoothing
+
+- **β**: collapse to single per-track median over high-confidence frames.
+- **θ**: Savitzky-Golay (window 11, order 2) per joint axis-angle channel.
+- **root_t**: Savgol on x, y; z snapped toward 0 with the existing `ground_snap_velocity` logic.
+- **root_R**: SLERP-based smoothing (window 5).
+
+### Compute
+
+- GVHMR runs on bbox-crop tracks (not whole frames). Cuts work substantially compared to current `hmr.py`.
+- Sequence cap of 120 frames per GVHMR call to avoid the known MPS kernel assertion; sequences stitched at the boundary using the bidirectional smoother's logic.
+- Target: minutes per clip on GPU; CPU is unworkable.
+
+### Confidence
+
+Per-frame, per-player scalar in [0, 1]:
+
+- HMR per-joint confidence (lowest joint as bottleneck).
+- Foot-anchor agreement (ankle ray vs SMPL feet reprojection).
+- Bbox tracking confidence.
+
+Drives a per-player overlay GIF in `output/hmr_world/debug/PXXX_overlay.gif` and a per-frame heatmap in the viewer.
+
+### Out of scope for v1
+
+- Goalkeeper diving / extreme horizontal poses (GVHMR struggles; flagged via confidence).
+- Cross-player physical constraints (no two players at the same pitch point). Future enhancement.
+
+## 5. Ball reconstruction (`ball` stage)
+
+Most algorithmic work already exists; this stage rewires it onto the new camera track.
+
+### Inputs and output
+
+**In:** `tracks/ball_track.json`, `camera/camera_track.json`.
+
+**Out:**
+
+```jsonc
+// output/ball/ball_track.json
+{
+  "clip_id": "play_037",
+  "fps": 30.0,
+  "frames": [
+    {"frame": 0, "world_xyz": [52.5, 34.0, 0.11], "state": "grounded", "confidence": 0.92}
+  ],
+  "flight_segments": [
+    {
+      "id": 3,
+      "frame_range": [82, 119],
+      "parabola": {"v0": [12.4, -8.1, 9.7], "p0": [...], "g": -9.81},
+      "fit_residual_px": 1.4
+    }
+  ]
+}
+```
+
+`state` is `grounded` | `flight` | `occluded` | `missing`.
+
+### Algorithm (per frame)
+
+1. No detection → `state: missing`, skip.
+2. Provisional grounded estimate: ray from camera through detection centre, intersect with z = `ball_radius_m` (default 0.11).
+3. Pixel velocity vs previous frame.
+
+### Flight segmentation
+
+Contiguous frames with pixel velocity ≥ `flight_px_velocity` (default 25) form candidate flight segments. Segments shorter than `min_flight_frames` (default 4) or longer than `max_flight_frames` (default 60) are demoted to grounded.
+
+### Parabolic fit per flight segment
+
+1. Seed from grounded estimates at segment start/end (existing heuristic).
+2. LM on `(p0, v0)`; gravity fixed at -9.81 along z. Per-frame predicted position is reprojected through `(K_t, R_t, t_world)` and image-space residual minimised.
+3. Accept iff mean residual < `flight_max_residual_px` (default 5) **and** trajectory within plausibility bounds (z ∈ [0, 50 m], horizontal speed ≤ 40 m/s). Else fall back to grounded.
+4. For accepted segments, fill per-frame `world_xyz` with parabola evaluation; set `state: flight`.
+
+LM and seeding code from `bundle_adjust.py` reused.
+
+### Occlusion handling
+
+Detection missing for ≤ `max_occlusion_frames` (default 8) inside an active flight segment → interpolate world position along the parabola. Outside flight, missing frames stay `missing`.
+
+### Single-camera caveat
+
+A ball moving directly toward / away from the camera, in flight, is depth-degenerate. The fit residual gate catches this; failed fits fall back to grounded estimates.
+
+## 6. Configuration and data flow
+
+### `config/default.yaml` (post-cleanup)
+
+```yaml
+pitch:
+  length_m: 105.0
+  width_m: 68.0
+  goal_height_m: 2.44
+  corner_flag_height_m: 1.5
+
+prepare_shots:
+  expected_format: mp4
+  output_fps: null
+
+tracking:
+  player_model: yolov8x.pt
+  ball_model: yolov8n.pt
+  confidence_threshold: 0.3
+  team_classifier: none
+  default_team_label: unknown
+  progress_every_frames: 150
+
+camera:
+  first_anchor_min_landmarks: 6
+  subsequent_anchor_min_landmarks: 4
+  anchor_max_reprojection_px: 4.0
+  feature_detector: superpoint
+  max_features_per_frame: 1000
+  ransac_inlier_min_ratio: 0.4
+  redetect_threshold: 200
+  enable_bidirectional: true
+  pitch_line_consistency_max_px: 5.0
+  forward_backward_disagreement_warn_deg: 0.5
+
+pose_2d:
+  model_config: td-hm_ViTPose-small_8xb64-210e_coco-256x192
+  checkpoint: null
+  device: auto
+  min_confidence: 0.3
+  smooth_sigma: 2.0
+
+hmr_world:
+  device: auto
+  checkpoint: third_party/gvhmr/inputs/checkpoints/gvhmr/gvhmr_siga24_release.ckpt
+  batch_size: 16
+  max_sequence_length: 120
+  min_track_frames: 10
+  beta_aggregation: median
+  theta_savgol_window: 11
+  theta_savgol_order: 2
+  ground_snap_velocity: 0.1
+  foot_anchor_max_occlusion_frames: 10
+
+ball:
+  flight_px_velocity: 25.0
+  min_flight_frames: 4
+  max_flight_frames: 60
+  flight_max_residual_px: 5.0
+  max_occlusion_frames: 8
+  ball_radius_m: 0.11
+  plausibility:
+    z_max_m: 50.0
+    horizontal_speed_max_m_s: 40.0
+
+export:
+  gltf_enabled: true
+  fbx_enabled: true
+  blender_path: blender
+  ue5:
+    forward_axis: -Y
+    up_axis: Z
+    scale: 1.0
+```
+
+### Stage data flow
+
+```
+   input.mp4
+       │
+       ▼
+  prepare_shots ──▶ shots/clip.mp4 + manifest
+       │
+       ▼
+    tracking ─────▶ tracks/PXXX_track.json + tracks/ball_track.json
+       │
+       ▼
+     camera ◀───── (user) anchors.json   (web UI loop)
+       │       └─▶ camera/camera_track.json + debug/
+       ▼
+    pose_2d ─────▶ pose_2d/PXXX_pose.json
+       │
+       ▼
+   hmr_world ───▶ hmr_world/PXXX_smpl_world.npz + debug/
+       │
+       ▼
+      ball ─────▶ ball/ball_track.json
+       │
+       ▼
+    export ─────▶ export/gltf/scene.glb + scene_metadata.json
+                  export/fbx/PXXX.fbx + ball.fbx + camera.fbx
+       │
+       ▼
+quality_report.json
+```
+
+The `camera` stage is the only stage with a manual artefact in its inputs. The viewer drives the iteration loop; downstream stages re-run automatically when their inputs change via the existing stage-cache invalidation.
+
+### CLI changes
+
+```bash
+# End-to-end
+python recon.py --input clip.mp4 --output ./output/
+
+# Re-run only the camera stage (after editing anchors)
+python recon.py --output ./output/ --from-stage camera
+
+# Web viewer (anchor editor + 3D viewer + per-stage debug)
+python recon.py --output ./output/ --viewer
+
+# Wipe legacy artefacts (calibration/, triangulation/, smpl/, sync/, matching/) before running
+python recon.py --input clip.mp4 --output ./output/ --clean
+```
+
+**Removed:** `--stages 1,2,3` (numeric stage selection — names only now), legacy mode toggles, `--stages segmentation,calibration,sync,matching,triangulation,smpl_fitting` (those stage names no longer exist).
+**Added:** `--clean` (one-time migration helper).
+**Retained:** `--input`, `--output`, `--from-stage`, `--config`, `--device`, `--viewer`.
+
+### Migration of existing `output/`
+
+Detect legacy layout (presence of `calibration/`, `triangulation/`, `smpl/` etc.), print a single warning, refuse to mix old and new artefacts. User runs on a fresh dir or passes `--clean` to wipe legacy directories. No auto-migration of legacy calibration outputs.
+
+### Quality report
+
+`quality_report.json` extended:
+
+```jsonc
+{
+  "camera": {
+    "anchor_count": 5,
+    "mean_anchor_residual_px": 1.8,
+    "low_confidence_frame_count": 12,
+    "low_confidence_frame_ranges": [[145, 152], [284, 288]]
+  },
+  "hmr_world": {
+    "tracked_players": 22,
+    "mean_per_player_confidence": 0.81,
+    "low_confidence_players": ["P017"]
+  },
+  "ball": {
+    "grounded_frames": 247,
+    "flight_segments": 3,
+    "missing_frames": 14,
+    "mean_flight_fit_residual_px": 1.4
   }
 }
 ```
 
----
+## 7. Error handling, testing, documentation
 
-## 8. Dependencies
+### Error handling philosophy
 
-### 8.1 Python Packages
+1. **Stage cannot run** (missing model, bad config, missing input). Fail fast with one-line actionable error. No stack traces in user-facing path.
+2. **Stage runs but produces low-confidence output**. Never silently substitute "good enough" data. Write the output, mark `confidence` low, surface in `quality_report.json` and viewer. User decides next step.
+3. **Stage runs but produces visibly wrong output**. Caught by post-stage debug renders (overlays, projected pitch lines, anchor reprojection plots). Viewer opens to the most recently completed stage's debug view.
 
-```
-# Core
-torch >= 2.0
-torchvision
-numpy
-scipy
-opencv-python
+Stages **never** return partial state without writing it. A crashed `hmr_world` writes whatever players completed plus `partial: true` on the rest. Protects resume-from-stage workflow.
 
-# Detection & Tracking
-ultralytics                    # YOLOv8
-supervision                    # ByteTrack integration
+### Testing
 
-# Pose Estimation
-mmpose
-mmengine
-mmcv
+Adheres to the global 80%+ coverage requirement (unit + integration + E2E).
 
-# Runtime note
-# This implementation runs pose on tracked player crops, so it does not require
-# a separate detector pass inside the pose stage.
+**Unit tests** — small and many:
 
-# Shot Detection
-scenedetect[opencv]
+- `test_camera_anchor_solver.py`: synthetic landmark sets → solved (K, R, t) within tolerance; degenerate coplanar set → graceful failure with explanatory error.
+- `test_camera_propagator.py`: synthetic two-frame homographies with known ΔR + zoom → recovered within 0.1° / 1%.
+- `test_camera_bidirectional.py`: with known ground-truth pan + injected per-frame error, smoother bounds final error ≤ 50% of one-way.
+- `test_hmr_world_frame_transform.py`: synthetic SMPL pose + known camera → reprojects to expected pitch coordinates; **specifically pins the upside-down regression**.
+- `test_hmr_world_foot_anchor.py`: synthetic ankle keypoints + known camera → ray intersection matches expected pitch coordinate.
+- `test_ball_grounded.py`: synthetic ball pixel + known camera → expected pitch x/y at z = 0.11.
+- `test_ball_flight.py`: synthetic parabolic 3D arc reprojected to image, then recovered → recovered v0 within 0.5 m/s, residual < 1 px.
 
-# SMPL
-smplx                          # SMPL body model
-chumpy                         # SMPL dependency
-vposer                         # learned pose prior (optional)
+**Integration tests** — fewer, full stage interactions:
 
-# Export
-bpy                            # Blender Python API (for FBX export)
-trimesh                        # mesh processing
-pygltflib                      # glTF construction
+- `test_camera_stage.py`: synthetic clip with known ground-truth camera trajectory → camera stage end-to-end recovers (K, R, t) within tolerance for ≥ 95% of frames.
+- `test_hmr_world_stage.py`: pre-computed `tracks/`, `pose_2d/`, `camera/` fixtures → `hmr_world/` output matches reference.
+- `test_runner.py`: full pipeline on small synthetic clip → all expected output files present, `quality_report.json` populated.
 
-# Utilities
-tqdm
-pyyaml
-click                          # CLI framework
-```
+**E2E** — gated by `pytest -m e2e`:
 
-### 8.2 External Tools
+- 5-second real broadcast clip, 3 anchors, full pipeline, checks `camera_track.json` complete, `hmr_world/` produced for ≥ 1 player, `ball/ball_track.json` present, `export/gltf/scene.glb` opens, `export/fbx/` non-empty.
 
-- **Blender** (≥ 3.6): headless mode for FBX export. Install via `snap install blender --classic` or download from blender.org
-- **FFmpeg**: video file manipulation (shot extraction, frame extraction)
-- **SMPL model files**: download from https://smpl.is.tue.mpg.de/ (requires registration — academic/non-commercial license)
+**Test fixtures**: fresh `tests/fixtures/` with synthetic clip generator (renders calibrated SMPL avatar walking on a pitch into a pre-known camera trajectory). Replaces real-clip dependency in most tests, makes suite fast and deterministic.
 
-### 8.3 GPU Requirements
+**Not tested in default run**: GPU-only model inference paths (GVHMR weights aren't checked into the repo). Exercised by E2E and the optional `pytest -m gpu` marker.
 
-- Minimum: NVIDIA GPU with 8GB VRAM (RTX 3070 or equivalent)
-- Recommended: 12GB+ VRAM (RTX 4080 or A5000) for ViTPose-Large + YOLOv8x concurrent processing
-- SMPL fitting runs on GPU but is not the bottleneck
-- Estimated processing time: ~10-20 minutes per 10 seconds of multi-angle footage (on RTX 4080)
+### Web viewer test coverage
 
----
+- API-level integration tests for `/anchors`, `/camera/track`, `/hmr_world/preview`, `/ball/preview`.
+- Snapshot tests for anchor editor state at known confidence inputs.
 
-## 9. Known Limitations & Future Work
+### Documentation deliverables
 
-### 9.1 Current Limitations
+Three docs rewritten:
 
-- **Ball 3D position**: ball tracking in 2D is reliable, but 3D triangulation of the ball is hard because it moves faster than players and is often occluded. v1 may produce noisy ball trajectories.
-- **Player re-identification across shots**: if the camera cuts away and returns, re-identifying the same player requires jersey number recognition or appearance matching, which is not robust in v1.
-- **Tight close-ups**: shots where a single player fills most of the frame may fail camera calibration (too few pitch lines visible) but will produce excellent 2D pose estimates. These could be used for monocular HMR as a fallback.
-- **Rapid motion blur**: sprint phases and shots produce motion blur that degrades both detection and pose estimation.
-- **SMPL limitations**: SMPL is a body-only model — no clothing, hair, or equipment. The exported mesh is a naked body shape, intended to be replaced by a MetaHuman in UE5.
+1. **`README.md`** — full rewrite. New content: project description; requirements (Python 3.11+, GVHMR submodule + checkpoint, FFmpeg, optional Blender for FBX); install (no PnLCalib, no SMPL model needed); CLI usage with new stage names; output layout; web dashboard description with anchor editor as headline feature. All references to segmentation/calibration/sync/triangulation/smpl_fitting/numeric stage aliases removed.
+2. **`docs/football-reconstruction-pipeline-design.md`** — full rewrite. The current 36 KB document describes the obsolete 8-stage pipeline. Replace with a description of this new pipeline including diagrams for the camera-tracking math.
+3. **`CLAUDE.md`** — replace the "Pipeline Architecture" table and "Key Design Decisions" section with the new pipeline. Keep project overview header. Update "External Dependencies" (remove PnLCalib, add GVHMR).
 
-### 9.2 Future Enhancements
+Three docs deleted:
 
-- **Jersey number recognition** for automatic player identification
-- **Motion infilling** using motion diffusion models (MDM) to fill gaps where a player is occluded in all views
-- **Crowd reconstruction** using procedural animation driven by detected crowd motion
-- **Automatic MetaHuman matching** from player face crops
-- **Live processing mode** for near-real-time reconstruction from multi-camera stadium feeds
-- **SMPL-X upgrade** for hand and face pose when close-up footage is available
+- `docs/sync-approaches-diagnostic.md` — about an obsolete stage.
+- `docs/2026-04-04-macos-dependency-handoff.md` — about PnLCalib/MMPose dependency woes; obsolete.
+- `docs/open-questions-2026-04-13.md` — its decisions are baked into this spec.
 
----
+### Migration / cleanup checklist (one-time, executed as the final implementation step)
 
-## 10. Development Phases
+- [ ] Delete listed source files, tests, schemas (Section 2).
+- [ ] Remove `third_party/tvcalib` submodule and `.gitmodules` entry.
+- [ ] Drop legacy config blocks.
+- [ ] Drop legacy CLI flags / numeric aliases.
+- [ ] Update README, design doc, CLAUDE.md.
+- [ ] Delete obsolete docs.
+- [ ] Ensure `pytest` and `pytest -m e2e` both pass on the new codebase before merge.
+- [ ] Manual run on a real clip end-to-end, with screenshots in the PR description.
 
-### Phase 1: Foundation (Weeks 1-3)
-- Shot segmentation (Stage 1)
-- Player detection and tracking (Stage 4)
-- 2D pose estimation (Stage 5)
-- Basic CLI with stage caching
+## 8. Open questions
 
-### Phase 2: Multi-View Core (Weeks 4-7)
-- Camera calibration (Stage 2)
-- Temporal synchronisation (Stage 3)
-- Cross-view player matching (Stage 6)
-- 3D triangulation (Stage 7)
-
-### Phase 3: Body Model & Export (Weeks 8-10)
-- SMPL fitting (Stage 8)
-- FBX and glTF export (Stage 9)
-- Browser viewer
-
-### Phase 4: Polish (Weeks 11-12)
-- Quality report generation
-- Confidence visualisation in viewer
-- Documentation and example data
-- End-to-end testing on 3-5 iconic football moments
+None blocking — all v1 decisions are locked in this spec. Future enhancements (custom pitch dimensions, multi-angle fusion, cross-player constraints, learned flight classifier) are tracked in `docs/FEATURE_IDEAS.md`.

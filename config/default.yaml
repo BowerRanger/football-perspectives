@@ -21,7 +21,9 @@ camera:
   first_anchor_min_landmarks: 6
   subsequent_anchor_min_landmarks: 4
   anchor_max_reprojection_px: 4.0
-  feature_detector: superpoint
+  # ORB is the only detector currently implemented in feature_propagator.
+  # SuperPoint is a future enhancement (better repeatability under zoom).
+  feature_detector: orb
   max_features_per_frame: 1000
   ransac_inlier_min_ratio: 0.4
   redetect_threshold: 200

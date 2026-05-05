@@ -86,6 +86,8 @@ def test_quality_report_aggregates_three_stages(tmp_path: Path) -> None:
     assert report["camera"]["anchor_count"] == 2
     assert report["camera"]["low_confidence_frame_count"] == 3
     assert report["camera"]["low_confidence_frame_ranges"] == [[8, 10]]
+    assert "mean_anchor_residual_px" in report["camera"]
+    assert isinstance(report["camera"]["mean_anchor_residual_px"], float)
 
     # HMR section
     assert report["hmr_world"]["tracked_players"] == 1

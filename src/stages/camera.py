@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import cv2
@@ -15,11 +16,31 @@ from src.utils.bidirectional_smoother import smooth_between_anchors
 from src.utils.camera_confidence import FrameSignals, confidence_from_signals
 from src.utils.feature_propagator import propagate_one_frame
 
+logger = logging.getLogger(__name__)
+
 
 def _angle_between(R1: np.ndarray, R2: np.ndarray) -> float:
     cos_t = (np.trace(R1.T @ R2) - 1) / 2
     cos_t = max(-1.0, min(1.0, cos_t))
     return float(np.degrees(np.arccos(cos_t)))
+
+
+def _reprojection_residual(
+    landmarks: tuple, K: np.ndarray, R: np.ndarray, t: np.ndarray
+) -> float:
+    """Mean reprojection error (px) of landmark world points under (K, R, t).
+
+    Returns a large sentinel (1e9) if any landmark is behind the camera.
+    """
+    residuals: list[float] = []
+    for lm in landmarks:
+        cam = R @ np.array(lm.world_xyz) + t
+        if cam[2] <= 0:
+            return 1e9
+        pix = K @ cam
+        proj = pix[:2] / pix[2]
+        residuals.append(float(np.linalg.norm(np.array(lm.image_xy) - proj)))
+    return float(np.mean(residuals)) if residuals else 0.0
 
 
 class CameraStage(BaseStage):
@@ -52,17 +73,28 @@ class CameraStage(BaseStage):
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+        anchor_max_residual = float(cfg.get("anchor_max_reprojection_px", 4.0))
+
         # Step 1: solve anchor frames.
         first_anchor = anchors.anchors[0]
         K0, R0, t_world = solve_first_anchor(first_anchor.landmarks)
         anchor_solutions: dict[int, tuple[np.ndarray, np.ndarray]] = {
             first_anchor.frame: (K0, R0)
         }
+        anchor_confidence_override: dict[int, float] = {}
         for a in anchors.anchors[1:]:
             K, R = solve_subsequent_anchor(
                 a.landmarks, t_world, image_size=anchors.image_size
             )
             anchor_solutions[a.frame] = (K, R)
+            residual = _reprojection_residual(a.landmarks, K, R, t_world)
+            if residual > anchor_max_residual:
+                logger.warning(
+                    "anchor at frame %d has reprojection residual %.2f px > "
+                    "%.2f px threshold; flagging as low-confidence",
+                    a.frame, residual, anchor_max_residual,
+                )
+                anchor_confidence_override[a.frame] = 0.5
 
         # Step 2: per-frame propagate forward and backward between consecutive anchor pairs.
         per_frame_K: list[np.ndarray | None] = [None] * n_frames
@@ -73,7 +105,7 @@ class CameraStage(BaseStage):
         for af in anchor_solutions:
             per_frame_K[af] = anchor_solutions[af][0]
             per_frame_R[af] = anchor_solutions[af][1]
-            per_frame_conf[af] = 1.0
+            per_frame_conf[af] = anchor_confidence_override.get(af, 1.0)
             is_anchor[af] = True
 
         anchor_frames = sorted(anchor_solutions.keys())
@@ -85,6 +117,20 @@ class CameraStage(BaseStage):
             )
 
         cap.release()
+
+        # Frames outside the [first_anchor, last_anchor] span are not currently
+        # covered by the bidirectional propagator — warn the user so they can
+        # add anchors instead of silently losing them.
+        dropped_before = anchor_frames[0]
+        dropped_after = max(0, n_frames - 1 - anchor_frames[-1])
+        if dropped_before > 0 or dropped_after > 0:
+            logger.warning(
+                "camera stage dropped %d frames before first anchor (frame %d) "
+                "and %d frames after last anchor (frame %d); add anchors to "
+                "cover them",
+                dropped_before, anchor_frames[0],
+                dropped_after, anchor_frames[-1],
+            )
 
         # Step 3: assemble output.
         frames_out: list[CameraFrame] = []

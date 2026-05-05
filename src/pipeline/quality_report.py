@@ -39,10 +39,33 @@ def write_quality_report(output_dir: Path) -> None:
                 i = j
             else:
                 i += 1
+
+        # Reprojection residual per landmark for each anchor frame, averaged.
+        anchor_residuals: list[float] = []
+        camera_by_frame = {
+            f.frame: (np.array(f.K), np.array(f.R)) for f in cam.frames
+        }
+        t_w = np.array(cam.t_world)
+        for anchor in anchors.anchors:
+            if anchor.frame not in camera_by_frame:
+                continue
+            K, R = camera_by_frame[anchor.frame]
+            for lm in anchor.landmarks:
+                cam_pt = R @ np.array(lm.world_xyz) + t_w
+                if cam_pt[2] <= 0:
+                    continue
+                proj = (K @ cam_pt)[:2] / cam_pt[2]
+                anchor_residuals.append(
+                    float(np.linalg.norm(np.array(lm.image_xy) - proj))
+                )
+
         report["camera"] = {
             "anchor_count": len(anchors.anchors),
             "low_confidence_frame_count": int(low_mask.sum()),
             "low_confidence_frame_ranges": ranges,
+            "mean_anchor_residual_px": (
+                float(np.mean(anchor_residuals)) if anchor_residuals else 0.0
+            ),
         }
 
     hmr_dir = output_dir / "hmr_world"

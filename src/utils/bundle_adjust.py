@@ -32,10 +32,13 @@ def fit_parabola_to_image_observations(
 
     Args:
         observations: list of ``(frame_index, (u, v))`` pairs ordered by
-            time.  ``frame_index`` is the absolute clip frame and is used
-            to look up per-frame ``Ks[frame_index]`` and ``Rs[frame_index]``.
-        Ks: per-frame intrinsics, indexed by absolute clip frame.
-        Rs: per-frame rotation, indexed by absolute clip frame.
+            time.  ``frame_index`` is the absolute clip frame, used only
+            for time deltas; ``Ks`` and ``Rs`` are looked up positionally.
+        Ks: position-parallel to ``observations`` — one entry per
+            observation, in the same order. ``Ks[i]`` is the intrinsics
+            for ``observations[i]``.
+        Rs: position-parallel to ``observations`` — one entry per
+            observation. ``Rs[i]`` is the rotation for ``observations[i]``.
         t_world: clip-shared world translation (3,).
         fps: frame rate.
         g: gravity along world-z (default -9.81 m/s^2).
@@ -58,9 +61,9 @@ def fit_parabola_to_image_observations(
         v0 = params[3:6]
         pts = p0 + np.outer(dt, v0) + 0.5 * np.outer(dt ** 2, g_vec)
         residuals = []
-        for i, fi in enumerate(frame_idx):
-            cam = Rs[fi] @ pts[i] + t_world
-            pix = Ks[fi] @ cam
+        for i in range(len(observations)):
+            cam = Rs[i] @ pts[i] + t_world
+            pix = Ks[i] @ cam
             uv = pix[:2] / pix[2]
             residuals.append(uv - obs_array[i])
         return np.concatenate(residuals)
@@ -70,15 +73,15 @@ def fit_parabola_to_image_observations(
 
     p_start = ankle_ray_to_pitch(
         observations[0][1],
-        K=Ks[frame_idx[0]],
-        R=Rs[frame_idx[0]],
+        K=Ks[0],
+        R=Rs[0],
         t=t_world,
         plane_z=0.5,
     )
     p_end = ankle_ray_to_pitch(
         observations[-1][1],
-        K=Ks[frame_idx[-1]],
-        R=Rs[frame_idx[-1]],
+        K=Ks[-1],
+        R=Rs[-1],
         t=t_world,
         plane_z=0.5,
     )

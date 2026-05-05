@@ -9,6 +9,10 @@ geometry features the user can recognise on a broadcast frame:
   edges.
 - Vertical lines (z=0..2.44): goal posts.
 - Horizontal high lines (z=2.44): goal crossbars.
+- Advertising-board edges (z=0 base, z≈1 top): perimeter LED ribbons that
+  wrap the pitch — visible across the back of nearly every broadcast frame
+  and crucial for breaking coplanar ambiguity on thin anchors that don't
+  show goal frames or corner flag tops clearly.
 
 Used by:
 - ``src/web/server.py``'s ``GET /pitch_lines`` endpoint (palette feed).
@@ -18,6 +22,12 @@ Used by:
 
 Coordinate system matches ``src/utils/pitch_landmarks.py``: x along the
 nearside touchline (0..105), y from near (0) to far (68), z up.
+
+Advertising-board dimensions are *nominal* values (Premier League–ish
+defaults: 1.0 m board height, 2 m offset from touchline, 4 m offset from
+goal line). Residuals on ad-board-anchored frames may be looser than fully
+known geometry if the stadium uses different dimensions; per-stadium
+overrides are tracked in ``docs/FEATURE_IDEAS.md``.
 """
 
 from __future__ import annotations
@@ -42,6 +52,17 @@ _6_DEPTH = 5.5
 _6_HALF = 9.16
 _6_NEAR = 34.0 - _6_HALF    # 24.84
 _6_FAR = 34.0 + _6_HALF     # 43.16
+
+# Advertising boards (perimeter LED ribbons) — nominal Premier League–ish
+# defaults. See module docstring for caveats and the future per-stadium
+# override note in docs/FEATURE_IDEAS.md.
+_AD_BOARD_HEIGHT = 1.0          # m — typical LED ribbon top edge
+_AD_TOUCHLINE_OFFSET = 2.0      # m — boards beyond near (y=-2) / far (y=70)
+_AD_GOALLINE_OFFSET = 4.0       # m — boards beyond left (x=-4) / right (x=109)
+_AD_NEAR_Y = -_AD_TOUCHLINE_OFFSET                  # -2.0
+_AD_FAR_Y = _PITCH_WID + _AD_TOUCHLINE_OFFSET       # 70.0
+_AD_LEFT_X = -_AD_GOALLINE_OFFSET                   # -4.0
+_AD_RIGHT_X = _PITCH_LEN + _AD_GOALLINE_OFFSET      # 109.0
 
 
 # Each value is ((x1, y1, z1), (x2, y2, z2)) — endpoints of the world line.
@@ -84,6 +105,32 @@ LINE_CATALOGUE: dict[
     # Goal frame — horizontal crossbars (z = 2.44)
     "left_goal_crossbar":     ((0.0,        _GP_NEAR, _GOAL_HEIGHT), (0.0,        _GP_FAR, _GOAL_HEIGHT)),
     "right_goal_crossbar":    ((_PITCH_LEN, _GP_NEAR, _GOAL_HEIGHT), (_PITCH_LEN, _GP_FAR, _GOAL_HEIGHT)),
+
+    # Advertising boards (perimeter LED ribbons) — give a vertical depth cue
+    # (z=0 base + z=1 top, parallel) on frames where goal frames / corner
+    # flags aren't clearly visible. Endpoints span the typical visible
+    # extent; the solver only uses the line direction so endpoints don't
+    # need to match the user's clicks exactly.
+    # Near touchline-parallel boards
+    "near_advertising_board_base": ((0.0,        _AD_NEAR_Y, 0.0),
+                                    (_PITCH_LEN, _AD_NEAR_Y, 0.0)),
+    "near_advertising_board_top":  ((0.0,        _AD_NEAR_Y, _AD_BOARD_HEIGHT),
+                                    (_PITCH_LEN, _AD_NEAR_Y, _AD_BOARD_HEIGHT)),
+    # Far touchline-parallel boards
+    "far_advertising_board_base":  ((0.0,        _AD_FAR_Y, 0.0),
+                                    (_PITCH_LEN, _AD_FAR_Y, 0.0)),
+    "far_advertising_board_top":   ((0.0,        _AD_FAR_Y, _AD_BOARD_HEIGHT),
+                                    (_PITCH_LEN, _AD_FAR_Y, _AD_BOARD_HEIGHT)),
+    # Behind-left-goal boards (parallel to left goal line; spans 18-yd width)
+    "behind_left_goal_ad_board_base": ((_AD_LEFT_X, _18_NEAR, 0.0),
+                                       (_AD_LEFT_X, _18_FAR,  0.0)),
+    "behind_left_goal_ad_board_top":  ((_AD_LEFT_X, _18_NEAR, _AD_BOARD_HEIGHT),
+                                       (_AD_LEFT_X, _18_FAR,  _AD_BOARD_HEIGHT)),
+    # Behind-right-goal boards
+    "behind_right_goal_ad_board_base": ((_AD_RIGHT_X, _18_NEAR, 0.0),
+                                        (_AD_RIGHT_X, _18_FAR,  0.0)),
+    "behind_right_goal_ad_board_top":  ((_AD_RIGHT_X, _18_NEAR, _AD_BOARD_HEIGHT),
+                                        (_AD_RIGHT_X, _18_FAR,  _AD_BOARD_HEIGHT)),
 }
 
 

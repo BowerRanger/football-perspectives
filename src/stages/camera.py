@@ -127,24 +127,27 @@ class CameraStage(BaseStage):
             is_anchor[af] = True
 
         anchor_frames = sorted(anchor_solutions.keys())
-        # Pass anchor_KR_only to the propagator (it doesn't need t for the
-        # feature-tracking homography — t enters only via interpolation
-        # below, after propagation).
-        anchor_KR_only = {f: (K, R) for f, (K, R, _) in anchor_solutions.items()}
+        # Inter-anchor frames: LERP K and t, SLERP R between adjacent
+        # anchors. The legacy feature-propagator (ORB homography frame-to-
+        # frame) was tuned for the broadcast-fixed-body assumption; with a
+        # moving camera (per-anchor t) it tends to drift visibly between
+        # anchors. Direct interpolation of (K, R, t) is smoother and more
+        # predictable: it trusts the anchor solves and produces a steady
+        # camera-motion model between them.
+        from scipy.spatial.transform import Rotation, Slerp
         for a, b in zip(anchor_frames, anchor_frames[1:]):
-            self._propagate_pair(
-                cap, a, b, anchor_KR_only,
-                per_frame_K, per_frame_R, per_frame_conf, is_anchor, cfg,
-            )
-            # Linear interpolation of t between adjacent anchors.
-            t_a = per_frame_t[a]
-            t_b = per_frame_t[b]
-            for offset in range(b - a + 1):
+            K_a, R_a, t_a = anchor_solutions[a]
+            K_b, R_b, t_b = anchor_solutions[b]
+            slerp = Slerp([0.0, 1.0], Rotation.from_matrix([R_a, R_b]))
+            for offset in range(1, b - a):
                 idx = a + offset
-                if is_anchor[idx]:
-                    continue
                 w = offset / (b - a)
+                per_frame_K[idx] = (1.0 - w) * K_a + w * K_b
+                per_frame_R[idx] = slerp([w]).as_matrix()[0]
                 per_frame_t[idx] = (1.0 - w) * t_a + w * t_b
+                # Lower confidence than the anchors but still high since
+                # interpolation is well-behaved between trusted anchors.
+                per_frame_conf[idx] = 0.7
 
         cap.release()
 

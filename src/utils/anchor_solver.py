@@ -583,31 +583,53 @@ def solve_anchors_jointly(
             "Check that landmark world_xyz values match the FIFA catalogue."
         )
 
-    # ── Pass 2: thin anchors inherit interpolated t ─────────────────────
+    # ── Pass 2: thin anchors — pick the better of solo-solve or t-fixed ──
+    # Try BOTH a solo full-solve (uses the anchor's own constraints to
+    # recover its own t) and a t-fixed LM (inherits the t interpolated
+    # between bracketing rich anchors). Keep whichever produces a lower
+    # reprojection residual. Solo wins when the anchor has enough info
+    # to disagree with the rich-anchor t (e.g. clip with camera motion).
+    # T-fixed wins when the anchor is geometrically degenerate alone.
     rich_frames_sorted = sorted(rich_t.keys())
     for a in qualifying:
         if a.frame in per_anchor_KRt:
             continue
-        t_inherited = _interp_t(a.frame, rich_frames_sorted, rich_t)
-        # Initial fx from nearest rich anchor.
         nearest_idx = min(
             range(len(rich_frames_sorted)),
             key=lambda i: abs(rich_frames_sorted[i] - a.frame),
         )
-        fx_seed = rich_fx[rich_frames_sorted[nearest_idx]]
-        K_seed = _make_K(fx_seed, cx, cy)
+        fx_prior = rich_fx[rich_frames_sorted[nearest_idx]]
+        K_prior = _make_K(fx_prior, cx, cy)
+
+        # Candidate A: solo solve.
+        solo_KRt: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        solo_res = float("inf")
+        solo_result = _solve_one_anchor_full(a, cx, cy, fx_prior, K_prior)
+        if solo_result is not None:
+            K_s, R_s, t_s, _ = solo_result
+            solo_res = reprojection_residual_for_anchor(a, K_s, R_s, t_s)
+            solo_KRt = (K_s, R_s, t_s)
+
+        # Candidate B: t-fixed (inherited from interpolation).
+        t_inherited = _interp_t(a.frame, rich_frames_sorted, rich_t)
         if len(a.landmarks) >= 4:
-            seed = _seed_anchor_pose(a, K_seed)
+            seed = _seed_anchor_pose(a, K_prior)
             rvec_init = seed[0] if seed is not None else np.array([0.001, 0.001, 0.001])
         else:
             rvec_init = np.array([0.001, 0.001, 0.001])
         rvec, fx = _solve_anchor_with_t_fixed(
-            a, t_inherited, cx, cy, fx_seed, rvec_init,
+            a, t_inherited, cx, cy, fx_prior, rvec_init,
         )
-        K = _make_K(fx, cx, cy)
-        R = _rvec_to_R(rvec)
-        per_anchor_KRt[a.frame] = (K, R, t_inherited)
-        per_anchor_res[a.frame] = reprojection_residual_for_anchor(a, K, R, t_inherited)
+        K_t = _make_K(fx, cx, cy)
+        R_t = _rvec_to_R(rvec)
+        tfx_res = reprojection_residual_for_anchor(a, K_t, R_t, t_inherited)
+
+        if solo_KRt is not None and solo_res < tfx_res:
+            per_anchor_KRt[a.frame] = solo_KRt
+            per_anchor_res[a.frame] = solo_res
+        else:
+            per_anchor_KRt[a.frame] = (K_t, R_t, t_inherited)
+            per_anchor_res[a.frame] = tfx_res
 
     # Representative t_world: median across rich-anchor t values.
     ts_rich = np.stack(list(rich_t.values()))

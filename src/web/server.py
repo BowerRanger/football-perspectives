@@ -77,7 +77,7 @@ _STAGE_COMPLETE = {
     "tracking": lambda d: any((d / "tracks").glob("*_tracks.json")),
     "camera": lambda d: (d / "camera" / "camera_track.json").exists(),
     "pose_2d": lambda d: any((d / "pose_2d").glob("*_pose_2d.json")),
-    "hmr_world": lambda d: any((d / "hmr_world").glob("*_hmr_world.npz")),
+    "hmr_world": lambda d: any((d / "hmr_world").glob("*_smpl_world.npz")),
     "ball": lambda d: (d / "ball" / "ball_track.json").exists(),
     "export": lambda d: (d / "export" / "gltf" / "scene.glb").exists(),
 }
@@ -510,15 +510,15 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         if not hmr_dir.exists():
             return {"players": []}
         ids: list[str] = []
-        for npz_path in sorted(hmr_dir.glob("*_hmr_world.npz")):
-            ids.append(npz_path.stem.replace("_hmr_world", ""))
+        for npz_path in sorted(hmr_dir.glob("*_smpl_world.npz")):
+            ids.append(npz_path.stem.replace("_smpl_world", ""))
         return {"players": ids}
 
     @app.get("/hmr_world/preview")
     def get_hmr_preview(player_id: str):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", player_id):
             raise HTTPException(status_code=400, detail="Invalid player_id")
-        npz_path = (output_dir / "hmr_world" / f"{player_id}_hmr_world.npz").resolve()
+        npz_path = (output_dir / "hmr_world" / f"{player_id}_smpl_world.npz").resolve()
         hmr_dir = (output_dir / "hmr_world").resolve()
         if not npz_path.is_relative_to(hmr_dir):
             raise HTTPException(status_code=400, detail="Invalid player_id")

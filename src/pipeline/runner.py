@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from src.pipeline.base import BaseStage
+from src.pipeline.quality_report import write_quality_report
 
 # Stages are imported lazily inside _stage_class() so deleting a not-yet-
 # rebuilt stage doesn't break other tooling that imports the runner.
@@ -82,3 +83,10 @@ def run_pipeline(
             continue
         print(f"  [RUN]  {name}")
         stage.run()
+
+    # Aggregate per-stage diagnostics into output/quality_report.json.
+    # This always runs (each section is independent of stage activation).
+    try:
+        write_quality_report(output_dir)
+    except Exception as exc:  # noqa: BLE001 — diagnostics must never fail the run
+        print(f"  [WARN] quality_report aggregation failed: {exc}")

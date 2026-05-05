@@ -123,3 +123,22 @@ The plan's test camera + the plan's static transform formula are inconsistent un
 A second regression test was added (`test_pitch_up_axis_recovered_under_yawed_camera`) to confirm the property holds under a non-trivial camera yaw — exercising that the formula is composing camera→world correctly, not just landing on the right answer when both rotations are identity.
 
 **Reasoning:** The user's task brief reaches the same conclusion (option (a) in the brief). The regression intent — "upright SMPL stays upright in pitch frame" — is preserved; the camera's specific orientation is not load-bearing for the pin. Documenting here so the user knows the test fixture deviates from the plan even though the production formula does not.
+
+### D9: Phase 2a — Task 2.3 foot-offset frame fix
+
+**Question:** The plan's `test_anchor_translation_subtracts_foot_offset` specifies:
+
+```
+foot_world      = (30, 40, 0.05)
+foot_in_root    = (0, -0.95, 0)        # comment: "foot is 0.95 m below root"
+R_root_world    = I
+expected root_t = (30, 40, 1.0)        # comment: "Root should be 0.95 m above the foot in world z"
+```
+
+with implementation `root_t = foot_world - R_root_world @ foot_in_root`. With `R_root_world = I`, this gives `(30, 40, 0.05) - (0, -0.95, 0) = (30, 40.95, 0.05)`, not `(30, 40, 1.0)`. The test fails.
+
+The expected result is z-direction-correct, which means the test author expected `foot_in_root` to express "below" as `-z`, not `-y`. The y-down convention is SMPL-canonical (its native frame), but `R_root_world = I` here implies the root is already in pitch-world coordinates (z-up).
+
+**Decision:** Changed the test data to `foot_in_root = (0, 0, -0.95)` and updated the inline comment. The implementation formula is unchanged (matches plan exactly).
+
+**Reasoning:** The test's expected result is physically correct (root 1.0 m above the pitch when foot is 0.05 m above the pitch). The test data `foot_in_root` was using the wrong axis convention for the case where `R_root_world = I` is supposed to place the root in pitch-world coords. The function contract is `foot_world = root_t + R_root_world @ foot_in_root` — `foot_in_root` is in the root's local frame, and the root frame is whatever `R_root_world` rotates from. With `R_root_world = I`, that frame is already pitch-world (z-up). The fix keeps the regression pin meaningful (offset is correctly subtracted) and the production code is unchanged.

@@ -600,6 +600,197 @@ class GVHMREstimator:
         }
 
 
+def _axis_angle_to_matrix(aa: np.ndarray) -> np.ndarray:
+    """Convert (N, 3) axis-angle vectors to (N, 3, 3) rotation matrices.
+
+    Implemented in numpy so this module stays importable without torch.
+    Uses Rodrigues' formula:  R = I + sin(theta) K + (1 - cos(theta)) K^2
+    where K is the skew-symmetric matrix of the unit axis.
+    """
+    aa = np.asarray(aa, dtype=np.float64).reshape(-1, 3)
+    n = aa.shape[0]
+    if n == 0:
+        return np.zeros((0, 3, 3), dtype=np.float64)
+
+    theta = np.linalg.norm(aa, axis=1)  # (N,)
+    out = np.tile(np.eye(3), (n, 1, 1))
+    nonzero = theta > 1e-9
+    if not np.any(nonzero):
+        return out
+
+    axis = aa[nonzero] / theta[nonzero, np.newaxis]  # (M, 3)
+    th = theta[nonzero]
+    sin_t = np.sin(th)[:, np.newaxis, np.newaxis]
+    cos_t = np.cos(th)[:, np.newaxis, np.newaxis]
+
+    M = axis.shape[0]
+    K = np.zeros((M, 3, 3), dtype=np.float64)
+    K[:, 0, 1] = -axis[:, 2]
+    K[:, 0, 2] = axis[:, 1]
+    K[:, 1, 0] = axis[:, 2]
+    K[:, 1, 2] = -axis[:, 0]
+    K[:, 2, 0] = -axis[:, 1]
+    K[:, 2, 1] = axis[:, 0]
+
+    K2 = K @ K
+    R = np.eye(3) + sin_t * K + (1.0 - cos_t) * K2
+    out[nonzero] = R
+    return out
+
+
+def _read_video_frames(
+    video_path: Path, frame_indices: list[int]
+) -> list[np.ndarray]:
+    """Read specific frames from a video file by index. Returns BGR frames.
+
+    Frames missing from the video (eof reached) are returned as black images
+    matching the first decoded frame's shape. Raises if the video cannot
+    be opened at all.
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"cannot open video {video_path}")
+    try:
+        # Sort/dedupe so seeking is monotonic and we only decode each frame once.
+        wanted = sorted(set(frame_indices))
+        cache: dict[int, np.ndarray] = {}
+        last_shape: tuple[int, int, int] | None = None
+        for fi in wanted:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, float(fi))
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                if last_shape is None:
+                    last_shape = (720, 1280, 3)
+                cache[fi] = np.zeros(last_shape, dtype=np.uint8)
+            else:
+                last_shape = frame.shape
+                cache[fi] = frame
+        return [cache[fi] for fi in frame_indices]
+    finally:
+        cap.release()
+
+
+def run_on_track(
+    track_frames: list[tuple[int, tuple[int, int, int, int]]],
+    *,
+    video_path: Path,
+    checkpoint: Path,
+    device: str,
+    batch_size: int,
+    max_sequence_length: int,
+) -> dict[str, np.ndarray]:
+    """Run GVHMR over a single player's track.
+
+    Parameters
+    ----------
+    track_frames:
+        Ordered list of ``(frame_index, (x1, y1, x2, y2))``.
+    video_path:
+        Path to the source clip; frames are decoded by index.
+    checkpoint:
+        Path to the GVHMR release checkpoint. Must exist on disk.
+    device:
+        PyTorch device string (``"auto"``, ``"cpu"``, ``"mps"``, ``"cuda:0"``).
+    batch_size:
+        Reserved for future use; current GVHMR predict() is sequence-level.
+    max_sequence_length:
+        Maximum number of frames per inference call. Long tracks are
+        chunked to avoid the MPS allocation issue noted in the spec.
+
+    Returns
+    -------
+    dict with arrays keyed by per-frame index in track order:
+        thetas:           (N, 24, 3)  axis-angle pose, root included at idx 0
+        betas:            (N, 10)     per-frame shape (caller medians)
+        root_R_cam:       (N, 3, 3)   root rotation in camera frame
+        root_t_cam:       (N, 3)      root translation in camera frame
+        joint_confidence: (N, 24)     per-joint confidence in [0, 1]
+
+    Notes
+    -----
+    GVHMR returns SMPL pose in 21 body joints + global_orient. SMPL canonical
+    is 24 joints (root + 23). The two extra joints (hands_left, hands_right
+    under the SMPL-H/SMPL-X convention) are zero-padded.
+    """
+    n = len(track_frames)
+    if n == 0:
+        return {
+            "thetas": np.zeros((0, 24, 3), dtype=np.float32),
+            "betas": np.zeros((0, 10), dtype=np.float32),
+            "root_R_cam": np.zeros((0, 3, 3), dtype=np.float32),
+            "root_t_cam": np.zeros((0, 3), dtype=np.float32),
+            "joint_confidence": np.zeros((0, 24), dtype=np.float32),
+        }
+
+    checkpoint = Path(checkpoint)
+    if not checkpoint.exists():
+        raise RuntimeError(
+            f"GVHMR checkpoint not found at {checkpoint}. "
+            "Download from https://github.com/zju3dv/GVHMR or run scripts/setup_gvhmr.sh"
+        )
+
+    estimator = GVHMREstimator(checkpoint=str(checkpoint), device=device)
+
+    frame_indices = [int(fi) for fi, _ in track_frames]
+    bboxes = [list(map(float, bb)) for _, bb in track_frames]
+    frames_bgr = _read_video_frames(video_path, frame_indices)
+
+    chunk = max(1, int(max_sequence_length))
+    all_thetas: list[np.ndarray] = []
+    all_betas: list[np.ndarray] = []
+    all_root_R_cam: list[np.ndarray] = []
+    all_root_t_cam: list[np.ndarray] = []
+    all_joint_conf: list[np.ndarray] = []
+
+    for start in range(0, n, chunk):
+        end = min(start + chunk, n)
+        sub_frames = frames_bgr[start:end]
+        sub_bboxes = bboxes[start:end]
+        out = estimator.estimate_sequence(sub_frames, sub_bboxes)
+
+        global_orient = out["global_orient"]                # (M, 3)
+        body_pose = out["body_pose"].reshape(-1, 21, 3)     # (M, 21, 3)
+        betas_avg = out["betas"]                            # (10,)
+        transl = out["transl"]                              # (M, 3)
+        kp2d = out["kp2d"]                                  # (M, 17, 3)
+
+        m = global_orient.shape[0]
+        thetas = np.zeros((m, 24, 3), dtype=np.float32)
+        thetas[:, 0, :] = global_orient
+        thetas[:, 1:22, :] = body_pose
+        # joints 22, 23 (hand placeholders) remain zero
+
+        betas_per_frame = np.tile(betas_avg.astype(np.float32), (m, 1))
+        root_R_cam = _axis_angle_to_matrix(global_orient).astype(np.float32)
+        root_t_cam = transl.astype(np.float32)
+
+        # Joint confidence: GVHMR's ViTPose 2D keypoint confidences cover 17
+        # COCO joints. For the 24 SMPL joints, take the mean of the per-frame
+        # 2D-keypoint confidence and broadcast — the foot-anchor stage only
+        # uses min(joint_confidence) anyway. Joints with no 2D analogue
+        # (root, spine) inherit the same scalar. This is intentionally
+        # conservative; if needed, downstream can refine.
+        if kp2d.size:
+            scalar_conf = kp2d[:, :, 2].mean(axis=1, keepdims=True)  # (M, 1)
+        else:
+            scalar_conf = np.zeros((m, 1), dtype=np.float32)
+        joint_conf = np.broadcast_to(scalar_conf, (m, 24)).astype(np.float32)
+
+        all_thetas.append(thetas)
+        all_betas.append(betas_per_frame)
+        all_root_R_cam.append(root_R_cam)
+        all_root_t_cam.append(root_t_cam)
+        all_joint_conf.append(joint_conf)
+
+    return {
+        "thetas": np.concatenate(all_thetas, axis=0) if all_thetas else np.zeros((0, 24, 3), dtype=np.float32),
+        "betas": np.concatenate(all_betas, axis=0) if all_betas else np.zeros((0, 10), dtype=np.float32),
+        "root_R_cam": np.concatenate(all_root_R_cam, axis=0) if all_root_R_cam else np.zeros((0, 3, 3), dtype=np.float32),
+        "root_t_cam": np.concatenate(all_root_t_cam, axis=0) if all_root_t_cam else np.zeros((0, 3), dtype=np.float32),
+        "joint_confidence": np.concatenate(all_joint_conf, axis=0) if all_joint_conf else np.zeros((0, 24), dtype=np.float32),
+    }
+
+
 class FakeGVHMREstimator:
     """Deterministic test double that produces plausible SMPL parameters.
 

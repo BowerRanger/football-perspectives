@@ -483,9 +483,18 @@ async function seekToFrame(frame) {
 // ── Canvas overlay ──────────────────────────────────────────────────
 function resizeOverlay() {
   const rect = els.video.getBoundingClientRect();
-  els.overlay.width = els.imageSize ? state.imageSize[0] : rect.width;
-  els.overlay.height = els.imageSize ? state.imageSize[1] : rect.height;
-  // Set CSS size to match the displayed video size
+  // Backing-store in image (natural) pixels so drawing in image-space
+  // coordinates is sharp at any display scale. Fall back to display
+  // pixels when the image size hasn't been determined yet (before
+  // ``loadedmetadata`` fires).
+  if (state.imageSize && state.imageSize[0] > 0 && state.imageSize[1] > 0) {
+    els.overlay.width = state.imageSize[0];
+    els.overlay.height = state.imageSize[1];
+  } else {
+    els.overlay.width = rect.width;
+    els.overlay.height = rect.height;
+  }
+  // CSS size matches the displayed video size.
   els.overlay.style.width = `${rect.width}px`;
   els.overlay.style.height = `${rect.height}px`;
 }
@@ -762,6 +771,11 @@ window.addEventListener("resize", () => {
 });
 
 els.video.addEventListener("loadedmetadata", () => {
+  resizeOverlay();
+  redrawOverlay();
+});
+
+window.addEventListener("resize", () => {
   resizeOverlay();
   redrawOverlay();
 });

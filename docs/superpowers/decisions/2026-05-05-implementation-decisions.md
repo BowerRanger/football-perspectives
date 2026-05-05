@@ -183,3 +183,50 @@ Additionally: even when the camera orientation is fixed so root z = 1.0 pre-snap
 The production stage uses the plan's snap default (0.1 m/frame) — appropriate for real broadcast footage where stationary players genuinely should ground-snap. Disabling it in the test fixture (where the fake runner produces zero velocity) avoids a numerical artifact specific to constant-input tests.
 
 A real broadcast clip with real GVHMR output (varying θ frame-to-frame, real ankle keypoints with sub-pixel jitter) would have non-zero velocities and the snap would behave correctly. The test's fixed-position fixture is the artefact.
+
+### D12: Phase 6 completion summary
+
+**Phase 6 status:** complete on `feat/broadcast-mono-pipeline`.
+
+**Final test count** (`pytest -q`): **55 passed, 2 skipped, 0 failures, 2 warnings** (third-party deprecation only).
+
+The two intentional skips are:
+
+1. `tests/test_camera_stage.py::test_camera_stage_recovers_trajectory` — D7 synthetic propagator integration; remains skip-marked.
+2. `tests/test_e2e_real_clip.py::test_full_pipeline_on_real_clip` — skips automatically when `tests/fixtures/real_clip/play.mp4` is absent.
+
+**Tests added in Phase 6:**
+
+- `tests/test_runner.py` — pins `resolve_stages` behaviour for the single-mode runner (4 unit tests).
+- `tests/test_e2e_real_clip.py` — real-clip E2E scaffold; skips cleanly when the fixture isn't provided.
+- `tests/test_cli.py` — rewritten against the new `recon.py` CLI surface (`run`/`serve`, named stages, `--clean`, no numeric aliases). 5 unit tests.
+
+**Tests deleted as legacy / superseded:**
+
+`test_calibration_propagation`, `test_calibration_smoothing`, `test_iterative_line_refinement`, `test_per_frame_refine`, `test_manual_calibration`, `test_pitch_lines`, `test_vp_calibration`, `test_single_shot_reconstruction`, `test_triangulation_dedupe`, `test_triangulation_utils`, `test_triangulation_stage`, `test_smpl_fitting`, `test_segmentation`, `test_ball_reconstruction`, `test_matching`, `test_sync`, `test_export`, `test_pose`, `test_prepare_shots`, `test_schemas`, `test_manifest_inference`. All were skip-marked at module level since Phase 0 (referenced deleted modules); their behaviour is now covered by the new stage-level tests (`test_camera_stage`, `test_anchor_solver`, `test_hmr_world_stage`, `test_ball_*`, `test_tracking`, etc.) or is no longer relevant in single-camera mode (sync, matching, triangulation).
+
+`test_manifest_inference.py` was deleted in full: its 9 schema-method tests covered behaviour that no active stage exercises (the new stages load `shots/shots_manifest.json` directly without falling back to inference), and its 2 stage-level tests referenced `src.stages.calibration` and `src.stages.sync` which were deleted in Phase 0.
+
+**Pytest config:** registered `unit`, `integration`, and `e2e` markers in `pyproject.toml::[tool.pytest.ini_options]` to silence `PytestUnknownMarkWarning` noise.
+
+**Coverage measurement deferred:** `pytest-cov` was not installed in the working venv; coverage was not gated. Many code paths (GVHMR runner, GLB export, web-server frame extraction) require GPU + model weights and would not contribute to `pytest --cov` numbers in CI without dedicated fixtures. Re-establish coverage tooling alongside the real-clip fixture work below.
+
+**Smoke checks performed manually:**
+
+- `python recon.py --help` and `python recon.py run --help` show the new CLI surface only — no numeric aliases, no removed stages, `--clean` flag present.
+- `from src.pipeline.runner import resolve_stages; resolve_stages('all', None)` returns the 7 named stages in spec order.
+- `create_app(...)` exposes `/anchors`, `/camera/track`, `/hmr_world/players`, `/hmr_world/preview`, `/ball/preview`, `/landmarks`, `/anchor_editor`, `/viewer`. Note: the plan referenced `/anchor-editor` (hyphen); the actual route uses `/anchor_editor` (underscore). Production routes match the dashboard links — no fix needed.
+
+**Items deferred to runtime verification on a real broadcast clip:**
+
+- **D11 anchor_editor projection convention** — single-anchor warp drift was flagged in D11; the new editor lacks any synthetic regression. Runtime verification with a real clip and known landmarks is required before relying on the projection.
+- **GVHMR real-weight integration** — `src/utils/gvhmr_estimator.py` is unit-tested via the smoke `test_gvhmr_estimator_smoke.py` (signature only). Real-weight inference + foot anchor + ground-snap behaviour all need to be confirmed end-to-end against `tests/fixtures/real_clip/play.mp4` once the user supplies it.
+- **Real-clip E2E** — `tests/test_e2e_real_clip.py` is the gate for end-to-end pipeline correctness. Skipped today; will activate when the fixture is dropped in.
+- **Foot-ground penetration on real footage** — Ground-snap default (0.1 m/frame) was chosen on synthetic data; verify it doesn't over-snap on broadcast clips where GVHMR root z naturally varies.
+
+**Recommendation:** before merging to `main`, run the real-clip E2E once with a representative ~5-second broadcast clip and inspect:
+1. `output/camera/camera_track.json` — focal stability, R_world_to_cam orthonormality.
+2. `output/hmr_world/*_smpl_world.npz` — root z stays roughly in [0.0, 1.5] m (no through-pitch or floating).
+3. `output/ball/ball_track.json` — ground/flight transitions land on visually plausible frames.
+4. `output/export/gltf/scene.glb` opened in the browser viewer — players walk on the pitch, not above/below.
+5. `output/quality_report.json` — no stage flagged as low-confidence.

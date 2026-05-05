@@ -82,10 +82,14 @@ _STAGE_COMPLETE = {
     "export": lambda d: (d / "export" / "gltf" / "scene.glb").exists(),
 }
 
+# Per-stage outputs that should be wiped on a "re-run" or "clear" action.
+# Paths are relative to ``output_dir`` and may name files or directories.
+# ``camera/anchors.json`` is deliberately omitted — it is user-supplied input
+# to the camera stage, not output, and must survive a stage re-run.
 _STAGE_ARTIFACTS: dict[str, list[str]] = {
     "prepare_shots": ["shots"],
     "tracking": ["tracks"],
-    "camera": ["camera"],
+    "camera": ["camera/camera_track.json", "camera/debug"],
     "pose_2d": ["pose_2d"],
     "hmr_world": ["hmr_world"],
     "ball": ["ball"],
@@ -386,11 +390,15 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         if stage not in STAGE_ORDER:
             raise HTTPException(status_code=404, detail=f"Unknown stage: {stage}")
         removed = []
-        for d in _STAGE_ARTIFACTS.get(stage, []):
-            target = output_dir / d
-            if target.exists():
+        for relpath in _STAGE_ARTIFACTS.get(stage, []):
+            target = output_dir / relpath
+            if not target.exists():
+                continue
+            if target.is_dir():
                 shutil.rmtree(target)
-                removed.append(d)
+            else:
+                target.unlink()
+            removed.append(relpath)
         return {"stage": stage, "removed": removed}
 
     @app.get("/api/video/{shot_id}")

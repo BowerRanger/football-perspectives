@@ -17,17 +17,26 @@ class LineObservation:
     """A line correspondence for camera calibration.
 
     The user draws a 2-point ``image_segment`` on a frame and selects a known
-    pitch line from the catalogue (e.g. ``near_touchline``). ``world_segment``
-    captures both endpoints of that catalogue line in pitch coordinates.
+    pitch line from the catalogue. There are two flavours:
 
-    The solver does NOT require the user's image endpoints to align with the
-    world segment's endpoints — only that the two image points lie on the
-    *projection* of the world line through (K, R, t).
+    1. **Position-known line** (``world_segment`` set) — e.g. ``near_touchline``
+       at world ``((0,0,0),(105,0,0))``. The solver requires the user's two
+       image points to lie on the *projection* of that specific world line.
+
+    2. **Direction-only / vanishing-point line** (``world_direction`` set) —
+       e.g. ``vertical_separator`` with direction ``(0,0,1)``. The world
+       position is unknown (the user is marking a vertical LED-board seam at
+       an arbitrary x position), but the line is parallel to a known world
+       direction. The solver requires the user's image line to point at the
+       vanishing point of that direction.
+
+    Exactly one of ``world_segment`` or ``world_direction`` should be set.
     """
 
     name: str
     image_segment: tuple[tuple[float, float], tuple[float, float]]
-    world_segment: tuple[tuple[float, float, float], tuple[float, float, float]]
+    world_segment: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None
+    world_direction: tuple[float, float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -66,8 +75,17 @@ class AnchorSet:
                             tuple(ln["image_segment"][1]),
                         ),
                         world_segment=(
-                            tuple(ln["world_segment"][0]),
-                            tuple(ln["world_segment"][1]),
+                            (
+                                tuple(ln["world_segment"][0]),
+                                tuple(ln["world_segment"][1]),
+                            )
+                            if ln.get("world_segment") is not None
+                            else None
+                        ),
+                        world_direction=(
+                            tuple(ln["world_direction"])
+                            if ln.get("world_direction") is not None
+                            else None
                         ),
                     )
                     for ln in a.get("lines", [])

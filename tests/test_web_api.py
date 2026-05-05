@@ -136,3 +136,50 @@ def test_post_anchors_round_trips_lines(client) -> None:
     assert line["name"] == "near_touchline"
     assert line["image_segment"] == [[400.0, 900.0], [1500.0, 880.0]]
     assert line["world_segment"] == [[0.0, 0.0, 0.0], [105.0, 0.0, 0.0]]
+    # Position-known line has world_direction = null on the wire.
+    assert line["world_direction"] is None
+
+
+@pytest.mark.integration
+def test_post_anchors_round_trips_vanishing_line(client) -> None:
+    """A direction-only (VP) line annotation round-trips correctly."""
+    c, tmp = client
+    payload = {
+        "clip_id": "play_037",
+        "image_size": [1920, 1080],
+        "anchors": [
+            {
+                "frame": 169,
+                "landmarks": [],
+                "lines": [
+                    {
+                        "name": "vertical_separator",
+                        "image_segment": [[800.0, 200.0], [802.0, 380.0]],
+                        "world_segment": None,
+                        "world_direction": [0.0, 0.0, 1.0],
+                    }
+                ],
+            }
+        ],
+    }
+    resp = c.post("/anchors", json=payload)
+    assert resp.status_code == 200
+
+    resp2 = c.get("/anchors")
+    body = resp2.json()
+    line = body["anchors"][0]["lines"][0]
+    assert line["name"] == "vertical_separator"
+    assert line["world_segment"] is None
+    assert line["world_direction"] == [0.0, 0.0, 1.0]
+
+
+@pytest.mark.integration
+def test_get_pitch_lines_includes_vanishing_lines(client) -> None:
+    c, _ = client
+    resp = c.get("/pitch_lines")
+    body = resp.json()
+    names = [ln["name"] for ln in body["lines"]]
+    assert "vertical_separator" in names
+    vs = next(ln for ln in body["lines"] if ln["name"] == "vertical_separator")
+    assert vs["world_direction"] == [0.0, 0.0, 1.0]
+    assert "world_segment" not in vs or vs.get("world_segment") is None

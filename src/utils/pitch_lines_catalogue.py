@@ -1,18 +1,17 @@
 """FIFA-standard pitch line catalogue for manual line-correspondence
 annotation in the camera-calibration anchor editor.
 
-Each entry maps a stable name to a 3D world line segment defined by two
-endpoints in pitch coordinates (metres). The endpoints are well-defined
-geometry features the user can recognise on a broadcast frame:
+Each entry has either a fully-known ``world_segment`` (two endpoints in
+pitch coordinates) OR a ``world_direction`` only (a 3D unit-vector
+direction the line is parallel to, with unknown world position):
 
-- Pitch-plane lines (z=0): touchlines, goal lines, halfway, 18yd / 6yd box
-  edges.
-- Vertical lines (z=0..2.44): goal posts.
-- Horizontal high lines (z=2.44): goal crossbars.
-- Advertising-board edges (z=0 base, z≈1 top): perimeter LED ribbons that
-  wrap the pitch — visible across the back of nearly every broadcast frame
-  and crucial for breaking coplanar ambiguity on thin anchors that don't
-  show goal frames or corner flag tops clearly.
+- **Position-known segments**: touchlines, goal lines, halfway, 18yd / 6yd
+  box edges, goal-frame posts and crossbars, perimeter LED-board edges.
+- **Direction-only ("vanishing-point") lines**: ``vertical_separator`` for
+  any vertical seam between adjacent LED-board panels — direction (0,0,1).
+  The user clicks two points along ANY visible vertical seam; the solver
+  uses it to constrain the world-z vanishing point. Critical when goal
+  posts and corner flag tops aren't visible (most thin pre-action shots).
 
 Used by:
 - ``src/web/server.py``'s ``GET /pitch_lines`` endpoint (palette feed).
@@ -138,3 +137,29 @@ def get_line(name: str) -> tuple[tuple[float, float, float], tuple[float, float,
     if name not in LINE_CATALOGUE:
         raise KeyError(f"Unknown pitch line: {name!r}")
     return LINE_CATALOGUE[name]
+
+
+# Direction-only lines (vanishing-point constraints). The user's clicked
+# image segment must point at the projection of the world direction —
+# world position of the line is unknown and unconstrained. Useful when the
+# user can spot a *direction* (e.g. a vertical seam between LED-board
+# panels) but not its absolute world location.
+VANISHING_LINE_CATALOGUE: dict[str, tuple[float, float, float]] = {
+    # The vertical (z-axis) seam between adjacent LED-board panels — visible
+    # in nearly any frame where the boards are. Adds VP3 (world +z) to
+    # frames that don't show goal posts or corner flags.
+    "vertical_separator":          (0.0, 0.0, 1.0),
+    # Optional: mowing-stripe lines. Mowing stripes alternate parallel to
+    # the touchlines (world +x) — direction (1,0,0). Often visible when
+    # turf is freshly cut and the user can't make out painted lines.
+    "mowing_stripe_along_touchline": (1.0, 0.0, 0.0),
+    # Mowing stripes perpendicular to touchlines (world +y) — direction
+    # (0,1,0). Same idea, perpendicular pattern.
+    "mowing_stripe_along_goalline":  (0.0, 1.0, 0.0),
+}
+
+
+def get_vanishing_line(name: str) -> tuple[float, float, float]:
+    if name not in VANISHING_LINE_CATALOGUE:
+        raise KeyError(f"Unknown vanishing line: {name!r}")
+    return VANISHING_LINE_CATALOGUE[name]

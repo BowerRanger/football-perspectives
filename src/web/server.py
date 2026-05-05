@@ -477,13 +477,17 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
 
     @app.get("/pitch_lines")
     def get_pitch_lines():
-        from src.utils.pitch_lines_catalogue import LINE_CATALOGUE
-        return {
-            "lines": [
-                {"name": name, "world_segment": [list(seg[0]), list(seg[1])]}
-                for name, seg in sorted(LINE_CATALOGUE.items())
-            ]
-        }
+        from src.utils.pitch_lines_catalogue import (
+            LINE_CATALOGUE,
+            VANISHING_LINE_CATALOGUE,
+        )
+        merged: list[dict[str, Any]] = []
+        for name, seg in LINE_CATALOGUE.items():
+            merged.append({"name": name, "world_segment": [list(seg[0]), list(seg[1])]})
+        for name, d in VANISHING_LINE_CATALOGUE.items():
+            merged.append({"name": name, "world_direction": list(d)})
+        merged.sort(key=lambda x: x["name"])
+        return {"lines": merged}
 
     @app.get("/anchors")
     def get_anchors():
@@ -604,10 +608,14 @@ def _anchor_set_to_dict(anchor_set: AnchorSet) -> dict[str, Any]:
                             list(ln.image_segment[0]),
                             list(ln.image_segment[1]),
                         ],
-                        "world_segment": [
-                            list(ln.world_segment[0]),
-                            list(ln.world_segment[1]),
-                        ],
+                        "world_segment": (
+                            [list(ln.world_segment[0]), list(ln.world_segment[1])]
+                            if ln.world_segment is not None else None
+                        ),
+                        "world_direction": (
+                            list(ln.world_direction)
+                            if ln.world_direction is not None else None
+                        ),
                     }
                     for ln in a.lines
                 ],
@@ -644,15 +652,26 @@ def _dict_to_anchor_set(data: dict[str, Any]) -> AnchorSet:
                     ),
                     world_segment=(
                         (
-                            float(ln["world_segment"][0][0]),
-                            float(ln["world_segment"][0][1]),
-                            float(ln["world_segment"][0][2]),
-                        ),
+                            (
+                                float(ln["world_segment"][0][0]),
+                                float(ln["world_segment"][0][1]),
+                                float(ln["world_segment"][0][2]),
+                            ),
+                            (
+                                float(ln["world_segment"][1][0]),
+                                float(ln["world_segment"][1][1]),
+                                float(ln["world_segment"][1][2]),
+                            ),
+                        )
+                        if ln.get("world_segment") is not None else None
+                    ),
+                    world_direction=(
                         (
-                            float(ln["world_segment"][1][0]),
-                            float(ln["world_segment"][1][1]),
-                            float(ln["world_segment"][1][2]),
-                        ),
+                            float(ln["world_direction"][0]),
+                            float(ln["world_direction"][1]),
+                            float(ln["world_direction"][2]),
+                        )
+                        if ln.get("world_direction") is not None else None
                     ),
                 )
                 for ln in a.get("lines", [])

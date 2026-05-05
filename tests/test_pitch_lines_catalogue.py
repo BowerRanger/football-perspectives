@@ -112,3 +112,27 @@ def test_catalogue_size_after_ad_boards():
 def test_get_line_raises_on_unknown_name():
     with pytest.raises(KeyError):
         get_line("bogus_advertising_board")
+
+
+# ── Direction-only (vanishing-point) catalogue ──────────────────────────────
+
+
+@pytest.mark.unit
+def test_vanishing_line_catalogue_has_vertical_separator():
+    from src.utils.pitch_lines_catalogue import VANISHING_LINE_CATALOGUE
+    assert "vertical_separator" in VANISHING_LINE_CATALOGUE
+    assert VANISHING_LINE_CATALOGUE["vertical_separator"] == (0.0, 0.0, 1.0)
+
+
+@pytest.mark.unit
+def test_get_vanishing_line_raises_on_unknown():
+    from src.utils.pitch_lines_catalogue import get_vanishing_line
+    with pytest.raises(KeyError):
+        get_vanishing_line("not_a_thing")
+
+
+@pytest.mark.unit
+def test_get_vanishing_line_returns_unit_direction():
+    from src.utils.pitch_lines_catalogue import get_vanishing_line
+    d = get_vanishing_line("vertical_separator")
+    assert d == (0.0, 0.0, 1.0)

@@ -360,39 +360,99 @@ def _point_residuals(
 def _line_residuals(
     lines: list[LineObservation], K: np.ndarray, R: np.ndarray, t: np.ndarray
 ) -> np.ndarray:
-    """2 residuals per line: perpendicular distance from each user-clicked
-    image endpoint to the projected world line.
+    """2 residuals per line.
 
-    The projected world line is defined by the projections of the world
-    segment's endpoints. Using image-plane line-distance (not point-to-point)
-    means the user's image endpoints are NOT required to coincide with the
-    world segment's endpoints — they only need to lie on the projected line.
+    For *position-known* lines (``world_segment`` set): perpendicular
+    distance from each user-clicked image endpoint to the projected world
+    line. The projected line is defined by the projections of the world
+    segment's endpoints.
+
+    For *direction-only* lines (``world_direction`` set, used for vanishing-
+    point constraints like ``vertical_separator``): the line is parallel to
+    a known world direction but its world position is unknown. The residual
+    is the perpendicular distance from the *vanishing point* of that
+    direction (i.e. ``K @ R @ d`` perspective-divided) to the line through
+    the user's two image clicks. Each click contributes one residual via
+    its perpendicular distance from the line, computed against the line
+    that would pass through the VP and bisect the user's clicks.
+
+    Either way, each line contributes 2 residuals.
     """
     if not lines:
         return np.empty(0)
     out = np.empty(2 * len(lines))
     for i, ln in enumerate(lines):
+        if ln.world_direction is not None:
+            # Vanishing-point residual.
+            d_world = np.array(ln.world_direction, dtype=np.float64)
+            d_cam = R @ d_world          # direction in camera frame
+            # The vanishing point is K @ d_cam, perspective-divided. If
+            # d_cam[2] ≈ 0 the VP is at infinity in image plane (line is
+            # parallel to image plane); fall through to a "line direction"
+            # residual using d_cam[:2] as the image-plane direction.
+            (u1, v1), (u2, v2) = ln.image_segment
+            if abs(d_cam[2]) < 1e-3:
+                # VP at infinity — image line should be parallel to d_cam[:2].
+                # Residual: cross-product magnitude between user line direction
+                # and projected world direction.
+                user_dir = np.array([u2 - u1, v2 - v1])
+                un = float(np.linalg.norm(user_dir))
+                if un < 1e-6:
+                    out[2 * i] = 1e6; out[2 * i + 1] = 1e6
+                    continue
+                user_dir /= un
+                proj_dir = d_cam[:2]
+                pn = float(np.linalg.norm(proj_dir))
+                if pn < 1e-6:
+                    out[2 * i] = 1e6; out[2 * i + 1] = 1e6
+                    continue
+                proj_dir /= pn
+                # Cross product (scalar, signed) — pixels per metre of line
+                # length, scaled to match magnitude with point residuals.
+                cross = float(user_dir[0] * proj_dir[1] - user_dir[1] * proj_dir[0])
+                out[2 * i] = un * cross / 2
+                out[2 * i + 1] = un * cross / 2
+                continue
+            vp = (K @ d_cam)[:2] / d_cam[2]
+            # Build image line through the user's two clicks and measure
+            # perpendicular distance from VP to that line.
+            a = np.array([u1, v1])
+            b = np.array([u2, v2])
+            ab = b - a
+            ab_norm = float(np.linalg.norm(ab))
+            if ab_norm < 1e-6:
+                out[2 * i] = 1e6; out[2 * i + 1] = 1e6
+                continue
+            # Unit normal of the user's line.
+            nx = -ab[1] / ab_norm
+            ny = ab[0] / ab_norm
+            cc = -(nx * a[0] + ny * a[1])
+            dist = nx * vp[0] + ny * vp[1] + cc
+            # Two residuals: distance from VP applied symmetrically to keep
+            # parameter count consistent with the position-known branch.
+            out[2 * i] = dist
+            out[2 * i + 1] = dist
+            continue
+
+        # Position-known line residual (existing path).
+        if ln.world_segment is None:
+            out[2 * i] = 1e6; out[2 * i + 1] = 1e6
+            continue
         Pa = np.array(ln.world_segment[0], dtype=np.float64)
         Pb = np.array(ln.world_segment[1], dtype=np.float64)
         cam_a = R @ Pa + t
         cam_b = R @ Pb + t
-        # If both world endpoints are behind the camera, the line cannot be
-        # evaluated at this iteration. Penalise heavily but with finite values.
         if cam_a[2] <= 1e-3 and cam_b[2] <= 1e-3:
             out[2 * i] = 1e6
             out[2 * i + 1] = 1e6
             continue
-        # Clamp z to keep projections finite.
         za = cam_a[2] if cam_a[2] > 1e-3 else 1e-3
         zb = cam_b[2] if cam_b[2] > 1e-3 else 1e-3
         pa = (K @ cam_a)[:2] / za
         pb = (K @ cam_b)[:2] / zb
-        # Image line through pa, pb expressed as ax + by + c = 0 with
-        # (a, b) the unit normal.
         d = pb - pa
         norm = float(np.linalg.norm(d))
         if norm < 1e-6:
-            # Degenerate: world endpoints project to the same image point.
             out[2 * i] = 1e6
             out[2 * i + 1] = 1e6
             continue

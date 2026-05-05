@@ -473,11 +473,20 @@ function renderPalette() {
       const row = document.createElement("div");
       row.className = "landmark-row";
       row.dataset.name = ln.name;
-      const a = ln.world_segment[0].map((v) => v.toFixed(1)).join(",");
-      const b = ln.world_segment[1].map((v) => v.toFixed(1)).join(",");
+      let label;
+      if (ln.world_segment) {
+        const a = ln.world_segment[0].map((v) => v.toFixed(1)).join(",");
+        const b = ln.world_segment[1].map((v) => v.toFixed(1)).join(",");
+        label = `${a} → ${b}`;
+      } else if (ln.world_direction) {
+        const d = ln.world_direction.map((v) => v.toFixed(1)).join(",");
+        label = `direction (${d}) — VP`;
+      } else {
+        label = "(unknown)";
+      }
       row.innerHTML = `
         <span class="lm-name">${ln.name}</span>
-        <span class="lm-coord" style="color:#fef08a;">${a} → ${b}</span>
+        <span class="lm-coord" style="color:#fef08a;">${label}</span>
       `;
       row.addEventListener("click", () => selectLine(ln.name));
       els.palette.appendChild(row);
@@ -786,11 +795,20 @@ els.overlay.addEventListener("click", (ev) => {
   const obs = {
     name: ln.name,
     image_segment: [state.pendingLineStart, [x, y]],
-    world_segment: ln.world_segment,
+    world_segment: ln.world_segment || null,
+    world_direction: ln.world_direction || null,
   };
   const cur = ensureAnchor(state.frame);
-  const idx = cur.lines.findIndex((o) => o.name === obs.name);
-  if (idx >= 0) cur.lines[idx] = obs; else cur.lines.push(obs);
+  // For position-known lines, replace by name (only one near_touchline per
+  // anchor). For direction-only lines (e.g. vertical_separator), allow
+  // multiple copies — each separator is an independent VP residual, so
+  // disambiguate by index.
+  if (obs.world_direction !== null) {
+    cur.lines.push(obs);
+  } else {
+    const idx = cur.lines.findIndex((o) => o.name === obs.name);
+    if (idx >= 0) cur.lines[idx] = obs; else cur.lines.push(obs);
+  }
   state.pendingLineStart = null;
   clearLineSelection();
   redrawOverlay();
@@ -911,7 +929,8 @@ els.saveBtn.addEventListener("click", async () => {
         lines: (a.lines || []).map((ln) => ({
           name: ln.name,
           image_segment: ln.image_segment,
-          world_segment: ln.world_segment,
+          world_segment: ln.world_segment || null,
+          world_direction: ln.world_direction || null,
         })),
       })),
   };

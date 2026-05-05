@@ -75,25 +75,28 @@ LINE_CATALOGUE: dict[
     "right_goal_line":        ((_PITCH_LEN, 0.0,    0.0), (_PITCH_LEN, _PITCH_WID, 0.0)),
     "halfway_line":           ((52.5,       0.0,    0.0), (52.5,       _PITCH_WID, 0.0)),
 
-    # Left penalty area (18-yard box)
+    # Left penalty area (18-yard box). ``_near_edge`` runs along the near
+    # touchline side of the box (y = 13.84); ``_far_edge`` runs along the
+    # far touchline side (y = 54.16). Renamed from the previous
+    # ``_top``/``_bottom`` which inverted the conventional broadcast view.
     "left_18yd_front":        ((_18_DEPTH,  _18_NEAR, 0.0), (_18_DEPTH,  _18_FAR, 0.0)),
-    "left_18yd_top":          ((0.0,        _18_NEAR, 0.0), (_18_DEPTH,  _18_NEAR, 0.0)),
-    "left_18yd_bottom":       ((0.0,        _18_FAR,  0.0), (_18_DEPTH,  _18_FAR,  0.0)),
+    "left_18yd_near_edge":    ((0.0,        _18_NEAR, 0.0), (_18_DEPTH,  _18_NEAR, 0.0)),
+    "left_18yd_far_edge":     ((0.0,        _18_FAR,  0.0), (_18_DEPTH,  _18_FAR,  0.0)),
 
     # Right penalty area (18-yard box)
     "right_18yd_front":       ((_PITCH_LEN - _18_DEPTH, _18_NEAR, 0.0), (_PITCH_LEN - _18_DEPTH, _18_FAR, 0.0)),
-    "right_18yd_top":         ((_PITCH_LEN, _18_NEAR, 0.0), (_PITCH_LEN - _18_DEPTH, _18_NEAR, 0.0)),
-    "right_18yd_bottom":      ((_PITCH_LEN, _18_FAR,  0.0), (_PITCH_LEN - _18_DEPTH, _18_FAR,  0.0)),
+    "right_18yd_near_edge":   ((_PITCH_LEN, _18_NEAR, 0.0), (_PITCH_LEN - _18_DEPTH, _18_NEAR, 0.0)),
+    "right_18yd_far_edge":    ((_PITCH_LEN, _18_FAR,  0.0), (_PITCH_LEN - _18_DEPTH, _18_FAR,  0.0)),
 
     # Left goal area (6-yard box)
     "left_6yd_front":         ((_6_DEPTH,   _6_NEAR, 0.0), (_6_DEPTH,   _6_FAR, 0.0)),
-    "left_6yd_top":           ((0.0,        _6_NEAR, 0.0), (_6_DEPTH,   _6_NEAR, 0.0)),
-    "left_6yd_bottom":        ((0.0,        _6_FAR,  0.0), (_6_DEPTH,   _6_FAR,  0.0)),
+    "left_6yd_near_edge":     ((0.0,        _6_NEAR, 0.0), (_6_DEPTH,   _6_NEAR, 0.0)),
+    "left_6yd_far_edge":      ((0.0,        _6_FAR,  0.0), (_6_DEPTH,   _6_FAR,  0.0)),
 
     # Right goal area (6-yard box)
     "right_6yd_front":        ((_PITCH_LEN - _6_DEPTH, _6_NEAR, 0.0), (_PITCH_LEN - _6_DEPTH, _6_FAR, 0.0)),
-    "right_6yd_top":          ((_PITCH_LEN, _6_NEAR, 0.0), (_PITCH_LEN - _6_DEPTH, _6_NEAR, 0.0)),
-    "right_6yd_bottom":       ((_PITCH_LEN, _6_FAR,  0.0), (_PITCH_LEN - _6_DEPTH, _6_FAR,  0.0)),
+    "right_6yd_near_edge":    ((_PITCH_LEN, _6_NEAR, 0.0), (_PITCH_LEN - _6_DEPTH, _6_NEAR, 0.0)),
+    "right_6yd_far_edge":     ((_PITCH_LEN, _6_FAR,  0.0), (_PITCH_LEN - _6_DEPTH, _6_FAR,  0.0)),
 
     # Goal frame — vertical posts (great for breaking coplanarity)
     "left_goal_left_post":    ((0.0,        _GP_NEAR, 0.0), (0.0,        _GP_NEAR, _GOAL_HEIGHT)),

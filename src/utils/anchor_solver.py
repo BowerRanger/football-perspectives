@@ -58,10 +58,15 @@ class AnchorSolveError(RuntimeError):
 
 
 class JointSolution(NamedTuple):
-    t_world: np.ndarray                                       # (3,)
-    principal_point: tuple[float, float]                      # (cx, cy)
-    per_anchor_KR: dict[int, tuple[np.ndarray, np.ndarray]]   # frame -> (K, R)
-    per_anchor_residual_px: dict[int, float]                  # frame -> mean px
+    t_world: np.ndarray                                            # (3,) — median across anchors
+    principal_point: tuple[float, float]                           # (cx, cy)
+    per_anchor_KRt: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]]
+    """Per-anchor (K, R, t). Each anchor has its own translation because
+    the broadcast-fixed-body assumption doesn't hold reliably on real
+    clips (steadicam, broadcast cuts between cameras). Solving each
+    anchor independently gives much tighter per-anchor calibration.
+    """
+    per_anchor_residual_px: dict[int, float]                       # frame -> mean px
 
 
 # Public utilities ------------------------------------------------------------
@@ -448,11 +453,91 @@ def _jac_sparsity(anchors: tuple[Anchor, ...]) -> lil_matrix:
 # Public solver ---------------------------------------------------------------
 
 
+def _solve_one_anchor_full(
+    anchor: Anchor,
+    cx: float,
+    cy: float,
+    fx_init: float,
+    K_init: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float] | None:
+    """Solo solve: cv2.solvePnP for a (R, t) seed at fx=fx_init, then LM-refine
+    (fx, R, t) using both point landmarks and line annotations.
+
+    Returns ``(K, R, t, fx)`` or ``None`` if the anchor has too few points
+    AND too few lines for solvePnP to bootstrap.
+    """
+    if len(anchor.landmarks) < 4 and len(anchor.lines) < 2:
+        return None
+
+    # Bootstrap from solvePnP if we have enough points; otherwise initialise
+    # from identity rotation + a guessed translation along the optical axis
+    # (LM with line residuals takes it from there).
+    if len(anchor.landmarks) >= 4:
+        seed = _seed_anchor_pose(anchor, K_init)
+        if seed is None:
+            return None
+        rvec_init, tvec_init = seed
+    else:
+        rvec_init = np.array([0.001, 0.001, 0.001])
+        tvec_init = np.array([0.0, 0.0, 50.0])  # 50 m down optical axis
+
+    # Refine (fx, R, t) jointly. Both points and lines are weighted as in the
+    # seed-pose path, but here every anchor gets its own t (no shared-t
+    # constraint) — broadcast clips with steadicam motion or stitched
+    # camera feeds need this flexibility.
+    fx, rvec, tvec = _refine_seed_pose(
+        anchor, rvec_init, tvec_init, cx, cy, fx_init,
+    )
+    K = _make_K(fx, cx, cy)
+    R = _rvec_to_R(rvec)
+    return K, R, tvec, fx
+
+
+def _is_rich(anchor: Anchor, min_points: int = 6) -> bool:
+    """Whether an anchor has enough non-coplanar points to solo-solve (K, R, t).
+
+    A rich anchor can recover its own translation independently of other
+    anchors — used for the v2 hybrid solve where the broadcast-fixed-body
+    assumption is dropped.
+    """
+    if len(anchor.landmarks) < min_points:
+        return False
+    z_levels = {round(lm.world_xyz[2], 3) for lm in anchor.landmarks}
+    return len(z_levels) >= 2
+
+
+def _interp_t(
+    frame: int, rich_frames: list[int], t_by_frame: dict[int, np.ndarray]
+) -> np.ndarray:
+    """Linearly interpolate t at ``frame`` from the bracketing rich anchors.
+    Clamps to the first/last rich anchor outside the bracket range."""
+    if frame <= rich_frames[0]:
+        return t_by_frame[rich_frames[0]].copy()
+    if frame >= rich_frames[-1]:
+        return t_by_frame[rich_frames[-1]].copy()
+    for a, b in zip(rich_frames, rich_frames[1:]):
+        if a <= frame <= b:
+            w = (frame - a) / (b - a) if b > a else 0.0
+            return (1.0 - w) * t_by_frame[a] + w * t_by_frame[b]
+    return t_by_frame[rich_frames[0]].copy()
+
+
 def solve_anchors_jointly(
     anchors: tuple[Anchor, ...],
     image_size: tuple[int, int],
 ) -> JointSolution:
-    """Joint bundle adjustment over all anchors. See module docstring."""
+    """Hybrid per-anchor solve.
+
+    Pass 1: every "rich" anchor (≥6 non-coplanar landmarks) is solo-solved
+    via solvePnP + LM refine — each gets its own (K, R, t).
+    Pass 2: thin anchors inherit a t linearly interpolated between the
+    bracketing rich anchors and run a t-fixed LM for (R, fx).
+
+    This drops the "broadcast camera body fixed" assumption (which doesn't
+    hold for steadicam / multi-camera-stitched clips). Camera position
+    can vary smoothly between rich anchors; thin anchors trust the
+    interpolated value.
+    """
     if not anchors:
         raise AnchorSolveError("no anchors supplied")
     qualifying = tuple(a for a in anchors if _qualifies(a))
@@ -463,161 +548,82 @@ def solve_anchors_jointly(
         )
 
     width, height = image_size
-    cx_init = width / 2.0
-    cy_init = height / 2.0
-    fx_init = float(width)        # broadcast prior: fx ≈ image width
-    K_seed = _make_K(fx_init, cx_init, cy_init)
+    cx = width / 2.0
+    cy = height / 2.0
+    fx_init = float(width)              # broadcast prior, refined per-anchor
+    K_init = _make_K(fx_init, cx, cy)
 
-    # Pick the richest anchor (most landmarks + most z-diversity) and run a
-    # one-anchor LM to get a good fx seed before initialising the others.
-    # The broadcast prior fx=image_width is often off by a factor of 1.5×;
-    # solvePnP at the wrong fx places landmarks behind the camera at the
-    # other anchors, and the joint LM struggles to escape.
-    seed_anchor = _pick_seed_anchor(qualifying)
-    seed = _seed_anchor_pose(seed_anchor, K_seed)
-    if seed is None:
-        raise AnchorSolveError(
-            f"cv2.solvePnP failed on seed anchor (frame {seed_anchor.frame}); "
-            f"add more / clearer landmarks on that frame"
-        )
-    seed_rvec_init, seed_tvec_init = seed
-
-    # Refine (fx, R, t) on the seed using its full set of constraints
-    # (point landmarks + line annotations).
-    fx_refined, seed_rvec_init, seed_tvec_init = _refine_seed_pose(
-        seed_anchor, seed_rvec_init, seed_tvec_init, cx_init, cy_init, fx_init,
-    )
-    K_refined = _make_K(fx_refined, cx_init, cy_init)
-
-    # Use the seed anchor's tvec as the shared t_world initial guess. Other
-    # anchors' R and fx are seeded by a t-fixed LM (much more stable on
-    # coplanar landmarks than running solvePnP per anchor).
-    t_init = seed_tvec_init.copy()
-
-    rvec_seeds: list[np.ndarray] = []
-    fx_seeds: list[float] = []
-    for a in qualifying:
-        if a.frame == seed_anchor.frame:
-            rvec_seeds.append(seed_rvec_init.copy())
-            fx_seeds.append(fx_refined)
-            continue
-        # Get a good rvec initial via solvePnP with the refined K (when the
-        # anchor has enough points), then let the t-fixed LM polish (R, fx)
-        # under the shared t_init using BOTH points and lines.
-        if len(a.landmarks) >= 4:
-            seeded = _seed_anchor_pose(a, K_refined)
-            rvec_init = seeded[0] if seeded is not None else seed_rvec_init
-        else:
-            rvec_init = seed_rvec_init
-        rvec, fx = _solve_anchor_with_t_fixed(
-            a, t_init, cx_init, cy_init, fx_refined, rvec_init,
-        )
-        rvec_seeds.append(rvec)
-        fx_seeds.append(fx)
-
-    # ── Compose result from staged seeds ──────────────────────────────────
-    # The joint LM was originally meant to polish the seeds, but in
-    # practice it tends to compromise the rich anchor's tight fit by
-    # tugging t_world toward thin/noisy anchors. The seeded values
-    # (rich-anchor full solve + per-other-anchor t-fixed LM) are already
-    # close to optimal under the shared-t broadcast assumption; anchors
-    # whose user-clicks don't fit that assumption surface as high
-    # per-anchor residuals (the camera stage flags those as low confidence).
-    per_anchor_KR: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    per_anchor_KRt: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
     per_anchor_res: dict[int, float] = {}
-    for a, rvec, fx in zip(qualifying, rvec_seeds, fx_seeds):
-        K = _make_K(fx, cx_init, cy_init)
+
+    # ── Pass 1: solo-solve every rich anchor ────────────────────────────
+    rich_anchors = [a for a in qualifying if _is_rich(a)]
+    if not rich_anchors:
+        raise AnchorSolveError(
+            "no anchor has ≥6 non-coplanar landmarks; place at least one "
+            "rich anchor (e.g. corners + a corner-flag-top + a goal-crossbar "
+            "endpoint) so the solver can recover the camera pose"
+        )
+
+    rich_t: dict[int, np.ndarray] = {}
+    rich_fx: dict[int, float] = {}
+    for a in sorted(rich_anchors, key=lambda x: x.frame):
+        result = _solve_one_anchor_full(a, cx, cy, fx_init, K_init)
+        if result is None:
+            continue
+        K, R, t, fx = result
+        per_anchor_KRt[a.frame] = (K, R, t)
+        per_anchor_res[a.frame] = reprojection_residual_for_anchor(a, K, R, t)
+        rich_t[a.frame] = t
+        rich_fx[a.frame] = fx
+
+    if not rich_t:
+        raise AnchorSolveError(
+            "all rich-anchor solo solves failed (cv2.solvePnP refused). "
+            "Check that landmark world_xyz values match the FIFA catalogue."
+        )
+
+    # ── Pass 2: thin anchors inherit interpolated t ─────────────────────
+    rich_frames_sorted = sorted(rich_t.keys())
+    for a in qualifying:
+        if a.frame in per_anchor_KRt:
+            continue
+        t_inherited = _interp_t(a.frame, rich_frames_sorted, rich_t)
+        # Initial fx from nearest rich anchor.
+        nearest_idx = min(
+            range(len(rich_frames_sorted)),
+            key=lambda i: abs(rich_frames_sorted[i] - a.frame),
+        )
+        fx_seed = rich_fx[rich_frames_sorted[nearest_idx]]
+        K_seed = _make_K(fx_seed, cx, cy)
+        if len(a.landmarks) >= 4:
+            seed = _seed_anchor_pose(a, K_seed)
+            rvec_init = seed[0] if seed is not None else np.array([0.001, 0.001, 0.001])
+        else:
+            rvec_init = np.array([0.001, 0.001, 0.001])
+        rvec, fx = _solve_anchor_with_t_fixed(
+            a, t_inherited, cx, cy, fx_seed, rvec_init,
+        )
+        K = _make_K(fx, cx, cy)
         R = _rvec_to_R(rvec)
-        per_anchor_KR[a.frame] = (K, R)
-        per_anchor_res[a.frame] = reprojection_residual_for_anchor(a, K, R, t_init)
+        per_anchor_KRt[a.frame] = (K, R, t_inherited)
+        per_anchor_res[a.frame] = reprojection_residual_for_anchor(a, K, R, t_inherited)
+
+    # Representative t_world: median across rich-anchor t values.
+    ts_rich = np.stack(list(rich_t.values()))
+    t_world_median = np.median(ts_rich, axis=0)
 
     logger.info(
-        "staged solve: %d anchors, seed=%d, t_world=[%.2f, %.2f, %.2f], "
-        "fx_seed=%.1f, mean per-anchor residual=%.2f px",
-        len(qualifying), seed_anchor.frame, *t_init, fx_refined,
+        "hybrid solve: %d total (%d rich solo + %d thin t-interpolated), "
+        "t_world median=[%.2f, %.2f, %.2f], mean residual=%.2f px",
+        len(per_anchor_KRt), len(rich_t),
+        len(per_anchor_KRt) - len(rich_t), *t_world_median,
         float(np.mean(list(per_anchor_res.values()))) if per_anchor_res else 0.0,
     )
 
     return JointSolution(
-        t_world=t_init,
-        principal_point=(cx_init, cy_init),
-        per_anchor_KR=per_anchor_KR,
-        per_anchor_residual_px=per_anchor_res,
-    )
-
-    # ── (Joint LM polish disabled — see commit message for rationale) ────
-    p0 = _pack_params(t_init, cx_init, cy_init, rvec_seeds, fx_seeds)
-    sparsity = _jac_sparsity(qualifying)
-
-    # Parameter bounds — keep the LM out of pathological regions where it
-    # can diverge to 1e27 t_world or wildly off principal points. fx has a
-    # wide range (broadcast lenses span ~400 to image_width × 5 effectively).
-    # Rotation vectors are unbounded (axis-angle wraps).
-    n = len(qualifying)
-    lo = np.full(_GLOBALS + _PER_ANCHOR * n, -np.inf)
-    hi = np.full(_GLOBALS + _PER_ANCHOR * n, np.inf)
-    # t_world bounds: ±200 m from pitch origin (FIFA pitch is 105×68).
-    lo[:3] = -200.0
-    hi[:3] = 200.0
-    # Principal point: tightly bounded to image centre. Allowing it to roam
-    # creates a degenerate parameter space (pp + fx + rotation are
-    # interchangeable in many configurations), and broadcast lenses are
-    # close to centred in practice. Tight ±2 % bound effectively pins it.
-    lo[3] = cx_init - 0.02 * width
-    hi[3] = cx_init + 0.02 * width
-    lo[4] = cy_init - 0.02 * height
-    hi[4] = cy_init + 0.02 * height
-    # Per-anchor fx: 0.2× to 10× image width covers ultra-wide to long
-    # telephoto broadcast lenses.
-    for i in range(n):
-        fx_idx = _GLOBALS + i * _PER_ANCHOR + 3
-        lo[fx_idx] = 0.2 * width
-        hi[fx_idx] = 10.0 * width
-
-    # Clamp the seed to lie strictly inside bounds (LM requires this).
-    p0 = np.clip(p0, lo + 1e-6, hi - 1e-6)
-
-    try:
-        # Use the trust-region reflective method with auto-scaling. ``lm``
-        # (true Levenberg–Marquardt) does not support bounds or sparse
-        # Jacobians, so we keep ``trf`` to leverage both. Plain L2 loss;
-        # outlier handling can be added back later if real-data smoke
-        # tests show issues.
-        result = least_squares(
-            _residuals,
-            p0,
-            args=(qualifying,),
-            bounds=(lo, hi),
-            jac_sparsity=sparsity,
-            method="trf",
-            x_scale="jac",
-            ftol=1e-10,
-            xtol=1e-10,
-            gtol=1e-10,
-            max_nfev=2000,
-        )
-    except Exception as exc:
-        raise AnchorSolveError(f"joint LM failed: {exc}") from exc
-
-    t_world, cx, cy, rvecs, fxs = _unpack_params(result.x, len(qualifying))
-
-    per_anchor_KR: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-    per_anchor_res: dict[int, float] = {}
-    for a, rvec, fx in zip(qualifying, rvecs, fxs):
-        K = _make_K(fx, cx, cy)
-        R = _rvec_to_R(rvec)
-        per_anchor_KR[a.frame] = (K, R)
-        per_anchor_res[a.frame] = reprojection_residual_for_anchor(a, K, R, t_world)
-
-    logger.info(
-        "joint BA solved: %d anchors, t_world=[%.2f, %.2f, %.2f], "
-        "principal_point=(%.1f, %.1f), final cost=%.4f",
-        len(qualifying), *t_world, cx, cy, float(result.cost),
-    )
-
-    return JointSolution(
-        t_world=t_world,
+        t_world=t_world_median,
         principal_point=(cx, cy),
-        per_anchor_KR=per_anchor_KR,
+        per_anchor_KRt=per_anchor_KRt,
         per_anchor_residual_px=per_anchor_res,
     )

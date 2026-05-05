@@ -14,6 +14,11 @@ class CameraFrame:
     R: list[list[float]]      # 3x3
     confidence: float
     is_anchor: bool
+    # Per-frame world->camera translation. Optional for backward compatibility
+    # with older camera_track.json files that stored only a clip-shared
+    # ``t_world``; viewers/downstream should prefer per-frame ``t`` when
+    # present and fall back to ``CameraTrack.t_world`` when absent.
+    t: list[float] | None = None
 
 
 @dataclass(frozen=True)
@@ -21,11 +26,9 @@ class CameraTrack:
     clip_id: str
     fps: float
     image_size: tuple[int, int]
-    t_world: list[float]                   # length 3
+    t_world: list[float]                   # length 3 — representative/median across anchors
     frames: tuple[CameraFrame, ...]
-    # Shared principal point recovered by the joint bundle adjustment.
-    # Optional for backward compatibility with older camera_track.json files
-    # — when absent, viewers should fall back to (image_size[0]/2, image_size[1]/2).
+    # Shared principal point recovered by the bundle adjustment.
     principal_point: tuple[float, float] | None = None
 
     @classmethod
@@ -39,6 +42,7 @@ class CameraTrack:
                 R=[list(r) for r in f["R"]],
                 confidence=float(f["confidence"]),
                 is_anchor=bool(f["is_anchor"]),
+                t=list(f["t"]) if f.get("t") is not None else None,
             )
             for f in data["frames"]
         )

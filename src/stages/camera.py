@@ -93,9 +93,12 @@ class CameraStage(BaseStage):
         except AnchorSolveError as exc:
             raise RuntimeError(f"camera stage failed: {exc}") from exc
 
-        t_world = sol.t_world
+        t_world_median = sol.t_world
         principal_point = sol.principal_point
-        anchor_solutions: dict[int, tuple[np.ndarray, np.ndarray]] = sol.per_anchor_KR
+        # Per-anchor (K, R, t) — each anchor has its own translation.
+        anchor_solutions: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = (
+            sol.per_anchor_KRt
+        )
         anchor_confidence_override: dict[int, float] = {}
         for af, residual in sol.per_anchor_residual_px.items():
             if residual > anchor_max_residual:
@@ -106,25 +109,42 @@ class CameraStage(BaseStage):
                 )
                 anchor_confidence_override[af] = 0.5
 
-        # Step 2: per-frame propagate forward and backward between consecutive anchor pairs.
+        # Step 2: per-frame propagate (K, R) forward/backward between
+        # consecutive anchor pairs. Per-frame t is linearly interpolated
+        # between the two anchor t values (smooth camera motion under
+        # steadicam/handheld assumption).
         per_frame_K: list[np.ndarray | None] = [None] * n_frames
         per_frame_R: list[np.ndarray | None] = [None] * n_frames
+        per_frame_t: list[np.ndarray | None] = [None] * n_frames
         per_frame_conf: list[float] = [0.0] * n_frames
         is_anchor: list[bool] = [False] * n_frames
 
-        for af in anchor_solutions:
-            per_frame_K[af] = anchor_solutions[af][0]
-            per_frame_R[af] = anchor_solutions[af][1]
+        for af, (K, R, t) in anchor_solutions.items():
+            per_frame_K[af] = K
+            per_frame_R[af] = R
+            per_frame_t[af] = t
             per_frame_conf[af] = anchor_confidence_override.get(af, 1.0)
             is_anchor[af] = True
 
         anchor_frames = sorted(anchor_solutions.keys())
-        # Frames before first anchor / after last anchor are propagated one-way.
+        # Pass anchor_KR_only to the propagator (it doesn't need t for the
+        # feature-tracking homography — t enters only via interpolation
+        # below, after propagation).
+        anchor_KR_only = {f: (K, R) for f, (K, R, _) in anchor_solutions.items()}
         for a, b in zip(anchor_frames, anchor_frames[1:]):
             self._propagate_pair(
-                cap, a, b, anchor_solutions,
+                cap, a, b, anchor_KR_only,
                 per_frame_K, per_frame_R, per_frame_conf, is_anchor, cfg,
             )
+            # Linear interpolation of t between adjacent anchors.
+            t_a = per_frame_t[a]
+            t_b = per_frame_t[b]
+            for offset in range(b - a + 1):
+                idx = a + offset
+                if is_anchor[idx]:
+                    continue
+                w = offset / (b - a)
+                per_frame_t[idx] = (1.0 - w) * t_a + w * t_b
 
         cap.release()
 
@@ -147,7 +167,8 @@ class CameraStage(BaseStage):
         for i in range(n_frames):
             K = per_frame_K[i]
             R = per_frame_R[i]
-            if K is None or R is None:
+            t = per_frame_t[i]
+            if K is None or R is None or t is None:
                 continue  # frames outside any anchor span are skipped in v1
             frames_out.append(
                 CameraFrame(
@@ -156,6 +177,7 @@ class CameraStage(BaseStage):
                     R=R.tolist(),
                     confidence=per_frame_conf[i],
                     is_anchor=is_anchor[i],
+                    t=list(t),
                 )
             )
 
@@ -163,7 +185,7 @@ class CameraStage(BaseStage):
             clip_id=anchors.clip_id,
             fps=float(fps),
             image_size=(w, h),
-            t_world=list(t_world),
+            t_world=list(t_world_median),
             frames=tuple(frames_out),
             principal_point=(float(principal_point[0]), float(principal_point[1])),
         )

@@ -169,7 +169,7 @@ def test_joint_solve_recovers_known_camera_with_rich_anchors():
     assert abs(sol.principal_point[0] - CX_TRUE) < 30.0
     assert abs(sol.principal_point[1] - CY_TRUE) < 30.0
     for a in anchors:
-        K_hat, _ = sol.per_anchor_KR[a.frame]
+        K_hat, _ = sol.per_anchor_KRt[a.frame][:2]
         assert abs(K_hat[0, 0] - FX_TRUE) < 50.0, (
             f"frame {a.frame}: fx={K_hat[0,0]:.1f} vs true {FX_TRUE}"
         )
@@ -222,7 +222,7 @@ def test_joint_solve_with_hybrid_point_plus_line_anchor():
         _rich_anchor(K_true, _yaw(-8.0), T_BASE, 100),
     )
     sol = solve_anchors_jointly(anchors, image_size=IMAGE_SIZE)
-    _, R_hybrid = sol.per_anchor_KR[50]
+    _, R_hybrid = sol.per_anchor_KRt[50][:2]
     err = _angle_deg(R_hybrid, yaw_R)
     assert err < 1.0, f"hybrid anchor R error {err:.2f}°"
     assert sol.per_anchor_residual_px[50] < 5.0

@@ -684,7 +684,9 @@ function drawProjectedPitch(ctx) {
   const cf = track.frames.find((f) => f.frame === state.frame)
             || track.frames[Math.min(track.frames.length - 1, state.frame)];
   if (!cf) return;
-  const K = cf.K, R = cf.R, t = track.t_world;
+  // Prefer per-frame t (CameraFrame.t) when present; fall back to the
+  // clip-shared t_world for older camera_track.json files.
+  const K = cf.K, R = cf.R, t = cf.t || track.t_world;
   if (!K || !R || !t) return;
 
   const polylines = pitchPolylines();

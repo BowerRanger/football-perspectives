@@ -243,3 +243,12 @@ The two intentional skips are:
 **Downstream impact.** `hmr_world` already treats a missing pose entry per frame as "unanchored" — `confidence` propagates the low score and `root_t` holds the last anchored value (or zero for the first frame). The placeholder therefore produces a fully-zero `confidence` track with zero translation, which is correct fallback behaviour and is reflected in `quality_report.json`'s `mean_per_player_confidence`. Consumers who need real foot-anchoring must port a ViTPose runner before relying on `hmr_world` output.
 
 **Tests.** No new tests added in this entry — running prepare_shots and pose_2d is exercised by the smoke check in the issue spec and (when fixtures land) by `tests/test_e2e_real_clip.py`. Phase 6's `test_prepare_shots.py` and `test_pose.py` were deleted as legacy (D12) and would need rewriting against the new schemas.
+
+
+### D14: CLI shape — `recon.py serve` (not `recon.py --viewer`)
+
+**Context.** The pipeline design spec (`docs/football-reconstruction-pipeline-design.md` line 461 and `docs/superpowers/specs/2026-05-04-broadcast-mono-pipeline-design.md` line 452) shows the dashboard launching via `python recon.py --output ./output/ --viewer`. The actual implementation uses `python recon.py serve --output ./output/`.
+
+**Decision.** Keep the `serve` subcommand. Phase 0 inherited a Click `@cli.group()` structure with `run` and `serve` as separate subcommands; that pattern was the existing convention before the broadcast-mono spec was written. Switching to a single-command `--viewer` flag would require collapsing the group into a single command and conditionally branching on the flag — a structural change unrelated to the broadcast-mono pipeline work and not warranted at end-of-branch review.
+
+**User-facing impact.** README.md and CLAUDE.md both already document `recon.py serve` as the entrypoint. The two design docs above retain the `--viewer` wording as a historical artefact; they will be reconciled against the spec next time those docs are revised. No code change needed for this branch.

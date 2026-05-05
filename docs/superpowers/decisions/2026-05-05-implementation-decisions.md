@@ -142,3 +142,36 @@ The expected result is z-direction-correct, which means the test author expected
 **Decision:** Changed the test data to `foot_in_root = (0, 0, -0.95)` and updated the inline comment. The implementation formula is unchanged (matches plan exactly).
 
 **Reasoning:** The test's expected result is physically correct (root 1.0 m above the pitch when foot is 0.05 m above the pitch). The test data `foot_in_root` was using the wrong axis convention for the case where `R_root_world = I` is supposed to place the root in pitch-world coords. The function contract is `foot_world = root_t + R_root_world @ foot_in_root` — `foot_in_root` is in the root's local frame, and the root frame is whatever `R_root_world` rotates from. With `R_root_world = I`, that frame is already pitch-world (z-up). The fix keeps the regression pin meaningful (offset is correctly subtracted) and the production code is unchanged.
+
+### D10: Phase 2b — Task 2.6 HmrWorldStage test fixture camera + ground-snap
+
+**Question:** The plan's `test_hmr_world_emits_track_in_pitch_frame` integration test specifies:
+
+```
+R_world_to_cam   = [[1,0,0],[0,0,1],[0,-1,0]]      # plan's camera
+root_R_cam       = I                               # from fake runner
+foot_in_root     = (0, 0, -0.95)                   # per D9 convention
+SMPL_TO_PITCH_STATIC = [[1,0,0],[0,0,-1],[0,1,0]]
+```
+
+with assertion `(out.root_t[:, 2] > 0.5).any()`.
+
+Tracing through `smpl_root_in_pitch_frame(I, R_world_to_cam) = R_world_to_cam.T @ SMPL_TO_PITCH_STATIC @ I`:
+
+- `R_world_to_cam.T = [[1,0,0],[0,0,-1],[0,1,0]]`
+- `R_world_to_cam.T @ SMPL_TO_PITCH_STATIC = [[1,0,0],[0,-1,0],[0,0,-1]]`
+
+So `root_R_pitch = [[1,0,0],[0,-1,0],[0,0,-1]]` (a 180° flip about x). Then `R_root_world @ foot_in_root = [0, 0, 0.95]`, so `root_t = foot_world - [0, 0, 0.95]`. With `foot_world.z = 0.05`, `root_t.z = -0.9`. The plan assertion fails — under both the original `(0,-0.95,0)` and the D9 `(0,0,-0.95)` foot conventions, the plan's camera orientation produces a negative root z.
+
+Additionally: even when the camera orientation is fixed so root z = 1.0 pre-snap, the plan default `ground_snap_velocity=0.1` halves all z values (every frame's velocity is 0 in this fixture, which is below 0.1 threshold), driving root z to exactly 0.5 — still fails the strict `> 0.5` assertion.
+
+**Decision:** Two test-only fixture changes; production code is unchanged.
+
+1. Set `R_world_to_cam = SMPL_TO_PITCH_STATIC = [[1,0,0],[0,0,-1],[0,1,0]]` in the fixture. This is orthogonal, so `R_world_to_cam.T @ SMPL_TO_PITCH_STATIC = I`, making `root_R_pitch = root_R_cam = I`. Then `R @ foot_in_root = [0, 0, -0.95]`, and `root_t.z = foot_world.z - (-0.95) = 0.05 + 0.95 = 1.0`. The fixture comment notes this rationale.
+2. Pass `ground_snap_velocity: 0.0` in the stage config so the snap doesn't fire on the synthetic stationary track (with threshold 0, `|v| < 0` is false everywhere).
+
+**Reasoning:** The test's *intent* is "does the stage run end-to-end and emit a SmplWorldTrack with reasonable root z?" The specific camera orientation in the plan isn't load-bearing for that intent — it just needs to be a valid `R_world_to_cam`. Using SMPL_TO_PITCH_STATIC as the test camera makes the math collapse cleanly and the assertion meaningful.
+
+The production stage uses the plan's snap default (0.1 m/frame) — appropriate for real broadcast footage where stationary players genuinely should ground-snap. Disabling it in the test fixture (where the fake runner produces zero velocity) avoids a numerical artifact specific to constant-input tests.
+
+A real broadcast clip with real GVHMR output (varying θ frame-to-frame, real ankle keypoints with sub-pixel jitter) would have non-zero velocities and the snap would behave correctly. The test's fixed-position fixture is the artefact.

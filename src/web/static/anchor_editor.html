@@ -251,6 +251,9 @@
       <input type="number" id="frame-input" min="0" value="0">
       <span class="frame-info" id="frame-info">0 / 0</span>
       <button id="add-anchor-btn" title="Mark current frame as an anchor">+ Anchor here</button>
+      <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;cursor:pointer;">
+        <input type="checkbox" id="show-pitch" checked> projected pitch
+      </label>
     </div>
     <div class="conf-strip" id="conf-strip" title="Click to seek">
       <canvas id="conf-canvas" class="conf-canvas"></canvas>
@@ -286,6 +289,7 @@ const els = {
   clipSelect: document.getElementById("clip-select"),
   status: document.getElementById("status"),
   saveBtn: document.getElementById("save-btn"),
+  showPitch: document.getElementById("show-pitch"),
   palette: document.getElementById("palette"),
   video: document.getElementById("video"),
   overlay: document.getElementById("overlay"),
@@ -514,28 +518,53 @@ function redrawOverlay() {
   const ctx = els.overlay.getContext("2d");
   ctx.clearRect(0, 0, els.overlay.width, els.overlay.height);
 
-  // Draw projected pitch lines if camera track is available for this frame
-  drawProjectedPitch(ctx);
+  // Draw projected pitch lines if camera track is available for this frame.
+  // Toggle off via the "projected pitch" checkbox to verify dot positions
+  // independently of the camera-stage overlay.
+  if (els.showPitch && els.showPitch.checked) {
+    drawProjectedPitch(ctx);
+  }
 
-  // Draw landmark dots if at an anchor frame
+  // Draw landmark dots if at an anchor frame. Backing-store is in image
+  // pixels (see resizeOverlay) so x/y are in image-space coordinates.
+  // Stroke widths are scaled by the natural→display ratio so they appear
+  // at a consistent thickness on screen regardless of zoom.
   const anchor = state.anchors.get(state.frame);
   if (anchor) {
+    const rect = els.overlay.getBoundingClientRect();
+    const scale = state.imageSize[0] > 0 && rect.width > 0
+      ? state.imageSize[0] / rect.width
+      : 1;
+    const dotR = 4 * scale;       // ~4 display px regardless of zoom
+    const ringR = 8 * scale;      // outer crosshair ring
+    const lineW = 2 * scale;
     for (const lm of anchor) {
       const [x, y] = lm.image_xy;
+      // Inner solid dot — exact click position.
       ctx.beginPath();
-      ctx.arc(x, y, 8, 0, 2 * Math.PI);
-      ctx.fillStyle = "rgba(99, 102, 241, 0.85)";
+      ctx.arc(x, y, dotR, 0, 2 * Math.PI);
+      ctx.fillStyle = "#22d3ee";
       ctx.fill();
-      ctx.lineWidth = 2;
+      // Outer ring for visibility against the projected-pitch line clutter.
+      ctx.beginPath();
+      ctx.arc(x, y, ringR, 0, 2 * Math.PI);
+      ctx.lineWidth = lineW;
       ctx.strokeStyle = "#fff";
       ctx.stroke();
-
-      ctx.font = "12px -apple-system, Segoe UI, sans-serif";
+      // Crosshair through dot centre.
+      ctx.beginPath();
+      ctx.moveTo(x - ringR * 1.5, y); ctx.lineTo(x + ringR * 1.5, y);
+      ctx.moveTo(x, y - ringR * 1.5); ctx.lineTo(x, y + ringR * 1.5);
+      ctx.lineWidth = lineW * 0.5;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.6)";
+      ctx.stroke();
+      // Label.
+      ctx.font = `${12 * scale}px -apple-system, Segoe UI, sans-serif`;
       ctx.fillStyle = "#fff";
       ctx.strokeStyle = "rgba(0,0,0,0.7)";
-      ctx.lineWidth = 3;
-      ctx.strokeText(lm.name, x + 12, y - 8);
-      ctx.fillText(lm.name, x + 12, y - 8);
+      ctx.lineWidth = 3 * scale;
+      ctx.strokeText(lm.name, x + ringR + 4 * scale, y - 4 * scale);
+      ctx.fillText(lm.name, x + ringR + 4 * scale, y - 4 * scale);
     }
   }
 }
@@ -779,6 +808,10 @@ window.addEventListener("resize", () => {
   resizeOverlay();
   redrawOverlay();
 });
+
+if (els.showPitch) {
+  els.showPitch.addEventListener("change", () => redrawOverlay());
+}
 
 init();
 </script>

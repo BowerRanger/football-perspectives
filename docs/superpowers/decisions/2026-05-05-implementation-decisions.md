@@ -74,6 +74,19 @@ Auto-mode execution decisions for the broadcast-mono pipeline rewrite. Each entr
 
 **Related — `_rq_decomposition` translation-scale bug (already fixed by prior implementer):** During the in-flight Phase 1a work the prior implementer noticed that `_rq_decomposition` normalised `K` to `K[2, 2] == 1` but did not divide the corresponding `t` by the same scale factor, so the recovered translation was off by ~6 orders of magnitude. The fix (in `src/utils/anchor_solver.py:30-78`) returns the pre-normalisation scale from `_rq_decomposition` and `solve_first_anchor` divides `P[:, 3]` by that scale before solving for `t`. Recording here so the bug + fix is captured in the decisions log even though the change predates this commit.
 
+### D7: Phase 1c — synthetic clip fixture orthonormality + skipped trajectory test
+
+**Question:** The Phase 1c implementer landed `tests/test_camera_stage.py` with two integration tests; the second (`test_camera_stage_recovers_trajectory`) was pre-emptively `pytest.mark.skip`-marked because synthetic dot-content fixtures are unstable for ORB feature matching. The first test (`test_camera_stage_recovers_anchor_frames_exactly`) initially failed: anchor frame 0 R-error 1.98° exceeded the 0.5° tolerance.
+
+**Decision:**
+
+- **Root cause of the 1.98° error:** `R_base` in `tests/fixtures/synthetic_clip.py` was hard-coded with values rounded to 3 decimals (`0.424`, `0.905`), giving `det(R_base) ≈ 0.998` rather than 1.0. The first-anchor DLT solver returned a projection matrix consistent with the rounded R, then RQ decomposition produced an orthonormal R that differed from the rounded ground-truth R by ~2° — not a solver bug but a fixture bug.
+- **Fix:** rebuilt R_base from the exact normalised look-direction `(0, 64, -30) / sqrt(4996)` and a cross product. Now orthonormal to floating-point precision.
+- **Trajectory test stays skipped:** ORB on rendered point landmarks is genuinely unreliable; the dot fixture lacks the texture/blob structure ORB needs to lock onto. Real-clip end-to-end recovery is exercised in Phase 6.
+- The active anchor-frames test still validates the stage's anchor-handling code path end-to-end through CameraStage → AnchorSet → solver → CameraTrack.save → CameraTrack.load.
+
+**Reasoning:** Floating-point orthogonality matters for camera-recovery tests; the broadcast-pose construction must come from exact normalisation, not rounded literals. Skipping the inter-anchor propagation test on a synthetic fixture is honest: the solver is correct (anchor-frame test confirms), and propagator correctness is already pinned by `tests/test_feature_propagator.py` on synthetic homographies. Combining propagator + ORB + dot rendering produces a brittle stack we don't need to test until Phase 6's real clip.
+
 ### D3: Constraints directory not in .gitignore
 
 **Question:** Initial .gitignore update added `constraints/` but the README references `constraints/macos-py311-openmmlab.txt` for installs.

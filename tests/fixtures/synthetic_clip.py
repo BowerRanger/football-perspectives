@@ -76,14 +76,18 @@ def render_synthetic_clip(
     fx0 = 700.0  # wide enough that pitch is in frame at the broadcast pose
     cx = w / 2
     cy = h / 2
-    # Camera at world (52.5, -30, 30) looking at pitch centre (52.5, 34, 0).
-    R_base = np.array(
-        [[1, 0, 0],
-         [0, -0.424, -0.905],
-         [0, 0.905, -0.424]],
-        dtype=float,
-    )
-    t_world = np.array([-52.5, 14.43, 39.87])  # = -R_base @ (52.5, -30, 30)
+    # Camera at world C=(52.5, -30, 30) looking at pitch centre (52.5, 34, 0).
+    # Build R_base from exact normalised look-direction so it is orthonormal
+    # to floating-point precision (rounded values like 0.424/0.905 produce
+    # det(R_base)≈0.998 which then leaks ~2° error through the RQ decomposition
+    # in solve_first_anchor — see decisions log D7).
+    look_world = np.array([0.0, 64.0, -30.0])
+    look_world = look_world / np.linalg.norm(look_world)  # camera +z in world
+    right_world = np.array([1.0, 0.0, 0.0])               # camera +x in world
+    down_world = np.cross(look_world, right_world)        # camera +y in world
+    R_base = np.array([right_world, down_world, look_world], dtype=float)
+    cam_C = np.array([52.5, -30.0, 30.0])
+    t_world = -R_base @ cam_C                             # = (-52.5, ~14.43, ~39.87)
     pts_world = _build_pitch_world_points()
 
     Ks: list[np.ndarray] = []

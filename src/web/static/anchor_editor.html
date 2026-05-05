@@ -699,13 +699,13 @@ function drawProjectedPitch(ctx) {
 }
 
 function projectPoint(p, K, R, t) {
-  // cam = R * (p - t)? camera_track stores R and t_world such that
-  // the camera position is t_world (a single point), and R rotates
-  // world axes to camera axes. Convention: cam = R @ (P - t).
-  const dx = p[0] - t[0], dy = p[1] - t[1], dz = p[2] - t[2];
-  const cx = R[0][0]*dx + R[0][1]*dy + R[0][2]*dz;
-  const cy = R[1][0]*dx + R[1][1]*dy + R[1][2]*dz;
-  const cz = R[2][0]*dx + R[2][1]*dy + R[2][2]*dz;
+  // OpenCV extrinsic convention (matches src/utils/anchor_solver.py): R is
+  // world->camera rotation, t is the world-frame origin expressed in the
+  // camera frame. So the camera-frame point is cam = R @ P + t — NOT
+  // R @ (P - t). The world-frame camera position is C = -R^T @ t.
+  const cx = R[0][0]*p[0] + R[0][1]*p[1] + R[0][2]*p[2] + t[0];
+  const cy = R[1][0]*p[0] + R[1][1]*p[1] + R[1][2]*p[2] + t[1];
+  const cz = R[2][0]*p[0] + R[2][1]*p[1] + R[2][2]*p[2] + t[2];
   if (cz <= 0.05) return null;
   const u = (K[0][0]*cx + K[0][1]*cy + K[0][2]*cz) / cz;
   const v = (K[1][0]*cx + K[1][1]*cy + K[1][2]*cz) / cz;

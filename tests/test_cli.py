@@ -31,12 +31,13 @@ def test_run_help_shows_named_stages_and_clean_flag():
         "prepare_shots",
         "tracking",
         "camera",
-        "pose_2d",
         "hmr_world",
         "ball",
         "export",
     ):
         assert stage in result.output
+    # pose_2d has been removed — confirm it doesn't reappear.
+    assert "pose_2d" not in result.output
 
 
 @pytest.mark.unit

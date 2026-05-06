@@ -27,7 +27,7 @@ def cli() -> None:
 @click.option(
     "--stages", default="all", show_default=True,
     help="Stages to run: 'all' or comma-separated stage names "
-         "(prepare_shots,tracking,camera,pose_2d,hmr_world,ball,export).",
+         "(prepare_shots,tracking,camera,hmr_world,ball,export).",
 )
 @click.option(
     "--from-stage", default=None,

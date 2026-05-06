@@ -1,8 +1,16 @@
 # Broadcast Single-Camera Pipeline — Design
 
 **Date:** 2026-05-04
-**Status:** Approved (pending implementation plan)
+**Status:** Approved; revised 2026-05-06 (see banner below)
 **Supersedes:** the 8-stage multi-view triangulation pipeline described in `docs/football-reconstruction-pipeline-design.md`.
+
+> **Update — 2026-05-06 (decision D15):** the `pose_2d` stage has been
+> collapsed into `hmr_world`. GVHMR runs ViTPose-Huge internally on every
+> player crop and exposes its `kp2d` output, which `hmr_world` consumes
+> directly for foot anchoring. The 2D-keypoint preview is written as
+> `output/hmr_world/PXXX_kp2d.json` for the dashboard overlay. Sections
+> below still describe a separate `pose_2d` stage — that text is
+> historical. The current production pipeline has 6 stages.
 
 ## 1. Goals and scope
 

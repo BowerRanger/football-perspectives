@@ -11,7 +11,6 @@ def test_resolve_all():
         "prepare_shots",
         "tracking",
         "camera",
-        "pose_2d",
         "hmr_world",
         "ball",
         "export",
@@ -20,7 +19,7 @@ def test_resolve_all():
 
 @pytest.mark.unit
 def test_resolve_subset():
-    assert resolve_stages("camera,pose_2d", None) == ["camera", "pose_2d"]
+    assert resolve_stages("camera,hmr_world", None) == ["camera", "hmr_world"]
 
 
 @pytest.mark.unit

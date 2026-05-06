@@ -36,7 +36,7 @@ def test_full_pipeline_on_real_clip(tmp_path: Path):
     config: dict = {}  # default config from /config/default.yaml at runtime
     run_pipeline(
         output_dir=tmp_path,
-        stages="tracking,camera,pose_2d,hmr_world,ball,export",
+        stages="tracking,camera,hmr_world,ball,export",
         from_stage=None,
         config=config,
         video_path=tmp_path / "shots" / "play.mp4",

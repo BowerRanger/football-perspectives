@@ -2,11 +2,13 @@
 
 Bypasses GVHMR weights via monkeypatching ``run_on_track`` so the test
 runs in unit-test time without ML dependencies. Validates that the stage:
-  * Reads tracks/pose_2d/camera inputs and writes a SmplWorldTrack.
+  * Reads tracks/camera inputs and writes a SmplWorldTrack.
   * Produces θ shape (N, 24, 3) consistent with GVHMR adapter contract.
   * Produces a physically reasonable root translation z (>0.5) when the
-    ankle keypoint is anchored to the ground plane and the foot offset is
-    interpreted in pitch-world coordinates.
+    ankle keypoint (sourced from GVHMR's internal ViTPose, returned via
+    ``run_on_track``'s ``kp2d`` array) is anchored to the ground plane.
+  * Writes a side-output ``{player_id}_kp2d.json`` for the dashboard
+    overlay.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import pytest
 
 from src.schemas.camera_track import CameraFrame, CameraTrack
 from src.schemas.smpl_world import SmplWorldTrack
+from src.schemas.tracks import Track, TrackFrame, TracksResult
 from src.stages.hmr_world import HmrWorldStage
 
 
@@ -57,16 +60,27 @@ def _identity_track(n_frames: int) -> CameraTrack:
 
 @pytest.fixture
 def fake_gvhmr(monkeypatch):
-    """Replace run_on_track with a deterministic stub that needs no weights."""
+    """Replace run_on_track with a deterministic stub that needs no weights.
+
+    Emits high-confidence ankle keypoints at a fixed pixel for every frame —
+    the foot-anchor ray-cast through that pixel onto the pitch ground plane
+    drives the root-z assertion downstream.
+    """
 
     def _runner(track_frames, *, video_path, checkpoint, device, batch_size, max_sequence_length):
         n = len(track_frames)
+        # COCO-17: keypoints 15/16 are left/right ankles. Other joints are
+        # zero-confidence (don't contribute to the foot anchor).
+        kp2d = np.zeros((n, 17, 3), dtype=np.float32)
+        kp2d[:, 15] = (150.0, 380.0, 0.9)  # left ankle
+        kp2d[:, 16] = (160.0, 380.0, 0.9)  # right ankle
         return {
             "thetas": np.zeros((n, 24, 3)),
             "betas": np.tile(np.linspace(0, 1, 10), (n, 1)),
             "root_R_cam": np.tile(np.eye(3), (n, 1, 1)),
             "root_t_cam": np.zeros((n, 3)),
             "joint_confidence": np.full((n, 24), 0.9),
+            "kp2d": kp2d,
         }
 
     monkeypatch.setattr(
@@ -86,43 +100,33 @@ def test_hmr_world_emits_track_in_pitch_frame(tmp_path: Path, fake_gvhmr) -> Non
     track = _identity_track(n_frames)
     track.save(tmp_path / "camera" / "camera_track.json")
 
-    # 3. Steady bounding-box player track.
+    # 3. Steady bounding-box player track in the TracksResult format the
+    # tracking stage emits (one *_tracks.json per shot, containing a list
+    # of Tracks). hmr_world groups frames by Track.player_id, falling back
+    # to track_id when player_id is empty.
     track_dir = tmp_path / "tracks"
     track_dir.mkdir()
-    (track_dir / "P001_track.json").write_text(
-        json.dumps(
-            {
-                "player_id": "P001",
-                "frames": [
-                    {"frame": i, "bbox": [100, 100, 200, 400]} for i in range(n_frames)
-                ],
-            }
-        )
-    )
-
-    # 4. 2D pose with strong ankle keypoints; other joints zero-confidence.
-    pose_dir = tmp_path / "pose_2d"
-    pose_dir.mkdir()
-    (pose_dir / "P001_pose.json").write_text(
-        json.dumps(
-            {
-                "player_id": "P001",
-                "frames": [
-                    {
-                        "frame": i,
-                        "keypoints": (
-                            [[0, 0, 0.0]] * 15
-                            + [[150.0, 380.0, 0.9], [160.0, 380.0, 0.9]]
-                        ),
-                    }
+    tr = TracksResult(
+        shot_id="play",
+        tracks=[
+            Track(
+                track_id="T001",
+                class_name="player",
+                team="A",
+                player_id="P001",
+                player_name="",
+                frames=[
+                    TrackFrame(frame=i, bbox=[100, 100, 200, 400], confidence=0.9, pitch_position=None)
                     for i in range(n_frames)
                 ],
-            }
-        )
+            ),
+        ],
     )
+    tr.save(track_dir / "play_tracks.json")
 
-    # 5. Run stage. ground_snap_velocity=0 disables snapping for this fixture
+    # 4. Run stage. ground_snap_velocity=0 disables snapping for this fixture
     # (all velocities are zero so the default would halve every frame's z).
+    # Ankle keypoints come from the fake GVHMR runner's kp2d output.
     stage = HmrWorldStage(
         config={
             "hmr_world": {
@@ -135,7 +139,7 @@ def test_hmr_world_emits_track_in_pitch_frame(tmp_path: Path, fake_gvhmr) -> Non
     )
     stage.run()
 
-    # 6. Verify output.
+    # 5. Verify SmplWorldTrack output.
     out_path = tmp_path / "hmr_world" / "P001_smpl_world.npz"
     assert out_path.exists(), "stage did not write SmplWorldTrack output"
 
@@ -145,3 +149,15 @@ def test_hmr_world_emits_track_in_pitch_frame(tmp_path: Path, fake_gvhmr) -> Non
     # Root z should be > 0.5 for at least some frames (foot at ground,
     # root ~1m above pitch).
     assert (out.root_t[:, 2] > 0.5).any()
+
+    # 6. Verify kp2d side-output written for the dashboard overlay.
+    kp2d_path = tmp_path / "hmr_world" / "P001_kp2d.json"
+    assert kp2d_path.exists(), "stage did not write kp2d preview JSON"
+    kp2d_data = json.loads(kp2d_path.read_text())
+    assert kp2d_data["player_id"] == "P001"
+    assert len(kp2d_data["frames"]) == n_frames
+    # Ankle indices (15/16) carry the seeded values; tolerance is for the
+    # float32 round-trip through the runner.
+    first_frame_kps = kp2d_data["frames"][0]["keypoints"]
+    assert first_frame_kps[15] == pytest.approx([150.0, 380.0, 0.9], abs=1e-5)
+    assert first_frame_kps[16] == pytest.approx([160.0, 380.0, 0.9], abs=1e-5)

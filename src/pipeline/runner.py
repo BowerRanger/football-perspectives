@@ -10,7 +10,6 @@ _STAGE_NAMES: list[str] = [
     "prepare_shots",
     "tracking",
     "camera",
-    "pose_2d",
     "hmr_world",
     "ball",
     "export",
@@ -28,9 +27,6 @@ def _stage_class(name: str) -> type[BaseStage] | None:
     if name == "camera":
         from src.stages.camera import CameraStage
         return CameraStage
-    if name == "pose_2d":
-        from src.stages.pose_2d import Pose2DStage
-        return Pose2DStage
     if name == "hmr_world":
         from src.stages.hmr_world import HmrWorldStage
         return HmrWorldStage

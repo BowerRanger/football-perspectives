@@ -705,6 +705,10 @@ def run_on_track(
         root_R_cam:       (N, 3, 3)   root rotation in camera frame
         root_t_cam:       (N, 3)      root translation in camera frame
         joint_confidence: (N, 24)     per-joint confidence in [0, 1]
+        kp2d:             (N, 17, 3)  COCO-17 image-pixel keypoints + conf
+                                     from GVHMR's internal ViTPose-Huge.
+                                     Consumed by hmr_world for foot-anchoring
+                                     and persisted as the dashboard overlay.
 
     Notes
     -----
@@ -720,6 +724,7 @@ def run_on_track(
             "root_R_cam": np.zeros((0, 3, 3), dtype=np.float32),
             "root_t_cam": np.zeros((0, 3), dtype=np.float32),
             "joint_confidence": np.zeros((0, 24), dtype=np.float32),
+            "kp2d": np.zeros((0, 17, 3), dtype=np.float32),
         }
 
     checkpoint = Path(checkpoint)
@@ -741,6 +746,7 @@ def run_on_track(
     all_root_R_cam: list[np.ndarray] = []
     all_root_t_cam: list[np.ndarray] = []
     all_joint_conf: list[np.ndarray] = []
+    all_kp2d: list[np.ndarray] = []
 
     for start in range(0, n, chunk):
         end = min(start + chunk, n)
@@ -781,6 +787,7 @@ def run_on_track(
         all_root_R_cam.append(root_R_cam)
         all_root_t_cam.append(root_t_cam)
         all_joint_conf.append(joint_conf)
+        all_kp2d.append(kp2d.astype(np.float32))
 
     return {
         "thetas": np.concatenate(all_thetas, axis=0) if all_thetas else np.zeros((0, 24, 3), dtype=np.float32),
@@ -788,6 +795,7 @@ def run_on_track(
         "root_R_cam": np.concatenate(all_root_R_cam, axis=0) if all_root_R_cam else np.zeros((0, 3, 3), dtype=np.float32),
         "root_t_cam": np.concatenate(all_root_t_cam, axis=0) if all_root_t_cam else np.zeros((0, 3), dtype=np.float32),
         "joint_confidence": np.concatenate(all_joint_conf, axis=0) if all_joint_conf else np.zeros((0, 24), dtype=np.float32),
+        "kp2d": np.concatenate(all_kp2d, axis=0) if all_kp2d else np.zeros((0, 17, 3), dtype=np.float32),
     }
 
 

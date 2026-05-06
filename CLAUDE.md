@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Python CLI tool (`recon.py`) that reconstructs 3D player animations and ball trajectories from a single broadcast football camera. It takes a manually-trimmed clip, runs a 7-stage ML pipeline, and exports glTF (for a browser viewer) and FBX (for Unreal Engine 5).
+A Python CLI tool (`recon.py`) that reconstructs 3D player animations and ball trajectories from a single broadcast football camera. It takes a manually-trimmed clip, runs a 6-stage ML pipeline, and exports glTF (for a browser viewer) and FBX (for Unreal Engine 5).
 
 The full technical design is in `docs/football-reconstruction-pipeline-design.md`.
 
@@ -18,7 +18,7 @@ python recon.py run --input clip.mp4 --output ./output/
 python recon.py run --input clip.mp4 --output ./output/ --from-stage camera
 
 # Run a subset of stages by name
-python recon.py run --input clip.mp4 --output ./output/ --stages tracking,camera,pose_2d
+python recon.py run --input clip.mp4 --output ./output/ --stages tracking,camera,hmr_world
 
 # Wipe legacy output dirs from earlier pipeline versions
 python recon.py run --input clip.mp4 --output ./output/ --clean
@@ -29,17 +29,18 @@ python recon.py serve --output ./output/
 
 ## Pipeline Architecture
 
-The pipeline has 7 sequential stages. Each stage reads from previous stage outputs in `output/` and writes its own subdirectory. Stages are independently re-runnable.
+The pipeline has 6 sequential stages. Each stage reads from previous stage outputs in `output/` and writes its own subdirectory. Stages are independently re-runnable.
 
 | # | Stage | Input | Output |
 |---|-------|-------|--------|
 | 1 | `prepare_shots` | trimmed clip | `shots/clip.mp4` + manifest |
 | 2 | `tracking` | shots | `tracks/PXXX_track.json` + `tracks/ball_track.json` |
 | 3 | `camera` | shots + anchors | `camera/camera_track.json` + debug |
-| 4 | `pose_2d` | shots + tracks | `pose_2d/PXXX_pose.json` |
-| 5 | `hmr_world` | tracks + pose_2d + camera | `hmr_world/PXXX_smpl_world.npz` |
-| 6 | `ball` | tracks + camera | `ball/ball_track.json` |
-| 7 | `export` | hmr_world + ball + camera | `export/gltf/scene.glb` + `export/fbx/` |
+| 4 | `hmr_world` | tracks + camera | `hmr_world/PXXX_smpl_world.npz` + `hmr_world/PXXX_kp2d.json` |
+| 5 | `ball` | tracks + camera | `ball/ball_track.json` |
+| 6 | `export` | hmr_world + ball + camera | `export/gltf/scene.glb` + `export/fbx/` |
+
+The 2D pose stage was collapsed into `hmr_world` (decision D15): GVHMR runs ViTPose internally on each player crop, so `hmr_world` consumes those keypoints directly for foot anchoring and writes them as a `PXXX_kp2d.json` side-output for the dashboard overlay.
 
 ## Key Design Decisions
 
@@ -49,7 +50,7 @@ The pipeline has 7 sequential stages. Each stage reads from previous stage outpu
 
 **Camera tracking**: Keyframe-anchored. The user marks pitch landmarks on a sparse set of keyframes via the web anchor editor; the camera stage solves anchor frames first, then propagates between them with bidirectional optical-flow feature tracking and a smoother. Per-frame confidence is reported so uncertain spans surface as candidates for additional anchors.
 
-**Player skeletal animation**: GVHMR (SIGGRAPH Asia 2024) runs per track on the cropped player. Output SMPL parameters are transformed into the pitch frame using the per-frame camera and foot-anchored against the ground plane. Foot anchoring uses ViTPose ankle keypoints when visible and falls back through bounded occlusion windows.
+**Player skeletal animation**: GVHMR (SIGGRAPH Asia 2024) runs per track on the cropped player. Output SMPL parameters are transformed into the pitch frame using the per-frame camera and foot-anchored against the ground plane. Foot anchoring uses GVHMR's internal ViTPose-Huge ankle keypoints when visible and falls back through bounded occlusion windows.
 
 **Ball**: Monocular ground projection while the ball is rolling; parabolic 3D fit on flight segments detected from pixel velocity spikes in the ball track.
 
@@ -60,8 +61,7 @@ The pipeline has 7 sequential stages. Each stage reads from previous stage outpu
 ## ML Models Used
 
 - **Player detection + tracking**: YOLOv8x + ByteTrack (via `supervision`)
-- **Pose 2D**: ViTPose (COCO 17 keypoints, via MMPose)
-- **HMR**: GVHMR (SIGGRAPH Asia 2024) — vendored under `third_party/gvhmr`
+- **HMR + 2D pose**: GVHMR (SIGGRAPH Asia 2024) — vendored under `third_party/gvhmr`. Bundles ViTPose-Huge for COCO-17 keypoints (used internally for HMR and reused for foot anchoring + dashboard overlay).
 - **Ball detection**: YOLOv8 ball variant (`yolov8n.pt`)
 
 ## Configuration
@@ -69,9 +69,10 @@ The pipeline has 7 sequential stages. Each stage reads from previous stage outpu
 `config/default.yaml` controls all tunable parameters per stage. Key values to know:
 
 - `camera.anchor_max_reprojection_px: 4.0` — anchor frames whose solver reprojection exceeds this are flagged
-- `pose_2d.min_confidence: 0.3` — below this, keypoints are excluded from foot anchoring
 - `hmr_world.foot_anchor_max_occlusion_frames: 10` — maximum gap during which the last anchored foot position is held
 - `ball.flight_px_velocity: 25.0` — pixel-velocity threshold above which the ball is treated as airborne
+
+The ankle-confidence cutoff for foot anchoring (formerly `pose_2d.min_confidence: 0.3`) is now a constant `_ANKLE_CONF_MIN = 0.3` inside `src/stages/hmr_world.py`.
 
 ## External Dependencies
 

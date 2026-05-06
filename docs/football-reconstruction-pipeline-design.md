@@ -5,6 +5,14 @@ authoritative spec is the brainstorming-skill output at
 `docs/superpowers/specs/2026-05-04-broadcast-mono-pipeline-design.md`;
 this file is kept in sync with it.
 
+> **Update — 2026-05-06 (decision D15):** the `pose_2d` stage has been
+> collapsed into `hmr_world`. GVHMR runs ViTPose-Huge internally on every
+> player crop and now exposes its `kp2d` output, which `hmr_world` consumes
+> directly for foot anchoring. The 2D-keypoint preview is written as
+> `output/hmr_world/PXXX_kp2d.json` for the dashboard overlay. Below the
+> pipeline still reads as 7 stages — treat all references to a separate
+> `pose_2d` stage as historical. The current production pipeline has 6 stages.
+
 ---
 
 # Broadcast Single-Camera Pipeline — Design

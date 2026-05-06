@@ -2,32 +2,41 @@
 
 Per-player monocular SMPL reconstruction expressed in pitch-world coords.
 
-For each player track in ``output/tracks/PXXX_track.json``:
+For each player track in ``output/tracks/{shot_id}_tracks.json``:
 1. Run GVHMR over the track to obtain per-frame SMPL params in the camera
-   frame (root rotation, pose, shape).
+   frame (root rotation, pose, shape) plus COCO-17 2D keypoints from
+   GVHMR's internal ViTPose-Huge.
 2. Median-aggregate the (per-frame-noisy) shape parameters.
 3. Convert root rotation from camera frame to pitch frame via the calibrated
    camera extrinsic, then SLERP-smooth.
 4. Savgol-smooth the per-joint axis-angle pose.
 5. Compute per-frame translation by ankle-anchoring: project the 2D ankle
-   midpoint to the pitch ground plane (z = 0.05 m) and back-solve the root
-   translation that places the foot exactly there.
+   midpoint (from GVHMR's kp2d) to the pitch ground plane (z = 0.05 m) and
+   back-solve the root translation that places the foot exactly there.
 6. Ground-snap z when the avatar is roughly stationary.
 
-Output: one ``SmplWorldTrack`` per player at
-``output/hmr_world/{player_id}_smpl_world.npz``.
+Outputs per player:
+- ``output/hmr_world/{player_id}_smpl_world.npz`` — SmplWorldTrack
+- ``output/hmr_world/{player_id}_kp2d.json``      — COCO-17 keypoints
+  (consumed by the dashboard 2D-overlay panel; same schema the legacy
+  pose_2d stage used to emit).
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import time
 from pathlib import Path
 
 import numpy as np
 
 from src.pipeline.base import BaseStage
+
+logger = logging.getLogger(__name__)
 from src.schemas.camera_track import CameraTrack
 from src.schemas.smpl_world import SmplWorldTrack
+from src.schemas.tracks import TracksResult
 from src.utils.foot_anchor import ankle_ray_to_pitch, anchor_translation
 from src.utils.smpl_pitch_transform import smpl_root_in_pitch_frame
 from src.utils.temporal_smoothing import (
@@ -66,7 +75,6 @@ class HmrWorldStage(BaseStage):
         cfg = self.config.get("hmr_world", {})
         track_dir = self.output_dir / "tracks"
         camera_path = self.output_dir / "camera" / "camera_track.json"
-        pose_dir = self.output_dir / "pose_2d"
         out_dir = self.output_dir / "hmr_world"
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -81,10 +89,61 @@ class HmrWorldStage(BaseStage):
         slerp_w = int(cfg.get("root_slerp_window", 5))
         ground_snap_velocity = float(cfg.get("ground_snap_velocity", 0.1))
 
-        for player_track_path in sorted(track_dir.glob("P*_track.json")):
-            self._process_player(
-                player_track_path=player_track_path,
-                pose_dir=pose_dir,
+        # Build per-player frame lists by walking each shot's TracksResult.
+        # Tracks share a player_id (assigned via the dashboard's annotation
+        # UI: name/split/merge); fallback to track_id when the operator
+        # hasn't annotated yet so the stage still runs against raw tracking
+        # output. Tracks named "ignore" are dropped entirely.
+        groups: dict[str, list[tuple[int, tuple[int, int, int, int]]]] = {}
+        group_shot: dict[str, str] = {}
+        if not track_dir.exists():
+            return
+        for tracks_path in sorted(track_dir.glob("*_tracks.json")):
+            try:
+                tr = TracksResult.load(tracks_path)
+            except Exception:
+                continue
+            for track in tr.tracks:
+                if track.class_name not in ("player", "goalkeeper"):
+                    continue
+                if track.player_name == "ignore":
+                    continue
+                pid = track.player_id or track.track_id
+                if pid not in groups:
+                    groups[pid] = []
+                    group_shot[pid] = tr.shot_id
+                groups[pid].extend(
+                    (int(f.frame), tuple(int(x) for x in f.bbox))
+                    for f in track.frames
+                )
+
+        # Sort players for stable ordering across runs (deterministic
+        # resume: the same partial order each time means the operator
+        # can predict which players come next).
+        ordered = sorted(groups.items(), key=lambda kv: kv[0])
+        total = len(ordered)
+        cached = sum(
+            1 for pid, _ in ordered
+            if (out_dir / f"{pid}_smpl_world.npz").exists()
+        )
+        to_process = total - cached
+        if total == 0:
+            print("[hmr_world] no tracks to process")
+            return
+        print(
+            f"[hmr_world] {total} player(s): "
+            f"{cached} cached on disk, {to_process} to process"
+        )
+
+        run_start = time.time()
+        elapsed_per_player: list[float] = []
+        for i, (player_id, frames) in enumerate(ordered, start=1):
+            frames = sorted(set(frames), key=lambda x: x[0])
+            t0 = time.time()
+            status = self._process_player(
+                player_id=player_id,
+                shot_id=group_shot[player_id],
+                track_frames=frames,
                 out_dir=out_dir,
                 cfg=cfg,
                 per_frame_K=per_frame_K,
@@ -96,12 +155,38 @@ class HmrWorldStage(BaseStage):
                 slerp_w=slerp_w,
                 ground_snap_velocity=ground_snap_velocity,
             )
+            dt = time.time() - t0
+            if status == "ran":
+                elapsed_per_player.append(dt)
+                avg = sum(elapsed_per_player) / len(elapsed_per_player)
+                remaining = sum(
+                    1 for pid, _ in ordered[i:]
+                    if not (out_dir / f"{pid}_smpl_world.npz").exists()
+                )
+                eta = avg * remaining
+                print(
+                    f"[hmr_world] ({i}/{total}) {player_id} done in "
+                    f"{_fmt_duration(dt)}  "
+                    f"(avg {_fmt_duration(avg)}/player, ~{_fmt_duration(eta)} remaining)"
+                )
+            elif status == "cached":
+                print(f"[hmr_world] ({i}/{total}) {player_id} cached, skipping")
+            elif status == "too_short":
+                print(
+                    f"[hmr_world] ({i}/{total}) {player_id} skipped "
+                    f"({len(frames)} < min_track_frames={min_track_frames})"
+                )
+
+        print(
+            f"[hmr_world] done — total wall {_fmt_duration(time.time() - run_start)}"
+        )
 
     def _process_player(
         self,
         *,
-        player_track_path: Path,
-        pose_dir: Path,
+        player_id: str,
+        shot_id: str,
+        track_frames: list[tuple[int, tuple[int, int, int, int]]],
         out_dir: Path,
         cfg: dict,
         per_frame_K: dict[int, np.ndarray],
@@ -112,15 +197,29 @@ class HmrWorldStage(BaseStage):
         savgol_order: int,
         slerp_w: int,
         ground_snap_velocity: float,
-    ) -> None:
-        with player_track_path.open() as fh:
-            track_data = json.load(fh)
-        player_id = track_data["player_id"]
-        track_frames: list[tuple[int, tuple[int, int, int, int]]] = [
-            (int(f["frame"]), tuple(f["bbox"])) for f in track_data["frames"]
-        ]
+    ) -> str:
+        """Process one player. Returns one of:
+        - ``"too_short"`` — track had fewer than ``min_track_frames`` frames
+        - ``"cached"`` — output already on disk, skipped GVHMR
+        - ``"ran"`` — GVHMR ran and a fresh SmplWorldTrack was written
+        """
         if len(track_frames) < min_track_frames:
-            return
+            return "too_short"
+
+        # Per-player resume: if the .npz is already on disk, skip GVHMR
+        # for this player. CPU GVHMR is ~5 min/player, so a kill-and-
+        # resume across 20+ players otherwise repeats hours of work. The
+        # dashboard's Re-run Stage button still wipes the directory before
+        # invoking, so an explicit re-run from the UI is unaffected.
+        out_path = out_dir / f"{player_id}_smpl_world.npz"
+        if out_path.exists():
+            return "cached"
+
+        # Announce up front — this player is going to take minutes on CPU.
+        print(
+            f"[hmr_world] {player_id} ({shot_id}) running — {len(track_frames)} frames…",
+            flush=True,
+        )
 
         # 1. GVHMR per track (lazy import — heavy dependency).
         from src.utils.gvhmr_estimator import run_on_track
@@ -145,6 +244,7 @@ class HmrWorldStage(BaseStage):
         betas_all = np.asarray(hmr_out["betas"])           # (N, 10)
         root_R_cam = np.asarray(hmr_out["root_R_cam"])     # (N, 3, 3)
         joint_conf = np.asarray(hmr_out["joint_confidence"])  # (N, 24)
+        kp2d = np.asarray(hmr_out["kp2d"])                 # (N, 17, 3)
 
         # 2. Median shape across track.
         betas = np.median(betas_all, axis=0)
@@ -167,23 +267,19 @@ class HmrWorldStage(BaseStage):
             thetas, window=savgol_window, order=savgol_order, axis=0
         ).astype(np.float32)
 
-        # 5. Foot-anchored translation per-frame.
-        pose_path = pose_dir / f"{player_id}_pose.json"
-        with pose_path.open() as fh:
-            pose_data = json.load(fh)
-        pose_by_frame = {int(p["frame"]): p for p in pose_data["frames"]}
-
+        # 5. Foot-anchored translation per-frame using GVHMR's internal
+        # ViTPose kp2d (one entry per track frame, aligned with frame_indices).
         root_t = np.zeros((len(frame_indices), 3), dtype=float)
         confidence = np.zeros(len(frame_indices), dtype=float)
         last_anchored: np.ndarray | None = None
         for i, fi in enumerate(frame_indices):
             fi_int = int(fi)
-            if not camera_present[i] or fi_int not in pose_by_frame:
-                # No camera or no 2D pose — leave translation zero, confidence zero.
+            if not camera_present[i]:
+                # No camera — leave translation zero, confidence zero.
                 continue
             K = per_frame_K[fi_int]
             R = per_frame_R[fi_int]
-            kp = np.asarray(pose_by_frame[fi_int]["keypoints"], dtype=float)
+            kp = kp2d[i]
             left = kp[_COCO_LEFT_ANKLE]
             right = kp[_COCO_RIGHT_ANKLE]
             ankle_conf = float(min(left[2], right[2]))
@@ -231,3 +327,29 @@ class HmrWorldStage(BaseStage):
             confidence=confidence.astype(np.float32),
         )
         track.save(out_dir / f"{player_id}_smpl_world.npz")
+
+        # Side-output: COCO-17 keypoints for the dashboard 2D-overlay panel.
+        # Same JSON schema the legacy pose_2d stage emitted, so the existing
+        # renderer in src/web/static/index.html can consume it unchanged.
+        kp2d_payload = {
+            "player_id": str(player_id),
+            "shot_id": shot_id,
+            "frames": [
+                {"frame": int(fi), "keypoints": kp2d[i].tolist()}
+                for i, fi in enumerate(frame_indices)
+            ],
+        }
+        (out_dir / f"{player_id}_kp2d.json").write_text(json.dumps(kp2d_payload))
+        return "ran"
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Compact m:ss / h:mm:ss for the progress lines."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        m = int(seconds // 60); s = int(seconds - m * 60)
+        return f"{m}m{s:02d}s"
+    h = int(seconds // 3600); m = int((seconds - h * 3600) // 60)
+    return f"{h}h{m:02d}m"

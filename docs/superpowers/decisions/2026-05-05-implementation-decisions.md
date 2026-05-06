@@ -252,3 +252,28 @@ The two intentional skips are:
 **Decision.** Keep the `serve` subcommand. Phase 0 inherited a Click `@cli.group()` structure with `run` and `serve` as separate subcommands; that pattern was the existing convention before the broadcast-mono spec was written. Switching to a single-command `--viewer` flag would require collapsing the group into a single command and conditionally branching on the flag — a structural change unrelated to the broadcast-mono pipeline work and not warranted at end-of-branch review.
 
 **User-facing impact.** README.md and CLAUDE.md both already document `recon.py serve` as the entrypoint. The two design docs above retain the `--viewer` wording as a historical artefact; they will be reconciled against the spec next time those docs are revised. No code change needed for this branch.
+
+
+## 2026-05-06
+
+### D15: Collapse `pose_2d` into `hmr_world` — reuse GVHMR's internal ViTPose
+
+**Context.** End-of-D13 the `pose_2d` stage was a placeholder writing empty JSON files. Real-clip runs therefore left `hmr_world` with no ankle pixels, so player root translations were all zero and confidence values were uniformly zero (`src/stages/hmr_world.py:181-183` fall-through). The user asked whether to wire up real 2D pose estimation as a separate stage or skip it. Investigation showed GVHMR already runs ViTPose-Huge internally on every player crop (`src/utils/gvhmr_estimator.py:426-427`) and emits the resulting COCO-17 keypoints as part of its result dict — a separate ViTPose run in `pose_2d` would have been redundant.
+
+**Decision.** Collapse `pose_2d` into `hmr_world`:
+
+1. **Surface `kp2d` from GVHMR.** `src/utils/gvhmr_estimator.py::run_on_track` accumulates `kp2d` (already produced inside the chunked inference loop) and returns it alongside `thetas`/`betas`/`root_R_cam`/`joint_confidence`. Empty-track early return updated to include a zero-shape kp2d entry.
+2. **Consume `kp2d` directly in `hmr_world`.** `src/stages/hmr_world.py` no longer reads `output/pose_2d/*.json`. The foot-anchor loop indexes `kp2d[i]` instead of `pose_by_frame[fi_int]["keypoints"]`. The midpoint-of-both-ankles, `_ANKLE_CONF_MIN = 0.3`, last-anchor-fallback, and ground-snap logic are unchanged ("minimal plumbing").
+3. **Side-output for the dashboard overlay.** `hmr_world` writes `output/hmr_world/{player_id}_kp2d.json` next to the SmplWorldTrack `.npz`. Same JSON schema the legacy `pose_2d` stage was supposed to emit, so the COCO-17 skeleton renderer in `src/web/static/index.html` is unchanged — only the fetch URL is renamed.
+4. **Stage deletion.** `src/stages/pose_2d.py` deleted; `_STAGE_NAMES` in `src/pipeline/runner.py` drops the entry; `config/default.yaml` drops the `pose_2d:` block; `recon.py` `--stages` help text updated; `STAGE_ORDER`, `_STAGE_COMPLETE`, and `_STAGE_ARTIFACTS` in `src/web/server.py` drop their `pose_2d` entries.
+5. **Dashboard endpoint rename.** `GET /pose_2d/players` → `GET /hmr_world/kp2d_players`; `GET /pose_2d/preview` → `GET /hmr_world/kp2d_preview` — both now read `output/hmr_world/*_kp2d.json`. The 2D-overlay panel is folded into the existing `hmr_world` dashboard panel via a new `renderKp2dPanel(panel)` helper called from `renderHmrWorld`. The D13 placeholder warning string is removed.
+6. **Tests.** `tests/test_runner.py`, `tests/test_cli.py`, `tests/test_e2e_real_clip.py` drop the `pose_2d` stage from their expected stage lists (and `test_cli.py` adds an explicit `assert "pose_2d" not in result.output`). `tests/test_hmr_world_stage.py` drops the `pose_2d/P001_pose.json` fixture write and instead extends the `fake_gvhmr` monkey-patch to emit ankle keypoints in the `kp2d` field; a new assertion confirms `hmr_world/P001_kp2d.json` is written with the seeded ankle values.
+7. **Docs.** `CLAUDE.md` rewritten to a 6-stage table; banner added to `docs/football-reconstruction-pipeline-design.md` and `docs/superpowers/specs/2026-05-04-broadcast-mono-pipeline-design.md` directing readers to this entry. The body of those design docs still describes `pose_2d` historically — a deeper rewrite is deferred (matches the D14 doc-drift precedent).
+
+**Reasoning.** The 2D pose was never a 3D-pose alternative — it was always a foot-anchoring aid. GVHMR is the 3D step, and it already computes the same keypoints internally. Surfacing them through `run_on_track` is a 4-line change; consuming them in `hmr_world` is another 4 lines. Removing the parallel ViTPose pass eliminates an MMPose install requirement, cuts inference time, and removes the placeholder warning the user has been seeing on every run. The minimal-plumbing variant (no per-foot selection, no anchor smoothing) was chosen so we can observe real-clip behaviour first; robustness changes are deferred until specific failure modes appear.
+
+**Out of scope (deferred):**
+- Per-foot anchor selection when one ankle is occluded.
+- Anchor smoothing / hysteresis across frames.
+- Re-establishing `pytest --cov` (D12 follow-up).
+- Anchor-editor projection convention (D11 follow-up).

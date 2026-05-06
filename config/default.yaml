@@ -36,15 +36,11 @@ camera:
   pitch_line_consistency_max_px: 5.0
   forward_backward_disagreement_warn_deg: 0.5
 
-pose_2d:
-  model_config: td-hm_ViTPose-small_8xb64-210e_coco-256x192
-  checkpoint: null
-  device: auto
-  min_confidence: 0.3
-  smooth_sigma: 2.0
-
 hmr_world:
-  device: auto
+  # Force CPU on macOS: GVHMR's RoPE attention has a slice op that
+  # trips an MPS assertion (dimension[1] (120) ... subRange) at exactly
+  # the model's configured max_len. CPU is slower but stable.
+  device: cpu
   checkpoint: third_party/gvhmr/inputs/checkpoints/gvhmr/gvhmr_siga24_release.ckpt
   batch_size: 16
   max_sequence_length: 120

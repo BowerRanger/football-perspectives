@@ -13,6 +13,7 @@ from src.schemas.anchor import Anchor, AnchorSet
 from src.schemas.camera_track import CameraFrame, CameraTrack
 from src.utils.anchor_solver import (
     AnchorSolveError,
+    refine_with_shared_translation,
     reprojection_residual_for_anchor,
     solve_anchors_jointly,
 )
@@ -93,9 +94,28 @@ class CameraStage(BaseStage):
         except AnchorSolveError as exc:
             raise RuntimeError(f"camera stage failed: {exc}") from exc
 
+        # Per-anchor (K, R, t) — each anchor has its own translation by
+        # default. For static stadium-mounted cameras (the documented
+        # design intent in CLAUDE.md), translation should be locked: the
+        # camera body doesn't move, only its pan/tilt/zoom. With t free
+        # the LM finds K/R/t combinations that reproject anchors well
+        # but place the camera in physically inconsistent positions
+        # (jumps of tens of metres between adjacent anchors), which
+        # downstream foot-anchor ray-casting interprets as players
+        # moving across the pitch.
+        static_camera = bool(cfg.get("static_camera", True))
+        if static_camera:
+            # Joint LM over all anchors with t shared. Replaces the joint
+            # solution wholesale so t_world / principal_point reflect the
+            # refined values.
+            sol = refine_with_shared_translation(tuple(qualifying), sol)
+            logger.info(
+                "static_camera=true: joint shared-t refine produced "
+                "t=%s across %d anchors",
+                np.round(sol.t_world, 3).tolist(), len(sol.per_anchor_KRt),
+            )
         t_world_median = sol.t_world
         principal_point = sol.principal_point
-        # Per-anchor (K, R, t) — each anchor has its own translation.
         anchor_solutions: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = (
             sol.per_anchor_KRt
         )
@@ -141,10 +161,12 @@ class CameraStage(BaseStage):
             slerp = Slerp([0.0, 1.0], Rotation.from_matrix([R_a, R_b]))
             for offset in range(1, b - a):
                 idx = a + offset
-                w = offset / (b - a)
-                per_frame_K[idx] = (1.0 - w) * K_a + w * K_b
-                per_frame_R[idx] = slerp([w]).as_matrix()[0]
-                per_frame_t[idx] = (1.0 - w) * t_a + w * t_b
+                # Don't reuse the name `w` — the outer scope holds image
+                # width and we'd clobber image_size on save (D27).
+                lerp_w = offset / (b - a)
+                per_frame_K[idx] = (1.0 - lerp_w) * K_a + lerp_w * K_b
+                per_frame_R[idx] = slerp([lerp_w]).as_matrix()[0]
+                per_frame_t[idx] = (1.0 - lerp_w) * t_a + lerp_w * t_b
                 # Lower confidence than the anchors but still high since
                 # interpolation is well-behaved between trusted anchors.
                 per_frame_conf[idx] = 0.7

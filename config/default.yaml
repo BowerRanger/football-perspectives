@@ -21,6 +21,11 @@ camera:
   first_anchor_min_landmarks: 6
   subsequent_anchor_min_landmarks: 4
   anchor_max_reprojection_px: 10.0
+  # Stadium-mounted broadcast cameras don't translate — only pan, tilt,
+  # zoom. Locking t prevents the LM from finding K/R/t combinations that
+  # reproject anchors well but jump the camera body around in pitch
+  # metres between anchors. Set false for moving rigs (steadicam, dolly).
+  static_camera: true
   # ORB is the only detector currently implemented in feature_propagator.
   # SuperPoint is a future enhancement (better repeatability under zoom).
   feature_detector: orb

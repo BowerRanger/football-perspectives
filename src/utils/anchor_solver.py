@@ -72,6 +72,165 @@ class JointSolution(NamedTuple):
 # Public utilities ------------------------------------------------------------
 
 
+def refine_with_shared_translation(
+    anchors: tuple[Anchor, ...],
+    sol: JointSolution,
+) -> JointSolution:
+    """Re-fit every anchor's (R, fx) against a single shared **camera
+    centre** in world coordinates.
+
+    For static stadium-mounted cameras the camera *body position* is the
+    physical invariant — the body doesn't move, only pan/tilt/zoom. The
+    OpenCV translation ``t`` is *not* the body position: ``t = -R @ C``
+    where ``C`` is the world-frame centre, so t varies whenever R does.
+    Locking t directly forces every anchor to share R as well, which
+    breaks the moment the camera pans (i.e. always).
+
+    The right invariant is C. We pick the lowest-residual anchor (its
+    solo solve is the most trustworthy individual fit), compute its
+    world-frame centre ``C = -R^T @ t``, then re-run a 4-DOF LM (rvec +
+    fx) for every other anchor with C held constant — t per anchor is
+    recomputed as ``-R @ C`` inside the residual.
+
+    The exported ``JointSolution.t_world`` and per-anchor ``t`` are
+    consistent with each anchor's R; downstream code that takes the
+    clip-shared ``t_world`` should now treat it as "t at the seed
+    anchor's rotation", or compute the camera centre via ``-R^T @ t``.
+
+    Returns a fresh JointSolution with every anchor's ``-R^T @ t``
+    equal to the locked C. If the resulting mean residual is much worse
+    than the original, the original is returned untouched.
+    """
+    if not sol.per_anchor_KRt or not sol.per_anchor_residual_px:
+        return sol
+
+    by_frame = {a.frame: a for a in anchors}
+    # Compute camera centre C = -R^T @ t per anchor and aggregate. We
+    # prefer rich (≥6 points) non-collinear anchors because their C is
+    # well-determined; thin / collinear anchors can have sub-pixel
+    # residuals despite a wildly off C (the unconstrained dimension).
+    Cs_rich: list[np.ndarray] = []
+    Cs_noncol: list[np.ndarray] = []
+    Cs_all: list[np.ndarray] = []
+    for af, (_K, R, t) in sol.per_anchor_KRt.items():
+        a = by_frame.get(af)
+        C_a = -R.astype(np.float64).T @ t.astype(np.float64)
+        Cs_all.append(C_a)
+        if a is None:
+            continue
+        if not _landmarks_collinear(a):
+            Cs_noncol.append(C_a)
+            if _is_rich(a):
+                Cs_rich.append(C_a)
+
+    if Cs_rich:
+        C_locked = np.median(np.stack(Cs_rich), axis=0)
+        seed_pool = "rich+non-collinear"; seed_n = len(Cs_rich)
+    elif Cs_noncol:
+        C_locked = np.median(np.stack(Cs_noncol), axis=0)
+        seed_pool = "non-collinear"; seed_n = len(Cs_noncol)
+    else:
+        C_locked = np.median(np.stack(Cs_all), axis=0)
+        seed_pool = "all"; seed_n = len(Cs_all)
+
+    # We still need a representative seed_K/R for the JointSolution
+    # output's t_world. Use the lowest-residual non-collinear anchor.
+    representative_frame = min(
+        sol.per_anchor_residual_px,
+        key=lambda f: (
+            _landmarks_collinear(by_frame[f]) if f in by_frame else True,
+            sol.per_anchor_residual_px[f],
+        ),
+    )
+    _Ks, R_seed, t_seed = sol.per_anchor_KRt[representative_frame]
+    R_seed = R_seed.astype(np.float64)
+    t_seed = t_seed.astype(np.float64)
+    cx, cy = sol.principal_point
+    best_frame = representative_frame  # used in log + early-keep below
+
+    new_KRt: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    new_res: dict[int, float] = {}
+    for af, (K_init, R_init, _t_init) in sol.per_anchor_KRt.items():
+        anchor = by_frame.get(af)
+        if anchor is None:
+            # No anchor record to re-fit against — keep K/R, recompute t.
+            R_new = R_init.astype(np.float64)
+            t_new = (-R_new @ C_locked)
+            new_KRt[af] = (K_init.copy(), R_new, t_new)
+            new_res[af] = float("inf")
+            continue
+        # Re-fit every anchor (no early-keep): C_locked is a median over
+        # rich anchors and won't match any single anchor's solo-solve C
+        # exactly, so even the representative anchor needs re-fitting.
+        fx_init = float(K_init[0, 0])
+        rvec_init, _ = cv2.Rodrigues(R_init.astype(np.float64))
+        rvec, fx = _solve_anchor_with_C_fixed(
+            anchor, C_locked, cx, cy, fx_init, rvec_init.reshape(3)
+        )
+        R_new = _rvec_to_R(rvec)
+        t_new = -R_new @ C_locked
+        K_new = _make_K(fx, cx, cy)
+        new_KRt[af] = (K_new, R_new, t_new)
+        new_res[af] = reprojection_residual_for_anchor(
+            anchor, K_new, R_new, t_new
+        )
+
+    new_mean = float(np.mean(list(new_res.values())))
+    old_mean = float(np.mean(list(sol.per_anchor_residual_px.values())))
+    # The static-C residual is often higher than the per-anchor residual
+    # because thin / collinear anchors had artificially-low residuals
+    # (their solo solves overfit) that get exposed once C is fixed. The
+    # rich-anchor median C is the honest answer, so don't reject lightly.
+    # Only fall back if the result is *catastrophic* (>10× original) —
+    # that level usually indicates the camera really did move.
+    if new_mean > 10.0 * max(old_mean, 1.0):
+        logger.warning(
+            "static-camera relock rejected: residual %.2f px ≫ original %.2f px. "
+            "Camera centre median over %d %s anchors was (%.1f, %.1f, %.1f). "
+            "Set camera.static_camera=false if the camera body actually moves.",
+            new_mean, old_mean, seed_n, seed_pool, *C_locked,
+        )
+        return sol
+
+    logger.info(
+        "static-camera relock: locked camera centre to (%.2f, %.2f, %.2f) "
+        "(median over %d %s anchors), mean residual %.2f px (was %.2f px). "
+        "Higher residual is expected — thin/collinear anchors lose their "
+        "overfit solo-solve as C is constrained.",
+        *C_locked, seed_n, seed_pool, new_mean, old_mean,
+    )
+
+    # Representative t for the JointSolution.t_world field (consumers
+    # like CameraTrack.t_world use this as a fallback). Compute it from
+    # the relocked R of the lowest-residual rich anchor so
+    # ``-R_seed_new.T @ t_world == C_locked`` — i.e. the clip-shared
+    # t_world is consistent with the locked camera centre.
+    if best_frame in new_KRt:
+        _Krep, R_rep_new, t_rep_new = new_KRt[best_frame]
+        t_world_out = t_rep_new.copy()
+    else:
+        t_world_out = -R_seed @ C_locked
+
+    return JointSolution(
+        t_world=t_world_out,
+        principal_point=(cx, cy),
+        per_anchor_KRt=new_KRt,
+        per_anchor_residual_px=new_res,
+    )
+
+
+# Backwards-compat thin wrapper for any external caller that imports the
+# old name. Returns just the per_anchor_KRt dict like the previous API.
+def relock_anchors_with_shared_t(
+    anchors: tuple[Anchor, ...],
+    sol: JointSolution,
+    t_shared: np.ndarray | None = None,
+) -> dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Deprecated. Use ``refine_with_shared_translation`` for static cams."""
+    refined = refine_with_shared_translation(anchors, sol)
+    return refined.per_anchor_KRt
+
+
 def reprojection_residual_for_anchor(
     anchor: Anchor, K: np.ndarray, R: np.ndarray, t: np.ndarray
 ) -> float:
@@ -253,6 +412,62 @@ def _refine_seed_pose(
         )
     except Exception:
         return fx_init, rvec_init.copy(), tvec_init.copy()
+
+
+def _solve_anchor_with_C_fixed(
+    anchor: Anchor,
+    C_fixed: np.ndarray,
+    cx: float,
+    cy: float,
+    fx_init: float,
+    rvec_init: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """LM-refine (rvec, fx) for one anchor with the world-frame camera
+    centre held constant. t per anchor is recomputed inside the
+    residual as ``t = -R @ C_fixed`` so the camera body stays put while
+    rotation and zoom vary.
+
+    This is the physical constraint for a static stadium-mounted camera
+    (PTZ rig): the body doesn't move, only its pan/tilt and zoom. With
+    only ``rvec`` and ``fx`` free this is a 4-DOF problem.
+    """
+    obj_pts = (
+        np.array([lm.world_xyz for lm in anchor.landmarks], dtype=np.float64)
+        if anchor.landmarks else np.empty((0, 3))
+    )
+    img_pts = (
+        np.array([lm.image_xy for lm in anchor.landmarks], dtype=np.float64)
+        if anchor.landmarks else np.empty((0, 2))
+    )
+    if len(obj_pts) < 3 and not anchor.lines:
+        return rvec_init.copy(), fx_init
+
+    def _residuals(p: np.ndarray) -> np.ndarray:
+        fx = float(p[0])
+        rvec = p[1:4]
+        R, _ = cv2.Rodrigues(rvec)
+        t = -R @ C_fixed
+        K = _make_K(fx, cx, cy)
+        parts: list[np.ndarray] = []
+        if len(obj_pts):
+            cam = obj_pts @ R.T + t
+            safe_z = np.where(cam[:, 2] > 1e-3, cam[:, 2], 1e-3)
+            pix = cam @ K.T
+            proj = pix[:, :2] / safe_z[:, None]
+            parts.append((proj - img_pts).reshape(-1))
+        if anchor.lines:
+            weight = 1.0 if len(obj_pts) == 0 else _LINE_RESIDUAL_WEIGHT
+            parts.append(
+                weight * _line_residuals(list(anchor.lines), K, R, t)
+            )
+        return np.concatenate(parts) if parts else np.empty(0)
+
+    p0 = np.concatenate([[fx_init], rvec_init])
+    try:
+        result = least_squares(_residuals, p0, method="lm", max_nfev=300)
+        return result.x[1:4].copy(), float(np.clip(result.x[0], 50.0, 1e5))
+    except Exception:
+        return rvec_init.copy(), fx_init
 
 
 def _solve_anchor_with_t_fixed(

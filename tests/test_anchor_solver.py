@@ -437,3 +437,65 @@ def test_joint_solve_with_thin_anchor_plus_vertical_separators():
     # without crashing or hitting the behind-camera sentinel.
     assert 50 in sol.per_anchor_KRt
     assert sol.per_anchor_residual_px[50] < 1e8
+
+
+def test_landmarks_collinear_detects_halfway_line_only_set():
+    """Frame-255-style annotation: all points on world line x=52.5, z=0.
+
+    The collinearity check must flag this so the user knows to add an
+    off-axis landmark.
+    """
+    from src.utils.anchor_solver import _landmarks_collinear
+
+    halfway_only = Anchor(
+        frame=255,
+        landmarks=tuple(
+            LandmarkObservation(name=name, image_xy=(0.0, 0.0), world_xyz=xyz)
+            for name, xyz in [
+                ("centre_circle_far",  (52.5, 43.15, 0.0)),
+                ("centre_spot",        (52.5, 34.0,  0.0)),
+                ("centre_circle_near", (52.5, 24.85, 0.0)),
+                ("halfway_far",        (52.5, 68.0,  0.0)),
+            ]
+        ),
+    )
+    assert _landmarks_collinear(halfway_only) is True
+
+    # Non-collinear set (e.g. two corners + halfway point) is fine.
+    triangle = Anchor(
+        frame=42,
+        landmarks=tuple(
+            LandmarkObservation(name=name, image_xy=(0.0, 0.0), world_xyz=xyz)
+            for name, xyz in [
+                ("near_left_corner",  (0.0,   0.0,   0.0)),
+                ("near_right_corner", (105.0, 0.0,   0.0)),
+                ("halfway_far",       (52.5,  68.0,  0.0)),
+            ]
+        ),
+    )
+    assert _landmarks_collinear(triangle) is False
+
+
+def test_solve_anchors_jointly_warns_on_collinear_anchor(caplog):
+    """The orchestrator emits a warning naming the offending frame so the
+    user sees it in the camera-stage log alongside other anchor diagnostics.
+    """
+    K_true = _K()
+    rich = _rich_anchor(K_true, R_BASE, T_BASE, 0)
+    collinear = Anchor(
+        frame=255,
+        landmarks=tuple(
+            _make_landmark(K_true, R_BASE, T_BASE, name, xyz)
+            for name, xyz in [
+                ("centre_circle_far",  (52.5, 43.15, 0.0)),
+                ("centre_spot",        (52.5, 34.0,  0.0)),
+                ("centre_circle_near", (52.5, 24.85, 0.0)),
+                ("halfway_far",        (52.5, 68.0,  0.0)),
+            ]
+        ),
+    )
+    with caplog.at_level("WARNING", logger="src.utils.anchor_solver"):
+        solve_anchors_jointly((rich, collinear), image_size=IMAGE_SIZE)
+    msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("frame 255" in m and "collinear" in m for m in msgs), msgs
+

@@ -115,6 +115,31 @@ def _z_diversity(anchor: Anchor) -> int:
     return len({round(lm.world_xyz[2], 3) for lm in anchor.landmarks})
 
 
+def _landmarks_collinear(anchor: Anchor, tol_m: float = 1.0) -> bool:
+    """Whether the anchor's point landmarks all lie on a single world line.
+
+    Detected via the second singular value of the centred world-coordinate
+    matrix: values below ``tol_m`` (metres) mean the points span at most
+    one world axis. Returns ``False`` when the anchor has fewer than two
+    points (caller treats those as separately under-constrained).
+
+    A collinear point set is geometrically rank-deficient — the solver
+    will still find *a* low-residual (R, t) but the camera position along
+    the perpendicular to the line is unconstrained, so the recovered
+    pose may be physically nonsensical (e.g. camera at pitch level on a
+    halfway-line-only annotation). Used by ``solve_anchors_jointly`` to
+    warn the user.
+    """
+    if len(anchor.landmarks) < 2:
+        return False
+    pts = np.array([lm.world_xyz for lm in anchor.landmarks], dtype=np.float64)
+    centred = pts - pts.mean(axis=0)
+    s = np.linalg.svd(centred, compute_uv=False)
+    # SVD pads to length 3; second singular value tells us whether the
+    # points span > 1 axis.
+    return float(s[1]) < tol_m
+
+
 def _pick_seed_anchor(anchors: tuple[Anchor, ...]) -> Anchor:
     """Pick the anchor with the most point landmarks AND most z-levels.
 
@@ -154,7 +179,13 @@ def _seed_anchor_pose(
     # data. Falls back to ITERATIVE for ≥6 points (well-conditioned non-
     # coplanar cases benefit from its iterative refinement).
     flag = cv2.SOLVEPNP_SQPNP if len(anchor.landmarks) < 6 else cv2.SOLVEPNP_ITERATIVE
-    ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, dist_zero, flags=flag)
+    try:
+        ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, dist_zero, flags=flag)
+    except cv2.error:
+        # SQPNP raises a hard assertion on rank-deficient configurations
+        # (e.g. all-collinear points). Treat that as a regular PnP failure
+        # so the orchestrator can fall back to t-fixed / interpolation.
+        return None
     if not ok:
         return None
     return rvec.reshape(3), tvec.reshape(3)
@@ -658,6 +689,25 @@ def solve_anchors_jointly(
             "no anchor has ≥4 point landmarks or ≥2 line correspondences; "
             "place more landmarks (or lines) before running the camera stage"
         )
+
+    # Warn on geometrically rank-deficient anchors. Collinear point sets
+    # admit a low-residual fit (the points reproject perfectly along the
+    # line) but leave the camera position perpendicular to the line
+    # unconstrained, so the recovered pose is often physically wrong.
+    # We still attempt the solve — the user may be relying on inter-anchor
+    # interpolation — but flag the frame so they know to add an off-axis
+    # landmark.
+    for a in qualifying:
+        if _landmarks_collinear(a):
+            logger.warning(
+                "anchor at frame %d has %d point landmarks but they are "
+                "collinear in world coordinates — the solve will fit them "
+                "but the camera position perpendicular to the line is "
+                "unconstrained, so the projected pitch may appear rotated "
+                "or skewed. Add at least one off-axis landmark (e.g. an "
+                "18yd-box corner, corner flag, or goal post) to disambiguate.",
+                a.frame, len(a.landmarks),
+            )
 
     width, height = image_size
     cx = width / 2.0

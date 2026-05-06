@@ -254,6 +254,7 @@
     </div>
     <div class="frame-bar">
       <button id="prev-btn" title="Previous frame (←)">◀</button>
+      <button id="play-btn" title="Play / pause (Space)">▶</button>
       <button id="next-btn" title="Next frame (→)">▶</button>
       <input type="range" id="seek" min="0" max="0" value="0" step="1">
       <input type="number" id="frame-input" min="0" value="0">
@@ -320,6 +321,7 @@ const els = {
   hint: document.getElementById("hint"),
   videoStack: document.getElementById("video-stack"),
   prevBtn: document.getElementById("prev-btn"),
+  playBtn: document.getElementById("play-btn"),
   nextBtn: document.getElementById("next-btn"),
   seek: document.getElementById("seek"),
   frameInput: document.getElementById("frame-input"),
@@ -1077,15 +1079,62 @@ els.saveBtn.addEventListener("click", async () => {
 });
 
 // ── Frame controls wiring ───────────────────────────────────────────
-els.prevBtn.addEventListener("click", () => seekToFrame(state.frame - 1));
-els.nextBtn.addEventListener("click", () => seekToFrame(state.frame + 1));
-els.seek.addEventListener("input", () => seekToFrame(parseInt(els.seek.value, 10)));
-els.frameInput.addEventListener("change", () => seekToFrame(parseInt(els.frameInput.value, 10)));
+els.prevBtn.addEventListener("click", () => { els.video.pause(); seekToFrame(state.frame - 1); });
+els.nextBtn.addEventListener("click", () => { els.video.pause(); seekToFrame(state.frame + 1); });
+els.seek.addEventListener("input", () => { els.video.pause(); seekToFrame(parseInt(els.seek.value, 10)); });
+els.frameInput.addEventListener("change", () => { els.video.pause(); seekToFrame(parseInt(els.frameInput.value, 10)); });
+
+// ── Playback ─────────────────────────────────────────────────────────
+// While the video is playing the per-frame state (state.frame, seek
+// slider, frame-info label, anchor highlights, projected pitch overlay)
+// is kept in sync via a requestAnimationFrame loop. Anchors and
+// keypoints are immutable during playback, so we just re-derive the
+// frame number from currentTime each tick rather than awaiting `seeked`
+// the way seekToFrame does.
+let playbackRafId = null;
+
+function tickPlayback() {
+  if (els.video.paused || els.video.ended) { playbackRafId = null; return; }
+  const fi = Math.max(
+    0,
+    Math.min(state.totalFrames - 1, Math.round(els.video.currentTime * state.fps))
+  );
+  if (fi !== state.frame) {
+    state.frame = fi;
+    els.seek.value = String(fi);
+    els.frameInput.value = String(fi);
+    els.frameInfo.textContent = `${fi} / ${Math.max(0, state.totalFrames - 1)}`;
+    redrawOverlay();
+    highlightAnchorList();
+  }
+  playbackRafId = requestAnimationFrame(tickPlayback);
+}
+
+els.playBtn.addEventListener("click", () => {
+  if (els.video.paused) els.video.play();
+  else els.video.pause();
+});
+els.video.addEventListener("play", () => {
+  els.playBtn.textContent = "⏸";
+  if (!playbackRafId) playbackRafId = requestAnimationFrame(tickPlayback);
+});
+els.video.addEventListener("pause", () => {
+  els.playBtn.textContent = "▶";
+  if (playbackRafId) { cancelAnimationFrame(playbackRafId); playbackRafId = null; }
+});
+els.video.addEventListener("ended", () => {
+  els.playBtn.textContent = "▶";
+  if (playbackRafId) { cancelAnimationFrame(playbackRafId); playbackRafId = null; }
+});
 
 window.addEventListener("keydown", (ev) => {
   if (ev.target && (ev.target.tagName === "INPUT" || ev.target.tagName === "SELECT")) return;
-  if (ev.key === "ArrowLeft") { ev.preventDefault(); seekToFrame(state.frame - 1); }
-  else if (ev.key === "ArrowRight") { ev.preventDefault(); seekToFrame(state.frame + 1); }
+  if (ev.key === "ArrowLeft") { ev.preventDefault(); els.video.pause(); seekToFrame(state.frame - 1); }
+  else if (ev.key === "ArrowRight") { ev.preventDefault(); els.video.pause(); seekToFrame(state.frame + 1); }
+  else if (ev.key === " " || ev.code === "Space") {
+    ev.preventDefault();
+    if (els.video.paused) els.video.play(); else els.video.pause();
+  }
   else if (ev.key === "Escape") clearLandmarkSelection();
 });
 

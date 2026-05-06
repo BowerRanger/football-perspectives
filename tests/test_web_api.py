@@ -245,3 +245,124 @@ def test_post_anchors_round_trips_stadium(client) -> None:
     # Round-trip via GET
     got = c.get("/anchors").json()
     assert got["stadium"] == "default_premier_league"
+
+
+# ── Track-annotation endpoints: physical-merge regressions ───────────
+
+
+def _seed_tracks(tmp: Path, *tracks_per_track: tuple[str, list[tuple[int, float]]]) -> None:
+    """Write a minimal play_tracks.json into ``tmp``.
+
+    Each input is ``(track_id, [(frame, confidence), ...])``. Bbox + team
+    are constants because the merge endpoint doesn't consult them.
+    """
+    from src.schemas.tracks import Track, TrackFrame, TracksResult
+
+    (tmp / "tracks").mkdir(parents=True, exist_ok=True)
+    tracks = [
+        Track(
+            track_id=tid,
+            class_name="player",
+            team="A",
+            player_id="",
+            player_name="",
+            frames=[
+                TrackFrame(frame=fi, bbox=[0, 0, 10, 10], confidence=conf, pitch_position=None)
+                for fi, conf in frames
+            ],
+        )
+        for tid, frames in tracks_per_track
+    ]
+    TracksResult(shot_id="play", tracks=tracks).save(tmp / "tracks" / "play_tracks.json")
+
+
+def _load_tracks(tmp: Path):
+    from src.schemas.tracks import TracksResult
+
+    return TracksResult.load(tmp / "tracks" / "play_tracks.json")
+
+
+@pytest.mark.integration
+def test_merge_physically_combines_tracks(client) -> None:
+    c, tmp = client
+    # T001 covers frames 0–4, T007 covers frames 5–9 — disjoint, the
+    # ByteTrack-dropped-and-restarted-the-same-player scenario.
+    _seed_tracks(
+        tmp,
+        ("T001", [(i, 0.9) for i in range(5)]),
+        ("T007", [(i, 0.8) for i in range(5, 10)]),
+    )
+    resp = c.post(
+        "/api/tracks/merge",
+        json={"shot_id": "play", "track_ids": ["T001", "T007"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Canonical track_id is the lex-smallest of the inputs.
+    assert body["merged_into"] == "T001"
+    assert body["removed_track_ids"] == ["T007"]
+    assert body["frame_collisions"] == 0
+    assert body["player_id"].startswith("P")  # freshly minted
+
+    tr = _load_tracks(tmp)
+    assert len(tr.tracks) == 1, "originals should have been dropped"
+    kept = tr.tracks[0]
+    assert kept.track_id == "T001"
+    assert [f.frame for f in kept.frames] == list(range(10))
+    assert kept.player_id == body["player_id"]
+
+
+@pytest.mark.integration
+def test_merge_resolves_frame_collisions_by_confidence(client) -> None:
+    c, tmp = client
+    # Both tracks claim frame 5; the higher-confidence observation wins.
+    _seed_tracks(
+        tmp,
+        ("T001", [(5, 0.5), (6, 0.9)]),
+        ("T002", [(5, 0.95), (7, 0.9)]),
+    )
+    resp = c.post(
+        "/api/tracks/merge",
+        json={"shot_id": "play", "track_ids": ["T001", "T002"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["merged_into"] == "T001"
+    assert body["frame_collisions"] == 1
+
+    tr = _load_tracks(tmp)
+    assert len(tr.tracks) == 1
+    kept = tr.tracks[0]
+    by_frame = {f.frame: f.confidence for f in kept.frames}
+    assert by_frame == {5: pytest.approx(0.95), 6: pytest.approx(0.9), 7: pytest.approx(0.9)}
+
+
+@pytest.mark.integration
+def test_merge_by_name_consolidates_tracks(client) -> None:
+    c, tmp = client
+    _seed_tracks(
+        tmp,
+        ("T001", [(0, 0.9), (1, 0.9)]),
+        ("T002", [(2, 0.8), (3, 0.8)]),
+        ("T003", [(0, 0.7), (1, 0.7)]),
+    )
+    # Name T001 + T002 "Salah", T003 "Mané".
+    for tid in ("T001", "T002"):
+        c.patch(f"/api/tracks/play/{tid}", json={"player_name": "Salah"})
+    c.patch("/api/tracks/play/T003", json={"player_name": "Mané"})
+
+    resp = c.post("/api/tracks/merge-by-name")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["merged_groups"] == 2
+    assert body["tracks_removed"] == 1  # only Salah's two collapse to one
+
+    tr = _load_tracks(tmp)
+    assert len(tr.tracks) == 2
+    by_name = {t.player_name: t for t in tr.tracks}
+    assert set(by_name) == {"Salah", "Mané"}
+    salah = by_name["Salah"]
+    assert salah.track_id == "T001"
+    assert [f.frame for f in salah.frames] == [0, 1, 2, 3]
+    # Both Salah tracks share the same canonical player_id.
+    assert salah.player_id.startswith("P")

@@ -123,8 +123,17 @@
   }
   .badge-complete { background: #14532d; color: #86efac; }
   .badge-pending  { background: #1e293b; color: #64748b; }
-  .badge-running  { background: #451a03; color: #fbbf24; }
+  .badge-running  {
+    background: #451a03;
+    color: #fbbf24;
+    animation: fp-pulse 1.4s ease-in-out infinite;
+  }
   .badge-error    { background: #450a0a; color: #fca5a5; }
+  .stage-dot.running { animation: fp-pulse 1.4s ease-in-out infinite; }
+  @keyframes fp-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.5; }
+  }
 
   #main-body {
     flex: 1;
@@ -231,7 +240,6 @@
   <div id="sidebar-header">Pipeline Stages</div>
   <div id="stage-list"></div>
   <div id="sidebar-links">
-    <a href="/anchor_editor">✎ Anchor Editor</a>
     <a href="/viewer" target="_blank">▶ 3D Viewer</a>
   </div>
 </div>
@@ -242,6 +250,7 @@
     <span id="stage-title">—</span>
     <span id="stage-badge" class="badge badge-pending">Not run</span>
     <button id="run-all-btn" class="btn btn-secondary" style="margin-left:auto;font-size:12px;">Run All</button>
+    <button id="continue-btn" class="btn btn-secondary" disabled style="font-size:12px;" title="Run this stage without wiping its output directory — resumes from any cached per-player results.">Continue</button>
     <button id="rerun-btn" class="btn btn-primary" disabled style="font-size:12px;">Re-run Stage</button>
   </div>
 
@@ -270,13 +279,18 @@
 let currentStage = null;
 let currentStages = [];   // [{name, index, complete}]
 let activeSource = null;  // current EventSource
+// Live state per stage — overrides the on-disk "complete" flag so a
+// stage that's mid-run doesn't appear as Complete just because some
+// output has been written to disk already.
+//   { stage_name: "running" | "error" }
+const stageState = {};
+let runningStage = null;  // which stage's Run/Continue is in flight
 
 // Stage dependency graph for the broadcast-mono pipeline
 const STAGE_DEPS = {
   prepare_shots: [],
   tracking:      ["prepare_shots"],
   camera:        ["prepare_shots"],
-  pose_2d:       ["prepare_shots", "tracking"],
   hmr_world:     ["tracking", "camera"],
   ball:          ["camera"],
   export:        ["camera", "hmr_world"],
@@ -304,8 +318,14 @@ function renderSidebar() {
     item.dataset.stage = s.name;
     item.onclick = () => selectStage(s.name);
 
+    const liveState = stageState[s.name];
+    const dotCls = liveState === "running"
+      ? " running"
+      : liveState === "error"
+        ? " error"
+        : (s.complete ? " complete" : "");
     const dot = document.createElement("span");
-    dot.className = "stage-dot" + (s.complete ? " complete" : "");
+    dot.className = "stage-dot" + dotCls;
     dot.id = `dot-${s.name}`;
 
     const label = document.createElement("span");
@@ -323,14 +343,26 @@ function renderSidebar() {
   }
 
   if (!currentStage) {
-    const first = currentStages.find((s) => !s.complete) || currentStages[0];
-    if (first) selectStage(first.name);
+    // Restore the stage the operator was viewing before navigating away
+    // (e.g. into the anchor editor or 3D viewer); fall back to the first
+    // not-yet-complete stage on a fresh visit.
+    let initial = null;
+    try {
+      const stored = localStorage.getItem("fp.currentStage");
+      if (stored && currentStages.some((s) => s.name === stored)) initial = stored;
+    } catch {}
+    if (!initial) {
+      const firstIncomplete = currentStages.find((s) => !s.complete);
+      initial = (firstIncomplete || currentStages[0] || {}).name || null;
+    }
+    if (initial) selectStage(initial);
   }
 }
 
 // ── Stage selection ──────────────────────────────────────────────────
 async function selectStage(name) {
   currentStage = name;
+  try { localStorage.setItem("fp.currentStage", name); } catch {}
   document.querySelectorAll(".stage-item").forEach((el) => {
     el.classList.toggle("active", el.dataset.stage === name);
   });
@@ -338,8 +370,18 @@ async function selectStage(name) {
   const s = currentStages.find((x) => x.name === name);
   document.getElementById("stage-title").textContent = humanizeStageName(name);
 
+  // Per-stage live override beats the on-disk complete flag so we don't
+  // flip "Running" → "Complete" mid-run just because some output has
+  // already been written to disk.
+  const liveState = stageState[name];
   const badge = document.getElementById("stage-badge");
-  if (s && s.complete) {
+  if (liveState === "running") {
+    badge.textContent = "Running";
+    badge.className = "badge badge-running";
+  } else if (liveState === "error") {
+    badge.textContent = "Error";
+    badge.className = "badge badge-error";
+  } else if (s && s.complete) {
     badge.textContent = "Complete";
     badge.className = "badge badge-complete";
   } else {
@@ -347,19 +389,40 @@ async function selectStage(name) {
     badge.className = "badge badge-pending";
   }
 
+  // While any stage is mid-run, lock out every run trigger so the
+  // operator can't accidentally fire a second job on top of the first.
+  const isAnyRunning = runningStage != null;
   const rerunBtn = document.getElementById("rerun-btn");
+  const continueBtn = document.getElementById("continue-btn");
+  const runAllBtn = document.getElementById("run-all-btn");
   const deps = STAGE_DEPS[name] || [];
   const stageMap = Object.fromEntries(currentStages.map((s) => [s.name, s.complete]));
   const missing = deps.filter((d) => !stageMap[d]);
-  rerunBtn.disabled = missing.length > 0;
-  rerunBtn.title = missing.length === 0 ? "" : `Requires: ${missing.join(", ")}`;
+  const blocked = missing.length > 0 || isAnyRunning;
+  const blockedReason = isAnyRunning
+    ? `${humanizeStageName(runningStage)} is currently running`
+    : `Requires: ${missing.join(", ")}`;
+  rerunBtn.disabled = blocked;
+  rerunBtn.title = blocked ? blockedReason : "";
+  continueBtn.disabled = blocked;
+  continueBtn.title = blocked
+    ? blockedReason
+    : "Run this stage without wiping its output directory — resumes from any cached per-player results.";
+  runAllBtn.disabled = isAnyRunning;
+  runAllBtn.title = isAnyRunning ? blockedReason : "";
 
   document.getElementById("output-panel").innerHTML = "";
   loadOutput(name);
 }
 
 // ── Run / log streaming ──────────────────────────────────────────────
-async function startRun(stages) {
+//
+// `fromStage`: when non-null, the runner skips its is_complete() short
+// circuit for that stage. Continue uses this to force re-entry into
+// hmr_world's per-player cache loop even when some .npz files exist;
+// without it the runner would print "[SKIP] hmr_world (cached)" and
+// never call stage.run().
+async function startRun(stages, fromStage) {
   const logPanel = document.getElementById("log-panel");
   const logOutput = document.getElementById("log-output");
   const logStatus = document.getElementById("log-status");
@@ -370,12 +433,26 @@ async function startRun(stages) {
   logStatus.style.color = "#fbbf24";
   logPanel.scrollIntoView({ behavior: "auto", block: "start" });
 
-  if (currentStage) setDot(currentStage, "running");
-  const badge = document.getElementById("stage-badge");
-  badge.textContent = "Running";
-  badge.className = "badge badge-running";
+  // The /api/run endpoint takes either a single stage name or "all".
+  // Mark the targeted stage(s) as running so subsequent re-renders of
+  // the sidebar / badge keep showing it correctly even if selectStage
+  // fires for the same stage in the meantime.
+  const targetStages = stages === "all"
+    ? currentStages.map((s) => s.name)
+    : [stages];
+  for (const t of targetStages) stageState[t] = "running";
+  runningStage = stages === "all" ? "Pipeline" : stages;
+  // Pulse-mark every targeted sidebar dot so the operator can see at a
+  // glance which stages are in flight on a "Run All".
+  for (const t of targetStages) {
+    const d = document.getElementById(`dot-${t}`);
+    if (d) d.className = "stage-dot running";
+  }
+  // Re-evaluate badge + buttons via selectStage so the
+  // any-running lockout is applied uniformly.
+  if (currentStage) selectStage(currentStage);
 
-  const body = { stages };
+  const body = fromStage ? { stages, from_stage: fromStage } : { stages };
   const res = await fetch("/api/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -384,7 +461,9 @@ async function startRun(stages) {
 
   if (!res.ok) {
     logOutput.textContent = "Failed to start run";
-    if (currentStage) setDot(currentStage, "error");
+    for (const t of targetStages) stageState[t] = "error";
+    runningStage = null;
+    if (currentStage) selectStage(currentStage);
     return;
   }
 
@@ -402,22 +481,27 @@ async function startRun(stages) {
     activeSource.close();
     activeSource = null;
     const { status } = JSON.parse(e.data);
+    // Clear the "running" flag on every stage we marked at the start.
+    for (const t of targetStages) delete stageState[t];
+    runningStage = null;
     if (status === "done") {
       logStatus.textContent = "done";
       logStatus.style.color = "#4ade80";
       logPanel.style.borderColor = "#166534";
-      if (currentStage) setDot(currentStage, "complete");
-      loadStages().then(() => { if (currentStage) selectStage(currentStage); });
     } else {
       logStatus.textContent = "ERROR — scroll log above for details";
       logStatus.style.color = "#f87171";
       logPanel.style.borderColor = "#b91c1c";
-      if (currentStage) setDot(currentStage, "error");
-      badge.textContent = "Error";
-      badge.className = "badge badge-error";
+      // Mark each targeted stage as error so the badge / dot reflect
+      // it after the sidebar refresh; the operator can retry via
+      // Continue without having to switch stages first.
+      for (const t of targetStages) stageState[t] = "error";
       logPanel.scrollIntoView({ behavior: "auto", block: "start" });
       logOutput.scrollTop = logOutput.scrollHeight;
     }
+    // Refresh stage completion + redrive sidebar/badge through selectStage
+    // so Continue / Re-run / Run-All re-enable correctly.
+    loadStages().then(() => { if (currentStage) selectStage(currentStage); });
   });
 }
 
@@ -431,6 +515,17 @@ document.getElementById("rerun-btn").addEventListener("click", async () => {
   btn.disabled = true;
   await fetch(`/api/output/${currentStage}`, { method: "DELETE" });
   startRun(currentStage);
+});
+
+// Continue: re-invoke the stage WITHOUT wiping its output directory
+// first. For hmr_world this means already-processed players are picked
+// up from the per-player .npz cache rather than re-running GVHMR.
+// We pass from_stage = currentStage so the pipeline runner doesn't
+// short-circuit on its is_complete()-cache check.
+document.getElementById("continue-btn").addEventListener("click", () => {
+  if (!currentStage) return;
+  document.getElementById("continue-btn").disabled = true;
+  startRun(currentStage, currentStage);
 });
 
 document.getElementById("run-all-btn").addEventListener("click", () => {
@@ -456,9 +551,6 @@ async function loadOutput(stageName) {
       break;
     case "camera":
       await renderCamera(panel);
-      break;
-    case "pose_2d":
-      await renderPose2D(panel);
       break;
     case "hmr_world":
       await renderHmrWorld(panel);
@@ -530,7 +622,6 @@ function humanizeStageName(name) {
     prepare_shots: "Prepare Shots",
     tracking:      "Tracking",
     camera:        "Camera Tracking",
-    pose_2d:       "2D Pose",
     hmr_world:     "HMR World",
     ball:          "Ball",
     export:        "Export",
@@ -576,9 +667,641 @@ async function renderPrepareShots(panel) {
 }
 
 async function renderTracking(panel) {
-  emptyNote(panel,
-    "Tracking output is consumed downstream (camera, pose_2d, hmr_world). " +
-    "Re-run this stage to regenerate per-clip tracks.");
+  const data = await fetchJsonOrNull("/tracking/shots");
+  if (!data || !data.shots || data.shots.length === 0) {
+    emptyNote(panel, "No tracks yet — run tracking to detect players and the ball.");
+    return;
+  }
+
+  // ── Shot picker (single-shot pipeline today, but the dropdown is cheap) ──
+  const shotPicker = document.createElement("div");
+  shotPicker.style.cssText = "padding:14px 16px 6px;font-size:13px;color:#cbd5e1;display:flex;gap:10px;align-items:center;";
+  shotPicker.innerHTML = "<span>Shot:</span>";
+  const select = document.createElement("select");
+  select.style.cssText = "background:#252840;color:#e2e8f0;border:1px solid #2d3148;border-radius:4px;padding:4px 8px;font-size:13px;";
+  for (const id of data.shots) {
+    const opt = document.createElement("option");
+    opt.value = id; opt.textContent = id;
+    select.appendChild(opt);
+  }
+  shotPicker.appendChild(select);
+  panel.appendChild(shotPicker);
+
+  const editorWrap = document.createElement("div");
+  panel.appendChild(editorWrap);
+
+  async function loadShot(shotId) {
+    editorWrap.innerHTML = "";
+    const preview = await fetchJsonOrNull(`/tracking/preview?shot_id=${encodeURIComponent(shotId)}`);
+    if (!preview || !preview.tracks) {
+      emptyNote(editorWrap, "Failed to load tracks for this shot.");
+      return;
+    }
+    buildTrackEditor(editorWrap, shotId, preview);
+  }
+  select.addEventListener("change", () => loadShot(select.value));
+  loadShot(data.shots[0]);
+}
+
+// ── Track annotation editor (video + bbox overlay + player list) ─────
+async function buildTrackEditor(container, shotId, preview) {
+  // Need per-frame bboxes for the overlay; /tracking/frames returns
+  // { shot_id, frames: [{frame, boxes: [{track_id, class_name, team, bbox, confidence}]}] }
+  const framesData = await fetchJsonOrNull(`/tracking/frames?shot_id=${encodeURIComponent(shotId)}`);
+  const frames = (framesData && framesData.frames) || [];
+
+  // Index per-frame box list by frame number for O(1) overlay lookup.
+  const frameIndex = new Map();
+  for (const f of frames) frameIndex.set(f.frame, f.boxes || []);
+
+  // Camera fps (for frame ↔ time conversion).
+  const cam = await fetchJsonOrNull("/camera/track");
+  const fps = (cam && cam.fps) || 30;
+
+  // Filter to player + goalkeeper rows; the ball gets drawn but is not edited.
+  const editable = preview.tracks.filter((t) => t.class_name === "player" || t.class_name === "goalkeeper");
+  if (editable.length === 0) {
+    emptyNote(container, "No player/goalkeeper tracks in this shot.");
+    return;
+  }
+
+  // ── Toolbar ──
+  const toolbar = document.createElement("div");
+  toolbar.style.cssText = "padding:8px 16px 4px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;";
+  const mergeBtn = makeToolbarBtn("Merge Selected", "#4f46e5");
+  mergeBtn.disabled = true;
+  const mergeByNameBtn = makeToolbarBtn("Merge by Name", "#334155");
+  mergeByNameBtn.title = "Across every shot, unify all tracks that share a player name under one player_id.";
+  const ignoreBtn = makeToolbarBtn("Ignore Unknown", "#334155");
+  ignoreBtn.title = "Mark every unnamed player/goalkeeper in this shot as 'ignore'.";
+  const deleteBtn = makeToolbarBtn("Delete Ignored", "#7f1d1d");
+  deleteBtn.title = "Drop every track currently named 'ignore' across all shots.";
+  const status = document.createElement("span");
+  status.style.cssText = "color:#94a3b8;font-size:12px;margin-left:8px;";
+  toolbar.appendChild(mergeBtn);
+  toolbar.appendChild(mergeByNameBtn);
+  toolbar.appendChild(ignoreBtn);
+  toolbar.appendChild(deleteBtn);
+  toolbar.appendChild(status);
+  container.appendChild(toolbar);
+
+  // ── Layout: video left, player list right ──
+  const row = document.createElement("div");
+  row.style.cssText = "display:flex;gap:14px;align-items:flex-start;padding:8px 16px 16px;";
+  container.appendChild(row);
+
+  // Video column
+  const videoCol = document.createElement("div");
+  videoCol.style.cssText = "flex:1;min-width:0;";
+  const videoStage = document.createElement("div");
+  videoStage.style.cssText = "position:relative;background:#000;border-radius:4px;overflow:hidden;";
+  const video = document.createElement("video");
+  video.src = `/api/video/${encodeURIComponent(shotId)}`;
+  video.preload = "metadata";
+  video.style.cssText = "display:block;width:100%;height:auto;";
+  const overlay = document.createElement("canvas");
+  overlay.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;cursor:pointer;";
+  videoStage.appendChild(video);
+  videoStage.appendChild(overlay);
+  videoCol.appendChild(videoStage);
+
+  // Timeline controls
+  const controls = document.createElement("div");
+  controls.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 0;";
+  const playBtn = makeToolbarBtn("▶", "#4f46e5"); playBtn.style.minWidth = "36px";
+  const stepBack = makeToolbarBtn("◀", "#334155"); stepBack.title = "Previous frame";
+  const stepFwd = makeToolbarBtn("▶", "#334155"); stepFwd.title = "Next frame";
+  const seek = document.createElement("input");
+  seek.type = "range"; seek.min = "0"; seek.max = "1000"; seek.value = "0";
+  seek.style.cssText = "flex:1;";
+  const frameLabel = document.createElement("span");
+  frameLabel.style.cssText = "color:#94a3b8;font-size:11px;min-width:80px;text-align:right;font-variant-numeric:tabular-nums;";
+  frameLabel.textContent = "Frame 0";
+  controls.append(playBtn, stepBack, stepFwd, seek, frameLabel);
+  videoCol.appendChild(controls);
+  row.appendChild(videoCol);
+
+  // Player list column
+  const listCol = document.createElement("div");
+  listCol.style.cssText = "width:300px;min-width:300px;max-height:560px;overflow-y:auto;background:#1a1d27;border-radius:6px;border:1px solid #2d3148;";
+  const listHeader = document.createElement("div");
+  listHeader.style.cssText = "padding:8px 10px;font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.06em;border-bottom:1px solid #2d3148;position:sticky;top:0;background:#1a1d27;z-index:1;";
+  listHeader.textContent = `Players — ${shotId}`;
+  listCol.appendChild(listHeader);
+  row.appendChild(listCol);
+
+  // Datalist for name autocomplete (shared across rows)
+  const datalistId = `player-names-${shotId}`;
+  const datalist = document.createElement("datalist");
+  datalist.id = datalistId;
+  const allNames = new Set();
+  for (const t of editable) if (t.player_name && t.player_name !== "ignore") allNames.add(t.player_name);
+  rebuildDatalist(datalist, allNames);
+  container.appendChild(datalist);
+
+  // ── Group tracks by player_id (fall back to track_id when empty) ──
+  // hmr_world groups by the same key, so the visible row collapse mirrors
+  // what eventually goes into GVHMR: one row = one player.
+  const playerGroups = new Map(); // rowKey → {key, tracks:[], frameCount, frameRange, name, team}
+  for (const t of editable) {
+    const key = t.player_id || t.track_id;
+    let g = playerGroups.get(key);
+    if (!g) {
+      g = {
+        key,
+        tracks: [],
+        frameCount: 0,
+        frameRange: [Infinity, -Infinity],
+        name: "",
+        team: t.team || "unknown",
+      };
+      playerGroups.set(key, g);
+    }
+    g.tracks.push(t);
+    g.frameCount += t.frame_count;
+    if (t.frame_range && t.frame_range.length === 2) {
+      if (t.frame_range[0] < g.frameRange[0]) g.frameRange[0] = t.frame_range[0];
+      if (t.frame_range[1] > g.frameRange[1]) g.frameRange[1] = t.frame_range[1];
+    }
+    // Pick the first non-empty, non-'ignore' name as canonical.
+    if (!g.name && t.player_name && t.player_name !== "ignore") g.name = t.player_name;
+    else if (!g.name && t.player_name === "ignore") g.name = "ignore";
+  }
+  // Default frameRange when a group has no real frames.
+  for (const g of playerGroups.values()) {
+    if (g.frameRange[0] === Infinity) g.frameRange = [0, 0];
+  }
+
+  // selectedRows stores rowKey (player_id or fallback). drawTrackOverlay
+  // expands these into the underlying track_ids on each draw.
+  const selectedRows = new Set();
+  const rowsByTrackId = new Map(); // track_id → row controls (shared across members)
+
+  function selectedTrackIdSet() {
+    const out = new Set();
+    for (const key of selectedRows) {
+      const g = playerGroups.get(key);
+      if (g) for (const t of g.tracks) out.add(t.track_id);
+    }
+    return out;
+  }
+
+  function refreshMergeBtn() {
+    mergeBtn.disabled = selectedRows.size < 2;
+    mergeBtn.textContent = selectedRows.size < 2
+      ? "Merge Selected"
+      : `Merge Selected (${selectedRows.size})`;
+  }
+
+  for (const g of playerGroups.values()) {
+    const item = document.createElement("div");
+    item.dataset.rowKey = g.key;
+    item.style.cssText = "display:flex;align-items:center;gap:6px;padding:6px 8px;border-bottom:1px solid #1e293b;transition:background 0.2s;";
+
+    // Selection checkbox (for merge) — operates on the whole group.
+    const sel = document.createElement("input");
+    sel.type = "checkbox";
+    sel.style.cssText = "flex-shrink:0;cursor:pointer;";
+    sel.addEventListener("change", () => {
+      if (sel.checked) selectedRows.add(g.key);
+      else selectedRows.delete(g.key);
+      refreshMergeBtn();
+      lastFrame = -1;
+      drawCurrent();
+    });
+    item.appendChild(sel);
+
+    // Color dot
+    const namedOk = g.name && g.name !== "ignore";
+    const dot = document.createElement("span");
+    dot.style.cssText = `width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${namedOk ? "#22c55e" : "#ef4444"};`;
+    item.appendChild(dot);
+
+    // Player ID label — click jumps the video to the middle of the union range.
+    const idLabel = document.createElement("a");
+    idLabel.href = "#";
+    idLabel.textContent = g.key;
+    idLabel.style.cssText = "color:#818cf8;font-size:11px;text-decoration:none;flex-shrink:0;min-width:34px;";
+    const memberList = g.tracks.map((t) => `${t.track_id} [${t.frame_range[0]}–${t.frame_range[1]}]`).join(", ");
+    idLabel.title = g.tracks.length > 1
+      ? `${g.tracks.length} tracks merged (${memberList})`
+      : `${g.frameCount} frames in [${g.frameRange[0]}–${g.frameRange[1]}]`;
+    idLabel.addEventListener("click", (e) => {
+      e.preventDefault();
+      const mid = Math.round((g.frameRange[0] + g.frameRange[1]) / 2);
+      video.pause();
+      video.currentTime = mid / fps;
+    });
+    item.appendChild(idLabel);
+
+    // Member-count badge when more than one track sits behind this row.
+    if (g.tracks.length > 1) {
+      const countBadge = document.createElement("span");
+      countBadge.textContent = `×${g.tracks.length}`;
+      countBadge.style.cssText = "font-size:10px;color:#94a3b8;flex-shrink:0;font-variant-numeric:tabular-nums;";
+      item.appendChild(countBadge);
+    }
+
+    // Name input — applies to every member track
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.value = g.name || "";
+    nameInput.placeholder = "Name…";
+    nameInput.setAttribute("list", datalistId);
+    nameInput.style.cssText = "flex:1;min-width:0;background:#0f1117;color:#e2e8f0;border:1px solid #334155;padding:3px 6px;border-radius:3px;font-size:12px;";
+    nameInput.addEventListener("change", async () => {
+      const newName = nameInput.value.trim();
+      // PATCH every member track in parallel.
+      const results = await Promise.all(
+        g.tracks.map((t) =>
+          fetch(`/api/tracks/${encodeURIComponent(shotId)}/${encodeURIComponent(t.track_id)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ player_name: newName }),
+          })
+        )
+      );
+      if (results.some((r) => !r.ok)) { status.textContent = "Save failed"; return; }
+      g.name = newName;
+      for (const t of g.tracks) t.player_name = newName;
+      dot.style.background = newName && newName !== "ignore" ? "#22c55e" : "#ef4444";
+      if (newName && newName !== "ignore" && !allNames.has(newName)) {
+        allNames.add(newName);
+        rebuildDatalist(datalist, allNames);
+      }
+      // Propagate the rename through the in-memory bbox index so the
+      // video overlay re-renders without a server round-trip.
+      const memberIds = new Set(g.tracks.map((t) => t.track_id));
+      for (const boxes of frameIndex.values()) {
+        for (const b of boxes) {
+          if (memberIds.has(b.track_id)) b.player_name = newName;
+        }
+      }
+      lastFrame = -1;
+      drawCurrent();
+      status.textContent = `Saved ${g.key}`;
+      setTimeout(() => { if (status.textContent === `Saved ${g.key}`) status.textContent = ""; }, 1500);
+    });
+    item.appendChild(nameInput);
+
+    // Team badge (most common across members; ties broken by first occurrence)
+    const teamCounts = {};
+    for (const t of g.tracks) teamCounts[t.team || "unknown"] = (teamCounts[t.team || "unknown"] || 0) + 1;
+    const teamLabel = Object.entries(teamCounts).sort((a, b) => b[1] - a[1])[0][0];
+    const teamBadge = document.createElement("span");
+    teamBadge.textContent = teamLabel || "?";
+    teamBadge.style.cssText = `font-size:10px;flex-shrink:0;padding:1px 5px;border-radius:3px;color:#fff;background:${TEAM_COLORS[teamLabel] || TEAM_COLORS.unknown};`;
+    item.appendChild(teamBadge);
+
+    // Split at current frame ✂ — only the member that owns the current frame is split.
+    const splitBtn = document.createElement("button");
+    splitBtn.textContent = "✂";
+    splitBtn.title = g.tracks.length > 1
+      ? "Split the underlying member track that contains the current video frame."
+      : "Split this track at the current video frame.";
+    splitBtn.style.cssText = "background:none;border:1px solid #475569;color:#94a3b8;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:12px;flex-shrink:0;";
+    splitBtn.addEventListener("click", async () => {
+      const f = Math.round(video.currentTime * fps);
+      const target = g.tracks.find((t) => f > t.frame_range[0] && f <= t.frame_range[1]);
+      if (!target) {
+        status.textContent = "Split failed: current frame is outside every member track's range";
+        return;
+      }
+      splitBtn.disabled = true; const prev = splitBtn.textContent; splitBtn.textContent = "…";
+      const res = await fetch("/api/tracks/split", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shot_id: shotId, track_id: target.track_id, split_frame: f }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        status.textContent = `Split failed: ${err.detail || res.statusText}`;
+        splitBtn.textContent = prev; splitBtn.disabled = false;
+        return;
+      }
+      const fresh = await fetchJsonOrNull(`/tracking/preview?shot_id=${encodeURIComponent(shotId)}`);
+      container.innerHTML = "";
+      if (fresh && fresh.tracks) buildTrackEditor(container, shotId, fresh);
+    });
+    item.appendChild(splitBtn);
+
+    // Delete × — drops every member track for this player.
+    const deleteRowBtn = document.createElement("button");
+    deleteRowBtn.textContent = "×";
+    deleteRowBtn.title = g.tracks.length > 1
+      ? `Delete this player and all ${g.tracks.length} underlying tracks.`
+      : "Delete this track entirely.";
+    deleteRowBtn.style.cssText = "background:none;border:1px solid #7f1d1d;color:#fca5a5;border-radius:3px;padding:1px 7px;cursor:pointer;font-size:13px;flex-shrink:0;line-height:1;";
+    deleteRowBtn.addEventListener("click", async () => {
+      const label = namedOk ? g.name : g.key;
+      const suffix = g.tracks.length > 1 ? ` (${g.tracks.length} tracks)` : "";
+      if (!confirm(`Delete ${label}${suffix}? This cannot be undone.`)) return;
+      deleteRowBtn.disabled = true; deleteRowBtn.textContent = "…";
+      const results = await Promise.all(
+        g.tracks.map((t) =>
+          fetch(
+            `/api/tracks/${encodeURIComponent(shotId)}/${encodeURIComponent(t.track_id)}`,
+            { method: "DELETE" }
+          )
+        )
+      );
+      if (results.some((r) => !r.ok)) {
+        status.textContent = "Delete failed for one or more member tracks";
+        deleteRowBtn.textContent = "×"; deleteRowBtn.disabled = false;
+        return;
+      }
+      const fresh = await fetchJsonOrNull(`/tracking/preview?shot_id=${encodeURIComponent(shotId)}`);
+      container.innerHTML = "";
+      if (fresh && fresh.tracks) buildTrackEditor(container, shotId, fresh);
+    });
+    item.appendChild(deleteRowBtn);
+
+    listCol.appendChild(item);
+    // Map every member track_id to this same row controls so click-to-focus
+    // from the canvas lands on the correct row regardless of which member
+    // bbox the operator clicked.
+    for (const t of g.tracks) {
+      rowsByTrackId.set(t.track_id, { item, sel, nameInput, dot });
+    }
+  }
+
+  // ── Toolbar handlers ──
+  mergeBtn.addEventListener("click", async () => {
+    if (selectedRows.size < 2) return;
+    // Expand selected rows to the underlying track_ids and POST.
+    const ids = Array.from(selectedTrackIdSet());
+    mergeBtn.disabled = true; mergeBtn.textContent = "Merging…";
+    const res = await fetch("/api/tracks/merge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shot_id: shotId, track_ids: ids }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      status.textContent = `Merge failed: ${err.detail || res.statusText}`;
+      mergeBtn.disabled = false; refreshMergeBtn();
+      return;
+    }
+    const out = await res.json();
+    const collisionNote = out.frame_collisions
+      ? ` (${out.frame_collisions} frame collision${out.frame_collisions === 1 ? "" : "s"} resolved by confidence)`
+      : "";
+    status.textContent = `Merged into ${out.merged_into}${collisionNote} — reloading…`;
+    const fresh = await fetchJsonOrNull(`/tracking/preview?shot_id=${encodeURIComponent(shotId)}`);
+    container.innerHTML = "";
+    if (fresh && fresh.tracks) buildTrackEditor(container, shotId, fresh);
+  });
+
+  mergeByNameBtn.addEventListener("click", async () => {
+    mergeByNameBtn.disabled = true;
+    const prev = mergeByNameBtn.textContent;
+    mergeByNameBtn.textContent = "Merging…";
+    const res = await fetch("/api/tracks/merge-by-name", { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      status.textContent = `Merge-by-name failed: ${err.detail || res.statusText}`;
+      mergeByNameBtn.textContent = prev;
+      mergeByNameBtn.disabled = false;
+      return;
+    }
+    const out = await res.json();
+    const collisionNote = out.frame_collisions
+      ? ` (${out.frame_collisions} frame collision${out.frame_collisions === 1 ? "" : "s"} resolved by confidence)`
+      : "";
+    status.textContent = `Merged ${out.tracks_removed} track(s) across ${out.merged_groups} name(s)${collisionNote} — reloading…`;
+    const fresh = await fetchJsonOrNull(`/tracking/preview?shot_id=${encodeURIComponent(shotId)}`);
+    container.innerHTML = "";
+    if (fresh && fresh.tracks) buildTrackEditor(container, shotId, fresh);
+  });
+
+  ignoreBtn.addEventListener("click", async () => {
+    ignoreBtn.disabled = true;
+    const res = await fetch(`/api/tracks/ignore-unknown/${encodeURIComponent(shotId)}`, { method: "POST" });
+    ignoreBtn.disabled = false;
+    if (!res.ok) { status.textContent = "Ignore failed"; return; }
+    const out = await res.json();
+    status.textContent = `Marked ${out.count} as 'ignore' — reloading…`;
+    const fresh = await fetchJsonOrNull(`/tracking/preview?shot_id=${encodeURIComponent(shotId)}`);
+    container.innerHTML = "";
+    if (fresh && fresh.tracks) buildTrackEditor(container, shotId, fresh);
+  });
+
+  deleteBtn.addEventListener("click", async () => {
+    if (!confirm("Delete every track named 'ignore'? This cannot be undone.")) return;
+    deleteBtn.disabled = true;
+    const res = await fetch("/api/tracks/delete-ignored", { method: "POST" });
+    deleteBtn.disabled = false;
+    if (!res.ok) { status.textContent = "Delete failed"; return; }
+    const out = await res.json();
+    status.textContent = `Deleted ${out.deleted} tracks — reloading…`;
+    const fresh = await fetchJsonOrNull(`/tracking/preview?shot_id=${encodeURIComponent(shotId)}`);
+    container.innerHTML = "";
+    if (fresh && fresh.tracks) buildTrackEditor(container, shotId, fresh);
+  });
+
+  // ── Wire video + overlay ──
+  let lastFrame = -1;
+  let rafId = null;
+
+  function fitOverlayToVideo() {
+    if (!video.videoWidth) return;
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+    overlay.style.width = video.offsetWidth + "px";
+    overlay.style.height = video.offsetHeight + "px";
+  }
+
+  function drawCurrent() {
+    const fi = Math.round(video.currentTime * fps);
+    if (fi !== lastFrame) {
+      lastFrame = fi;
+      frameLabel.textContent = `Frame ${fi}`;
+      seek.value = String(fi);
+      drawTrackOverlay(overlay, frameIndex.get(fi) || [], selectedTrackIdSet());
+    }
+  }
+
+  video.addEventListener("loadedmetadata", () => {
+    seek.max = String(Math.round(video.duration * fps));
+    fitOverlayToVideo();
+    drawCurrent();
+  });
+  new ResizeObserver(fitOverlayToVideo).observe(video);
+
+  video.addEventListener("play", () => {
+    playBtn.textContent = "⏸";
+    if (!rafId) {
+      const loop = () => { rafId = requestAnimationFrame(loop); drawCurrent(); };
+      loop();
+    }
+  });
+  video.addEventListener("pause", () => {
+    playBtn.textContent = "▶";
+    cancelAnimationFrame(rafId); rafId = null; drawCurrent();
+  });
+  video.addEventListener("seeked", () => { if (video.paused) drawCurrent(); });
+
+  playBtn.addEventListener("click", () => { video.paused ? video.play() : video.pause(); });
+  stepBack.addEventListener("click", () => {
+    video.pause(); video.currentTime = Math.max(0, video.currentTime - 1 / fps);
+  });
+  stepFwd.addEventListener("click", () => {
+    video.pause(); video.currentTime = Math.min(video.duration || 0, video.currentTime + 1 / fps);
+  });
+  seek.addEventListener("input", () => {
+    const fi = parseInt(seek.value, 10);
+    video.pause(); video.currentTime = fi / fps;
+  });
+
+  // Click on overlay → highlight matching row.
+  overlay.addEventListener("click", (e) => {
+    if (!overlay.width) return;
+    const rect = overlay.getBoundingClientRect();
+    const sx = overlay.width / rect.width, sy = overlay.height / rect.height;
+    const cx = (e.clientX - rect.left) * sx, cy = (e.clientY - rect.top) * sy;
+    const fi = Math.round(video.currentTime * fps);
+    const boxes = frameIndex.get(fi) || [];
+    for (const b of boxes) {
+      const [x1, y1, x2, y2] = b.bbox;
+      if (cx >= x1 && cx <= x2 && cy >= y1 && cy <= y2) {
+        const r = rowsByTrackId.get(b.track_id);
+        if (r) {
+          r.item.scrollIntoView({ block: "nearest" });
+          r.nameInput.focus();
+          r.item.style.background = "#2d3148";
+          setTimeout(() => { r.item.style.background = ""; }, 800);
+        }
+        return;
+      }
+    }
+    video.paused ? video.play() : video.pause();
+  });
+}
+
+function makeToolbarBtn(text, bg) {
+  const btn = document.createElement("button");
+  btn.textContent = text;
+  btn.style.cssText = `background:${bg};color:#fff;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;`;
+  return btn;
+}
+
+function rebuildDatalist(datalist, names) {
+  datalist.innerHTML = "";
+  for (const n of names) {
+    const opt = document.createElement("option");
+    opt.value = n;
+    datalist.appendChild(opt);
+  }
+}
+
+function drawTrackOverlay(canvas, boxes, selectedTrackIds) {
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = "bold 12px -apple-system, sans-serif";
+  const SELECT_COLOR = "#f97316"; // orange — used while merge-selecting
+  for (const b of boxes) {
+    const [x1, y1, x2, y2] = b.bbox;
+    // Annotated tracks render green with the player's name; unannotated
+    // tracks render in the team colour with the raw track_id so the
+    // operator can tell at a glance what's still pending. A selected
+    // track (merge checkbox on) overrides to orange with a thicker
+    // stroke so it pops against the rest of the frame.
+    const named = b.player_name && b.player_name !== "ignore";
+    const ignored = b.player_name === "ignore";
+    const selected = selectedTrackIds && selectedTrackIds.has(b.track_id);
+    const baseColor = ignored
+      ? "#64748b"
+      : named
+        ? "#22c55e"
+        : (TEAM_COLORS[b.team] || TEAM_COLORS.unknown);
+    const color = selected ? SELECT_COLOR : baseColor;
+    const tag = named ? b.player_name : (ignored ? "ignore" : b.track_id);
+    ctx.lineWidth = selected ? 3 : 2;
+    ctx.strokeStyle = color;
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    const tw = ctx.measureText(tag).width + 6;
+    const labelY = y1 - 4 < 14 ? y1 + 16 : y1 - 4;
+    ctx.fillRect(x1, labelY - 12, tw, 14);
+    ctx.fillStyle = color;
+    ctx.fillText(tag, x1 + 3, labelY);
+  }
+}
+
+// ── Frame preview helper ─────────────────────────────────────────────
+const TEAM_COLORS = { A: "#3b82f6", B: "#ef4444", referee: "#f59e0b", unknown: "#94a3b8" };
+
+function buildFramePreview({ title, shotId, frames, drawOverlay }) {
+  const { wrap, body } = makePanel(title);
+  body.style.padding = "0";
+
+  const container = document.createElement("div");
+  container.style.cssText = "padding:12px 16px;";
+
+  const stage = document.createElement("div");
+  stage.style.cssText = "position:relative;background:#000;border-radius:4px;overflow:hidden;display:inline-block;max-width:100%;";
+
+  const img = document.createElement("img");
+  img.style.cssText = "display:block;max-width:100%;height:auto;";
+  img.draggable = false;
+
+  const overlay = document.createElement("canvas");
+  overlay.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;";
+
+  stage.appendChild(img);
+  stage.appendChild(overlay);
+  container.appendChild(stage);
+
+  const sliderRow = document.createElement("div");
+  sliderRow.style.cssText = "display:flex;gap:10px;align-items:center;margin-top:10px;font-size:12px;color:#cbd5e1;";
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = 0;
+  slider.max = String(frames.length - 1);
+  slider.value = 0;
+  slider.style.cssText = "flex:1;";
+  const label = document.createElement("span");
+  label.style.minWidth = "120px";
+  sliderRow.appendChild(slider);
+  sliderRow.appendChild(label);
+  container.appendChild(sliderRow);
+
+  body.appendChild(container);
+
+  function drawCurrent() {
+    const idx = parseInt(slider.value, 10);
+    const f = frames[idx];
+    label.textContent = `Frame ${f.frame} (${idx + 1}/${frames.length})`;
+    img.src = `/api/video/${encodeURIComponent(shotId)}/frame?frame_idx=${f.frame}`;
+    img.onload = () => {
+      overlay.width = img.naturalWidth;
+      overlay.height = img.naturalHeight;
+      const ctx = overlay.getContext("2d");
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      drawOverlay(ctx, f);
+    };
+  }
+
+  slider.addEventListener("input", drawCurrent);
+  drawCurrent();
+  return wrap;
+}
+
+function drawBoxOverlay(ctx, frame) {
+  ctx.lineWidth = 2;
+  ctx.font = "14px -apple-system, sans-serif";
+  for (const b of frame.boxes || []) {
+    const [x1, y1, x2, y2] = b.bbox;
+    const color = TEAM_COLORS[b.team] || TEAM_COLORS.unknown;
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    const tag = b.track_id;
+    const tw = ctx.measureText(tag).width + 8;
+    ctx.fillRect(x1, Math.max(0, y1 - 18), tw, 16);
+    ctx.fillStyle = "#000";
+    ctx.fillText(tag, x1 + 4, Math.max(12, y1 - 5));
+  }
 }
 
 async function renderCamera(panel) {
@@ -613,20 +1336,474 @@ async function renderCamera(panel) {
   } else {
     summary.innerHTML += `
       <div style="margin-top:10px;padding-top:10px;border-top:1px solid #2d3148;color:#94a3b8;">
-        No anchors yet — open the
-        <a href="/anchor_editor" style="color:#a5b4fc;">Anchor Editor</a>
-        to mark landmarks before running this stage.
+        No anchors yet — use the editor below to mark landmarks before running this stage.
       </div>`;
   }
 
   body.appendChild(summary);
   panel.appendChild(wrap);
+
+  // Pitch-world camera position map — same diagnostic that the
+  // hmr_world trajectory panel uses, but here without players, so the
+  // operator can see at a glance where the calibration thinks the
+  // camera is. A mirror-image solution (camera in the wrong half /
+  // wrong corner) is impossible to mistake against the pitch outline.
+  if (track && track.frames && track.frames.length > 0) {
+    panel.appendChild(buildCameraPitchMap(track));
+  }
+
+  // Embedded anchor editor — keeps the calibration loop in one panel:
+  // see where the camera lands, fix anchors, re-run camera, refresh.
+  panel.appendChild(buildEmbeddedAnchorEditor());
 }
 
-async function renderPose2D(panel) {
-  emptyNote(panel,
-    "2D pose output is consumed by hmr_world. Re-run this stage to regenerate per-track keypoints.");
+function buildCameraPitchMap(track) {
+  const { wrap, body } = makePanel("Camera position (pitch-world top-down)");
+  body.style.padding = "14px 16px";
+
+  const PITCH_L = 105, PITCH_W = 68;
+  const MARGIN_M = 60;
+  const scale = 6, padding = 20;
+  const W = (PITCH_L + 2 * MARGIN_M) * scale + padding * 2;
+  const H = (PITCH_W + 2 * MARGIN_M) * scale + padding * 2;
+  const DEFAULT_FPS = track.fps || 30;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  canvas.style.cssText = "max-width:100%;height:auto;display:block;background:#0a1f10;border-radius:4px;";
+  body.appendChild(canvas);
+  const ctx = canvas.getContext("2d");
+
+  function pitch2px(x, y) {
+    return [
+      padding + (x + MARGIN_M) * scale,
+      padding + (PITCH_W + MARGIN_M - y) * scale,
+    ];
+  }
+  function drawPitch() {
+    ctx.fillStyle = "#0a1f10";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#0b3b1a";
+    const [x0, y0] = pitch2px(0, PITCH_W);
+    ctx.fillRect(x0, y0, PITCH_L * scale, PITCH_W * scale);
+    ctx.strokeStyle = "#e2e8f0"; ctx.lineWidth = 1.5;
+    const corners = [[0, 0], [PITCH_L, 0], [PITCH_L, PITCH_W], [0, PITCH_W]];
+    ctx.beginPath();
+    for (let i = 0; i < corners.length; i++) {
+      const [x, y] = pitch2px(...corners[i]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath(); ctx.stroke();
+    ctx.beginPath();
+    const m1 = pitch2px(PITCH_L / 2, 0), m2 = pitch2px(PITCH_L / 2, PITCH_W);
+    ctx.moveTo(m1[0], m1[1]); ctx.lineTo(m2[0], m2[1]); ctx.stroke();
+    ctx.beginPath();
+    const c = pitch2px(PITCH_L / 2, PITCH_W / 2);
+    ctx.arc(c[0], c[1], 9.15 * scale, 0, Math.PI * 2); ctx.stroke();
+    // Goal-line ticks (centre of each goal) so the operator can tell
+    // "left" from "right" goal even when the camera is way off.
+    ctx.fillStyle = "#fde68a";
+    for (const gx of [0, PITCH_L]) {
+      const [tx, ty] = pitch2px(gx, PITCH_W / 2);
+      ctx.beginPath(); ctx.arc(tx, ty, 3, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // Camera centre per frame: C = -R^T t. fwd = R[2] (third row of R is
+  // R^T's third column, the world-frame camera "look-at" direction).
+  const t_world = track.t_world && track.t_world.length === 3 ? track.t_world : null;
+  const cameraByFrame = new Map();
+  for (const f of track.frames) {
+    const t = (f.t && f.t.length === 3) ? f.t : t_world;
+    if (!t || !f.R) continue;
+    const R = f.R;
+    const C = [
+      -(R[0][0] * t[0] + R[1][0] * t[1] + R[2][0] * t[2]),
+      -(R[0][1] * t[0] + R[1][1] * t[1] + R[2][1] * t[2]),
+      -(R[0][2] * t[0] + R[1][2] * t[1] + R[2][2] * t[2]),
+    ];
+    const fwd = [R[2][0], R[2][1]];
+    cameraByFrame.set(f.frame, {
+      pos: [C[0], C[1]], z: C[2], fwd,
+      conf: f.confidence != null ? f.confidence : 1,
+      isAnchor: !!f.is_anchor,
+    });
+  }
+  const frameNumbers = [...cameraByFrame.keys()].sort((a, b) => a - b);
+  const minFrame = frameNumbers[0] || 0;
+  const maxFrame = frameNumbers[frameNumbers.length - 1] || 0;
+
+  // Controls
+  const controls = document.createElement("div");
+  controls.style.cssText = "display:flex;align-items:center;gap:8px;padding:8px 0 0;";
+  const playBtn = makeToolbarBtn("▶", "#4f46e5"); playBtn.style.minWidth = "36px";
+  const stepBack = makeToolbarBtn("◀", "#334155"); stepBack.title = "Previous frame";
+  const stepFwd = makeToolbarBtn("▶", "#334155"); stepFwd.title = "Next frame";
+  const seek = document.createElement("input");
+  seek.type = "range"; seek.min = String(minFrame); seek.max = String(maxFrame); seek.value = String(minFrame);
+  seek.style.cssText = "flex:1;";
+  const frameLabel = document.createElement("span");
+  frameLabel.style.cssText = "color:#94a3b8;font-size:11px;min-width:160px;text-align:right;font-variant-numeric:tabular-nums;";
+  controls.append(playBtn, stepBack, stepFwd, seek, frameLabel);
+  body.appendChild(controls);
+
+  let currentFrame = minFrame;
+
+  function nearestFrame(fi) {
+    // Slider value may not match a recorded frame; pick nearest.
+    if (cameraByFrame.has(fi)) return fi;
+    let best = frameNumbers[0], bestD = Math.abs(best - fi);
+    for (const k of frameNumbers) {
+      const d = Math.abs(k - fi);
+      if (d < bestD) { best = k; bestD = d; }
+    }
+    return best;
+  }
+  function drawCameraMarker(cam) {
+    const [cx, cy] = pitch2px(cam.pos[0], cam.pos[1]);
+    let [fx, fy] = cam.fwd;
+    const mag = Math.hypot(fx, fy) || 1;
+    fx /= mag; fy /= mag;
+    const dx = fx, dy = -fy;  // canvas y is flipped vs world y
+    const size = 10;
+    const tip = [cx + dx * size, cy + dy * size];
+    const base1 = [cx - dx * 5 - dy * 6, cy - dy * 5 + dx * 6];
+    const base2 = [cx - dx * 5 + dy * 6, cy - dy * 5 - dx * 6];
+    ctx.fillStyle = cam.isAnchor ? "#fef3c7" : "#fde68a";
+    ctx.strokeStyle = cam.isAnchor ? "#a16207" : "#854d0e";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(tip[0], tip[1]);
+    ctx.lineTo(base1[0], base1[1]);
+    ctx.lineTo(base2[0], base2[1]);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    // Direction sight-line — a faint line from camera projecting forward
+    // for ~30 m so you can tell at a glance which goal it's looking at.
+    ctx.strokeStyle = "rgba(253, 230, 138, 0.45)";
+    ctx.lineWidth = 1;
+    const sight = pitch2px(cam.pos[0] + fx * 30, cam.pos[1] + fy * 30);
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(sight[0], sight[1]); ctx.stroke();
+    // Position label
+    const offX = cam.pos[0] < -3 || cam.pos[0] > 108;
+    const offY = cam.pos[1] < -3 || cam.pos[1] > 71;
+    const label = `cam (${cam.pos[0].toFixed(1)}, ${cam.pos[1].toFixed(1)}, ${cam.z.toFixed(1)})`;
+    ctx.font = "bold 10px -apple-system, sans-serif";
+    const tw = ctx.measureText(label).width + 6;
+    const lx = Math.max(2, Math.min(W - tw - 2, cx + 12));
+    const ly = Math.max(14, Math.min(H - 4, cy - 10));
+    ctx.fillStyle = (offX || offY) ? "rgba(127,29,29,0.9)" : "rgba(0,0,0,0.65)";
+    ctx.fillRect(lx, ly - 11, tw, 14);
+    ctx.fillStyle = (offX || offY) ? "#fecaca" : "#fde68a";
+    ctx.fillText(label, lx + 3, ly);
+  }
+  function render(fi) {
+    currentFrame = fi;
+    drawPitch();
+    const cam = cameraByFrame.get(nearestFrame(fi));
+    if (cam) drawCameraMarker(cam);
+    seek.value = String(fi);
+    const sec = (fi / Math.max(1, DEFAULT_FPS)).toFixed(2);
+    const isAnchor = cam && cam.isAnchor ? "  (anchor)" : "";
+    frameLabel.textContent = `Frame ${fi}  (${sec}s)${isAnchor}`;
+  }
+
+  let playing = false, rafId = null, lastTs = 0;
+  function tick(ts) {
+    if (!playing) { rafId = null; return; }
+    if (lastTs === 0) lastTs = ts;
+    const dt = (ts - lastTs) / 1000;
+    const advance = Math.max(1, Math.round(dt * DEFAULT_FPS));
+    lastTs = ts;
+    let next = currentFrame + advance;
+    if (next > maxFrame) {
+      next = maxFrame; render(next);
+      playing = false; playBtn.textContent = "▶"; rafId = null; lastTs = 0; return;
+    }
+    render(next);
+    rafId = requestAnimationFrame(tick);
+  }
+  playBtn.addEventListener("click", () => {
+    if (playing) { playing = false; playBtn.textContent = "▶"; }
+    else {
+      if (currentFrame >= maxFrame) currentFrame = minFrame;
+      playing = true; playBtn.textContent = "⏸";
+      lastTs = 0; rafId = requestAnimationFrame(tick);
+    }
+  });
+  stepBack.addEventListener("click", () => {
+    playing = false; playBtn.textContent = "▶";
+    render(Math.max(minFrame, currentFrame - 1));
+  });
+  stepFwd.addEventListener("click", () => {
+    playing = false; playBtn.textContent = "▶";
+    render(Math.min(maxFrame, currentFrame + 1));
+  });
+  seek.addEventListener("input", () => {
+    playing = false; playBtn.textContent = "▶";
+    render(parseInt(seek.value, 10));
+  });
+
+  render(minFrame);
+  return wrap;
 }
+
+function buildEmbeddedAnchorEditor() {
+  const { wrap, body } = makePanel("Anchor Editor");
+  body.style.padding = "0";
+
+  // Header bar with a "pop out" link in case the in-page iframe gets
+  // cramped — opens the standalone full-page editor.
+  const header = document.createElement("div");
+  header.style.cssText = "padding:8px 12px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #1f2937;";
+  header.innerHTML = `
+    <span style="color:#94a3b8;font-size:12px;">Mark pitch landmarks on key frames; the camera stage solves anchors first, then propagates between them.</span>
+    <a href="/anchor_editor" target="_blank" style="margin-left:auto;color:#a5b4fc;font-size:12px;text-decoration:none;">Open in new tab ↗</a>
+  `;
+  body.appendChild(header);
+
+  // The embedded editor is the same standalone HTML — iframe avoids
+  // having to refactor anchor_editor.html into a reusable component.
+  const frame = document.createElement("iframe");
+  frame.src = "/anchor_editor";
+  frame.style.cssText = "width:100%;height:780px;border:0;display:block;background:#0a0e1a;";
+  frame.title = "Anchor Editor";
+  body.appendChild(frame);
+  return wrap;
+}
+
+// Stable color palette — shared between trajectory legend, kp2d overlay,
+// and the per-player tooltip so the same player keeps the same colour
+// across panels.
+const PLAYER_PALETTE = ["#60a5fa", "#f87171", "#34d399", "#fbbf24", "#c084fc", "#fb7185", "#22d3ee", "#facc15", "#a78bfa", "#f472b6", "#4ade80", "#fb923c", "#38bdf8", "#e879f9", "#a3e635", "#facc15"];
+
+function playerColour(idx) {
+  return PLAYER_PALETTE[idx % PLAYER_PALETTE.length];
+}
+
+function playerLabel(p) {
+  return p && p.player_name ? p.player_name : (p && p.player_id) || "?";
+}
+
+async function renderKp2dPanel(panel) {
+  const data = await fetchJsonOrNull("/hmr_world/kp2d_players");
+  if (!data || !data.players || data.players.length === 0) return;
+
+  // Server returns [{player_id, player_name}].
+  const playerList = data.players.map((p, i) => ({ ...p, colour: playerColour(i) }));
+  const previews = await Promise.all(
+    playerList.map((p) =>
+      fetchJsonOrNull(`/hmr_world/kp2d_preview?player_id=${encodeURIComponent(p.player_id)}`)
+        .then((d) => ({ ...p, data: d }))
+    )
+  );
+  const playersWithFrames = previews.filter((x) => x.data && x.data.frames && x.data.frames.length > 0);
+  const total = previews.reduce((s, x) => s + ((x.data && x.data.frames) ? x.data.frames.length : 0), 0);
+  const empty = previews.length - playersWithFrames.length;
+
+  const { wrap: hwrap, body: hbody } = makePanel(`2D keypoints (${playerList.length} players, from GVHMR ViTPose)`);
+  const summary = document.createElement("div");
+  summary.style.cssText = "padding:14px 16px;font-size:13px;color:#cbd5e1;line-height:1.7;";
+  summary.innerHTML = `
+    <div>Total keypoint frames: ${total}</div>
+    <div>Players with empty keypoints: ${empty} / ${playerList.length}</div>
+  `;
+  hbody.appendChild(summary);
+  panel.appendChild(hwrap);
+
+  if (playersWithFrames.length === 0) return;
+
+  // The kp2d JSON ships its source shot_id; pick whichever the first
+  // populated player references (single-shot pipeline → all the same).
+  const shotId = playersWithFrames[0].data.shot_id || "";
+
+  buildKp2dPlayer(panel, shotId, playersWithFrames);
+
+  const tablePanel = makePanel("Per-player frame counts");
+  const { t, tbody } = makeTable(["Player", "Shot", "Frames"]);
+  for (const x of previews) {
+    const n = (x.data && x.data.frames) ? x.data.frames.length : 0;
+    const cls = n === 0 ? "cell-dim" : "cell-green";
+    const label = playerLabel(x);
+    const idTag = x.player_name ? ` <span style="color:#64748b;font-size:11px;">(${x.player_id})</span>` : "";
+    addRow(tbody, [
+      { html: `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${x.colour};margin-right:6px;"></span>${label}${idTag}` },
+      (x.data && x.data.shot_id) || "—",
+      { html: `<span class="${cls}">${n}</span>` },
+    ]);
+  }
+  tablePanel.body.appendChild(t);
+  panel.appendChild(tablePanel.wrap);
+}
+
+// Video-based skeleton viewer. "All players" is the default; the picker
+// can drill into a single player to debug a specific track.
+function buildKp2dPlayer(panel, shotId, playersWithFrames) {
+  // Picker
+  const picker = document.createElement("div");
+  picker.style.cssText = "padding:14px 16px 6px;font-size:13px;color:#cbd5e1;display:flex;gap:10px;align-items:center;flex-wrap:wrap;";
+  picker.innerHTML = "<span>Player:</span>";
+  const select = document.createElement("select");
+  select.style.cssText = "background:#252840;color:#e2e8f0;border:1px solid #2d3148;border-radius:4px;padding:4px 8px;font-size:13px;";
+  const allOpt = document.createElement("option");
+  allOpt.value = "__all__"; allOpt.textContent = `All players (${playersWithFrames.length})`;
+  select.appendChild(allOpt);
+  for (const p of playersWithFrames) {
+    const opt = document.createElement("option");
+    opt.value = p.player_id;
+    opt.textContent = `${playerLabel(p)} (${p.data.frames.length} frames)`;
+    select.appendChild(opt);
+  }
+  picker.appendChild(select);
+  panel.appendChild(picker);
+
+  // Build a per-frame index: frame → [{player, keypoints}, ...]
+  // (limited to the players currently visible; rebuilt on selection change).
+  const allByFrame = new Map();
+  for (const p of playersWithFrames) {
+    for (const f of p.data.frames) {
+      const arr = allByFrame.get(f.frame) || [];
+      arr.push({ player: p, keypoints: f.keypoints });
+      allByFrame.set(f.frame, arr);
+    }
+  }
+
+  // Video stage with overlay (same pattern as the tracking editor).
+  const stage = document.createElement("div");
+  stage.style.cssText = "position:relative;background:#000;border-radius:4px;overflow:hidden;margin:0 16px;";
+  const video = document.createElement("video");
+  video.src = `/api/video/${encodeURIComponent(shotId)}`;
+  video.preload = "metadata";
+  video.style.cssText = "display:block;width:100%;height:auto;";
+  const overlay = document.createElement("canvas");
+  overlay.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;";
+  stage.appendChild(video);
+  stage.appendChild(overlay);
+  panel.appendChild(stage);
+
+  // Controls
+  const controls = document.createElement("div");
+  controls.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 16px;";
+  const playBtn = makeToolbarBtn("▶", "#4f46e5"); playBtn.style.minWidth = "36px";
+  const stepBack = makeToolbarBtn("◀", "#334155"); stepBack.title = "Previous frame";
+  const stepFwd = makeToolbarBtn("▶", "#334155"); stepFwd.title = "Next frame";
+  const seek = document.createElement("input");
+  seek.type = "range"; seek.min = "0"; seek.max = "1000"; seek.value = "0";
+  seek.style.cssText = "flex:1;";
+  const frameLabel = document.createElement("span");
+  frameLabel.style.cssText = "color:#94a3b8;font-size:11px;min-width:90px;text-align:right;font-variant-numeric:tabular-nums;";
+  frameLabel.textContent = "Frame 0";
+  controls.append(playBtn, stepBack, stepFwd, seek, frameLabel);
+  panel.appendChild(controls);
+
+  // Pull the configured fps once (camera_track is the source of truth).
+  let fps = 30;
+  fetchJsonOrNull("/camera/track").then((ct) => { if (ct && ct.fps) fps = ct.fps; });
+
+  let visiblePids = new Set(playersWithFrames.map((p) => p.player_id));
+  let lastFrame = -1, rafId = null;
+
+  function fitOverlay() {
+    if (!video.videoWidth) return;
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+    overlay.style.width = video.offsetWidth + "px";
+    overlay.style.height = video.offsetHeight + "px";
+  }
+  function drawCurrent() {
+    const fi = Math.round(video.currentTime * fps);
+    if (fi === lastFrame) return;
+    lastFrame = fi;
+    seek.value = String(fi);
+    frameLabel.textContent = `Frame ${fi}`;
+    const ctx = overlay.getContext("2d");
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    const entries = allByFrame.get(fi) || [];
+    for (const e of entries) {
+      if (!visiblePids.has(e.player.player_id)) continue;
+      drawSkeleton(ctx, e.keypoints, e.player.colour, playerLabel(e.player));
+    }
+  }
+  video.addEventListener("loadedmetadata", () => {
+    seek.max = String(Math.round(video.duration * fps));
+    fitOverlay(); drawCurrent();
+  });
+  new ResizeObserver(fitOverlay).observe(video);
+  video.addEventListener("play", () => {
+    playBtn.textContent = "⏸";
+    if (!rafId) {
+      const loop = () => { rafId = requestAnimationFrame(loop); drawCurrent(); };
+      loop();
+    }
+  });
+  video.addEventListener("pause", () => {
+    playBtn.textContent = "▶";
+    cancelAnimationFrame(rafId); rafId = null; drawCurrent();
+  });
+  video.addEventListener("seeked", () => { if (video.paused) drawCurrent(); });
+
+  playBtn.addEventListener("click", () => { video.paused ? video.play() : video.pause(); });
+  stepBack.addEventListener("click", () => { video.pause(); video.currentTime = Math.max(0, video.currentTime - 1 / fps); });
+  stepFwd.addEventListener("click", () => { video.pause(); video.currentTime = Math.min(video.duration || 0, video.currentTime + 1 / fps); });
+  seek.addEventListener("input", () => { video.pause(); video.currentTime = parseInt(seek.value, 10) / fps; });
+
+  select.addEventListener("change", () => {
+    if (select.value === "__all__") {
+      visiblePids = new Set(playersWithFrames.map((p) => p.player_id));
+    } else {
+      visiblePids = new Set([select.value]);
+      // Jump to the middle of the chosen player's frame range so the
+      // overlay isn't blank when the player isn't on-screen yet.
+      const p = playersWithFrames.find((x) => x.player_id === select.value);
+      if (p && p.data.frames.length) {
+        const mid = p.data.frames[Math.floor(p.data.frames.length / 2)].frame;
+        video.pause(); video.currentTime = mid / fps;
+      }
+    }
+    lastFrame = -1; drawCurrent();
+  });
+}
+
+function drawSkeleton(ctx, kps, colour, label) {
+  if (!kps || !kps.length) return;
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = colour;
+  for (const [a, b] of COCO_SKELETON) {
+    if (a >= kps.length || b >= kps.length) continue;
+    const ka = kps[a], kb = kps[b];
+    if (!ka || !kb) continue;
+    if ((ka[2] || 0) < 0.3 || (kb[2] || 0) < 0.3) continue;
+    ctx.beginPath();
+    ctx.moveTo(ka[0], ka[1]);
+    ctx.lineTo(kb[0], kb[1]);
+    ctx.stroke();
+  }
+  ctx.fillStyle = colour;
+  for (const k of kps) {
+    if (!k || (k[2] || 0) < 0.3) continue;
+    ctx.beginPath();
+    ctx.arc(k[0], k[1], 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Floating name tag near the head (kp 0 = nose) so multiple skeletons
+  // are still legible when they overlap.
+  if (label && kps[0] && (kps[0][2] || 0) >= 0.3) {
+    ctx.font = "bold 11px -apple-system, sans-serif";
+    const tw = ctx.measureText(label).width + 6;
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.fillRect(kps[0][0] - tw / 2, kps[0][1] - 22, tw, 14);
+    ctx.fillStyle = colour;
+    ctx.fillText(label, kps[0][0] - tw / 2 + 3, kps[0][1] - 11);
+  }
+}
+
+// ── COCO-17 skeleton (kp2d overlay) ──────────────────────────────────
+const COCO_SKELETON = [
+  [5, 7], [7, 9], [6, 8], [8, 10],          // arms
+  [11, 13], [13, 15], [12, 14], [14, 16],   // legs
+  [5, 6], [11, 12], [5, 11], [6, 12],       // torso
+  [0, 1], [0, 2], [1, 3], [2, 4],           // head
+];
 
 async function renderHmrWorld(panel) {
   const data = await fetchJsonOrNull("/hmr_world/players");
@@ -634,22 +1811,345 @@ async function renderHmrWorld(panel) {
     emptyNote(panel, "No hmr_world tracks yet — run hmr_world to fit SMPL bodies.");
     return;
   }
-  const { wrap, body } = makePanel(`HMR World (${data.players.length} player${data.players.length === 1 ? "" : "s"})`);
-  const { t, tbody } = makeTable(["Player ID", "Frames", "Mean confidence"]);
-  for (const pid of data.players) {
-    const preview = await fetchJsonOrNull(`/hmr_world/preview?player_id=${encodeURIComponent(pid)}`);
-    if (!preview) {
-      addRow(tbody, [pid, "—", "—"]);
+
+  // Server returns [{player_id, player_name}]; assign palette colours up
+  // front so trajectory legend, table, and skeleton overlay all match.
+  const playerList = data.players.map((p, i) => ({ ...p, colour: playerColour(i) }));
+  const previews = await Promise.all(
+    playerList.map((p) =>
+      fetchJsonOrNull(`/hmr_world/preview?player_id=${encodeURIComponent(p.player_id)}`)
+        .then((d) => ({ ...p, data: d }))
+    )
+  );
+
+  const { wrap: tWrap, body: tBody } = makePanel(`HMR World (${playerList.length} player${playerList.length === 1 ? "" : "s"})`);
+  const { t, tbody } = makeTable(["Player", "Frames", "Mean confidence"]);
+  for (const x of previews) {
+    const dotHtml = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${x.colour};margin-right:6px;vertical-align:middle;"></span>`;
+    const label = playerLabel(x);
+    const idTag = x.player_name ? ` <span style="color:#64748b;font-size:11px;">(${x.player_id})</span>` : "";
+    if (!x.data) {
+      addRow(tbody, [{ html: `${dotHtml}${label}${idTag}` }, "—", "—"]);
       continue;
     }
-    const N = (preview.frames || []).length;
-    const conf = preview.confidence || [];
-    const mean = conf.length ? conf.reduce((s, x) => s + x, 0) / conf.length : 0;
+    const N = (x.data.frames || []).length;
+    const conf = x.data.confidence || [];
+    const mean = conf.length ? conf.reduce((s, v) => s + v, 0) / conf.length : 0;
     const cls = mean > 0.7 ? "cell-green" : mean > 0.4 ? "cell-amber" : "cell-red";
-    addRow(tbody, [pid, N, { html: `<span class="${cls}">${fmt(mean, 3)}</span>` }]);
+    addRow(tbody, [
+      { html: `${dotHtml}${label}${idTag}` },
+      N,
+      { html: `<span class="${cls}">${fmt(mean, 3)}</span>` },
+    ]);
   }
-  body.appendChild(t);
-  panel.appendChild(wrap);
+  tBody.appendChild(t);
+  panel.appendChild(tWrap);
+
+  const withRoot = previews.filter((x) => x.data && Array.isArray(x.data.root_t) && x.data.root_t.length > 0);
+  if (withRoot.length > 0) {
+    panel.appendChild(buildTrajectoryPanel(withRoot));
+  }
+
+  // 2D keypoint preview (sourced from GVHMR's internal ViTPose; written
+  // alongside the SmplWorldTrack output as a side-artifact).
+  await renderKp2dPanel(panel);
+}
+
+function buildTrajectoryPanel(playerPreviews) {
+  const { wrap, body } = makePanel("Top-down player trajectories (pitch-world)");
+  body.style.padding = "14px 16px";
+
+  const PITCH_L = 105, PITCH_W = 68;
+  // Extra margin so a camera marker at e.g. y = -57 (behind the near
+  // touchline) still lands on the canvas. The actual pitch is drawn in
+  // its proper [0..PITCH_L] × [0..PITCH_W] box; the surround is just
+  // visual room for diagnostics.
+  const MARGIN_M = 60;
+  const scale = 6;
+  const padding = 20;
+  const W = (PITCH_L + 2 * MARGIN_M) * scale + padding * 2;
+  const H = (PITCH_W + 2 * MARGIN_M) * scale + padding * 2;
+  const TRAIL_LEN = 30;        // frames of fading trail behind each dot
+  const CONF_THRESH = 0.2;     // hide samples below this confidence
+  const DEFAULT_FPS = 30;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  canvas.style.cssText = "max-width:100%;height:auto;display:block;background:#0b3b1a;border-radius:4px;";
+  body.appendChild(canvas);
+  const ctx = canvas.getContext("2d");
+
+  function pitch2px(x, y) {
+    // Origin of the pitch box is offset by MARGIN_M so the diagnostic
+    // surround sits around it on every side. y is canvas-flipped.
+    return [
+      padding + (x + MARGIN_M) * scale,
+      padding + (PITCH_W + MARGIN_M - y) * scale,
+    ];
+  }
+
+  function drawPitch() {
+    // Surround region (off-pitch space) — slightly darker so the actual
+    // pitch is visually framed.
+    ctx.fillStyle = "#0a1f10";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#0b3b1a";
+    const [topLeftX, topLeftY] = pitch2px(0, PITCH_W);
+    ctx.fillRect(topLeftX, topLeftY, PITCH_L * scale, PITCH_W * scale);
+    ctx.strokeStyle = "#e2e8f0";
+    ctx.lineWidth = 1.5;
+    const corners = [[0, 0], [PITCH_L, 0], [PITCH_L, PITCH_W], [0, PITCH_W]];
+    ctx.beginPath();
+    for (let i = 0; i < corners.length; i++) {
+      const [x, y] = pitch2px(...corners[i]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath(); ctx.stroke();
+    ctx.beginPath();
+    const m1 = pitch2px(PITCH_L / 2, 0), m2 = pitch2px(PITCH_L / 2, PITCH_W);
+    ctx.moveTo(m1[0], m1[1]); ctx.lineTo(m2[0], m2[1]); ctx.stroke();
+    ctx.beginPath();
+    const c = pitch2px(PITCH_L / 2, PITCH_W / 2);
+    ctx.arc(c[0], c[1], 9.15 * scale, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  // Per-player {frame → {pos:[x,y,z], conf}} map for O(1) lookup as we
+  // scrub the timeline.
+  const playerIndex = playerPreviews.map((entry) => {
+    const frames = entry.data.frames || [];
+    const root_t = entry.data.root_t || [];
+    const conf = entry.data.confidence || [];
+    const m = new Map();
+    for (let i = 0; i < frames.length; i++) {
+      m.set(frames[i], { pos: root_t[i], conf: conf[i] != null ? conf[i] : 1 });
+    }
+    return {
+      pid: entry.player_id,
+      label: playerLabel(entry),
+      colour: entry.colour || playerColour(0),
+      byFrame: m,
+      firstFrame: frames.length ? frames[0] : 0,
+      lastFrame: frames.length ? frames[frames.length - 1] : 0,
+    };
+  });
+
+  // Global frame range across all players — drives the slider extents.
+  let minFrame = Infinity, maxFrame = -Infinity;
+  for (const p of playerIndex) {
+    if (p.byFrame.size === 0) continue;
+    if (p.firstFrame < minFrame) minFrame = p.firstFrame;
+    if (p.lastFrame > maxFrame) maxFrame = p.lastFrame;
+  }
+  if (!isFinite(minFrame)) { minFrame = 0; maxFrame = 0; }
+
+  // Controls: play/step/seek. Mirror the kp2d-preview pattern.
+  const controls = document.createElement("div");
+  controls.style.cssText = "display:flex;align-items:center;gap:8px;padding:8px 0 0;";
+  const playBtn = makeToolbarBtn("▶", "#4f46e5"); playBtn.style.minWidth = "36px";
+  const stepBack = makeToolbarBtn("◀", "#334155"); stepBack.title = "Previous frame";
+  const stepFwd = makeToolbarBtn("▶", "#334155"); stepFwd.title = "Next frame";
+  const seek = document.createElement("input");
+  seek.type = "range"; seek.min = String(minFrame); seek.max = String(maxFrame); seek.value = String(minFrame);
+  seek.style.cssText = "flex:1;";
+  const frameLabel = document.createElement("span");
+  frameLabel.style.cssText = "color:#94a3b8;font-size:11px;min-width:120px;text-align:right;font-variant-numeric:tabular-nums;";
+  controls.append(playBtn, stepBack, stepFwd, seek, frameLabel);
+  body.appendChild(controls);
+
+  let fps = DEFAULT_FPS;
+  // Camera-position overlay: per-frame {pos:[x,y], heading:[x,y]} in
+  // pitch-world (y-flipped done at draw time). Drawing the camera on
+  // the same panel as the players makes mirror-solution calibration
+  // bugs visually obvious — the marker should sit at the touchline
+  // side opposite the action; if it lands at a corner or behind the
+  // far line, the solver picked a degenerate minimum.
+  const cameraByFrame = new Map();
+  fetchJsonOrNull("/camera/track").then((ct) => {
+    if (!ct || !ct.frames) return;
+    if (ct.fps) fps = ct.fps;
+    const t_world = (ct.t_world && ct.t_world.length === 3) ? ct.t_world : null;
+    for (const f of ct.frames) {
+      // C = -R^T t  (OpenCV convention: cam = R X + t).
+      const t = (f.t && f.t.length === 3) ? f.t : t_world;
+      if (!t || !f.R) continue;
+      const R = f.R;
+      // R is row-major 3x3. R^T t = column-vector with components
+      //   sum_i R[i][k] * t[i] for k in 0..2
+      const C = [
+        -(R[0][0] * t[0] + R[1][0] * t[1] + R[2][0] * t[2]),
+        -(R[0][1] * t[0] + R[1][1] * t[1] + R[2][1] * t[2]),
+        -(R[0][2] * t[0] + R[1][2] * t[1] + R[2][2] * t[2]),
+      ];
+      // Camera "forward" in world frame = R^T @ [0,0,1] = third column of R^T = third row of R.
+      // Project to pitch x-y plane for the heading arrow.
+      const fwd = [R[2][0], R[2][1]];
+      cameraByFrame.set(f.frame, { pos: [C[0], C[1]], z: C[2], fwd });
+    }
+    render(currentFrame);
+  });
+
+  const legend = document.createElement("div");
+  legend.style.cssText = "margin-top:10px;display:flex;flex-wrap:wrap;gap:8px;font-size:11px;color:#cbd5e1;";
+  for (const p of playerIndex) {
+    const swatch = document.createElement("span");
+    swatch.dataset.pid = p.pid;
+    swatch.style.cssText = `display:inline-flex;align-items:center;gap:5px;padding:2px 6px;background:#252840;border-radius:3px;cursor:pointer;`;
+    swatch.innerHTML = `<span style="width:10px;height:10px;border-radius:50%;background:${p.colour};"></span>${p.label}`;
+    legend.appendChild(swatch);
+  }
+  body.appendChild(legend);
+
+  // Frame the trajectory at a given playhead. Older trail samples get
+  // exponential alpha falloff so the eye reads direction without the
+  // canvas turning into spaghetti.
+  let currentFrame = minFrame;
+  function drawCameraMarker(fi) {
+    const cam = cameraByFrame.get(fi) || cameraByFrame.get(minFrame);
+    if (!cam) return;
+    const [cx, cy] = pitch2px(cam.pos[0], cam.pos[1]);
+    // Triangular marker pointing along the camera's projected forward.
+    let [fx, fy] = cam.fwd;
+    const mag = Math.hypot(fx, fy) || 1;
+    fx /= mag; fy /= mag;
+    // Note: pitch2px flips y, so the marker's world-y direction must be
+    // negated when expressed in canvas pixels.
+    const dx = fx, dy = -fy;
+    const size = 10;
+    const tip = [cx + dx * size, cy + dy * size];
+    const base1 = [cx - dx * 5 - dy * 6, cy - dy * 5 + dx * 6];
+    const base2 = [cx - dx * 5 + dy * 6, cy - dy * 5 - dx * 6];
+    ctx.fillStyle = "#fde68a";
+    ctx.strokeStyle = "#854d0e";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(tip[0], tip[1]);
+    ctx.lineTo(base1[0], base1[1]);
+    ctx.lineTo(base2[0], base2[1]);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    // Camera-out-of-bounds annotation: when the recovered position is
+    // off the canvas, project it to the nearest edge and label.
+    const offX = cam.pos[0] < -3 || cam.pos[0] > 108;
+    const offY = cam.pos[1] < -3 || cam.pos[1] > 71;
+    const label = `cam (${cam.pos[0].toFixed(1)}, ${cam.pos[1].toFixed(1)}, ${cam.z.toFixed(1)})`;
+    ctx.font = "bold 10px -apple-system, sans-serif";
+    const tw = ctx.measureText(label).width + 6;
+    const lx = Math.max(2, Math.min(W - tw - 2, cx + 10));
+    const ly = Math.max(14, Math.min(H - 4, cy - 12));
+    ctx.fillStyle = (offX || offY) ? "rgba(127,29,29,0.85)" : "rgba(0,0,0,0.65)";
+    ctx.fillRect(lx, ly - 11, tw, 14);
+    ctx.fillStyle = (offX || offY) ? "#fecaca" : "#fde68a";
+    ctx.fillText(label, lx + 3, ly);
+  }
+  function render(fi) {
+    currentFrame = fi;
+    drawPitch();
+    drawCameraMarker(fi);
+    for (const p of playerIndex) {
+      // Build the trail of recent positions inside [fi - TRAIL_LEN, fi].
+      const trail = [];
+      for (let f = Math.max(p.firstFrame, fi - TRAIL_LEN); f <= fi; f++) {
+        const e = p.byFrame.get(f);
+        if (!e || !e.pos || e.pos.length < 2 || e.conf < CONF_THRESH) continue;
+        trail.push({ f, pos: e.pos });
+      }
+      if (trail.length === 0) continue;
+      // Trail polyline with fading alpha.
+      ctx.lineWidth = 1.6;
+      ctx.lineCap = "round";
+      for (let i = 1; i < trail.length; i++) {
+        const aN = (trail[i - 1].f - (fi - TRAIL_LEN)) / TRAIL_LEN;
+        const aB = (trail[i].f     - (fi - TRAIL_LEN)) / TRAIL_LEN;
+        const alpha = Math.max(0, Math.min(1, (aN + aB) / 2));
+        ctx.strokeStyle = withAlpha(p.colour, 0.15 + 0.6 * alpha);
+        const [x0, y0] = pitch2px(trail[i - 1].pos[0], trail[i - 1].pos[1]);
+        const [x1, y1] = pitch2px(trail[i].pos[0],     trail[i].pos[1]);
+        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+      }
+      // Head dot + label at the most recent sample.
+      const head = trail[trail.length - 1];
+      const [hx, hy] = pitch2px(head.pos[0], head.pos[1]);
+      ctx.fillStyle = p.colour;
+      ctx.beginPath(); ctx.arc(hx, hy, 4, 0, Math.PI * 2); ctx.fill();
+      // Off-pitch dots get a subtle warning ring so calibration errors
+      // are visually obvious from the trajectory panel alone.
+      const offPitch =
+        head.pos[0] < 0 || head.pos[0] > 105 ||
+        head.pos[1] < 0 || head.pos[1] > 68;
+      if (offPitch) {
+        ctx.strokeStyle = "#ef4444"; ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.arc(hx, hy, 7, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.font = "bold 10px -apple-system, sans-serif";
+      const tw = ctx.measureText(p.label).width + 6;
+      ctx.fillStyle = "rgba(0,0,0,0.6)";
+      ctx.fillRect(hx + 6, hy - 8, tw, 14);
+      ctx.fillStyle = p.colour;
+      ctx.fillText(p.label, hx + 9, hy + 2);
+    }
+    seek.value = String(fi);
+    const sec = (fi / Math.max(1, fps)).toFixed(2);
+    frameLabel.textContent = `Frame ${fi}  (${sec}s)`;
+  }
+
+  // Playback loop — uses requestAnimationFrame timestamps so playback
+  // speed tracks the configured fps regardless of refresh rate.
+  let playing = false, rafId = null, lastTs = 0;
+  function tick(ts) {
+    if (!playing) { rafId = null; return; }
+    if (lastTs === 0) lastTs = ts;
+    const dt = (ts - lastTs) / 1000;
+    const advance = Math.max(1, Math.round(dt * fps));
+    lastTs = ts;
+    let next = currentFrame + advance;
+    if (next > maxFrame) {
+      next = maxFrame; render(next);
+      playing = false; playBtn.textContent = "▶"; rafId = null; lastTs = 0; return;
+    }
+    render(next);
+    rafId = requestAnimationFrame(tick);
+  }
+  playBtn.addEventListener("click", () => {
+    if (playing) { playing = false; playBtn.textContent = "▶"; }
+    else {
+      if (currentFrame >= maxFrame) currentFrame = minFrame;
+      playing = true; playBtn.textContent = "⏸";
+      lastTs = 0; rafId = requestAnimationFrame(tick);
+    }
+  });
+  stepBack.addEventListener("click", () => {
+    playing = false; playBtn.textContent = "▶";
+    render(Math.max(minFrame, currentFrame - 1));
+  });
+  stepFwd.addEventListener("click", () => {
+    playing = false; playBtn.textContent = "▶";
+    render(Math.min(maxFrame, currentFrame + 1));
+  });
+  seek.addEventListener("input", () => {
+    playing = false; playBtn.textContent = "▶";
+    render(parseInt(seek.value, 10));
+  });
+
+  // Initial paint at the first frame any player exists in.
+  render(minFrame);
+  return wrap;
+}
+
+function withAlpha(hexColour, alpha) {
+  // Accepts #rgb / #rrggbb. Returns rgba(r,g,b,alpha).
+  const c = hexColour.replace("#", "");
+  let r, g, b;
+  if (c.length === 3) {
+    r = parseInt(c[0] + c[0], 16);
+    g = parseInt(c[1] + c[1], 16);
+    b = parseInt(c[2] + c[2], 16);
+  } else {
+    r = parseInt(c.slice(0, 2), 16);
+    g = parseInt(c.slice(2, 4), 16);
+    b = parseInt(c.slice(4, 6), 16);
+  }
+  return `rgba(${r},${g},${b},${alpha})`;
 }
 
 async function renderBall(panel) {

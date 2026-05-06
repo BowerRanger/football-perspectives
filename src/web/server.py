@@ -22,9 +22,23 @@ Anchor editor (Phase 4a — broadcast-mono)
 
 Pipeline output viewers
     GET    /camera/track              (camera_track.json)
+    GET    /tracking/shots            (list of shot_ids with tracks)
+    GET    /tracking/preview          (per-track summaries for one shot)
+    GET    /tracking/frames           (per-frame bbox payload for one shot)
+    GET    /hmr_world/kp2d_players   (list of player_ids with kp2d artifacts)
+    GET    /hmr_world/kp2d_preview   (per-frame COCO-17 keypoints for a player)
     GET    /hmr_world/preview         (lightweight summary for one player)
     GET    /hmr_world/players         (list of available player_id strings)
     GET    /ball/preview              (ball_track.json)
+
+Track annotation (manual edits to tracking output)
+    PATCH  /api/tracks/{shot_id}/{track_id}    (rename / re-team / re-id one track)
+    DELETE /api/tracks/{shot_id}/{track_id}    (remove one track)
+    POST   /api/tracks/split                   (split track at a frame, mint new IDs)
+    POST   /api/tracks/merge                   (unify N tracks under one player_id)
+    POST   /api/tracks/merge-by-name           (group every track sharing a name)
+    POST   /api/tracks/ignore-unknown/{shot_id}(mark unnamed tracks 'ignore')
+    POST   /api/tracks/delete-ignored          (drop tracks named 'ignore')
 
 Static / export
     GET    /                          (dashboard)
@@ -56,6 +70,7 @@ from src.pipeline.runner import run_pipeline
 from src.schemas.anchor import AnchorSet
 from src.schemas.ball_track import BallTrack
 from src.schemas.camera_track import CameraTrack
+from src.schemas.tracks import Track, TrackFrame, TracksResult
 from src.utils.pitch_landmarks import LANDMARK_CATALOGUE
 
 # ---------------------------------------------------------------------------
@@ -66,7 +81,6 @@ STAGE_ORDER: list[str] = [
     "prepare_shots",
     "tracking",
     "camera",
-    "pose_2d",
     "hmr_world",
     "ball",
     "export",
@@ -76,7 +90,6 @@ _STAGE_COMPLETE = {
     "prepare_shots": lambda d: (d / "shots" / "shots_manifest.json").exists(),
     "tracking": lambda d: any((d / "tracks").glob("*_tracks.json")),
     "camera": lambda d: (d / "camera" / "camera_track.json").exists(),
-    "pose_2d": lambda d: any((d / "pose_2d").glob("*_pose_2d.json")),
     "hmr_world": lambda d: any((d / "hmr_world").glob("*_smpl_world.npz")),
     "ball": lambda d: (d / "ball" / "ball_track.json").exists(),
     "export": lambda d: (d / "export" / "gltf" / "scene.glb").exists(),
@@ -90,7 +103,6 @@ _STAGE_ARTIFACTS: dict[str, list[str]] = {
     "prepare_shots": ["shots"],
     "tracking": ["tracks"],
     "camera": ["camera/camera_track.json", "camera/debug"],
-    "pose_2d": ["pose_2d"],
     "hmr_world": ["hmr_world"],
     "ball": ["ball"],
     "export": ["export"],
@@ -560,15 +572,147 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"Failed to load camera track: {exc}")
         return asdict(track)
 
+    @app.get("/tracking/shots")
+    def list_tracked_shots():
+        tracks_dir = output_dir / "tracks"
+        if not tracks_dir.exists():
+            return {"shots": []}
+        ids = sorted(p.stem.replace("_tracks", "") for p in tracks_dir.glob("*_tracks.json"))
+        return {"shots": ids}
+
+    @app.get("/tracking/preview")
+    def get_tracking_preview(shot_id: str):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", shot_id):
+            raise HTTPException(status_code=400, detail="Invalid shot_id")
+        tracks_path = (output_dir / "tracks" / f"{shot_id}_tracks.json").resolve()
+        tracks_dir = (output_dir / "tracks").resolve()
+        if not tracks_path.is_relative_to(tracks_dir):
+            raise HTTPException(status_code=400, detail="Invalid shot_id")
+        if not tracks_path.exists():
+            raise HTTPException(status_code=404, detail=f"Tracks not found: {shot_id}")
+        try:
+            from src.schemas.tracks import TracksResult
+
+            result = TracksResult.load(tracks_path)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to load tracks: {exc}")
+        summaries: list[dict[str, Any]] = []
+        for track in result.tracks:
+            confs = [f.confidence for f in track.frames if f.confidence is not None]
+            mean_conf = sum(confs) / len(confs) if confs else 0.0
+            frame_range = (
+                [track.frames[0].frame, track.frames[-1].frame]
+                if track.frames else [0, 0]
+            )
+            summaries.append({
+                "track_id": track.track_id,
+                "class_name": track.class_name,
+                "team": track.team,
+                "player_id": track.player_id,
+                "player_name": track.player_name,
+                "frame_count": len(track.frames),
+                "frame_range": frame_range,
+                "mean_confidence": mean_conf,
+            })
+        return {"shot_id": result.shot_id, "tracks": summaries}
+
+    @app.get("/tracking/frames")
+    def get_tracking_frames(shot_id: str):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", shot_id):
+            raise HTTPException(status_code=400, detail="Invalid shot_id")
+        tracks_path = (output_dir / "tracks" / f"{shot_id}_tracks.json").resolve()
+        tracks_dir = (output_dir / "tracks").resolve()
+        if not tracks_path.is_relative_to(tracks_dir):
+            raise HTTPException(status_code=400, detail="Invalid shot_id")
+        if not tracks_path.exists():
+            raise HTTPException(status_code=404, detail=f"Tracks not found: {shot_id}")
+        try:
+            from src.schemas.tracks import TracksResult
+
+            result = TracksResult.load(tracks_path)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to load tracks: {exc}")
+        frames_map: dict[int, list[dict[str, Any]]] = {}
+        for track in result.tracks:
+            for f in track.frames:
+                frames_map.setdefault(f.frame, []).append({
+                    "track_id": track.track_id,
+                    "player_id": track.player_id,
+                    "player_name": track.player_name,
+                    "class_name": track.class_name,
+                    "team": track.team,
+                    "bbox": list(f.bbox),
+                    "confidence": f.confidence,
+                })
+        frames = [
+            {"frame": frame_idx, "boxes": frames_map[frame_idx]}
+            for frame_idx in sorted(frames_map)
+        ]
+        return {"shot_id": result.shot_id, "frames": frames}
+
+    def _player_name_index() -> dict[str, str]:
+        """Build {player_id → player_name} from every shot's tracks file.
+
+        Used by the hmr_world endpoints so the dashboard can show real
+        names instead of the synthetic P### IDs. Tracks named 'ignore'
+        are skipped; player_id may map to multiple Track records (when a
+        merge wasn't followed by a physical-merge save) — first non-empty
+        wins.
+        """
+        names: dict[str, str] = {}
+        tracks_dir = output_dir / "tracks"
+        if not tracks_dir.exists():
+            return names
+        for tf in sorted(tracks_dir.glob("*_tracks.json")):
+            try:
+                tr = TracksResult.load(tf)
+            except Exception:
+                continue
+            for track in tr.tracks:
+                pid = track.player_id or track.track_id
+                if track.player_name and track.player_name != "ignore":
+                    names.setdefault(pid, track.player_name)
+        return names
+
+    @app.get("/hmr_world/kp2d_players")
+    def list_kp2d_players():
+        hmr_dir = output_dir / "hmr_world"
+        if not hmr_dir.exists():
+            return {"players": []}
+        names = _player_name_index()
+        rows = []
+        for p in sorted(hmr_dir.glob("*_kp2d.json")):
+            pid = p.stem.replace("_kp2d", "")
+            rows.append({"player_id": pid, "player_name": names.get(pid, "")})
+        return {"players": rows}
+
+    @app.get("/hmr_world/kp2d_preview")
+    def get_kp2d_preview(player_id: str):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", player_id):
+            raise HTTPException(status_code=400, detail="Invalid player_id")
+        kp2d_path = (output_dir / "hmr_world" / f"{player_id}_kp2d.json").resolve()
+        hmr_dir = (output_dir / "hmr_world").resolve()
+        if not kp2d_path.is_relative_to(hmr_dir):
+            raise HTTPException(status_code=400, detail="Invalid player_id")
+        if not kp2d_path.exists():
+            raise HTTPException(status_code=404, detail=f"kp2d track not found: {player_id}")
+        try:
+            data = json.loads(kp2d_path.read_text())
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to load kp2d: {exc}")
+        return data
+
     @app.get("/hmr_world/players")
     def list_hmr_players():
         hmr_dir = output_dir / "hmr_world"
         if not hmr_dir.exists():
             return {"players": []}
-        ids: list[str] = []
+        names = _player_name_index()
+        rows = []
         for npz_path in sorted(hmr_dir.glob("*_smpl_world.npz")):
-            ids.append(npz_path.stem.replace("_smpl_world", ""))
-        return {"players": ids}
+            pid = npz_path.stem.replace("_smpl_world", "")
+            rows.append({"player_id": pid, "player_name": names.get(pid, "")})
+        return {"players": rows}
 
     @app.get("/hmr_world/preview")
     def get_hmr_preview(player_id: str):
@@ -604,6 +748,335 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Failed to load ball track: {exc}")
         return _ball_track_to_dict(track)
+
+    # ------------------------------------------------------------------
+    # Track annotation (manual edits to tracking output)
+    # ------------------------------------------------------------------
+
+    def _tracks_dir() -> Path:
+        return output_dir / "tracks"
+
+    def _tracks_path(shot_id: str) -> Path:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", shot_id):
+            raise HTTPException(status_code=400, detail="Invalid shot ID")
+        return _tracks_dir() / f"{shot_id}_tracks.json"
+
+    def _all_used_player_ids() -> set[str]:
+        used: set[str] = set()
+        if not _tracks_dir().exists():
+            return used
+        for tf in _tracks_dir().glob("*_tracks.json"):
+            try:
+                tr = TracksResult.load(tf)
+            except Exception:
+                continue
+            for t in tr.tracks:
+                if t.player_id:
+                    used.add(t.player_id)
+        return used
+
+    def _next_player_id(used: set[str]) -> str:
+        n = 1
+        while f"P{n:03d}" in used:
+            n += 1
+        used.add(f"P{n:03d}")
+        return f"P{n:03d}"
+
+    @app.delete("/api/tracks/{shot_id}/{track_id}")
+    def delete_single_track(shot_id: str, track_id: str):
+        track_path = _tracks_path(shot_id)
+        if not track_path.exists():
+            raise HTTPException(status_code=404, detail=f"Tracks not found for {shot_id}")
+        tr = TracksResult.load(track_path)
+        before = len(tr.tracks)
+        tr.tracks = [t for t in tr.tracks if t.track_id != track_id]
+        if len(tr.tracks) == before:
+            raise HTTPException(status_code=404, detail=f"Track {track_id} not found in {shot_id}")
+        tr.save(track_path)
+        return {"shot_id": shot_id, "track_id": track_id, "deleted": True}
+
+    @app.patch("/api/tracks/{shot_id}/{track_id}")
+    async def patch_track(shot_id: str, track_id: str, request: Request):
+        track_path = _tracks_path(shot_id)
+        if not track_path.exists():
+            raise HTTPException(status_code=404, detail=f"Tracks not found for {shot_id}")
+        body = await request.json()
+        tr = TracksResult.load(track_path)
+        target = next((t for t in tr.tracks if t.track_id == track_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"Track {track_id} not found in {shot_id}")
+        if "player_id" in body:
+            target.player_id = str(body["player_id"])
+        if "player_name" in body:
+            target.player_name = str(body["player_name"])
+        if "team" in body:
+            target.team = str(body["team"])
+        tr.save(track_path)
+        return {
+            "shot_id": shot_id,
+            "track_id": track_id,
+            "player_id": target.player_id,
+            "player_name": target.player_name,
+            "team": target.team,
+        }
+
+    @app.post("/api/tracks/split")
+    async def split_track(request: Request):
+        body = await request.json()
+        shot_id = body.get("shot_id")
+        track_id = body.get("track_id")
+        if not shot_id or not track_id:
+            raise HTTPException(status_code=400, detail="shot_id and track_id required")
+        try:
+            split_frame = int(body.get("split_frame", 0))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="split_frame must be an integer")
+
+        track_path = _tracks_path(shot_id)
+        if not track_path.exists():
+            raise HTTPException(status_code=404, detail=f"Tracks not found for {shot_id}")
+        tr = TracksResult.load(track_path)
+        target = next((t for t in tr.tracks if t.track_id == track_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"Track {track_id} not found")
+
+        before = [f for f in target.frames if f.frame < split_frame]
+        after = [f for f in target.frames if f.frame >= split_frame]
+        if not before or not after:
+            raise HTTPException(
+                status_code=400,
+                detail="split_frame must lie strictly inside the track's frame range",
+            )
+
+        existing_track_ids = {t.track_id for t in tr.tracks}
+        n = 1
+        while f"T{n:03d}" in existing_track_ids:
+            n += 1
+        new_track_id = f"T{n:03d}"
+        new_player_id = _next_player_id(_all_used_player_ids())
+
+        target.frames = before
+        new_track = Track(
+            track_id=new_track_id,
+            class_name=target.class_name,
+            team=target.team,
+            player_id=new_player_id,
+            player_name="",
+            frames=after,
+        )
+        tr.tracks.append(new_track)
+        tr.save(track_path)
+        return {
+            "shot_id": shot_id,
+            "original_track_id": track_id,
+            "new_track_id": new_track_id,
+            "new_player_id": new_player_id,
+            "original_frames": len(before),
+            "new_frames": len(after),
+        }
+
+    def _physically_merge(
+        tracks: list[Track],
+        *,
+        canonical_pid: str,
+        canonical_name: str,
+    ) -> tuple[Track, list[str], int]:
+        """Physically combine ``tracks`` into one Track record.
+
+        - Frames from every input are concatenated and sorted by frame.
+        - When two inputs claim the same frame, the higher-confidence
+          observation wins (first-seen breaks ties); the other is dropped
+          and counted in the returned collision tally.
+        - The kept Track is the input with the lexicographically smallest
+          ``track_id`` so callers see stable identifiers across merges.
+        - ``player_id`` / ``player_name`` are overwritten with the supplied
+          canonicals; ``team`` is taken from the kept track.
+
+        Returns the kept Track, the list of removed track_ids, and the
+        number of frame collisions resolved.
+        """
+        kept = min(tracks, key=lambda t: t.track_id)
+        merged_by_frame: dict[int, TrackFrame] = {}
+        collisions = 0
+        for t in tracks:
+            for f in t.frames:
+                existing = merged_by_frame.get(f.frame)
+                if existing is None:
+                    merged_by_frame[f.frame] = f
+                    continue
+                collisions += 1
+                if (f.confidence or 0.0) > (existing.confidence or 0.0):
+                    merged_by_frame[f.frame] = f
+        kept.frames = [merged_by_frame[fi] for fi in sorted(merged_by_frame)]
+        kept.player_id = canonical_pid
+        if canonical_name:
+            kept.player_name = canonical_name
+        removed_ids = [t.track_id for t in tracks if t.track_id != kept.track_id]
+        return kept, removed_ids, collisions
+
+    @app.post("/api/tracks/merge")
+    async def merge_tracks(request: Request):
+        body = await request.json()
+        shot_id = body.get("shot_id")
+        track_ids = body.get("track_ids") or []
+        if not shot_id or not isinstance(track_ids, list) or len(track_ids) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="shot_id and track_ids (≥2) required",
+            )
+        track_path = _tracks_path(shot_id)
+        if not track_path.exists():
+            raise HTTPException(status_code=404, detail=f"Tracks not found for {shot_id}")
+        tr = TracksResult.load(track_path)
+
+        targets = [t for t in tr.tracks if t.track_id in track_ids]
+        missing = set(track_ids) - {t.track_id for t in targets}
+        if missing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Track(s) not found in {shot_id}: {sorted(missing)}",
+            )
+
+        # Pick a canonical player_id: prefer the first track that has one
+        # already, else mint a fresh P-id.
+        canonical_pid = next((t.player_id for t in targets if t.player_id), None)
+        if not canonical_pid:
+            canonical_pid = _next_player_id(_all_used_player_ids())
+        canonical_name = next(
+            (t.player_name for t in targets if t.player_name and t.player_name != "ignore"),
+            "",
+        )
+
+        # Optional: caller can override
+        if body.get("player_id"):
+            canonical_pid = str(body["player_id"])
+        if body.get("player_name") is not None:
+            canonical_name = str(body["player_name"])
+
+        kept, removed_ids, collisions = _physically_merge(
+            targets, canonical_pid=canonical_pid, canonical_name=canonical_name
+        )
+        tr.tracks = [t for t in tr.tracks if t.track_id not in removed_ids]
+        tr.save(track_path)
+        return {
+            "shot_id": shot_id,
+            "merged_into": kept.track_id,
+            "removed_track_ids": removed_ids,
+            "player_id": canonical_pid,
+            "player_name": canonical_name,
+            "frame_collisions": collisions,
+        }
+
+    @app.post("/api/tracks/merge-by-name")
+    def merge_tracks_by_name():
+        if not _tracks_dir().exists():
+            return {
+                "merged_groups": 0,
+                "tracks_removed": 0,
+                "frame_collisions": 0,
+            }
+
+        # First pass: load every shot's TracksResult and collect named
+        # player/goalkeeper tracks. Canonical player_id per name prefers
+        # any existing P-id; otherwise we mint one. Cross-shot tracks
+        # cannot be physically merged (they live in different files), but
+        # they share the same player_id so hmr_world groups them.
+        used = _all_used_player_ids()
+        all_files: list[tuple[Path, TracksResult]] = []
+        all_named: dict[str, list[Track]] = {}
+        canonical: dict[str, str] = {}
+        for tf in sorted(_tracks_dir().glob("*_tracks.json")):
+            try:
+                tr = TracksResult.load(tf)
+            except Exception:
+                continue
+            all_files.append((tf, tr))
+            for track in tr.tracks:
+                if track.class_name not in ("player", "goalkeeper"):
+                    continue
+                name = track.player_name
+                if not name or name == "ignore":
+                    continue
+                all_named.setdefault(name, []).append(track)
+                if name not in canonical and track.player_id:
+                    canonical[name] = track.player_id
+        for name in all_named:
+            if name not in canonical:
+                canonical[name] = _next_player_id(used)
+
+        # Second pass: per shot, group tracks by name and physically merge
+        # each group. Drop merged-away records from tr.tracks. Always set
+        # player_id to the canonical (so single-occurrence shots are
+        # rewritten too).
+        tracks_removed = 0
+        total_collisions = 0
+        for tf, tr in all_files:
+            dirty = False
+            by_name: dict[str, list[Track]] = {}
+            for track in tr.tracks:
+                if track.class_name not in ("player", "goalkeeper"):
+                    continue
+                name = track.player_name
+                if not name or name == "ignore":
+                    continue
+                by_name.setdefault(name, []).append(track)
+            removed_ids: set[str] = set()
+            for name, group in by_name.items():
+                target_pid = canonical[name]
+                if len(group) > 1:
+                    _, removed, collisions = _physically_merge(
+                        group, canonical_pid=target_pid, canonical_name=name
+                    )
+                    removed_ids.update(removed)
+                    total_collisions += collisions
+                    tracks_removed += len(removed)
+                    dirty = True
+                else:
+                    only = group[0]
+                    if only.player_id != target_pid:
+                        only.player_id = target_pid
+                        dirty = True
+            if removed_ids:
+                tr.tracks = [t for t in tr.tracks if t.track_id not in removed_ids]
+            if dirty:
+                tr.save(tf)
+
+        return {
+            "merged_groups": len(all_named),
+            "tracks_removed": tracks_removed,
+            "frame_collisions": total_collisions,
+        }
+
+    @app.post("/api/tracks/ignore-unknown/{shot_id}")
+    def ignore_unknown_tracks(shot_id: str):
+        track_path = _tracks_path(shot_id)
+        if not track_path.exists():
+            raise HTTPException(status_code=404, detail=f"Tracks not found for {shot_id}")
+        tr = TracksResult.load(track_path)
+        count = 0
+        for t in tr.tracks:
+            if t.class_name == "ball":
+                continue
+            if not t.player_name:
+                t.player_name = "ignore"
+                count += 1
+        tr.save(track_path)
+        return {"shot_id": shot_id, "count": count}
+
+    @app.post("/api/tracks/delete-ignored")
+    def delete_ignored_tracks():
+        if not _tracks_dir().exists():
+            return {"deleted": 0}
+        deleted = 0
+        for tf in sorted(_tracks_dir().glob("*_tracks.json")):
+            tr = TracksResult.load(tf)
+            before = len(tr.tracks)
+            tr.tracks = [t for t in tr.tracks if t.player_name != "ignore"]
+            removed = before - len(tr.tracks)
+            if removed:
+                deleted += removed
+                tr.save(tf)
+        return {"deleted": deleted}
 
     @app.get("/anchor_editor")
     def anchor_editor_page():

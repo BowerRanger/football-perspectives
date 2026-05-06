@@ -95,3 +95,59 @@ def test_goal_post_bases_present():
 def test_catalogue_size_matches_legacy():
     """Catalogue has at least the legacy 42 landmarks (regression guard)."""
     assert len(LANDMARK_CATALOGUE) >= 42
+
+
+# ── Mow-grid intersections ──────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_centre_line_intersection_landmarks_present():
+    """Centre-line (y=34) crossings: goal lines, 18-yd fronts, D, centre circle.
+
+    All eight live on y=34, z=0 — the user-observed mow-stripe boundary
+    that passes through both penalty spots and the centre spot.
+    """
+    # Goal-line crossings
+    assert get_landmark("centre_line_left_goal_intersect").world_xyz == (0.0, 34.0, 0.0)
+    assert get_landmark("centre_line_right_goal_intersect").world_xyz == (105.0, 34.0, 0.0)
+    # 18-yd-front crossings
+    assert get_landmark("centre_line_left_18yd_intersect").world_xyz == (16.5, 34.0, 0.0)
+    assert get_landmark("centre_line_right_18yd_intersect").world_xyz == (88.5, 34.0, 0.0)
+    # D crossings: arc at 9.15 m from penalty spot (11, 34) crosses y=34
+    # at x = 11 + 9.15 = 20.15 (left side, outside the box) and mirrored.
+    assert get_landmark("centre_line_left_D_intersect").world_xyz == (20.15, 34.0, 0.0)
+    assert get_landmark("centre_line_right_D_intersect").world_xyz == (105.0 - 20.15, 34.0, 0.0)
+    # Centre-circle east/west crossings: 9.15 m radius around (52.5, 34).
+    assert get_landmark("centre_line_centre_circle_left").world_xyz == (52.5 - 9.15, 34.0, 0.0)
+    assert get_landmark("centre_line_centre_circle_right").world_xyz == (52.5 + 9.15, 34.0, 0.0)
+
+
+@pytest.mark.unit
+def test_near_and_far_mow_line_intersections_present():
+    """Near (y=17.5) and far (y=50.5) mow-line crossings of goal / 18-yd / halfway.
+
+    The mow grid inside the 18-yd box is 5.5 m squares anchored to y=34;
+    three squares above/below puts the boundaries at y=17.5 and y=50.5.
+    """
+    # Near mow line: y = 34 - 3*5.5 = 17.5
+    assert get_landmark("near_mow_line_left_goal_intersect").world_xyz == (0.0, 17.5, 0.0)
+    assert get_landmark("near_mow_line_right_goal_intersect").world_xyz == (105.0, 17.5, 0.0)
+    assert get_landmark("near_mow_line_left_18yd_intersect").world_xyz == (16.5, 17.5, 0.0)
+    assert get_landmark("near_mow_line_right_18yd_intersect").world_xyz == (88.5, 17.5, 0.0)
+    assert get_landmark("near_mow_line_halfway_intersect").world_xyz == (52.5, 17.5, 0.0)
+    # Far mow line: y = 34 + 3*5.5 = 50.5
+    assert get_landmark("far_mow_line_left_goal_intersect").world_xyz == (0.0, 50.5, 0.0)
+    assert get_landmark("far_mow_line_right_goal_intersect").world_xyz == (105.0, 50.5, 0.0)
+    assert get_landmark("far_mow_line_left_18yd_intersect").world_xyz == (16.5, 50.5, 0.0)
+    assert get_landmark("far_mow_line_right_18yd_intersect").world_xyz == (88.5, 50.5, 0.0)
+    assert get_landmark("far_mow_line_halfway_intersect").world_xyz == (52.5, 50.5, 0.0)
+
+
+@pytest.mark.unit
+def test_mow_intersection_landmarks_added_18_entries():
+    """Regression guard for the mow-intersection batch (8 centre-line + 5 near + 5 far)."""
+    mow_names = [
+        n for n in LANDMARK_CATALOGUE
+        if n.startswith("centre_line_") or n.startswith("near_mow_line_") or n.startswith("far_mow_line_")
+    ]
+    assert len(mow_names) == 18, sorted(mow_names)

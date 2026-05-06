@@ -1,0 +1,45 @@
+# Per-stadium pitch metadata used by the camera stage.
+#
+# Each stadium entry MAY declare a ``mowing`` block describing the cut
+# pattern of the turf. When a clip's anchor set references a stadium
+# (``AnchorSet.stadium``), the line catalogue served to the anchor editor
+# is extended with one position-known line per visible mowing-stripe
+# boundary. This lets the user mark a mow seam (visible in nearly any
+# broadcast frame) and have it act as a translation constraint, which
+# painted-line annotations alone often can't provide on far-side-only
+# camera angles.
+#
+# Mowing block fields:
+# - orientation: "along_touchline" | "along_goalline" | "grid"
+#     along_touchline → stripes parallel to the x-axis; boundaries occur
+#                        at successive y values.
+#     along_goalline  → stripes parallel to the y-axis; boundaries occur
+#                        at successive x values.
+#     grid            → both sets generated.
+# - stripe_width_m:   width of each mowed stripe (metres).
+# - origin_x_m / origin_y_m: world coordinate of stripe-boundary 0.
+#     Subsequent boundaries are at origin + N*stripe_width up to the
+#     pitch edge (105 m in x, 68 m in y).
+#
+# Generated catalogue entry names (see src/utils/stadium_config.py):
+#   mow_y_{value:0.1f}  for "along_touchline" / "grid" y-stripes
+#   mow_x_{value:0.1f}  for "along_goalline"  / "grid" x-stripes
+#
+# Reserved-for-future fields (NOT consumed yet — see docs/FEATURE_IDEAS.md):
+# - ad_boards: { height_m, touchline_offset_m, goalline_offset_m }
+
+stadiums:
+  default_premier_league:
+    display_name: "Generic Premier League"
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  example_grid_stadium:
+    display_name: "Example (cross-mowed)"
+    mowing:
+      orientation: grid
+      stripe_width_m: 6.0
+      origin_x_m: 0.0
+      origin_y_m: 0.0

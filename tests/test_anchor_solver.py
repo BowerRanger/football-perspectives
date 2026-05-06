@@ -499,3 +499,87 @@ def test_solve_anchors_jointly_warns_on_collinear_anchor(caplog):
     msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert any("frame 255" in m and "collinear" in m for m in msgs), msgs
 
+
+def _make_line_from_segment(
+    K: np.ndarray, R: np.ndarray, t: np.ndarray,
+    name: str,
+    seg: tuple[tuple[float, float, float], tuple[float, float, float]],
+    *, alpha: float = 0.2, beta: float = 0.8,
+) -> LineObservation:
+    """Like ``_make_line`` but takes the world segment directly (for entries
+    that aren't in the static ``LINE_CATALOGUE`` — e.g. stadium-derived mow
+    stripes whose positions depend on the picked stadium)."""
+    pa, pb = np.asarray(seg[0]), np.asarray(seg[1])
+    A = pa + alpha * (pb - pa)
+    B = pa + beta * (pb - pa)
+    return LineObservation(
+        name=name,
+        image_segment=(_project(K, R, t, A), _project(K, R, t, B)),
+        world_segment=seg,
+    )
+
+
+def test_mow_stripe_line_drives_solo_solve_to_correct_translation():
+    """Frame-0-style anchor: 2 collinear points + 5 far-side lines is rank-
+    deficient on the front-back axis. A position-known mow stripe parallel
+    to the touchlines but at a known interior y supplies the perpendicular
+    translation constraint so the recovered camera stays close to truth.
+
+    This is the integration test for stadium-derived mow-stripe lines flowing
+    end-to-end through the solver — they should behave exactly like any
+    other ``world_segment`` line annotation.
+    """
+    K_true = _K()
+    rich = _rich_anchor(K_true, R_BASE, T_BASE, 0)
+
+    # Frame-0-style thin anchor at frame 100: 2 collinear points (both at
+    # x=88.5) plus 5 far-side lines, all bunched around y∈[54.16, 70].
+    base_landmarks = tuple(
+        _make_landmark(K_true, R_BASE, T_BASE, name, xyz)
+        for name, xyz in [
+            ("right_18yd_d_far",  (88.5, 41.31, 0.0)),
+            ("right_18yd_far",    (88.5, 54.16, 0.0)),
+        ]
+    )
+    base_lines = tuple(
+        _make_line(K_true, R_BASE, T_BASE, name)
+        for name in [
+            "right_18yd_far_edge",
+            "right_18yd_front",
+            "far_touchline",
+            "far_advertising_board_top",
+            "far_advertising_board_base",
+        ]
+    )
+
+    # Stadium-derived mow stripe at y=15.0 (5.5 m × 3 stripes from origin
+    # 0 in the default Premier League pattern would be y=16.5; pick 15.0
+    # for a clean number). The world_segment is what the editor would
+    # have generated via stadium_config.mow_stripe_lines and persisted in
+    # anchors.json.
+    mow_line = _make_line_from_segment(
+        K_true, R_BASE, T_BASE,
+        "mow_y_15.0",
+        ((0.0, 15.0, 0.0), (105.0, 15.0, 0.0)),
+    )
+
+    rescued = Anchor(
+        frame=100,
+        landmarks=base_landmarks,
+        lines=base_lines + (mow_line,),
+    )
+    sol = solve_anchors_jointly((rich, rescued), image_size=IMAGE_SIZE)
+
+    assert 100 in sol.per_anchor_KRt
+    K_hat, R_hat, t_hat = sol.per_anchor_KRt[100]
+    C_hat = -R_hat.T @ t_hat
+    C_true = -R_BASE.T @ T_BASE  # (52.5, -30, 30)
+    err = float(np.linalg.norm(C_hat - C_true))
+    # Acceptance: with the mow stripe present, the recovered camera
+    # position is within a few metres of truth (the rich anchor's t-fixed
+    # propagation also gets us most of the way; this just confirms the
+    # mow stripe flows through and doesn't make things worse).
+    assert err < 5.0, (
+        f"frame 100: |C_hat - C_true| = {err:.2f} m "
+        f"(C_hat={C_hat}, C_true={C_true})"
+    )

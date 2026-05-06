@@ -222,6 +222,9 @@
 <header>
   <h1>Anchor Editor</h1>
   <select id="clip-select"><option value="">Loading clips…</option></select>
+  <select id="stadium-select" title="Pick the stadium to enable mowing-stripe palette entries">
+    <option value="">(no stadium)</option>
+  </select>
   <span class="spacer"></span>
   <span id="status">Ready</span>
   <button id="save-btn" class="primary">Save Anchors</button>
@@ -260,6 +263,9 @@
         <input type="checkbox" id="show-pitch" checked> projected pitch
       </label>
       <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;cursor:pointer;">
+        <input type="checkbox" id="show-landmark-labels"> landmark labels
+      </label>
+      <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;cursor:pointer;">
         <input type="checkbox" id="show-anchors" checked> anchors
       </label>
     </div>
@@ -283,9 +289,10 @@
 // ── State ───────────────────────────────────────────────────────────
 const state = {
   clipId: "",
+  stadium: "",            // selected stadium id (empty = no mow stripes)
   imageSize: [0, 0],     // [w, h] from anchors.json or video
   landmarks: [],          // {name, world_xyz} — pitch-landmark catalogue
-  pitchLines: [],         // {name, world_segment} — pitch-line catalogue
+  pitchLines: [],         // {name, world_segment, category?} — pitch-line catalogue
   selectedLandmark: null, // landmark name pending placement (Points mode)
   selectedLine: null,     // pitch-line name pending placement (Lines mode)
   pendingLineStart: null, // first click of a 2-click line (image_xy)
@@ -299,9 +306,11 @@ const state = {
 
 const els = {
   clipSelect: document.getElementById("clip-select"),
+  stadiumSelect: document.getElementById("stadium-select"),
   status: document.getElementById("status"),
   saveBtn: document.getElementById("save-btn"),
   showPitch: document.getElementById("show-pitch"),
+  showLandmarkLabels: document.getElementById("show-landmark-labels"),
   showAnchors: document.getElementById("show-anchors"),
   modePoints: document.getElementById("mode-points"),
   modeLines: document.getElementById("mode-lines"),
@@ -336,13 +345,15 @@ function setStatus(msg, color = "#94a3b8") {
 // ── Init ────────────────────────────────────────────────────────────
 async function init() {
   try {
-    const [shots, lms, pls] = await Promise.all([
+    const [shots, lms, pls, stadiums] = await Promise.all([
       fetchJson("/api/output/shots"),
       fetchJson("/landmarks"),
       fetchJson("/pitch_lines"),
+      fetchJson("/stadiums").catch(() => ({ stadiums: [] })),
     ]);
     state.landmarks = lms.landmarks || [];
     state.pitchLines = pls.lines || [];
+    populateStadiumDropdown(stadiums.stadiums || []);
     renderPalette();
 
     const ids = shots.shots || [];
@@ -363,17 +374,59 @@ async function init() {
     }
     els.clipSelect.addEventListener("change", () => loadClip(els.clipSelect.value));
 
+    // Stadium dropdown changes refetch the line catalogue with the
+    // stadium-derived mow stripes merged in. Persist to anchors.json on
+    // the next Save Anchors click.
+    els.stadiumSelect.addEventListener("change", async () => {
+      state.stadium = els.stadiumSelect.value || "";
+      await refreshPitchLines();
+      renderPalette();
+    });
+
     // Try to default to clip referenced by existing anchors.json
     const anchors = await fetchJson("/anchors").catch(() => null);
     let defaultId = ids[0];
     if (anchors && anchors.clip_id && ids.includes(anchors.clip_id)) {
       defaultId = anchors.clip_id;
     }
+    if (anchors && anchors.stadium) {
+      state.stadium = anchors.stadium;
+      els.stadiumSelect.value = anchors.stadium;
+      await refreshPitchLines();
+    }
     els.clipSelect.value = defaultId;
     await loadClip(defaultId);
   } catch (err) {
     setStatus("Init failed: " + err.message, "#f87171");
   }
+}
+
+function populateStadiumDropdown(items) {
+  // Preserve any pre-selected value (e.g. from anchors.json) when
+  // re-populating.
+  const previous = els.stadiumSelect.value;
+  els.stadiumSelect.innerHTML = "";
+  const noneOpt = document.createElement("option");
+  noneOpt.value = "";
+  noneOpt.textContent = "(no stadium)";
+  els.stadiumSelect.appendChild(noneOpt);
+  for (const s of items) {
+    const opt = document.createElement("option");
+    opt.value = s.id;
+    opt.textContent = s.display_name || s.id;
+    els.stadiumSelect.appendChild(opt);
+  }
+  if (previous) els.stadiumSelect.value = previous;
+}
+
+async function refreshPitchLines() {
+  // Re-fetch the line catalogue for the active stadium so the palette
+  // includes (or excludes) mow-stripe entries as appropriate.
+  const url = state.stadium
+    ? `/pitch_lines?stadium=${encodeURIComponent(state.stadium)}`
+    : "/pitch_lines";
+  const pls = await fetchJson(url).catch(() => ({ lines: [] }));
+  state.pitchLines = pls.lines || [];
 }
 
 async function loadClip(clipId) {
@@ -426,6 +479,15 @@ async function loadAnchors() {
       if (data.image_size && data.image_size[0] > 0) {
         state.imageSize = data.image_size;
       }
+      // Sync stadium dropdown + line catalogue if anchors.json carries a
+      // stadium reference. Empty string means "no stadium" — preserve
+      // whatever the user picked manually before this clip was loaded.
+      if (data.stadium) {
+        state.stadium = data.stadium;
+        els.stadiumSelect.value = data.stadium;
+        await refreshPitchLines();
+        renderPalette();
+      }
     }
   } catch (_) { /* no anchors yet */ }
   renderAnchorList();
@@ -469,28 +531,45 @@ function renderPalette() {
       els.palette.appendChild(row);
     }
   } else {
-    for (const ln of state.pitchLines) {
-      const row = document.createElement("div");
-      row.className = "landmark-row";
-      row.dataset.name = ln.name;
-      let label;
-      if (ln.world_segment) {
-        const a = ln.world_segment[0].map((v) => v.toFixed(1)).join(",");
-        const b = ln.world_segment[1].map((v) => v.toFixed(1)).join(",");
-        label = `${a} → ${b}`;
-      } else if (ln.world_direction) {
-        const d = ln.world_direction.map((v) => v.toFixed(1)).join(",");
-        label = `direction (${d}) — VP`;
-      } else {
-        label = "(unknown)";
-      }
-      row.innerHTML = `
-        <span class="lm-name">${ln.name}</span>
-        <span class="lm-coord" style="color:#fef08a;">${label}</span>
-      `;
-      row.addEventListener("click", () => selectLine(ln.name));
-      els.palette.appendChild(row);
+    // Split into "mowing" (stadium-derived) and everything else so the
+    // dynamic mow-stripe entries don't bury the standard pitch lines.
+    const mow = state.pitchLines.filter((ln) => ln.category === "mowing");
+    const others = state.pitchLines.filter((ln) => ln.category !== "mowing");
+    appendLineGroup(others, null);
+    if (mow.length > 0) {
+      appendLineGroup(mow, "Mowing stripes");
     }
+  }
+}
+
+function appendLineGroup(lines, heading) {
+  if (heading) {
+    const h = document.createElement("div");
+    h.style.cssText = "padding:8px 12px 4px;font-size:11px;color:#94a3b8;letter-spacing:0.05em;text-transform:uppercase;border-top:1px solid #1f2937;margin-top:6px;";
+    h.textContent = heading;
+    els.palette.appendChild(h);
+  }
+  for (const ln of lines) {
+    const row = document.createElement("div");
+    row.className = "landmark-row";
+    row.dataset.name = ln.name;
+    let label;
+    if (ln.world_segment) {
+      const a = ln.world_segment[0].map((v) => v.toFixed(1)).join(",");
+      const b = ln.world_segment[1].map((v) => v.toFixed(1)).join(",");
+      label = `${a} → ${b}`;
+    } else if (ln.world_direction) {
+      const d = ln.world_direction.map((v) => v.toFixed(1)).join(",");
+      label = `direction (${d}) — VP`;
+    } else {
+      label = "(unknown)";
+    }
+    row.innerHTML = `
+      <span class="lm-name">${ln.name}</span>
+      <span class="lm-coord" style="color:#fef08a;">${label}</span>
+    `;
+    row.addEventListener("click", () => selectLine(ln.name));
+    els.palette.appendChild(row);
   }
 }
 
@@ -604,6 +683,15 @@ function redrawOverlay() {
     drawProjectedPitch(ctx);
   }
 
+  // Catalogue landmark name labels — projected onto the frame using the
+  // current camera, so the user can see which painted feature each
+  // catalogue entry corresponds to (e.g. "centre_circle_top",
+  // "right_18yd_far"). Off by default; toggle via the "landmark labels"
+  // checkbox.
+  if (els.showLandmarkLabels && els.showLandmarkLabels.checked) {
+    drawLandmarkLabels(ctx);
+  }
+
   // Draw landmark dots and line annotations if at an anchor frame.
   // Backing-store is in image pixels (see resizeOverlay) so x/y are in
   // image-space coordinates. Stroke widths are scaled by the natural→display
@@ -711,6 +799,41 @@ function drawProjectedPitch(ctx) {
       else ctx.lineTo(proj[0], proj[1]);
     }
     ctx.stroke();
+  }
+}
+
+function drawLandmarkLabels(ctx) {
+  const track = state.cameraTrack;
+  if (!track || !track.frames || track.frames.length === 0) return;
+  if (!state.landmarks || state.landmarks.length === 0) return;
+  const cf = track.frames.find((f) => f.frame === state.frame)
+            || track.frames[Math.min(track.frames.length - 1, state.frame)];
+  if (!cf) return;
+  const K = cf.K, R = cf.R, t = cf.t || track.t_world;
+  if (!K || !R || !t) return;
+
+  const rect = els.overlay.getBoundingClientRect();
+  const scale = state.imageSize[0] > 0 && rect.width > 0
+    ? state.imageSize[0] / rect.width
+    : 1;
+  const dotR = 3 * scale;
+  const W = state.imageSize[0], H = state.imageSize[1];
+
+  ctx.font = `${11 * scale}px -apple-system, Segoe UI, sans-serif`;
+  ctx.lineWidth = 3 * scale;
+  for (const lm of state.landmarks) {
+    const proj = projectPoint(lm.world_xyz, K, R, t);
+    if (!proj) continue;
+    const [u, v] = proj;
+    if (u < 0 || u > W || v < 0 || v > H) continue;
+    ctx.beginPath();
+    ctx.arc(u, v, dotR, 0, 2 * Math.PI);
+    ctx.fillStyle = "rgba(255, 200, 0, 0.85)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.7)";
+    ctx.strokeText(lm.name, u + dotR + 3 * scale, v - 3 * scale);
+    ctx.fillStyle = "rgba(255, 220, 120, 0.95)";
+    ctx.fillText(lm.name, u + dotR + 3 * scale, v - 3 * scale);
   }
 }
 
@@ -917,6 +1040,7 @@ els.saveBtn.addEventListener("click", async () => {
   const payload = {
     clip_id: state.clipId,
     image_size: state.imageSize,
+    stadium: state.stadium || null,
     anchors: [...state.anchors.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([frame, a]) => ({
@@ -983,6 +1107,10 @@ window.addEventListener("resize", () => {
 
 if (els.showPitch) {
   els.showPitch.addEventListener("change", () => redrawOverlay());
+}
+
+if (els.showLandmarkLabels) {
+  els.showLandmarkLabels.addEventListener("change", () => redrawOverlay());
 }
 
 if (els.showAnchors) {

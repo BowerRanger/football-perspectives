@@ -51,6 +51,12 @@ class AnchorSet:
     clip_id: str
     image_size: tuple[int, int]   # (width, height)
     anchors: tuple[Anchor, ...]
+    # Optional reference into config/stadiums.yaml. When set, the anchor
+    # editor and camera stage extend the line catalogue with the
+    # stadium's mowing-stripe entries (see src/utils/stadium_config.py).
+    # Default None for backwards compatibility — older anchors.json files
+    # don't have this key.
+    stadium: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> "AnchorSet":
@@ -93,10 +99,12 @@ class AnchorSet:
             )
             for a in data["anchors"]
         )
+        stadium_raw = data.get("stadium")
         return cls(
             clip_id=str(data["clip_id"]),
             image_size=tuple(data["image_size"]),
             anchors=anchors,
+            stadium=str(stadium_raw) if stadium_raw else None,
         )
 
     def save(self, path: Path) -> None:

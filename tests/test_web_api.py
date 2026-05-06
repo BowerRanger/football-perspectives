@@ -183,3 +183,65 @@ def test_get_pitch_lines_includes_vanishing_lines(client) -> None:
     vs = next(ln for ln in body["lines"] if ln["name"] == "vertical_separator")
     assert vs["world_direction"] == [0.0, 0.0, 1.0]
     assert "world_segment" not in vs or vs.get("world_segment") is None
+
+
+@pytest.mark.integration
+def test_get_stadiums_returns_registry(client) -> None:
+    c, _ = client
+    resp = c.get("/stadiums")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "stadiums" in body
+    ids = [s["id"] for s in body["stadiums"]]
+    # ``default_premier_league`` ships in config/stadiums.yaml
+    assert "default_premier_league" in ids
+
+
+@pytest.mark.integration
+def test_get_pitch_lines_no_stadium_excludes_mow_entries(client) -> None:
+    c, _ = client
+    resp = c.get("/pitch_lines")
+    names = [ln["name"] for ln in resp.json()["lines"]]
+    assert not any(n.startswith("mow_y_") for n in names)
+    assert not any(n.startswith("mow_x_") for n in names)
+
+
+@pytest.mark.integration
+def test_get_pitch_lines_with_stadium_includes_mow_entries(client) -> None:
+    c, _ = client
+    resp = c.get("/pitch_lines", params={"stadium": "default_premier_league"})
+    body = resp.json()
+    names = [ln["name"] for ln in body["lines"]]
+    mow = [n for n in names if n.startswith("mow_y_")]
+    assert mow, "expected at least one mow_y_* entry from default_premier_league"
+    # Default stadium uses width 5.5 from origin 0 → first inner boundary at y=5.5.
+    sample = next(ln for ln in body["lines"] if ln["name"] == "mow_y_5.5")
+    assert sample["world_segment"] == [[0.0, 5.5, 0.0], [105.0, 5.5, 0.0]]
+    assert sample.get("category") == "mowing"
+
+
+@pytest.mark.integration
+def test_get_pitch_lines_with_unknown_stadium_falls_back_to_static(client) -> None:
+    c, _ = client
+    resp = c.get("/pitch_lines", params={"stadium": "no_such_stadium"})
+    names = [ln["name"] for ln in resp.json()["lines"]]
+    assert "halfway_line" in names
+    assert not any(n.startswith("mow_y_") for n in names)
+
+
+@pytest.mark.integration
+def test_post_anchors_round_trips_stadium(client) -> None:
+    c, tmp = client
+    payload = {
+        "clip_id": "play_037",
+        "image_size": [1920, 1080],
+        "stadium": "default_premier_league",
+        "anchors": [{"frame": 0, "landmarks": []}],
+    }
+    resp = c.post("/anchors", json=payload)
+    assert resp.status_code == 200
+    saved = json.loads((tmp / "camera" / "anchors.json").read_text())
+    assert saved["stadium"] == "default_premier_league"
+    # Round-trip via GET
+    got = c.get("/anchors").json()
+    assert got["stadium"] == "default_premier_league"

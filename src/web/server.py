@@ -476,18 +476,51 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         }
 
     @app.get("/pitch_lines")
-    def get_pitch_lines():
+    def get_pitch_lines(stadium: str | None = None):
         from src.utils.pitch_lines_catalogue import (
             LINE_CATALOGUE,
             VANISHING_LINE_CATALOGUE,
         )
+        from src.utils.stadium_config import load_stadiums, mow_stripe_lines
+
         merged: list[dict[str, Any]] = []
         for name, seg in LINE_CATALOGUE.items():
             merged.append({"name": name, "world_segment": [list(seg[0]), list(seg[1])]})
         for name, d in VANISHING_LINE_CATALOGUE.items():
             merged.append({"name": name, "world_direction": list(d)})
+        # When a stadium is supplied, append its dynamic mow-stripe entries
+        # so the editor's Lines palette shows them. Unknown stadium ids
+        # are silently ignored — the user just gets the static catalogue.
+        if stadium:
+            registry = load_stadiums()
+            cfg = registry.get(stadium)
+            if cfg is not None:
+                for name, seg in mow_stripe_lines(cfg).items():
+                    merged.append({
+                        "name": name,
+                        "world_segment": [list(seg[0]), list(seg[1])],
+                        "category": "mowing",
+                    })
         merged.sort(key=lambda x: x["name"])
         return {"lines": merged}
+
+    @app.get("/stadiums")
+    def get_stadiums():
+        """Registry of available stadium ids → display names.
+
+        Drives the anchor editor's stadium dropdown. Returns an empty
+        list when the registry YAML is missing or empty (clips work
+        unchanged, just without dynamic mow stripes).
+        """
+        from src.utils.stadium_config import load_stadiums
+
+        registry = load_stadiums()
+        return {
+            "stadiums": [
+                {"id": cfg.id, "display_name": cfg.display_name}
+                for cfg in sorted(registry.values(), key=lambda c: c.display_name)
+            ]
+        }
 
     @app.get("/anchors")
     def get_anchors():
@@ -504,6 +537,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         clip_id: str
         image_size: tuple[int, int]
         anchors: list[dict[str, Any]]
+        stadium: str | None = None
 
     @app.post("/anchors")
     def post_anchors(payload: AnchorPayload):
@@ -590,6 +624,7 @@ def _anchor_set_to_dict(anchor_set: AnchorSet) -> dict[str, Any]:
     return {
         "clip_id": anchor_set.clip_id,
         "image_size": list(anchor_set.image_size),
+        "stadium": anchor_set.stadium,
         "anchors": [
             {
                 "frame": a.frame,
@@ -680,10 +715,12 @@ def _dict_to_anchor_set(data: dict[str, Any]) -> AnchorSet:
         for a in data.get("anchors", [])
     )
     image_size = tuple(data.get("image_size", (0, 0)))
+    stadium_raw = data.get("stadium")
     return AnchorSet(
         clip_id=str(data.get("clip_id", "")),
         image_size=(int(image_size[0]), int(image_size[1])),
         anchors=anchors,
+        stadium=str(stadium_raw) if stadium_raw else None,
     )
 
 

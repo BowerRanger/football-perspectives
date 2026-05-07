@@ -231,6 +231,7 @@ class CameraStage(BaseStage):
                 if sol.camera_centre is not None
                 else None
             ),
+            distortion=tuple(float(x) for x in sol.distortion),
         )
         track.save(self.output_dir / "camera" / "camera_track.json")
 

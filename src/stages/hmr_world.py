@@ -87,7 +87,18 @@ class HmrWorldStage(BaseStage):
         camera_track = CameraTrack.load(camera_path)
         per_frame_K = {f.frame: np.array(f.K, dtype=float) for f in camera_track.frames}
         per_frame_R = {f.frame: np.array(f.R, dtype=float) for f in camera_track.frames}
-        t_world = np.array(camera_track.t_world, dtype=float)
+        # Per-frame t when available (current camera stage always writes
+        # it). Fall back to clip-shared t_world for legacy tracks. Per-
+        # frame t is essential for static-camera clips where t varies
+        # with R while the body centre stays put.
+        t_world_fallback = np.array(camera_track.t_world, dtype=float)
+        per_frame_t: dict[int, np.ndarray] = {}
+        for f in camera_track.frames:
+            if f.t is not None:
+                per_frame_t[f.frame] = np.array(f.t, dtype=float)
+            else:
+                per_frame_t[f.frame] = t_world_fallback
+        distortion = camera_track.distortion
 
         min_track_frames = int(cfg.get("min_track_frames", 10))
         savgol_window = int(cfg.get("theta_savgol_window", 11))
@@ -154,7 +165,8 @@ class HmrWorldStage(BaseStage):
                 cfg=cfg,
                 per_frame_K=per_frame_K,
                 per_frame_R=per_frame_R,
-                t_world=t_world,
+                per_frame_t=per_frame_t,
+                distortion=distortion,
                 min_track_frames=min_track_frames,
                 savgol_window=savgol_window,
                 savgol_order=savgol_order,
@@ -197,7 +209,8 @@ class HmrWorldStage(BaseStage):
         cfg: dict,
         per_frame_K: dict[int, np.ndarray],
         per_frame_R: dict[int, np.ndarray],
-        t_world: np.ndarray,
+        per_frame_t: dict[int, np.ndarray],
+        distortion: tuple[float, float],
         min_track_frames: int,
         savgol_window: int,
         savgol_order: int,
@@ -301,6 +314,7 @@ class HmrWorldStage(BaseStage):
                 continue
             K = per_frame_K[fi_int]
             R = per_frame_R[fi_int]
+            t = per_frame_t[fi_int]
             kp = kp2d[i]
             left = kp[_COCO_LEFT_ANKLE]
             right = kp[_COCO_RIGHT_ANKLE]
@@ -319,7 +333,8 @@ class HmrWorldStage(BaseStage):
             )
             try:
                 foot_world = ankle_ray_to_pitch(
-                    ankle_uv, K=K, R=R, t=t_world, plane_z=_FOOT_PLANE_Z
+                    ankle_uv, K=K, R=R, t=t,
+                    plane_z=_FOOT_PLANE_Z, distortion=distortion,
                 )
             except ValueError:
                 # Ray parallel to ground — skip this frame.

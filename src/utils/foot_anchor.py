@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.utils.camera_projection import undistort_pixel
+
 
 def ankle_ray_to_pitch(
     uv: np.ndarray | tuple[float, float],
@@ -19,10 +21,19 @@ def ankle_ray_to_pitch(
     R: np.ndarray,
     t: np.ndarray,
     plane_z: float = 0.05,
+    distortion: tuple[float, float] = (0.0, 0.0),
 ) -> np.ndarray:
     """Cast a ray from the camera centre through pixel (u, v) and intersect
-    with the plane z = plane_z. Returns world-frame xyz."""
+    with the plane z = plane_z. Returns world-frame xyz.
+
+    When the camera has non-zero radial ``distortion``, the input pixel is
+    undistorted first so the linear ``K^-1`` back-projection lands on the
+    correct ray. Skipping this step on a distorted lens biases foot
+    positions by tens of centimetres at the far touchline.
+    """
     uv = np.asarray(uv, dtype=float)
+    if distortion != (0.0, 0.0):
+        uv = undistort_pixel(uv, K, distortion)
     # Camera centre in world frame: C = -R^T t.
     C = -R.T @ t
     # Ray direction in world frame: d = R^T K^-1 (u, v, 1).

@@ -20,7 +20,10 @@ tracking:
 camera:
   first_anchor_min_landmarks: 6
   subsequent_anchor_min_landmarks: 4
-  anchor_max_reprojection_px: 10.0
+  # Tightened from 10.0 once lens-distortion modelling and Huber loss were
+  # added — anchors above this px residual surface as low-confidence in the
+  # quality report (soft threshold, not a hard fail).
+  anchor_max_reprojection_px: 2.0
   # Stadium-mounted broadcast cameras don't translate — only pan, tilt,
   # zoom. Locking t prevents the LM from finding K/R/t combinations that
   # reproject anchors well but jump the camera body around in pitch

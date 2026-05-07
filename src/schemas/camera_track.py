@@ -30,6 +30,10 @@ class CameraTrack:
     frames: tuple[CameraFrame, ...]
     # Shared principal point recovered by the bundle adjustment.
     principal_point: tuple[float, float] | None = None
+    # World-frame camera body position when the clip was solved with
+    # static_camera=true. None for moving-camera clips. When present,
+    # every per-frame (R, t) satisfies -R^T @ t == camera_centre.
+    camera_centre: tuple[float, float, float] | None = None
 
     @classmethod
     def load(cls, path: Path) -> "CameraTrack":
@@ -48,6 +52,8 @@ class CameraTrack:
         )
         pp_raw = data.get("principal_point")
         principal_point = tuple(pp_raw) if pp_raw is not None else None
+        cc_raw = data.get("camera_centre")
+        camera_centre = tuple(cc_raw) if cc_raw is not None else None
         return cls(
             clip_id=str(data["clip_id"]),
             fps=float(data["fps"]),
@@ -55,6 +61,7 @@ class CameraTrack:
             t_world=list(data["t_world"]),
             frames=frames,
             principal_point=principal_point,
+            camera_centre=camera_centre,
         )
 
     def save(self, path: Path) -> None:

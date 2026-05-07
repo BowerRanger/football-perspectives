@@ -94,7 +94,7 @@ def test_camera_stage_recovers_anchor_frames_exactly(tmp_path: Path) -> None:
     anchor_set = _build_anchor_set(clip, anchor_frames, _LANDMARK_WORLD)
     anchor_set.save(tmp_path / "camera" / "anchors.json")
 
-    stage = CameraStage(config={"camera": {}}, output_dir=tmp_path)
+    stage = CameraStage(config={"camera": {"static_camera": False}}, output_dir=tmp_path)
     stage.run()
 
     track = CameraTrack.load(tmp_path / "camera" / "camera_track.json")
@@ -139,7 +139,7 @@ def test_camera_stage_recovers_trajectory(tmp_path: Path) -> None:
     anchor_set = _build_anchor_set(clip, anchor_frames, _LANDMARK_WORLD)
     anchor_set.save(tmp_path / "camera" / "anchors.json")
 
-    stage = CameraStage(config={"camera": {}}, output_dir=tmp_path)
+    stage = CameraStage(config={"camera": {"static_camera": False}}, output_dir=tmp_path)
     stage.run()
 
     track = CameraTrack.load(tmp_path / "camera" / "camera_track.json")
@@ -210,7 +210,7 @@ def test_camera_stage_picks_later_anchor_as_primary_when_first_is_thin(
     )
     anchor_set.save(tmp_path / "camera" / "anchors.json")
 
-    stage = CameraStage(config={"camera": {}}, output_dir=tmp_path)
+    stage = CameraStage(config={"camera": {"static_camera": False}}, output_dir=tmp_path)
     stage.run()  # must not raise — frame 20 should be promoted to primary
 
     track = CameraTrack.load(tmp_path / "camera" / "camera_track.json")

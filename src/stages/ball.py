@@ -49,7 +49,14 @@ class BallStage(BaseStage):
         camera = CameraTrack.load(self.output_dir / "camera" / "camera_track.json")
         per_frame_K = {f.frame: np.array(f.K) for f in camera.frames}
         per_frame_R = {f.frame: np.array(f.R) for f in camera.frames}
-        t_world = np.array(camera.t_world)
+        # Per-frame t when present (current camera stage always writes it).
+        # Fall back to clip-shared t_world for legacy tracks.
+        t_world_fallback = np.array(camera.t_world)
+        per_frame_t = {
+            f.frame: (np.array(f.t) if f.t is not None else t_world_fallback)
+            for f in camera.frames
+        }
+        distortion = camera.distortion
 
         ball_track_path = self.output_dir / "tracks" / "ball_track.json"
         with ball_track_path.open() as fh:
@@ -75,8 +82,9 @@ class BallStage(BaseStage):
                 uv,
                 K=per_frame_K[fi],
                 R=per_frame_R[fi],
-                t=t_world,
+                t=per_frame_t[fi],
                 plane_z=ball_radius,
+                distortion=distortion,
             )
             provisional[fi] = (uv, world, float(f.get("confidence", 0.5)))
             if prev_uv is not None:
@@ -113,8 +121,9 @@ class BallStage(BaseStage):
                 obs,
                 Ks=[per_frame_K.get(o[0], np.eye(3)) for o in obs],
                 Rs=[per_frame_R.get(o[0], np.eye(3)) for o in obs],
-                t_world=t_world,
+                t_world=[per_frame_t.get(o[0], t_world_fallback) for o in obs],
                 fps=camera.fps,
+                distortion=distortion,
             )
             if residual > max_residual:
                 continue

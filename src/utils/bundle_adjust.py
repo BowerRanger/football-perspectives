@@ -23,10 +23,11 @@ def fit_parabola_to_image_observations(
     *,
     Ks: list[np.ndarray],
     Rs: list[np.ndarray],
-    t_world: np.ndarray,
+    t_world: np.ndarray | list[np.ndarray],
     fps: float,
     g: float = -9.81,
     max_iter: int = 100,
+    distortion: tuple[float, float] = (0.0, 0.0),
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Fit a 3D parabola to per-frame image observations.
 
@@ -35,15 +36,19 @@ def fit_parabola_to_image_observations(
             time.  ``frame_index`` is the absolute clip frame, used only
             for time deltas; ``Ks`` and ``Rs`` are looked up positionally.
         Ks: position-parallel to ``observations`` — one entry per
-            observation, in the same order. ``Ks[i]`` is the intrinsics
-            for ``observations[i]``.
-        Rs: position-parallel to ``observations`` — one entry per
-            observation. ``Rs[i]`` is the rotation for ``observations[i]``.
-        t_world: clip-shared world translation (3,).
+            observation, in the same order.
+        Rs: position-parallel to ``observations``.
+        t_world: either a clip-shared (3,) translation or a list of
+            per-frame (3,) translations parallel to ``observations``.
+            Use the per-frame form for static-camera clips where ``t``
+            varies with the SLERP'd ``R``.
         fps: frame rate.
         g: gravity along world-z (default -9.81 m/s^2).
         max_iter: LM iteration cap (passed through to scipy as
             ``max_nfev = max_iter * 50``).
+        distortion: (k1, k2) radial distortion. Default ``(0, 0)``;
+            non-zero values undistort each image observation before
+            measuring reprojection residuals.
 
     Returns:
         ``(p0, v0, mean_residual_px)`` where ``mean_residual_px`` is
@@ -56,13 +61,27 @@ def fit_parabola_to_image_observations(
     dt = (frame_idx - frame_idx[0]) / fps
     g_vec = np.array([0.0, 0.0, g])
 
+    # Normalise t_world to per-observation form so the residual loop is uniform.
+    n_obs = len(observations)
+    if isinstance(t_world, list) or (
+        isinstance(t_world, np.ndarray) and t_world.ndim == 2
+    ):
+        ts = [np.asarray(t, dtype=float) for t in t_world]
+        if len(ts) != n_obs:
+            raise ValueError(
+                f"per-frame t_world has {len(ts)} entries, expected {n_obs}"
+            )
+    else:
+        t_shared = np.asarray(t_world, dtype=float)
+        ts = [t_shared] * n_obs
+
     def _residuals(params: np.ndarray) -> np.ndarray:
         p0 = params[:3]
         v0 = params[3:6]
         pts = p0 + np.outer(dt, v0) + 0.5 * np.outer(dt ** 2, g_vec)
         residuals = []
-        for i in range(len(observations)):
-            cam = Rs[i] @ pts[i] + t_world
+        for i in range(n_obs):
+            cam = Rs[i] @ pts[i] + ts[i]
             pix = Ks[i] @ cam
             uv = pix[:2] / pix[2]
             residuals.append(uv - obs_array[i])
@@ -75,15 +94,17 @@ def fit_parabola_to_image_observations(
         observations[0][1],
         K=Ks[0],
         R=Rs[0],
-        t=t_world,
+        t=ts[0],
         plane_z=0.5,
+        distortion=distortion,
     )
     p_end = ankle_ray_to_pitch(
         observations[-1][1],
         K=Ks[-1],
         R=Rs[-1],
-        t=t_world,
+        t=ts[-1],
         plane_z=0.5,
+        distortion=distortion,
     )
     duration = dt[-1] if dt[-1] > 0 else 1.0
     v_horiz = (p_end - p_start) / duration

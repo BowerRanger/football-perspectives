@@ -786,6 +786,7 @@ function drawProjectedPitch(ctx) {
   // Prefer per-frame t (CameraFrame.t) when present; fall back to the
   // clip-shared t_world for older camera_track.json files.
   const K = cf.K, R = cf.R, t = cf.t || track.t_world;
+  const distortion = track.distortion || [0, 0];
   if (!K || !R || !t) return;
 
   const polylines = pitchPolylines();
@@ -795,7 +796,7 @@ function drawProjectedPitch(ctx) {
     ctx.beginPath();
     let drawing = false;
     for (const p of poly) {
-      const proj = projectPoint(p, K, R, t);
+      const proj = projectPoint(p, K, R, t, distortion);
       if (!proj) { drawing = false; continue; }
       if (!drawing) { ctx.moveTo(proj[0], proj[1]); drawing = true; }
       else ctx.lineTo(proj[0], proj[1]);
@@ -812,6 +813,7 @@ function drawLandmarkLabels(ctx) {
             || track.frames[Math.min(track.frames.length - 1, state.frame)];
   if (!cf) return;
   const K = cf.K, R = cf.R, t = cf.t || track.t_world;
+  const distortion = track.distortion || [0, 0];
   if (!K || !R || !t) return;
 
   const rect = els.overlay.getBoundingClientRect();
@@ -824,7 +826,7 @@ function drawLandmarkLabels(ctx) {
   ctx.font = `${11 * scale}px -apple-system, Segoe UI, sans-serif`;
   ctx.lineWidth = 3 * scale;
   for (const lm of state.landmarks) {
-    const proj = projectPoint(lm.world_xyz, K, R, t);
+    const proj = projectPoint(lm.world_xyz, K, R, t, distortion);
     if (!proj) continue;
     const [u, v] = proj;
     if (u < 0 || u > W || v < 0 || v > H) continue;
@@ -839,7 +841,23 @@ function drawLandmarkLabels(ctx) {
   }
 }
 
-function projectPoint(p, K, R, t) {
+function applyRadialDistortion(uv, distortion, K) {
+  // OpenCV-compatible 2-coefficient radial distortion. Returns the
+  // distorted pixel (u', v') given the linear-pinhole projection (u, v).
+  // Used to make the projected pitch overlay match the raw video frame
+  // when the camera has non-zero radial distortion.
+  if (!distortion || (distortion[0] === 0 && distortion[1] === 0)) return uv;
+  const fx = K[0][0], fy = K[1][1];
+  const cx = K[0][2], cy = K[1][2];
+  const x = (uv[0] - cx) / fx;
+  const y = (uv[1] - cy) / fy;
+  const r2 = x * x + y * y;
+  const k1 = distortion[0], k2 = distortion[1];
+  const factor = 1 + k1 * r2 + k2 * r2 * r2;
+  return [cx + fx * x * factor, cy + fy * y * factor];
+}
+
+function projectPoint(p, K, R, t, distortion) {
   // OpenCV extrinsic convention (matches src/utils/anchor_solver.py): R is
   // world->camera rotation, t is the world-frame origin expressed in the
   // camera frame. So the camera-frame point is cam = R @ P + t — NOT
@@ -850,7 +868,7 @@ function projectPoint(p, K, R, t) {
   if (cz <= 0.05) return null;
   const u = (K[0][0]*cx + K[0][1]*cy + K[0][2]*cz) / cz;
   const v = (K[1][0]*cx + K[1][1]*cy + K[1][2]*cz) / cz;
-  return [u, v];
+  return applyRadialDistortion([u, v], distortion, K);
 }
 
 // FIFA pitch outline (subset — enough to verify camera registration).

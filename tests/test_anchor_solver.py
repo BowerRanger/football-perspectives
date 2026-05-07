@@ -15,6 +15,7 @@ from src.schemas.anchor import (
 )
 from src.utils.anchor_solver import (
     AnchorSolveError,
+    refine_with_shared_translation,
     reprojection_residual_for_anchor,
     solve_anchors_jointly,
 )
@@ -583,3 +584,81 @@ def test_mow_stripe_line_drives_solo_solve_to_correct_translation():
         f"frame 100: |C_hat - C_true| = {err:.2f} m "
         f"(C_hat={C_hat}, C_true={C_true})"
     )
+
+
+
+# ── Static-camera invariant tests (Phase 1) ─────────────────────────────────
+
+
+_C_WORLD: np.ndarray = np.array([52.5, -30.0, 30.0])
+"""World-frame camera body position used by the static-camera tests."""
+
+
+def _t_for_yaw(angle_deg: float) -> np.ndarray:
+    """Translation that places the yawed camera at ``_C_WORLD``."""
+    return -_yaw(angle_deg) @ _C_WORLD
+
+
+def _three_rich_anchors_static() -> tuple[Anchor, ...]:
+    """Three rich anchors at yaw 0/+5/-5° with a shared world-frame camera centre.
+
+    Unlike the existing ``_rich_anchor(_, _yaw(...), T_BASE, ...)`` pattern
+    (which holds OpenCV ``t`` constant while rotating R, and so silently
+    moves the camera body), this fixture rotates only R and recomputes
+    ``t = -R @ C`` so every anchor truly shares the same body position.
+    """
+    K = _K()
+    out: list[Anchor] = []
+    for frame, yaw in ((0, 0.0), (60, 5.0), (120, -5.0)):
+        R = _yaw(yaw)
+        t = _t_for_yaw(yaw)
+        out.append(_rich_anchor(K, R, t, frame))
+    return tuple(out)
+
+
+@pytest.mark.unit
+def test_joint_solution_carries_camera_centre():
+    """After ``refine_with_shared_translation``, the JointSolution exposes
+    the locked camera centre, and every per-anchor (R, t) satisfies
+    ``-R^T @ t == C`` to floating-point precision."""
+    anchors = _three_rich_anchors_static()
+    sol = solve_anchors_jointly(anchors, image_size=IMAGE_SIZE)
+    sol = refine_with_shared_translation(anchors, sol)
+
+    assert sol.camera_centre is not None, "camera_centre missing on JointSolution"
+    C = np.asarray(sol.camera_centre)
+    for af, (_K_a, R_a, t_a) in sol.per_anchor_KRt.items():
+        recovered = -R_a.T @ t_a
+        assert np.allclose(recovered, C, atol=1e-4), (
+            f"anchor {af}: -R^T @ t = {recovered} != C = {C}"
+        )
+
+
+@pytest.mark.unit
+def test_relock_does_not_silently_fall_back(caplog):
+    """When a single anchor's true camera centre disagrees with the rest by
+    several metres, the relock still returns a solution that honours the
+    locked C across every anchor (no silent fallback to per-anchor t)."""
+    import logging
+
+    base = _three_rich_anchors_static()
+    # Replace the middle anchor with one whose true camera centre is shifted
+    # +5m laterally — this provokes a high relock residual.
+    K = _K()
+    R_bad = _yaw(5.0)
+    C_bad = _C_WORLD + np.array([5.0, 0.0, 0.0])
+    t_bad = -R_bad @ C_bad
+    bad_anchor = _rich_anchor(K, R_bad, t_bad, 60)
+    inconsistent = (base[0], bad_anchor, base[2])
+
+    sol = solve_anchors_jointly(inconsistent, image_size=IMAGE_SIZE)
+    with caplog.at_level(logging.ERROR, logger="src.utils.anchor_solver"):
+        relocked = refine_with_shared_translation(inconsistent, sol)
+
+    assert relocked.camera_centre is not None
+    C = np.asarray(relocked.camera_centre)
+    for af, (_K_a, R_a, t_a) in relocked.per_anchor_KRt.items():
+        recovered = -R_a.T @ t_a
+        assert np.allclose(recovered, C, atol=1e-4), (
+            f"anchor {af}: -R^T @ t = {recovered} != C = {C} (silent fallback?)"
+        )

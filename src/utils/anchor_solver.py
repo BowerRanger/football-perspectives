@@ -67,6 +67,10 @@ class JointSolution(NamedTuple):
     anchor independently gives much tighter per-anchor calibration.
     """
     per_anchor_residual_px: dict[int, float]                       # frame -> mean px
+    camera_centre: np.ndarray | None = None
+    """World-frame camera body position when the static-camera relock has
+    been applied. ``None`` for un-relocked solutions. When set, every
+    per-anchor (R, t) satisfies ``-R^T @ t == camera_centre``."""
 
 
 # Public utilities ------------------------------------------------------------
@@ -216,6 +220,7 @@ def refine_with_shared_translation(
         principal_point=(cx, cy),
         per_anchor_KRt=new_KRt,
         per_anchor_residual_px=new_res,
+        camera_centre=C_locked.copy(),
     )
 
 

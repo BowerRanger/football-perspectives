@@ -181,20 +181,23 @@ def refine_with_shared_translation(
 
     new_mean = float(np.mean(list(new_res.values())))
     old_mean = float(np.mean(list(sol.per_anchor_residual_px.values())))
-    # The static-C residual is often higher than the per-anchor residual
-    # because thin / collinear anchors had artificially-low residuals
-    # (their solo solves overfit) that get exposed once C is fixed. The
-    # rich-anchor median C is the honest answer, so don't reject lightly.
-    # Only fall back if the result is *catastrophic* (>10× original) —
-    # that level usually indicates the camera really did move.
+    # If the static-C residual blows up by >10× the original, the camera
+    # body genuinely moves (or anchors disagree on C). Surface this as an
+    # ERROR but DO NOT silently fall back to the un-relocked solution —
+    # falling back invisibly breaks the static-camera contract that every
+    # anchor satisfies -R^T @ t == C. Better to ship a relocked solution
+    # the user can inspect than a moving one they can't see.
     if new_mean > 10.0 * max(old_mean, 1.0):
-        logger.warning(
-            "static-camera relock rejected: residual %.2f px ≫ original %.2f px. "
-            "Camera centre median over %d %s anchors was (%.1f, %.1f, %.1f). "
-            "Set camera.static_camera=false if the camera body actually moves.",
-            new_mean, old_mean, seed_n, seed_pool, *C_locked,
+        worst = sorted(new_res.items(), key=lambda kv: -kv[1])[:3]
+        logger.error(
+            "static-camera relock produced mean residual %.2f px (was %.2f px "
+            "before relock). Camera centre median over %d %s anchors was "
+            "(%.1f, %.1f, %.1f). Worst offenders (frame, residual_px): %s. "
+            "Continuing with relocked solution to honour the static-camera "
+            "contract; if the camera body actually moves, set "
+            "camera.static_camera=false in config.",
+            new_mean, old_mean, seed_n, seed_pool, *C_locked, worst,
         )
-        return sol
 
     logger.info(
         "static-camera relock: locked camera centre to (%.2f, %.2f, %.2f) "

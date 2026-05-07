@@ -71,6 +71,10 @@ class JointSolution(NamedTuple):
     """World-frame camera body position when the static-camera relock has
     been applied. ``None`` for un-relocked solutions. When set, every
     per-anchor (R, t) satisfies ``-R^T @ t == camera_centre``."""
+    distortion: tuple[float, float] = (0.0, 0.0)
+    """Clip-shared radial distortion (k1, k2). Default (0, 0) for
+    solutions produced before lens distortion was added to the model.
+    Bounded to ``|k| < 0.5`` by the joint LM."""
 
 
 # Public utilities ------------------------------------------------------------
@@ -224,6 +228,7 @@ def refine_with_shared_translation(
         per_anchor_KRt=new_KRt,
         per_anchor_residual_px=new_res,
         camera_centre=C_locked.copy(),
+        distortion=sol.distortion,
     )
 
 
@@ -888,6 +893,136 @@ def _interp_t(
     return t_by_frame[rich_frames[0]].copy()
 
 
+def _refine_joint_distortion(
+    anchors: tuple[Anchor, ...],
+    per_anchor_KRt: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    cx: float,
+    cy: float,
+) -> tuple[
+    dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    tuple[float, float],
+    dict[int, float],
+]:
+    """Final joint LM: shared (k1, k2), per-anchor (rvec, t, fx).
+
+    ``cx, cy`` are held fixed at the joint-solve seed. Per-anchor ``t`` is
+    free here so the LM can disambiguate distortion from pose; the static-
+    camera relock that follows reconstrains ``t = -R @ C`` if requested.
+
+    Uses ``cv2.projectPoints`` so distortion is honoured natively. Huber
+    loss dampens outlier landmarks/lines.
+
+    Returns refined per-anchor (K, R, t), recovered (k1, k2), and per-anchor
+    point-only mean reprojection residuals (in pixels) under the refined
+    pose AND distortion.
+    """
+    qualifying = [a for a in anchors if a.frame in per_anchor_KRt]
+    if not qualifying:
+        return per_anchor_KRt, (0.0, 0.0), {}
+
+    rvecs_init: list[np.ndarray] = []
+    fxs_init: list[float] = []
+    ts_init: list[np.ndarray] = []
+    for a in qualifying:
+        K_a, R_a, t_a = per_anchor_KRt[a.frame]
+        rv_a, _ = cv2.Rodrigues(R_a.astype(np.float64))
+        rvecs_init.append(rv_a.flatten().copy())
+        fxs_init.append(float(K_a[0, 0]))
+        ts_init.append(t_a.astype(np.float64).copy())
+
+    # Param layout: [k1, k2, rvec_0(3), tvec_0(3), fx_0, ...] — 7 per anchor.
+    PER = 7
+    n = len(qualifying)
+    p0 = np.empty(2 + PER * n)
+    p0[:2] = 0.0
+    for i, (rv, t_a, fx) in enumerate(zip(rvecs_init, ts_init, fxs_init)):
+        base = 2 + i * PER
+        p0[base : base + 3] = rv
+        p0[base + 3 : base + 6] = t_a
+        p0[base + 6] = fx
+
+    def _residuals_joint(p: np.ndarray) -> np.ndarray:
+        k1 = float(p[0])
+        k2 = float(p[1])
+        parts: list[np.ndarray] = []
+        for i, anchor in enumerate(qualifying):
+            base = 2 + i * PER
+            rv = p[base : base + 3]
+            t_i = p[base + 3 : base + 6]
+            fx = float(np.clip(p[base + 6], 50.0, 1e5))
+            R_i, _ = cv2.Rodrigues(rv)
+            K_i = _make_K(fx, cx, cy)
+            if anchor.landmarks:
+                parts.append(_point_residuals_distorted(
+                    list(anchor.landmarks), K_i, rv, t_i, (k1, k2),
+                ))
+            if anchor.lines:
+                parts.append(_line_residuals(list(anchor.lines), K_i, R_i, t_i))
+        return np.concatenate(parts) if parts else np.empty(0)
+
+    try:
+        result = least_squares(
+            _residuals_joint, p0,
+            method="trf", loss="huber", f_scale=2.0, max_nfev=500,
+        )
+    except Exception as exc:
+        logger.warning("joint distortion refinement failed: %s", exc)
+        return per_anchor_KRt, (0.0, 0.0), {}
+
+    k1 = float(np.clip(result.x[0], -0.5, 0.5))
+    k2 = float(np.clip(result.x[1], -0.5, 0.5))
+    new_KRt: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = dict(
+        per_anchor_KRt
+    )
+    new_residuals: dict[int, float] = {}
+    for i, anchor in enumerate(qualifying):
+        base = 2 + i * PER
+        rv = result.x[base : base + 3]
+        t_i = result.x[base + 3 : base + 6].copy()
+        fx = float(np.clip(result.x[base + 6], 50.0, 1e5))
+        R_i, _ = cv2.Rodrigues(rv)
+        K_i = _make_K(fx, cx, cy)
+        new_KRt[anchor.frame] = (K_i, R_i, t_i)
+        if anchor.landmarks:
+            r = _point_residuals_distorted(
+                list(anchor.landmarks), K_i, rv, t_i, (k1, k2),
+            ).reshape(-1, 2)
+            new_residuals[anchor.frame] = float(
+                np.mean(np.linalg.norm(r, axis=1))
+            )
+        else:
+            new_residuals[anchor.frame] = 0.0
+    return new_KRt, (k1, k2), new_residuals
+
+
+def _point_residuals_distorted(
+    points: list[LandmarkObservation],
+    K: np.ndarray,
+    rvec: np.ndarray,
+    t: np.ndarray,
+    distortion: tuple[float, float],
+) -> np.ndarray:
+    """Per-point reprojection residuals using ``cv2.projectPoints`` so that
+    radial distortion is honoured. 2 residuals per point. Used by the joint
+    distortion-refinement LM."""
+    if not points:
+        return np.empty(0)
+    world = np.array([lm.world_xyz for lm in points], dtype=np.float64).reshape(
+        -1, 1, 3,
+    )
+    obs = np.array([lm.image_xy for lm in points], dtype=np.float64)
+    k1, k2 = distortion
+    dist = np.array([k1, k2, 0.0, 0.0, 0.0], dtype=np.float64)
+    proj, _ = cv2.projectPoints(
+        world,
+        np.asarray(rvec, dtype=np.float64).reshape(3, 1),
+        np.asarray(t, dtype=np.float64).reshape(3, 1),
+        K.astype(np.float64),
+        dist,
+    )
+    return (proj.reshape(-1, 2) - obs).reshape(-1)
+
+
 def solve_anchors_jointly(
     anchors: tuple[Anchor, ...],
     image_size: tuple[int, int],
@@ -1032,10 +1167,28 @@ def solve_anchors_jointly(
     t_world_median = np.median(ts_rich, axis=0)
 
     logger.info(
-        "hybrid solve: %d total (%d rich solo + %d thin t-interpolated), "
+        "hybrid solve (pre-distortion): %d total (%d rich solo + %d thin t-fixed), "
         "t_world median=[%.2f, %.2f, %.2f], mean residual=%.2f px",
         len(per_anchor_KRt), len(rich_t),
         len(per_anchor_KRt) - len(rich_t), *t_world_median,
+        float(np.mean(list(per_anchor_res.values()))) if per_anchor_res else 0.0,
+    )
+
+    # ── Pass 3: joint LM to recover shared (k1, k2) and refine (R, fx). ──
+    # Per-anchor t held fixed at the solo-solved value; cx/cy held at seed.
+    # This is where the broadcast lens's ~1–3% radial bias gets removed.
+    per_anchor_KRt, distortion, per_anchor_res_post = _refine_joint_distortion(
+        qualifying, per_anchor_KRt, cx, cy,
+    )
+    # Use post-distortion residuals where available (they're measured under
+    # refined pose + recovered distortion); fall back for any anchor not
+    # touched by the joint LM.
+    for af, res in per_anchor_res_post.items():
+        per_anchor_res[af] = res
+
+    logger.info(
+        "joint distortion refine: k1=%+.4f, k2=%+.4f, mean residual=%.2f px",
+        distortion[0], distortion[1],
         float(np.mean(list(per_anchor_res.values()))) if per_anchor_res else 0.0,
     )
 
@@ -1044,4 +1197,5 @@ def solve_anchors_jointly(
         principal_point=(cx, cy),
         per_anchor_KRt=per_anchor_KRt,
         per_anchor_residual_px=per_anchor_res,
+        distortion=distortion,
     )

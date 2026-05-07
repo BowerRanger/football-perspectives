@@ -662,3 +662,48 @@ def test_relock_does_not_silently_fall_back(caplog):
         assert np.allclose(recovered, C, atol=1e-4), (
             f"anchor {af}: -R^T @ t = {recovered} != C = {C} (silent fallback?)"
         )
+
+
+# ── Lens distortion + Huber tests (Phase 2) ─────────────────────────────────
+
+
+@pytest.mark.unit
+def test_joint_solver_recovers_radial_distortion():
+    """Synthesise observations with known (k1, k2); the joint LM recovers them."""
+    from src.utils.camera_projection import project_world_to_image
+
+    K_true = _K()
+    k1_true, k2_true = 0.10, -0.02
+    rich_pts = [
+        ("near_left_corner",          (0.0,    0.0,   0.0)),
+        ("near_right_corner",         (105.0,  0.0,   0.0)),
+        ("far_left_corner",           (0.0,    68.0,  0.0)),
+        ("far_right_corner",          (105.0,  68.0,  0.0)),
+        ("halfway_near",              (52.5,   0.0,   0.0)),
+        ("near_left_corner_flag_top", (0.0,    0.0,   1.5)),
+        ("left_goal_crossbar_left",   (0.0,    30.34, 2.44)),
+        ("left_goal_crossbar_right",  (0.0,    37.66, 2.44)),
+    ]
+    pts_world = np.array([w for _, w in rich_pts], dtype=np.float64)
+    anchors: list[Anchor] = []
+    for frame, yaw in ((0, 0.0), (60, 5.0), (120, -5.0)):
+        R = _yaw(yaw)
+        t = _t_for_yaw(yaw)
+        proj = project_world_to_image(K_true, R, t, (k1_true, k2_true), pts_world)
+        anchors.append(Anchor(
+            frame=frame,
+            landmarks=tuple(
+                LandmarkObservation(
+                    name=n, image_xy=tuple(proj[i]), world_xyz=w,
+                )
+                for i, (n, w) in enumerate(rich_pts)
+            ),
+        ))
+
+    sol = solve_anchors_jointly(tuple(anchors), image_size=IMAGE_SIZE)
+    sol = refine_with_shared_translation(tuple(anchors), sol)
+
+    assert sol.distortion is not None
+    k1_est, k2_est = sol.distortion
+    assert abs(k1_est - k1_true) < 0.03, f"k1: got {k1_est}, want {k1_true}"
+    assert abs(k2_est - k2_true) < 0.03, f"k2: got {k2_est}, want {k2_true}"

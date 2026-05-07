@@ -88,6 +88,10 @@ def test_quality_report_aggregates_three_stages(tmp_path: Path) -> None:
     assert report["camera"]["low_confidence_frame_ranges"] == [[8, 10]]
     assert "mean_anchor_residual_px" in report["camera"]
     assert isinstance(report["camera"]["mean_anchor_residual_px"], float)
+    # body_drift_max_m is reported as None when the track has no
+    # camera_centre (moving-camera clip) and as a float otherwise.
+    assert "body_drift_max_m" in report["camera"]
+    assert report["camera"]["body_drift_max_m"] is None
 
     # HMR section
     assert report["hmr_world"]["tracked_players"] == 1
@@ -106,3 +110,50 @@ def test_quality_report_handles_empty_dir(tmp_path: Path) -> None:
     write_quality_report(tmp_path)
     report = json.loads((tmp_path / "quality_report.json").read_text())
     assert report == {}
+
+
+@pytest.mark.unit
+def test_quality_report_body_drift_for_static_camera(tmp_path: Path) -> None:
+    """When camera_centre is set on the track, body_drift_max_m is the
+    worst ||(-R^T @ t) - C|| across frames."""
+    AnchorSet(
+        clip_id="play",
+        image_size=(1280, 720),
+        anchors=(
+            Anchor(
+                frame=0,
+                landmarks=(
+                    LandmarkObservation(
+                        name="x", image_xy=(0.0, 0.0), world_xyz=(0.0, 0.0, 0.0),
+                    ),
+                ),
+            ),
+        ),
+    ).save(tmp_path / "camera" / "anchors.json")
+
+    eye = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    C = (52.5, -30.0, 30.0)
+    # Frame 0: t such that -R^T @ t == C exactly.
+    t0 = [-C[0], -C[1], -C[2]]                 # R = I, so t = -C
+    # Frame 1: a deliberately drifted t to verify the metric picks it up.
+    drift = 0.4
+    t1 = [-C[0] + drift, -C[1], -C[2]]         # body shifted by 0.4 m in x
+    CameraTrack(
+        clip_id="play",
+        fps=30.0,
+        image_size=(1280, 720),
+        t_world=t0,
+        frames=(
+            CameraFrame(
+                frame=0, K=eye, R=eye, confidence=1.0, is_anchor=True, t=t0,
+            ),
+            CameraFrame(
+                frame=1, K=eye, R=eye, confidence=0.7, is_anchor=False, t=t1,
+            ),
+        ),
+        camera_centre=C,
+    ).save(tmp_path / "camera" / "camera_track.json")
+
+    write_quality_report(tmp_path)
+    report = json.loads((tmp_path / "quality_report.json").read_text())
+    assert report["camera"]["body_drift_max_m"] == pytest.approx(drift, abs=1e-6)

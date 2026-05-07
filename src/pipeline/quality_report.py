@@ -59,6 +59,22 @@ def write_quality_report(output_dir: Path) -> None:
                     float(np.linalg.norm(np.array(lm.image_xy) - proj))
                 )
 
+        # Static-camera contract: with cam.camera_centre set, every frame's
+        # -R^T @ t must equal that centre. Surface the worst drift so a
+        # regression in the inter-anchor interpolation can't slip past us.
+        if cam.camera_centre is not None:
+            C = np.asarray(cam.camera_centre, dtype=float)
+            drifts: list[float] = []
+            for f in cam.frames:
+                if f.t is None:
+                    continue
+                R = np.asarray(f.R, dtype=float)
+                t = np.asarray(f.t, dtype=float)
+                drifts.append(float(np.linalg.norm(-R.T @ t - C)))
+            body_drift_max_m: float | None = max(drifts) if drifts else 0.0
+        else:
+            body_drift_max_m = None
+
         report["camera"] = {
             "anchor_count": len(anchors.anchors),
             "low_confidence_frame_count": int(low_mask.sum()),
@@ -66,6 +82,7 @@ def write_quality_report(output_dir: Path) -> None:
             "mean_anchor_residual_px": (
                 float(np.mean(anchor_residuals)) if anchor_residuals else 0.0
             ),
+            "body_drift_max_m": body_drift_max_m,
         }
 
     hmr_dir = output_dir / "hmr_world"

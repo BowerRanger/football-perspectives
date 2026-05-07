@@ -16,7 +16,10 @@
   #info { font-size: 12px; color: #94a3b8; min-width: 140px; text-align: right; }
   #sidebar { position: absolute; top: 10px; right: 10px; background: rgba(26,29,39,0.92); border-radius: 8px; padding: 12px; font-size: 12px; max-height: 60vh; overflow-y: auto; z-index: 10; min-width: 180px; }
   #sidebar h4 { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; font-weight: 600; }
-  .player-row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 3px; }
+  .player-row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 3px; cursor: pointer; }
+  .player-row:hover { background: #2d3148; }
+  .player-row.active { background: #4f46e5; }
+  .player-row.active .player-name { color: #fff; }
   .player-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
   .player-name { font-size: 11px; color: #cbd5e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   select { background: #334155; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; padding: 4px 8px; font-size: 12px; }
@@ -141,10 +144,148 @@ let playing = false;
 let speed = 1;
 let showBall = true;
 let fps = 25;
+// When a player is selected from the sidebar, OrbitControls.target is
+// retargeted to that player's pelvis on every frame (camera follows
+// them as the timeline plays). null = back to pitch centre / preset.
+let selectedPlayerId = null;
 
-// Player markers, keyed by player_id. Each entry stores the per-frame
-// pelvis (root_t) positions and a Three.js mesh group.
-const playerObjects = new Map();   // player_id -> { mesh, frames, root_t, confidence, label }
+// Player skeletons, keyed by player_id. Each entry stores the per-frame
+// SMPL pose (thetas + root_R + root_t) plus the Three.js LineSegments
+// used to render the live skeleton.
+const playerObjects = new Map();
+//   player_id -> {
+//     skel,        // THREE.LineSegments (the bones)
+//     joints,      // THREE.Points (joint dots)
+//     posBuf,      // Float32Array, bone endpoints (length = SMPL_BONES.length * 6)
+//     jointBuf,    // Float32Array, joint positions (length = 24 * 3)
+//     frames,      // [int]
+//     root_t,      // [[x,y,z]]
+//     root_R,      // [[[3x3]]]
+//     thetas,      // [[[24][3]]] axis-angle
+//     confidence,  // [float]
+//   }
+
+// ── SMPL skeleton: parents, bones, T-pose joint offsets ────────────
+// 24-joint SMPL hierarchy. ``parent[0] = -1`` (root).
+const SMPL_PARENTS = [
+  -1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9,
+  12, 13, 14, 16, 17, 18, 19, 20, 21,
+];
+// Bones to draw: every (parent → child) pair. Drawn as LineSegments,
+// so the buffer is laid out [a.xyz, b.xyz, a.xyz, b.xyz, ...] per pair.
+const SMPL_BONES = SMPL_PARENTS
+  .map((p, i) => [p, i])
+  .filter((pair) => pair[0] >= 0);
+// SMPL T-pose joint positions in **standard SMPL canonical (y-up)**
+// space, neutral shape, pelvis at origin. ``root_R`` (computed by
+// hmr_world via the corrected bridge in ``smpl_pitch_transform.py``)
+// maps SMPL canonical y-up directly to pitch z-up, so the FK runs in
+// canonical SMPL all the way through and pitch-world positions only
+// appear when ``root_R`` is applied at the root.
+const SMPL_J_REST = [
+  [ 0.000,  0.000,  0.000],  // 0  pelvis
+  [ 0.060, -0.087, -0.013],  // 1  l_hip
+  [-0.060, -0.087, -0.013],  // 2  r_hip
+  [ 0.001,  0.108, -0.027],  // 3  spine1
+  [ 0.099, -0.494, -0.001],  // 4  l_knee
+  [-0.099, -0.494, -0.001],  // 5  r_knee
+  [ 0.002,  0.246,  0.018],  // 6  spine2
+  [ 0.087, -0.882, -0.038],  // 7  l_ankle
+  [-0.087, -0.882, -0.038],  // 8  r_ankle
+  [ 0.000,  0.300,  0.060],  // 9  spine3
+  [ 0.117, -0.939,  0.071],  // 10 l_foot
+  [-0.117, -0.939,  0.071],  // 11 r_foot
+  [ 0.000,  0.518,  0.013],  // 12 neck
+  [ 0.084,  0.474,  0.008],  // 13 l_collar
+  [-0.084,  0.474,  0.008],  // 14 r_collar
+  [ 0.000,  0.609,  0.052],  // 15 head
+  [ 0.184,  0.427, -0.012],  // 16 l_shoulder
+  [-0.184,  0.427, -0.012],  // 17 r_shoulder
+  [ 0.448,  0.426, -0.039],  // 18 l_elbow
+  [-0.448,  0.426, -0.039],  // 19 r_elbow
+  [ 0.711,  0.420, -0.046],  // 20 l_wrist
+  [-0.711,  0.420, -0.046],  // 21 r_wrist
+  [ 0.789,  0.418, -0.034],  // 22 l_hand
+  [-0.789,  0.418, -0.034],  // 23 r_hand
+];
+
+// Local offset from each joint to its parent in T-pose (parent's frame
+// at rest = canonical frame). Pre-computed by diff so the per-frame
+// FK only does matrix algebra.
+const SMPL_LOCAL_OFFSET = SMPL_J_REST.map((p, i) => {
+  const par = SMPL_PARENTS[i];
+  if (par < 0) return [0, 0, 0];
+  const q = SMPL_J_REST[par];
+  return [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+});
+
+// Rodrigues' formula: 3-vector axis-angle → 3×3 rotation.
+function aaToMat(aa) {
+  const x = aa[0], y = aa[1], z = aa[2];
+  const theta = Math.hypot(x, y, z);
+  if (theta < 1e-9) return [[1,0,0],[0,1,0],[0,0,1]];
+  const ux = x/theta, uy = y/theta, uz = z/theta;
+  const c = Math.cos(theta), s = Math.sin(theta), C = 1 - c;
+  return [
+    [c + ux*ux*C,    ux*uy*C - uz*s, ux*uz*C + uy*s],
+    [uy*ux*C + uz*s, c + uy*uy*C,    uy*uz*C - ux*s],
+    [uz*ux*C - uy*s, uz*uy*C + ux*s, c + uz*uz*C],
+  ];
+}
+function matMul3(A, B) {
+  const r0 = [
+    A[0][0]*B[0][0]+A[0][1]*B[1][0]+A[0][2]*B[2][0],
+    A[0][0]*B[0][1]+A[0][1]*B[1][1]+A[0][2]*B[2][1],
+    A[0][0]*B[0][2]+A[0][1]*B[1][2]+A[0][2]*B[2][2],
+  ];
+  const r1 = [
+    A[1][0]*B[0][0]+A[1][1]*B[1][0]+A[1][2]*B[2][0],
+    A[1][0]*B[0][1]+A[1][1]*B[1][1]+A[1][2]*B[2][1],
+    A[1][0]*B[0][2]+A[1][1]*B[1][2]+A[1][2]*B[2][2],
+  ];
+  const r2 = [
+    A[2][0]*B[0][0]+A[2][1]*B[1][0]+A[2][2]*B[2][0],
+    A[2][0]*B[0][1]+A[2][1]*B[1][1]+A[2][2]*B[2][1],
+    A[2][0]*B[0][2]+A[2][1]*B[1][2]+A[2][2]*B[2][2],
+  ];
+  return [r0, r1, r2];
+}
+function matVec3(M, v) {
+  return [
+    M[0][0]*v[0] + M[0][1]*v[1] + M[0][2]*v[2],
+    M[1][0]*v[0] + M[1][1]*v[1] + M[1][2]*v[2],
+    M[2][0]*v[0] + M[2][1]*v[1] + M[2][2]*v[2],
+  ];
+}
+
+// SMPL forward kinematics for one frame. Returns joints (24,3) in
+// pitch-world coordinates. No cosmetic corrections — what hmr_world
+// emitted is what gets rendered, so any wrongness is visible and
+// diagnosable rather than masked.
+//   thetas: (24, 3) axis-angle. theta[0] is intentionally ignored —
+//           ``root_R`` already carries the pitch-frame root orientation.
+//   root_R: (3, 3) world rotation of the root joint (pitch frame).
+//   root_t: (3,)   world position of the root joint (pitch frame).
+function smplFK(thetas, root_R, root_t) {
+  const N = SMPL_J_REST.length;
+  const rot = new Array(N);
+  const pos = new Array(N);
+  rot[0] = root_R;
+  pos[0] = [root_t[0], root_t[1], root_t[2]];
+  for (let i = 1; i < N; i++) {
+    const par = SMPL_PARENTS[i];
+    const Rl  = aaToMat(thetas[i] || [0,0,0]);
+    rot[i] = matMul3(rot[par], Rl);
+    const off = SMPL_LOCAL_OFFSET[i];
+    const offW = matVec3(rot[par], off);
+    pos[i] = [
+      pos[par][0] + offW[0],
+      pos[par][1] + offW[1],
+      pos[par][2] + offW[2],
+    ];
+  }
+  return pos;
+}
 
 // Ball
 let ballMesh = null;
@@ -169,18 +310,36 @@ async function loadScene() {
     totalFrames = Math.max(totalFrames, camTrack.frames.length);
   }
 
-  // 2. List available HMR-world player tracks
-  let players = [];
+  // 2. List available HMR-world player tracks. The endpoint returns
+  // [{player_id, player_name}] (since the dashboard rebuild); we also
+  // tolerate the old bare-string shape so this viewer keeps working
+  // against legacy outputs.
+  let playerIds = [];
+  const playerNames = new Map();   // player_id -> player_name (when known)
   try {
     const list = await fetchJson('/hmr_world/players');
-    players = list.players || [];
+    const rows = list.players || [];
+    for (const r of rows) {
+      if (typeof r === 'string') {
+        playerIds.push(r);
+      } else if (r && r.player_id) {
+        playerIds.push(r.player_id);
+        if (r.player_name) playerNames.set(r.player_id, r.player_name);
+      }
+    }
   } catch (_) {}
 
-  // 3. Fetch each player's preview (frames + root_t + confidence)
+  // 3. Fetch each player's preview WITH pose data (frames + root_t +
+  // root_R + thetas + confidence). include_pose=1 inflates payload by
+  // ~10× but is required for skeletal animation; the dashboard's
+  // trajectory panel calls without that flag and gets the lighter
+  // response.
   const playerEntries = [];
-  for (const pid of players) {
+  for (const pid of playerIds) {
     try {
-      const preview = await fetchJson(`/hmr_world/preview?player_id=${encodeURIComponent(pid)}`);
+      const preview = await fetchJson(
+        `/hmr_world/preview?player_id=${encodeURIComponent(pid)}&include_pose=1`
+      );
       playerEntries.push(preview);
       if (preview.frames && preview.frames.length > 0) {
         const last = preview.frames[preview.frames.length - 1];
@@ -189,7 +348,7 @@ async function loadScene() {
     } catch (_) {}
   }
 
-  for (const p of playerEntries) addPlayerMarker(p, sidebar);
+  for (const p of playerEntries) addPlayerMarker(p, sidebar, playerNames);
 
   // 4. Ball
   try {
@@ -215,35 +374,92 @@ async function loadScene() {
   updateFrame(0);
 }
 
-function addPlayerMarker(p, sidebar) {
+function addPlayerMarker(p, sidebar, playerNames) {
   const team = (p.team || 'unknown');
   const color = TEAM_COLORS[team] || TEAM_COLORS.unknown;
+  const displayName = (playerNames && playerNames.get(p.player_id)) || p.player_id;
 
-  // Each player is rendered as a single tall capsule at root_t (pitch metres).
-  // The full SMPL mesh is in scene.glb if needed for export — the live viewer
-  // just shows pelvis-centred markers, which keeps it lightweight.
-  const geom = new THREE.CapsuleGeometry(0.35, 1.4, 4, 8);
-  const mat = new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.9 });
-  const mesh = new THREE.Mesh(geom, mat);
-  mesh.visible = false;
-  scene.add(mesh);
+  // Skeleton: 23 bones drawn as LineSegments. Each bone contributes 2
+  // endpoints × 3 coords = 6 floats. The buffer is updated per frame
+  // by smplFK; positions are in three.js coords (y-up).
+  const posBuf = new Float32Array(SMPL_BONES.length * 6);
+  const skelGeom = new THREE.BufferGeometry();
+  skelGeom.setAttribute('position', new THREE.BufferAttribute(posBuf, 3));
+  const skelMat = new THREE.LineBasicMaterial({
+    color, linewidth: 2, transparent: true, opacity: 0.95,
+  });
+  const skel = new THREE.LineSegments(skelGeom, skelMat);
+  skel.visible = false;
+  skel.frustumCulled = false;
+  scene.add(skel);
+
+  // Joint dots at every skeleton vertex so the eye can pick out the
+  // pelvis / wrists / ankles when the body is in profile.
+  const jointBuf = new Float32Array(SMPL_J_REST.length * 3);
+  const jointGeom = new THREE.BufferGeometry();
+  jointGeom.setAttribute('position', new THREE.BufferAttribute(jointBuf, 3));
+  const jointMat = new THREE.PointsMaterial({
+    color, size: 6, sizeAttenuation: false, transparent: true, opacity: 0.9,
+  });
+  const joints = new THREE.Points(jointGeom, jointMat);
+  joints.visible = false;
+  joints.frustumCulled = false;
+  scene.add(joints);
 
   playerObjects.set(p.player_id, {
-    mesh,
+    skel,
+    joints,
+    posBuf,
+    jointBuf,
     frames: p.frames || [],
     root_t: p.root_t || [],
+    root_R: p.root_R || [],
+    thetas: p.thetas || [],
     confidence: p.confidence || [],
   });
 
   const row = document.createElement('div');
   row.className = 'player-row';
+  row.dataset.playerId = p.player_id;
+  // Show the manual name (when annotated via the dashboard) with a
+  // small grey ID tag so the operator can still see which P### track
+  // they're looking at.
+  const idTag = (displayName !== p.player_id)
+    ? ` <span style="color:#64748b;font-size:10px;">(${p.player_id})</span>`
+    : '';
   row.innerHTML =
     `<span class="player-dot" style="background:#${color.toString(16).padStart(6,'0')}"></span>`
-    + `<span class="player-name">${p.player_id}</span>`;
+    + `<span class="player-name">${displayName}${idTag}</span>`;
+  // Click toggles "follow this player" — OrbitControls.target tracks
+  // their pelvis on every frame until another player is clicked or
+  // the same row is clicked again to deselect.
+  row.addEventListener('click', () => selectPlayer(p.player_id));
   sidebar.appendChild(row);
 }
 
+function selectPlayer(pid) {
+  const sidebar = document.getElementById('sidebar');
+  // Toggle off if the same row is clicked again.
+  if (selectedPlayerId === pid) {
+    selectedPlayerId = null;
+    sidebar.querySelectorAll('.player-row.active').forEach((el) => el.classList.remove('active'));
+    return;
+  }
+  selectedPlayerId = pid;
+  sidebar.querySelectorAll('.player-row').forEach((el) => {
+    el.classList.toggle('active', el.dataset.playerId === pid);
+  });
+  // Re-target immediately on the current frame; subsequent frames
+  // will continue to follow as updateFrame fires.
+  updateFrame(currentFrame);
+}
+
 function setCameraPreset(preset) {
+  // Switching to a preset implicitly stops following any player.
+  if (selectedPlayerId) {
+    selectedPlayerId = null;
+    document.querySelectorAll('.player-row.active').forEach((el) => el.classList.remove('active'));
+  }
   if (preset === 'broadcast') camera.position.set(52.5, 25, 50);
   else if (preset === 'tactical') camera.position.set(52.5, 80, -34);
   else if (preset === 'behind-goal') camera.position.set(-10, 10, -34);
@@ -260,19 +476,40 @@ function updateFrame(fi) {
 
   for (const obj of playerObjects.values()) {
     const idx = obj.frames.indexOf(fi);
-    if (idx < 0) {
-      obj.mesh.visible = false;
+    const t = idx >= 0 ? obj.root_t[idx] : null;
+    const R = idx >= 0 ? obj.root_R[idx] : null;
+    const theta = idx >= 0 ? obj.thetas[idx] : null;
+    const valid = idx >= 0 && t && R && theta && !isNaN(t[0]);
+    if (!valid) {
+      obj.skel.visible = false;
+      obj.joints.visible = false;
       continue;
     }
-    const t = obj.root_t[idx];
-    if (!t || t[0] === null || isNaN(t[0])) {
-      obj.mesh.visible = false;
-      continue;
+    // Compute joint positions in pitch-world via SMPL FK, then convert
+    // to three.js (y-up) and write into both the bone and joint vertex
+    // buffers in one pass.
+    const positions = smplFK(theta, R, t);
+    for (let b = 0; b < SMPL_BONES.length; b++) {
+      const [pa, pb] = SMPL_BONES[b];
+      const a3 = pitchToThree(positions[pa]);
+      const c3 = pitchToThree(positions[pb]);
+      obj.posBuf[b * 6 + 0] = a3[0];
+      obj.posBuf[b * 6 + 1] = a3[1];
+      obj.posBuf[b * 6 + 2] = a3[2];
+      obj.posBuf[b * 6 + 3] = c3[0];
+      obj.posBuf[b * 6 + 4] = c3[1];
+      obj.posBuf[b * 6 + 5] = c3[2];
     }
-    const [tx, ty, tz] = pitchToThree(t);
-    // Pelvis is roughly mid-body; lift the capsule centre to clear the ground.
-    obj.mesh.position.set(tx, Math.max(ty, 0.9), tz);
-    obj.mesh.visible = true;
+    for (let i = 0; i < positions.length; i++) {
+      const v3 = pitchToThree(positions[i]);
+      obj.jointBuf[i * 3 + 0] = v3[0];
+      obj.jointBuf[i * 3 + 1] = v3[1];
+      obj.jointBuf[i * 3 + 2] = v3[2];
+    }
+    obj.skel.geometry.attributes.position.needsUpdate = true;
+    obj.joints.geometry.attributes.position.needsUpdate = true;
+    obj.skel.visible = true;
+    obj.joints.visible = true;
   }
 
   if (ballMesh && ballFrames.length > 0) {
@@ -283,6 +520,26 @@ function updateFrame(fi) {
       ballMesh.visible = true;
     } else {
       ballMesh.visible = false;
+    }
+  }
+
+  // If the operator picked a player in the sidebar, retarget the
+  // OrbitControls focus to that player's pelvis. Camera position is
+  // left untouched so the user's orbit/zoom stays sticky — only the
+  // look-at-point follows. Falls through silently when the selected
+  // player has no data on this frame (camera holds previous target).
+  if (selectedPlayerId) {
+    const obj = playerObjects.get(selectedPlayerId);
+    if (obj) {
+      const idx = obj.frames.indexOf(fi);
+      if (idx >= 0) {
+        const t = obj.root_t[idx];
+        if (t && !isNaN(t[0])) {
+          const [tx, ty, tz] = pitchToThree(t);
+          controls.target.set(tx, ty, tz);
+          controls.update();
+        }
+      }
     }
   }
 }

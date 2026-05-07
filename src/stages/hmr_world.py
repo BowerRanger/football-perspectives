@@ -53,11 +53,17 @@ _COCO_RIGHT_ANKLE = 16
 # do not anchor (matches the spec keypoint-confidence threshold).
 _ANKLE_CONF_MIN = 0.3
 
-# Foot offset relative to root, expressed in the pitch-world (z-up) frame
-# *after* the SMPL→pitch static transform has been applied via root_R.
-# See decision-log D9: the root frame here is pitch-world (z-up), so "foot
-# below root" is along pitch -z, not the SMPL canonical -y.
-_FOOT_IN_ROOT = np.array([0.0, 0.0, -0.95], dtype=float)
+# Foot offset relative to the SMPL root, in the body's local (SMPL
+# canonical, y-up) frame. ``root_R_pitch`` rotates the body from this
+# y-up local frame straight into pitch z-up world (see the docstring
+# in ``smpl_pitch_transform``), so foot-below-root is along the body's
+# local -y, not pitch -z.
+#
+# (Decision D9 in the implementation log called this offset
+# ``(0, 0, -0.95)`` because the previous transform had a misnamed bridge
+# matrix that left the body-local frame coincidentally z-up. With the
+# bridge fixed, the offset is now in correct SMPL canonical convention.)
+_FOOT_IN_ROOT = np.array([0.0, -0.95, 0.0], dtype=float)
 
 # Pitch ground-plane offset for the foot ray-cast (foot rests slightly above
 # the turf surface so a vertical ray-from-camera doesn't grazing-intersect).
@@ -246,6 +252,22 @@ class HmrWorldStage(BaseStage):
         joint_conf = np.asarray(hmr_out["joint_confidence"])  # (N, 24)
         kp2d = np.asarray(hmr_out["kp2d"])                 # (N, 17, 3)
 
+        # GVHMR's body_pose axis-angles are stored in its internal
+        # 'ay' (y-down, gravity-aligned) frame. Standard SMPL FK
+        # (used by every downstream consumer — our viewer, smplx, FBX
+        # exporters, UE5 retargeters) expects axis-angles in canonical
+        # SMPL y-up. Re-expressing the same physical rotation across
+        # those two conventions is a 180° rotation around +x acting on
+        # the AXIS vector — which negates the y and z components of
+        # each axis-angle while leaving x and the magnitude unchanged.
+        # Empirically validated on real clips: with this conversion an
+        # upright running player produces shoulder > elbow with hands
+        # swinging high when the arm is forward (running pose); without
+        # it the elbow ends up *above* both shoulder and hand
+        # ("Dead Space necromorph" arms).
+        thetas[:, 1:22, 1] *= -1.0
+        thetas[:, 1:22, 2] *= -1.0
+
         # 2. Median shape across track.
         betas = np.median(betas_all, axis=0)
 
@@ -312,10 +334,16 @@ class HmrWorldStage(BaseStage):
             joint_conf_min = float(joint_conf[i].min()) if joint_conf.size else 0.0
             confidence[i] = float(min(ankle_conf, joint_conf_min))
 
-        # 6. Ground-snap z when the avatar is approximately stationary.
-        root_t[:, 2] = ground_snap_z(
-            root_t[:, 2], velocity_threshold=ground_snap_velocity
-        )
+        # 6. (No ground snap.) The previous ``ground_snap_z`` post-process
+        # halved root_t.z every frame whose per-frame velocity was below
+        # threshold — which is every frame for a stationary or slowly-
+        # moving player. That collapsed the pelvis toward z=0 (so the
+        # avatar's feet ended up below the pitch). The foot-anchor
+        # ray-cast above already constrains the pelvis position
+        # consistently with the ankle keypoint, so no extra snap is
+        # needed. ``ground_snap_velocity`` is kept in the signature for
+        # backwards-compat but is now ignored.
+        _ = ground_snap_velocity
 
         track = SmplWorldTrack(
             player_id=str(player_id),

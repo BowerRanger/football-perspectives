@@ -330,11 +330,18 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+    # ``Cache-Control: no-store`` on dashboard HTML pages — the JS in
+    # these files changes during active development, and a stale cached
+    # viewer.html silently sends ``?player_id=[object Object]``-style
+    # requests that hit the validation regex and 400. Forcing the
+    # browser to re-fetch makes JS edits visible without a hard reload.
+    _NO_STORE = {"Cache-Control": "no-store"}
+
     @app.get("/")
     def index():
         index_path = static_dir / "index.html"
         if index_path.exists():
-            return FileResponse(str(index_path))
+            return FileResponse(str(index_path), headers=_NO_STORE)
         raise HTTPException(status_code=404, detail="index.html not found")
 
     @app.get("/api/stages")
@@ -450,7 +457,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         viewer_path = static_dir / "viewer.html"
         if not viewer_path.exists():
             raise HTTPException(status_code=404, detail="viewer.html not found")
-        return FileResponse(str(viewer_path))
+        return FileResponse(str(viewer_path), headers=_NO_STORE)
 
     @app.get("/api/export/scene.glb")
     def get_scene_glb():
@@ -715,8 +722,20 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         return {"players": rows}
 
     @app.get("/hmr_world/preview")
-    def get_hmr_preview(player_id: str):
+    def get_hmr_preview(
+        player_id: str, request: Request, include_pose: int = 0,
+    ):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", player_id):
+            # Diagnostic: log the Referer so we can pinpoint *which*
+            # client page is sending malformed player_id values (the
+            # ``[object Object]`` symptom seen when a JS list of objects
+            # was iterated as if it were a list of strings).
+            referer = request.headers.get("referer", "<no-referer>")
+            ua = request.headers.get("user-agent", "<no-ua>")[:60]
+            logging.warning(
+                "/hmr_world/preview rejected player_id=%r referer=%s ua=%s",
+                player_id, referer, ua,
+            )
             raise HTTPException(status_code=400, detail="Invalid player_id")
         npz_path = (output_dir / "hmr_world" / f"{player_id}_smpl_world.npz").resolve()
         hmr_dir = (output_dir / "hmr_world").resolve()
@@ -729,14 +748,22 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             frames = z["frames"].tolist()
             root_t = z["root_t"].tolist()
             confidence = z["confidence"].tolist()
+            payload = {
+                "player_id": player_id,
+                "frames": frames,
+                "root_t": root_t,
+                "confidence": confidence,
+            }
+            # Pose payload (thetas + root_R) is opt-in because it inflates
+            # the response by ~10× — only the 3D viewer needs it; the
+            # dashboard's trajectory panel doesn't.
+            if include_pose:
+                payload["thetas"] = z["thetas"].tolist()    # (N, 24, 3)
+                payload["root_R"] = z["root_R"].tolist()    # (N, 3, 3)
+                payload["betas"]  = z["betas"].tolist()     # (10,)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Failed to load hmr_world: {exc}")
-        return {
-            "player_id": player_id,
-            "frames": frames,
-            "root_t": root_t,
-            "confidence": confidence,
-        }
+        return payload
 
     @app.get("/ball/preview")
     def get_ball_preview():
@@ -1080,10 +1107,11 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
 
     @app.get("/anchor_editor")
     def anchor_editor_page():
+        # (no-store too — same dev-cache issue as / and /viewer)
         editor_path = static_dir / "anchor_editor.html"
         if not editor_path.exists():
             raise HTTPException(status_code=404, detail="anchor_editor.html not found")
-        return FileResponse(str(editor_path))
+        return FileResponse(str(editor_path), headers=_NO_STORE)
 
     return app
 

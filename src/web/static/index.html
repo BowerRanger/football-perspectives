@@ -239,9 +239,7 @@
 <div id="sidebar">
   <div id="sidebar-header">Pipeline Stages</div>
   <div id="stage-list"></div>
-  <div id="sidebar-links">
-    <a href="/viewer" target="_blank">▶ 3D Viewer</a>
-  </div>
+  <div id="sidebar-links"></div>
 </div>
 
 <!-- ── Main ─────────────────────────────────────────────────────────── -->
@@ -1362,10 +1360,16 @@ function buildCameraPitchMap(track) {
   body.style.padding = "14px 16px";
 
   const PITCH_L = 105, PITCH_W = 68;
-  const MARGIN_M = 60;
+  // Asymmetric margins: tiny strip above the far touchline (visual
+  // breathing room only) and a larger surround below the near
+  // touchline where the camera marker sits. y_world=68 is the far
+  // touchline (visual top), y_world=0 is the near touchline (visual
+  // bottom), so MARGIN_FAR maps to canvas top and MARGIN_NEAR to
+  // canvas bottom.
+  const MARGIN_X = 8, MARGIN_FAR = 5, MARGIN_NEAR = 30;
   const scale = 6, padding = 20;
-  const W = (PITCH_L + 2 * MARGIN_M) * scale + padding * 2;
-  const H = (PITCH_W + 2 * MARGIN_M) * scale + padding * 2;
+  const W = (PITCH_L + 2 * MARGIN_X) * scale + padding * 2;
+  const H = (PITCH_W + MARGIN_FAR + MARGIN_NEAR) * scale + padding * 2;
   const DEFAULT_FPS = track.fps || 30;
 
   const canvas = document.createElement("canvas");
@@ -1377,8 +1381,8 @@ function buildCameraPitchMap(track) {
 
   function pitch2px(x, y) {
     return [
-      padding + (x + MARGIN_M) * scale,
-      padding + (PITCH_W + MARGIN_M - y) * scale,
+      padding + (x + MARGIN_X) * scale,
+      padding + (PITCH_W + MARGIN_FAR - y) * scale,
     ];
   }
   function drawPitch() {
@@ -1401,12 +1405,50 @@ function buildCameraPitchMap(track) {
     ctx.beginPath();
     const c = pitch2px(PITCH_L / 2, PITCH_W / 2);
     ctx.arc(c[0], c[1], 9.15 * scale, 0, Math.PI * 2); ctx.stroke();
-    // Goal-line ticks (centre of each goal) so the operator can tell
-    // "left" from "right" goal even when the camera is way off.
-    ctx.fillStyle = "#fde68a";
-    for (const gx of [0, PITCH_L]) {
-      const [tx, ty] = pitch2px(gx, PITCH_W / 2);
-      ctx.beginPath(); ctx.arc(tx, ty, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#e2e8f0";
+    ctx.beginPath(); ctx.arc(c[0], c[1], 1.6, 0, Math.PI * 2); ctx.fill();
+
+    // FIFA-standard box markings (penalty box, 6-yard, spot, D, goal mouth).
+    const PEN_DEPTH = 16.5, PEN_HALF = 20.16;
+    const SIX_DEPTH = 5.5,  SIX_HALF = 9.16;
+    const SPOT_FROM_GOAL = 11.0, ARC_R = 9.15, GOAL_HALF = 3.66;
+    const yMid = PITCH_W / 2;
+    const halfAngle = Math.acos((PEN_DEPTH - SPOT_FROM_GOAL) / ARC_R);
+    function rectPath(xa, ya, xb, yb) {
+      const [pax, pay] = pitch2px(xa, ya);
+      const [pbx, pby] = pitch2px(xb, yb);
+      ctx.beginPath();
+      ctx.rect(Math.min(pax, pbx), Math.min(pay, pby), Math.abs(pbx - pax), Math.abs(pby - pay));
+      ctx.stroke();
+    }
+    for (const left of [true, false]) {
+      const xGoal = left ? 0 : PITCH_L;
+      const sgn = left ? 1 : -1;
+      rectPath(xGoal, yMid - PEN_HALF, xGoal + sgn * PEN_DEPTH, yMid + PEN_HALF);
+      rectPath(xGoal, yMid - SIX_HALF, xGoal + sgn * SIX_DEPTH, yMid + SIX_HALF);
+      const xSpot = xGoal + sgn * SPOT_FROM_GOAL;
+      const [sx, sy] = pitch2px(xSpot, yMid);
+      ctx.fillStyle = "#e2e8f0";
+      ctx.beginPath(); ctx.arc(sx, sy, 1.6, 0, Math.PI * 2); ctx.fill();
+      const startAng = left ? -halfAngle : (Math.PI - halfAngle);
+      const endAng   = left ?  halfAngle : (Math.PI + halfAngle);
+      ctx.beginPath();
+      const N_SEG = 32;
+      for (let i = 0; i <= N_SEG; i++) {
+        const a = startAng + (endAng - startAng) * (i / N_SEG);
+        const [px, py] = pitch2px(xSpot + ARC_R * Math.cos(a), yMid + ARC_R * Math.sin(a));
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+      // Goal mouth in highlight yellow so left/right goals are easy to
+      // pick out when the camera marker lands far off-pitch.
+      ctx.strokeStyle = "#fde68a"; ctx.lineWidth = 3;
+      const [gAx, gAy] = pitch2px(xGoal, yMid - GOAL_HALF);
+      const [gBx, gBy] = pitch2px(xGoal, yMid + GOAL_HALF);
+      ctx.beginPath();
+      ctx.moveTo(gAx, gAy); ctx.lineTo(gBx, gBy);
+      ctx.stroke();
+      ctx.strokeStyle = "#e2e8f0"; ctx.lineWidth = 1.5;
     }
   }
 
@@ -1860,32 +1902,79 @@ function buildTrajectoryPanel(playerPreviews) {
   body.style.padding = "14px 16px";
 
   const PITCH_L = 105, PITCH_W = 68;
-  // Extra margin so a camera marker at e.g. y = -57 (behind the near
-  // touchline) still lands on the canvas. The actual pitch is drawn in
-  // its proper [0..PITCH_L] × [0..PITCH_W] box; the surround is just
-  // visual room for diagnostics.
-  const MARGIN_M = 60;
+  // Asymmetric margins: tiny strip above the far touchline (visual
+  // breathing room only) and a larger surround below the near
+  // touchline so the camera marker (typically y ≈ -30) still lands on
+  // the canvas. y_world=68 is the far touchline (visual top), y_world=0
+  // is the near touchline (visual bottom), so MARGIN_FAR maps to canvas
+  // top and MARGIN_NEAR to canvas bottom.
+  const MARGIN_X = 8, MARGIN_FAR = 5, MARGIN_NEAR = 30;
   const scale = 6;
   const padding = 20;
-  const W = (PITCH_L + 2 * MARGIN_M) * scale + padding * 2;
-  const H = (PITCH_W + 2 * MARGIN_M) * scale + padding * 2;
+  const W = (PITCH_L + 2 * MARGIN_X) * scale + padding * 2;
+  const H = (PITCH_W + MARGIN_FAR + MARGIN_NEAR) * scale + padding * 2;
   const TRAIL_LEN = 30;        // frames of fading trail behind each dot
   const CONF_THRESH = 0.2;     // hide samples below this confidence
   const DEFAULT_FPS = 30;
 
+  // Side-by-side layout: top-down pitch on the left at 70%, original
+  // clip on the right at 30%. Both cells share a row height so the
+  // views align visually.
+  const stageWrap = document.createElement("div");
+  stageWrap.style.cssText = "display:flex;gap:12px;align-items:stretch;";
+  // ``flex: 7`` / ``flex: 3`` produces the 70/30 split. ``min-width:0``
+  // lets the cells collapse below their content's preferred width on
+  // narrow panels.
+  const pitchCell = document.createElement("div");
+  pitchCell.style.cssText = "flex:7;min-width:0;display:flex;align-items:center;justify-content:center;background:#0b3b1a;border-radius:4px;overflow:hidden;";
+  const videoCell = document.createElement("div");
+  videoCell.style.cssText = "flex:3;min-width:0;display:flex;align-items:center;justify-content:center;background:#000;border-radius:4px;overflow:hidden;";
+  // ``video`` is the playback master clock when its src loads — the
+  // rAF tick reads ``video.currentTime`` and renders the trajectory
+  // at the matching frame so the two views stay in lock-step. If the
+  // video can't load (test fixtures, missing shot file) the panel
+  // falls back to a self-paced rAF timer.
+  const pip = document.createElement("video");
+  pip.preload = "metadata";
+  pip.muted = true;
+  pip.playsInline = true;
+  pip.style.cssText = "width:100%;height:100%;object-fit:contain;display:block;line-height:0;";
+  videoCell.appendChild(pip);
   const canvas = document.createElement("canvas");
   canvas.width = W;
   canvas.height = H;
-  canvas.style.cssText = "max-width:100%;height:auto;display:block;background:#0b3b1a;border-radius:4px;";
-  body.appendChild(canvas);
+  // ``max-width/max-height:100%`` of the cell + ``width/height:auto``
+  // preserves the canvas's intrinsic aspect ratio while fitting inside
+  // whichever cell dimension is the constraint.
+  canvas.style.cssText = "max-width:100%;max-height:100%;width:auto;height:auto;display:block;line-height:0;";
+  pitchCell.appendChild(canvas);
+  stageWrap.appendChild(pitchCell);
+  stageWrap.appendChild(videoCell);
+  // Cap row height so the timeline + legend stay on-screen on
+  // 1080p-class viewports without scrolling. 62vh leaves about a third
+  // of the viewport for controls + other panels.
+  stageWrap.style.height = "62vh";
+  body.appendChild(stageWrap);
   const ctx = canvas.getContext("2d");
 
+  // Fetch shot_id (single-shot pipeline today, but keep this generic by
+  // taking the first available). Falls through gracefully if the
+  // tracks aren't on disk yet.
+  let pipReady = false;
+  fetchJsonOrNull("/tracking/shots").then((d) => {
+    const shotId = d && d.shots && d.shots[0];
+    if (!shotId) return;
+    pip.src = `/api/video/${encodeURIComponent(shotId)}`;
+  });
+  pip.addEventListener("loadedmetadata", () => { pipReady = true; });
+  pip.addEventListener("error", () => { pipReady = false; });
+
   function pitch2px(x, y) {
-    // Origin of the pitch box is offset by MARGIN_M so the diagnostic
-    // surround sits around it on every side. y is canvas-flipped.
+    // Origin of the pitch box is offset by MARGIN_X / MARGIN_FAR so
+    // the surround widths match the constants above. y is canvas-flipped.
     return [
-      padding + (x + MARGIN_M) * scale,
-      padding + (PITCH_W + MARGIN_M - y) * scale,
+      padding + (x + MARGIN_X) * scale,
+      padding + (PITCH_W + MARGIN_FAR - y) * scale,
     ];
   }
 
@@ -1899,6 +1988,8 @@ function buildTrajectoryPanel(playerPreviews) {
     ctx.fillRect(topLeftX, topLeftY, PITCH_L * scale, PITCH_W * scale);
     ctx.strokeStyle = "#e2e8f0";
     ctx.lineWidth = 1.5;
+
+    // Outer touchlines + goal lines.
     const corners = [[0, 0], [PITCH_L, 0], [PITCH_L, PITCH_W], [0, PITCH_W]];
     ctx.beginPath();
     for (let i = 0; i < corners.length; i++) {
@@ -1906,12 +1997,77 @@ function buildTrajectoryPanel(playerPreviews) {
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.closePath(); ctx.stroke();
+
+    // Halfway line + centre circle + centre spot.
     ctx.beginPath();
     const m1 = pitch2px(PITCH_L / 2, 0), m2 = pitch2px(PITCH_L / 2, PITCH_W);
     ctx.moveTo(m1[0], m1[1]); ctx.lineTo(m2[0], m2[1]); ctx.stroke();
     ctx.beginPath();
     const c = pitch2px(PITCH_L / 2, PITCH_W / 2);
     ctx.arc(c[0], c[1], 9.15 * scale, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = "#e2e8f0";
+    ctx.beginPath(); ctx.arc(c[0], c[1], 1.6, 0, Math.PI * 2); ctx.fill();
+
+    // FIFA-standard box markings on each end. Drawing both halves in
+    // one helper keeps the geometry symmetric and easy to tweak. All
+    // dimensions in pitch metres, converted by ``pitch2px``.
+    //   penalty box: 16.5 × 40.32  (centred on the goal)
+    //   6-yard box:  5.5  × 18.32
+    //   penalty spot at 11 m from the goal-line
+    //   penalty arc:  9.15 m radius around the spot, the part outside the box (the "D")
+    //   goal mouth:   7.32 m, marked as a thicker stub on the goal-line
+    const PEN_DEPTH = 16.5, PEN_HALF = 20.16;
+    const SIX_DEPTH = 5.5,  SIX_HALF = 9.16;
+    const SPOT_FROM_GOAL = 11.0;
+    const ARC_R = 9.15;
+    const GOAL_HALF = 3.66;
+    const yMid = PITCH_W / 2;
+    const halfAngle = Math.acos((PEN_DEPTH - SPOT_FROM_GOAL) / ARC_R);
+
+    function rectPath(x0, y0, x1, y1) {
+      const [a, b] = pitch2px(x0, y0);
+      const [c, d] = pitch2px(x1, y1);
+      ctx.beginPath();
+      ctx.rect(Math.min(a, c), Math.min(b, d), Math.abs(c - a), Math.abs(d - b));
+      ctx.stroke();
+    }
+
+    for (const left of [true, false]) {
+      const xGoal = left ? 0 : PITCH_L;
+      const sgn   = left ? 1 : -1;
+      // Penalty box.
+      rectPath(xGoal, yMid - PEN_HALF, xGoal + sgn * PEN_DEPTH, yMid + PEN_HALF);
+      // 6-yard box.
+      rectPath(xGoal, yMid - SIX_HALF, xGoal + sgn * SIX_DEPTH, yMid + SIX_HALF);
+      // Penalty spot.
+      const xSpot = xGoal + sgn * SPOT_FROM_GOAL;
+      const [sx, sy] = pitch2px(xSpot, yMid);
+      ctx.fillStyle = "#e2e8f0";
+      ctx.beginPath(); ctx.arc(sx, sy, 1.6, 0, Math.PI * 2); ctx.fill();
+      // Penalty arc — the part of the 9.15 m radius circle that sits
+      // outside the penalty box. We sample the arc parametrically and
+      // line-segment between samples; using ctx.arc directly would
+      // need careful direction handling because pitch2px flips y.
+      const startAng = left ? -halfAngle : (Math.PI - halfAngle);
+      const endAng   = left ?  halfAngle : (Math.PI + halfAngle);
+      const N_SEG = 32;
+      ctx.beginPath();
+      for (let i = 0; i <= N_SEG; i++) {
+        const a = startAng + (endAng - startAng) * (i / N_SEG);
+        const [px, py] = pitch2px(xSpot + ARC_R * Math.cos(a), yMid + ARC_R * Math.sin(a));
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+      // Goal mouth — a thicker stub on the goal-line so left/right
+      // goals are visually distinct from the rest of the line.
+      ctx.lineWidth = 3;
+      const [gAx, gAy] = pitch2px(xGoal, yMid - GOAL_HALF);
+      const [gBx, gBy] = pitch2px(xGoal, yMid + GOAL_HALF);
+      ctx.beginPath();
+      ctx.moveTo(gAx, gAy); ctx.lineTo(gBx, gBy);
+      ctx.stroke();
+      ctx.lineWidth = 1.5;
+    }
   }
 
   // Per-player {frame → {pos:[x,y,z], conf}} map for O(1) lookup as we
@@ -2093,42 +2249,86 @@ function buildTrajectoryPanel(playerPreviews) {
     frameLabel.textContent = `Frame ${fi}  (${sec}s)`;
   }
 
-  // Playback loop — uses requestAnimationFrame timestamps so playback
-  // speed tracks the configured fps regardless of refresh rate.
+  // Playback. When the PiP video has loaded we use it as the master
+  // clock — every animation tick reads ``pip.currentTime`` and renders
+  // the trajectory at the matching frame, so the two views can never
+  // drift. Without the video we fall back to a self-paced rAF tick.
   let playing = false, rafId = null, lastTs = 0;
+  function syncPipTo(fi) {
+    if (!pipReady) return;
+    const target = fi / Math.max(1, fps);
+    // Avoid pointless seeks while playing — the natural playback already
+    // walks currentTime forward; only force a seek if we've drifted by
+    // more than a frame. When paused (or stepping) always seek.
+    if (pip.paused || Math.abs(pip.currentTime - target) > 1.5 / fps) {
+      try { pip.currentTime = Math.max(0, Math.min(pip.duration || target, target)); }
+      catch { /* ignore — happens before metadata loads */ }
+    }
+  }
   function tick(ts) {
     if (!playing) { rafId = null; return; }
-    if (lastTs === 0) lastTs = ts;
-    const dt = (ts - lastTs) / 1000;
-    const advance = Math.max(1, Math.round(dt * fps));
-    lastTs = ts;
-    let next = currentFrame + advance;
-    if (next > maxFrame) {
-      next = maxFrame; render(next);
-      playing = false; playBtn.textContent = "▶"; rafId = null; lastTs = 0; return;
+    let next;
+    if (pipReady) {
+      // Master-clock branch: derive the playhead frame from the PiP
+      // video. Stop when the video ends or we hit the data range end.
+      next = Math.round(pip.currentTime * fps);
+      if (pip.ended || next > maxFrame) {
+        if (next > maxFrame) next = maxFrame;
+        render(next);
+        playing = false; playBtn.textContent = "▶"; rafId = null;
+        if (!pip.paused) pip.pause();
+        return;
+      }
+    } else {
+      // Fallback branch: dt-based advance against the configured fps.
+      if (lastTs === 0) lastTs = ts;
+      const dt = (ts - lastTs) / 1000;
+      const advance = Math.max(1, Math.round(dt * fps));
+      lastTs = ts;
+      next = currentFrame + advance;
+      if (next > maxFrame) {
+        next = maxFrame; render(next);
+        playing = false; playBtn.textContent = "▶"; rafId = null; lastTs = 0;
+        return;
+      }
     }
     render(next);
     rafId = requestAnimationFrame(tick);
   }
   playBtn.addEventListener("click", () => {
-    if (playing) { playing = false; playBtn.textContent = "▶"; }
-    else {
+    if (playing) {
+      playing = false; playBtn.textContent = "▶";
+      if (pipReady && !pip.paused) pip.pause();
+    } else {
       if (currentFrame >= maxFrame) currentFrame = minFrame;
       playing = true; playBtn.textContent = "⏸";
-      lastTs = 0; rafId = requestAnimationFrame(tick);
+      lastTs = 0;
+      if (pipReady) {
+        syncPipTo(currentFrame);
+        // Best-effort play() — autoplay policies on macOS Safari can
+        // refuse without user interaction; the click satisfies that.
+        pip.play().catch(() => {});
+      }
+      rafId = requestAnimationFrame(tick);
     }
   });
   stepBack.addEventListener("click", () => {
     playing = false; playBtn.textContent = "▶";
-    render(Math.max(minFrame, currentFrame - 1));
+    if (pipReady && !pip.paused) pip.pause();
+    const next = Math.max(minFrame, currentFrame - 1);
+    render(next); syncPipTo(next);
   });
   stepFwd.addEventListener("click", () => {
     playing = false; playBtn.textContent = "▶";
-    render(Math.min(maxFrame, currentFrame + 1));
+    if (pipReady && !pip.paused) pip.pause();
+    const next = Math.min(maxFrame, currentFrame + 1);
+    render(next); syncPipTo(next);
   });
   seek.addEventListener("input", () => {
     playing = false; playBtn.textContent = "▶";
-    render(parseInt(seek.value, 10));
+    if (pipReady && !pip.paused) pip.pause();
+    const fi = parseInt(seek.value, 10);
+    render(fi); syncPipTo(fi);
   });
 
   // Initial paint at the first frame any player exists in.
@@ -2194,18 +2394,35 @@ async function renderExport(panel) {
   if (meta.fbx_files && meta.fbx_files.length) items.push(`FBX files: ${meta.fbx_files.length}`);
   if (meta.players) items.push(`Players: ${(meta.players || []).join(", ")}`);
   summary.innerHTML = items.map((s) => `<div>${s}</div>`).join("");
-
-  const btnWrap = document.createElement("div");
-  btnWrap.style.cssText = "padding:8px 12px;";
-  const viewerBtn = document.createElement("a");
-  viewerBtn.href = "/viewer";
-  viewerBtn.target = "_blank";
-  viewerBtn.textContent = "Open 3D Viewer";
-  viewerBtn.style.cssText = "display:inline-block;background:#4f46e5;color:#fff;padding:8px 20px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:500;";
-  btnWrap.appendChild(viewerBtn);
   body.appendChild(summary);
-  body.appendChild(btnWrap);
   panel.appendChild(wrap);
+
+  // Embedded 3D viewer — same iframe pattern the Camera page uses for
+  // the anchor editor. Keeps the export+inspect loop self-contained:
+  // run export → see it animate → tweak upstream stages → re-run.
+  panel.appendChild(buildEmbeddedViewer());
+}
+
+function buildEmbeddedViewer() {
+  const { wrap, body } = makePanel("3D Viewer");
+  body.style.padding = "0";
+
+  const header = document.createElement("div");
+  header.style.cssText = "padding:8px 12px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #1f2937;";
+  header.innerHTML = `
+    <span style="color:#94a3b8;font-size:12px;">Live SMPL skeletons + ball trajectory in pitch-world. Use the timeline to scrub.</span>
+    <a href="/viewer" target="_blank" style="margin-left:auto;color:#a5b4fc;font-size:12px;text-decoration:none;">Open in new tab ↗</a>
+  `;
+  body.appendChild(header);
+
+  // Iframe loads the standalone viewer. Tall enough that the timeline
+  // + sidebar are fully visible without scrolling on a 1080p panel.
+  const frame = document.createElement("iframe");
+  frame.src = "/viewer";
+  frame.style.cssText = "width:100%;height:780px;border:0;display:block;background:#0a0e1a;";
+  frame.title = "3D Viewer";
+  body.appendChild(frame);
+  return wrap;
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────

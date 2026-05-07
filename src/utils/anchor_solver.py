@@ -363,6 +363,12 @@ def _seed_anchor_pose(
     return rvec.reshape(3), tvec.reshape(3)
 
 
+# Line residuals are perpendicular pixel distances from clicked endpoints to
+# projected world segments. When the world segment is long (e.g. a full
+# touchline) and the projection is even slightly off, the magnitude can
+# dwarf point reprojection residuals and overwhelm the LM. Down-weighting
+# during the solo LM bootstrap keeps points dominant; the final joint LM
+# (which is well-seeded) uses lines at full weight via Huber loss.
 _LINE_RESIDUAL_WEIGHT = 0.2
 
 
@@ -377,12 +383,10 @@ def _refine_seed_pose(
     """One-anchor LM that refines (fx, R, t) on the seed anchor.
 
     Uses point landmarks (full weight) and line annotations (down-weighted
-    by ``_LINE_RESIDUAL_WEIGHT``). Lines have inherently large residual
-    magnitudes when the projected line is even slightly off; without
-    down-weighting they dominate the LM and pull the solution away from
-    the tight point-only fit (observed empirically on real data — frame
-    429's point-only residual jumped from 5 px to 117 px when lines
-    were given equal weight).
+    by ``_LINE_RESIDUAL_WEIGHT``). TRF + Huber loss caps any individual
+    residual that escapes the down-weighting — the two protections compose:
+    Huber handles outlier *clicks*, the down-weight handles the natural
+    *scale* mismatch between point and line residuals on a wide-FOV pitch.
 
     Returns ``(fx, rvec, tvec)`` — caller updates K and the seed pose.
     """
@@ -390,9 +394,6 @@ def _refine_seed_pose(
         return fx_init, rvec_init.copy(), tvec_init.copy()
     obj_pts = np.array([lm.world_xyz for lm in anchor.landmarks], dtype=np.float64)
     img_pts = np.array([lm.image_xy for lm in anchor.landmarks], dtype=np.float64)
-    # When the seed already has plenty of well-conditioned points (≥6 with
-    # non-coplanar), skip lines entirely on the seed solve — they only add
-    # noise. Lines kick in below this threshold to rescue thinner seeds.
     n_pts = len(obj_pts)
     z_levels = len({round(z, 3) for _, _, z in obj_pts})
     use_lines_on_seed = anchor.lines and (n_pts < 6 or z_levels < 2)
@@ -417,6 +418,10 @@ def _refine_seed_pose(
 
     p0 = np.concatenate([[fx_init], rvec_init, tvec_init])
     try:
+        # Solo LMs use Levenberg–Marquardt (not robust). The final joint
+        # distortion LM uses TRF + Huber for outlier protection; doing it
+        # at solo level too caused real-broadcast seed solves to converge
+        # to wider local minima (seed-anchor residual jumped 5 → 30 px).
         result = least_squares(_residuals, p0, method="lm", max_nfev=300)
         return (
             float(np.clip(result.x[0], 50.0, 1e5)),
@@ -469,6 +474,8 @@ def _solve_anchor_with_C_fixed(
             proj = pix[:, :2] / safe_z[:, None]
             parts.append((proj - img_pts).reshape(-1))
         if anchor.lines:
+            # Down-weight lines (see _refine_seed_pose). Heavier weight when
+            # there are no points (line-only anchors rely entirely on lines).
             weight = 1.0 if len(obj_pts) == 0 else _LINE_RESIDUAL_WEIGHT
             parts.append(
                 weight * _line_residuals(list(anchor.lines), K, R, t)
@@ -522,8 +529,6 @@ def _solve_anchor_with_t_fixed(
             proj = pix[:, :2] / safe_z[:, None]
             parts.append((proj - img_pts).reshape(-1))
         if anchor.lines:
-            # Down-weight lines (see _refine_seed_pose). Heavier weight when
-            # there are no points (line-only anchors rely entirely on lines).
             weight = 1.0 if len(obj_pts) == 0 else _LINE_RESIDUAL_WEIGHT
             parts.append(
                 weight * _line_residuals(list(anchor.lines), K, R, t_fixed)
@@ -1174,23 +1179,42 @@ def solve_anchors_jointly(
         float(np.mean(list(per_anchor_res.values()))) if per_anchor_res else 0.0,
     )
 
-    # ── Pass 3: joint LM to recover shared (k1, k2) and refine (R, fx). ──
-    # Per-anchor t held fixed at the solo-solved value; cx/cy held at seed.
-    # This is where the broadcast lens's ~1–3% radial bias gets removed.
-    per_anchor_KRt, distortion, per_anchor_res_post = _refine_joint_distortion(
+    # ── Pass 3: joint LM to recover shared (k1, k2) and refine (R, t, fx). ──
+    # Per-anchor t is freed so the LM can disambiguate distortion from pose;
+    # cx/cy held at seed. This is where the broadcast lens's ~1–3% radial
+    # bias gets removed when the anchors are mutually consistent.
+    pre_residuals = dict(per_anchor_res)
+    pre_mean = (
+        float(np.mean(list(pre_residuals.values())))
+        if pre_residuals else 0.0
+    )
+    refined_KRt, distortion, refined_res = _refine_joint_distortion(
         qualifying, per_anchor_KRt, cx, cy,
     )
-    # Use post-distortion residuals where available (they're measured under
-    # refined pose + recovered distortion); fall back for any anchor not
-    # touched by the joint LM.
-    for af, res in per_anchor_res_post.items():
-        per_anchor_res[af] = res
-
-    logger.info(
-        "joint distortion refine: k1=%+.4f, k2=%+.4f, mean residual=%.2f px",
-        distortion[0], distortion[1],
-        float(np.mean(list(per_anchor_res.values()))) if per_anchor_res else 0.0,
+    refined_mean = (
+        float(np.mean(list(refined_res.values()))) if refined_res else 0.0
     )
+    # Sanity guard: if the joint LM made things worse (typically because
+    # anchors disagree from click noise rather than distortion), keep the
+    # solo solves' (R, t, fx) and report distortion=(0, 0). Otherwise
+    # bounded distortion can compound user inconsistencies into a
+    # near-saturated k2 that bakes in further bias.
+    if refined_res and refined_mean <= pre_mean * 1.1:
+        per_anchor_KRt = refined_KRt
+        for af, res in refined_res.items():
+            per_anchor_res[af] = res
+        logger.info(
+            "joint distortion refine: k1=%+.4f, k2=%+.4f, mean residual %.2f → %.2f px",
+            distortion[0], distortion[1], pre_mean, refined_mean,
+        )
+    else:
+        distortion = (0.0, 0.0)
+        logger.warning(
+            "joint distortion refine rejected: residual would worsen %.2f → %.2f px. "
+            "Anchors may be mutually inconsistent; review clicks before relying on "
+            "lens-distortion compensation.",
+            pre_mean, refined_mean,
+        )
 
     return JointSolution(
         t_world=t_world_median,

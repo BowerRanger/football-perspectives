@@ -707,3 +707,34 @@ def test_joint_solver_recovers_radial_distortion():
     k1_est, k2_est = sol.distortion
     assert abs(k1_est - k1_true) < 0.03, f"k1: got {k1_est}, want {k1_true}"
     assert abs(k2_est - k2_true) < 0.03, f"k2: got {k2_est}, want {k2_true}"
+
+
+@pytest.mark.unit
+def test_huber_loss_dampens_one_bad_landmark():
+    """A single 200 px outlier landmark should not move the recovered fx
+    relative to the no-outlier baseline by more than 1%.
+
+    Synthetic clip is rendered noise-free; without robust loss, an outlier
+    of this magnitude noticeably warps the joint LM. With Huber, the bad
+    point's contribution to the gradient is capped and fx stays put.
+    """
+    base = _three_rich_anchors_static()
+    bad_first = base[0]
+    bad_lm = bad_first.landmarks[0]
+    bad_lm = LandmarkObservation(
+        name=bad_lm.name,
+        image_xy=(bad_lm.image_xy[0] + 200.0, bad_lm.image_xy[1] + 200.0),
+        world_xyz=bad_lm.world_xyz,
+    )
+    bad_anchor = Anchor(
+        frame=bad_first.frame,
+        landmarks=(bad_lm,) + tuple(bad_first.landmarks[1:]),
+    )
+    bad_set = (bad_anchor,) + tuple(base[1:])
+
+    sol_clean = solve_anchors_jointly(base, image_size=IMAGE_SIZE)
+    sol_bad = solve_anchors_jointly(bad_set, image_size=IMAGE_SIZE)
+    fx_clean = sol_clean.per_anchor_KRt[0][0][0, 0]
+    fx_bad = sol_bad.per_anchor_KRt[0][0][0, 0]
+    rel = abs(fx_bad - fx_clean) / fx_clean
+    assert rel < 0.01, f"fx moved {rel * 100:.2f}% — Huber not dampening outlier"

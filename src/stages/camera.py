@@ -155,6 +155,15 @@ class CameraStage(BaseStage):
         # predictable: it trusts the anchor solves and produces a steady
         # camera-motion model between them.
         from scipy.spatial.transform import Rotation, Slerp
+        # When the camera body is static, every per-frame t must satisfy
+        # -R^T @ t == C_locked. LERP'ing t between two anchors with
+        # different R does NOT honour that constraint for the SLERP'd R,
+        # so the camera body wanders between anchors. Rebuild t = -R @ C
+        # instead. C_locked is None for moving-camera clips; fall back
+        # to LERP in that case.
+        C_locked = (
+            np.asarray(sol.camera_centre) if sol.camera_centre is not None else None
+        )
         for a, b in zip(anchor_frames, anchor_frames[1:]):
             K_a, R_a, t_a = anchor_solutions[a]
             K_b, R_b, t_b = anchor_solutions[b]
@@ -165,8 +174,12 @@ class CameraStage(BaseStage):
                 # width and we'd clobber image_size on save (D27).
                 lerp_w = offset / (b - a)
                 per_frame_K[idx] = (1.0 - lerp_w) * K_a + lerp_w * K_b
-                per_frame_R[idx] = slerp([lerp_w]).as_matrix()[0]
-                per_frame_t[idx] = (1.0 - lerp_w) * t_a + lerp_w * t_b
+                R_inter = slerp([lerp_w]).as_matrix()[0]
+                per_frame_R[idx] = R_inter
+                if C_locked is not None:
+                    per_frame_t[idx] = -R_inter @ C_locked
+                else:
+                    per_frame_t[idx] = (1.0 - lerp_w) * t_a + lerp_w * t_b
                 # Lower confidence than the anchors but still high since
                 # interpolation is well-behaved between trusted anchors.
                 per_frame_conf[idx] = 0.7
@@ -213,6 +226,11 @@ class CameraStage(BaseStage):
             t_world=list(t_world_median),
             frames=tuple(frames_out),
             principal_point=(float(principal_point[0]), float(principal_point[1])),
+            camera_centre=(
+                tuple(float(x) for x in sol.camera_centre)
+                if sol.camera_centre is not None
+                else None
+            ),
         )
         track.save(self.output_dir / "camera" / "camera_track.json")
 

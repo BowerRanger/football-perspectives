@@ -221,3 +221,75 @@ def test_camera_stage_picks_later_anchor_as_primary_when_first_is_thin(
     assert cf.is_anchor is True
     err_deg = _angle_deg(np.array(cf.R), clip.Rs[20])
     assert err_deg < 0.5
+
+
+def _build_static_anchor_set(
+    clip,
+    anchor_frames: list[int],
+    landmark_world: list[tuple[str, np.ndarray]],
+    camera_centre: np.ndarray,
+) -> AnchorSet:
+    """Build an AnchorSet that simulates a static camera body.
+
+    The synthetic-clip generator holds OpenCV ``t`` constant while ``R`` varies,
+    which silently moves the camera body. For static-camera tests we want
+    the body fixed at ``camera_centre`` and ``t = -R @ C`` per frame.
+    """
+    anchors_list = []
+    for af in anchor_frames:
+        K = clip.Ks[af]
+        R = clip.Rs[af]
+        t_static = -R @ camera_centre
+        lms = tuple(
+            LandmarkObservation(
+                name=name,
+                image_xy=_project(K, R, t_static, world),
+                world_xyz=tuple(world),
+            )
+            for name, world in landmark_world
+        )
+        anchors_list.append(Anchor(frame=af, landmarks=lms))
+    return AnchorSet(
+        clip_id="play",
+        image_size=clip.image_size,
+        anchors=tuple(anchors_list),
+    )
+
+
+@pytest.mark.integration
+def test_static_camera_invariant_holds_on_every_frame(tmp_path: Path) -> None:
+    """When ``static_camera=True``, every output frame (anchor and inter-anchor)
+    satisfies ``-R^T @ t == camera_centre`` to floating-point precision."""
+    clip = render_synthetic_clip(n_frames=40)
+    shots = tmp_path / "shots"
+    shots.mkdir()
+    _write_clip_mp4(clip, shots / "play.mp4")
+
+    C_world = np.array([52.5, -30.0, 30.0])
+    n = len(clip.frames)
+    anchor_frames = [0, n // 2, n - 1]
+    anchor_set = _build_static_anchor_set(
+        clip, anchor_frames, _LANDMARK_WORLD, C_world,
+    )
+    anchor_set.save(tmp_path / "camera" / "anchors.json")
+
+    stage = CameraStage(
+        config={"camera": {"static_camera": True}}, output_dir=tmp_path,
+    )
+    stage.run()
+
+    track = CameraTrack.load(tmp_path / "camera" / "camera_track.json")
+    assert track.camera_centre is not None, "camera_centre missing on saved track"
+    C = np.asarray(track.camera_centre)
+    # Solver-recovered C should be close to the synthesised one.
+    assert np.linalg.norm(C - C_world) < 1.0, (
+        f"recovered C={C} too far from truth {C_world}"
+    )
+    # Every frame must honour the invariant against the recovered C.
+    for f in track.frames:
+        R = np.asarray(f.R)
+        t = np.asarray(f.t)
+        recovered = -R.T @ t
+        assert np.allclose(recovered, C, atol=1e-3), (
+            f"frame {f.frame}: -R^T @ t = {recovered} != C = {C}"
+        )

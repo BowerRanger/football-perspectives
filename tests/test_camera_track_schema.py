@@ -45,3 +45,38 @@ def test_camera_track_legacy_load_without_camera_centre(tmp_path: Path):
     )
     loaded = CameraTrack.load(out)
     assert loaded.camera_centre is None
+
+
+@pytest.mark.unit
+def test_camera_track_carries_distortion(tmp_path: Path):
+    track = CameraTrack(
+        clip_id="t",
+        fps=25.0,
+        image_size=(1920, 1080),
+        t_world=[0.0, 0.0, 30.0],
+        frames=tuple(),
+        distortion=(0.12, -0.04),
+    )
+    out = tmp_path / "track.json"
+    track.save(out)
+    loaded = CameraTrack.load(out)
+    assert loaded.distortion == (0.12, -0.04)
+
+
+@pytest.mark.unit
+def test_camera_track_legacy_load_distortion_default_zero(tmp_path: Path):
+    """Older saved tracks (no ``distortion`` key) load with (0, 0) default."""
+    out = tmp_path / "legacy.json"
+    out.write_text(
+        json.dumps(
+            {
+                "clip_id": "legacy",
+                "fps": 25.0,
+                "image_size": [1920, 1080],
+                "t_world": [0.0, 0.0, 30.0],
+                "frames": [],
+            }
+        )
+    )
+    loaded = CameraTrack.load(out)
+    assert loaded.distortion == (0.0, 0.0)

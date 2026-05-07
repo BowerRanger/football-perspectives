@@ -34,6 +34,10 @@ class CameraTrack:
     # static_camera=true. None for moving-camera clips. When present,
     # every per-frame (R, t) satisfies -R^T @ t == camera_centre.
     camera_centre: tuple[float, float, float] | None = None
+    # Radial distortion coefficients (k1, k2). Default (0, 0) for
+    # backward compatibility with tracks saved before lens distortion
+    # was added to the calibration.
+    distortion: tuple[float, float] = (0.0, 0.0)
 
     @classmethod
     def load(cls, path: Path) -> "CameraTrack":
@@ -54,6 +58,8 @@ class CameraTrack:
         principal_point = tuple(pp_raw) if pp_raw is not None else None
         cc_raw = data.get("camera_centre")
         camera_centre = tuple(cc_raw) if cc_raw is not None else None
+        dist_raw = data.get("distortion")
+        distortion = tuple(dist_raw) if dist_raw is not None else (0.0, 0.0)
         return cls(
             clip_id=str(data["clip_id"]),
             fps=float(data["fps"]),
@@ -62,6 +68,7 @@ class CameraTrack:
             frames=frames,
             principal_point=principal_point,
             camera_centre=camera_centre,
+            distortion=distortion,
         )
 
     def save(self, path: Path) -> None:

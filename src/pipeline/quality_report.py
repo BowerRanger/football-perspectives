@@ -41,22 +41,37 @@ def write_quality_report(output_dir: Path) -> None:
                 i += 1
 
         # Reprojection residual per landmark for each anchor frame, averaged.
+        # Uses per-frame t when available (post Phase 1) and applies the
+        # clip-shared distortion (post Phase 2) so the metric reflects the
+        # actual model the camera stage solved, not a linearised approximation.
+        from src.utils.camera_projection import project_world_to_image
+
         anchor_residuals: list[float] = []
-        camera_by_frame = {
-            f.frame: (np.array(f.K), np.array(f.R)) for f in cam.frames
-        }
-        t_w = np.array(cam.t_world)
+        camera_by_frame: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        t_world_fallback = np.array(cam.t_world)
+        for f in cam.frames:
+            t_f = np.array(f.t) if f.t is not None else t_world_fallback
+            camera_by_frame[f.frame] = (np.array(f.K), np.array(f.R), t_f)
+        distortion = cam.distortion
         for anchor in anchors.anchors:
             if anchor.frame not in camera_by_frame:
                 continue
-            K, R = camera_by_frame[anchor.frame]
-            for lm in anchor.landmarks:
-                cam_pt = R @ np.array(lm.world_xyz) + t_w
-                if cam_pt[2] <= 0:
-                    continue
-                proj = (K @ cam_pt)[:2] / cam_pt[2]
+            K, R, t_f = camera_by_frame[anchor.frame]
+            world = np.array(
+                [lm.world_xyz for lm in anchor.landmarks], dtype=np.float64,
+            )
+            if len(world) == 0:
+                continue
+            obs = np.array(
+                [lm.image_xy for lm in anchor.landmarks], dtype=np.float64,
+            )
+            try:
+                proj = project_world_to_image(K, R, t_f, distortion, world)
+            except Exception:
+                continue
+            for i in range(len(world)):
                 anchor_residuals.append(
-                    float(np.linalg.norm(np.array(lm.image_xy) - proj))
+                    float(np.linalg.norm(obs[i] - proj[i]))
                 )
 
         # Static-camera contract: with cam.camera_centre set, every frame's
@@ -83,6 +98,7 @@ def write_quality_report(output_dir: Path) -> None:
                 float(np.mean(anchor_residuals)) if anchor_residuals else 0.0
             ),
             "body_drift_max_m": body_drift_max_m,
+            "distortion": list(cam.distortion),
         }
 
     hmr_dir = output_dir / "hmr_world"

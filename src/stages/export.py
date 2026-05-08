@@ -34,9 +34,28 @@ from src.pipeline.base import BaseStage
 from src.schemas.ball_track import BallTrack
 from src.schemas.camera_track import CameraTrack
 from src.schemas.smpl_world import SmplWorldTrack
+from src.schemas.ue_manifest import (
+    BallEntry,
+    CameraEntry,
+    PitchInfo,
+    PlayerEntry,
+    UeManifest,
+    WorldBBox,
+)
 from src.utils.gltf_builder import SceneBundle, build_glb
 
 logger = logging.getLogger(__name__)
+
+
+def _derive_clip_name(output_dir: Path) -> str:
+    """Read the prepared-shots manifest and return a folder-safe clip name."""
+    manifest = output_dir / "shots" / "manifest.json"
+    if not manifest.exists():
+        return "clip"
+    raw = json.loads(manifest.read_text())
+    name = Path(raw.get("source", "clip")).stem
+    safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name)
+    return safe or "clip"
 
 
 class ExportStage(BaseStage):
@@ -64,6 +83,9 @@ class ExportStage(BaseStage):
             self._export_fbx(export_cfg)
         else:
             logger.info("[export] fbx_enabled=false, skipping FBX emission")
+
+        clip_name = _derive_clip_name(self.output_dir)
+        self.write_ue_manifest(clip_name)
 
     # ------------------------------------------------------------------
     # glTF
@@ -162,3 +184,126 @@ class ExportStage(BaseStage):
             )
             return
         logger.info("[export] FBX export complete")
+
+    # ------------------------------------------------------------------
+    # UE manifest
+    # ------------------------------------------------------------------
+
+    def write_ue_manifest(self, clip_name: str) -> None:
+        """Write ``output/export/ue_manifest.json`` for UE5 ingest.
+
+        Manifest is written iff at least one player FBX exists. Ball and
+        camera entries are included only if their FBX files exist.
+        """
+        export_dir = self.output_dir / "export"
+        fbx_dir = export_dir / "fbx"
+        if not fbx_dir.exists():
+            logger.info("[export] no fbx dir, skipping manifest")
+            return
+
+        hmr_dir = self.output_dir / "hmr_world"
+        npz_files = sorted(hmr_dir.glob("*_smpl_world.npz")) if hmr_dir.exists() else []
+
+        players: list[PlayerEntry] = []
+        for npz in npz_files:
+            track = SmplWorldTrack.load(npz)
+            fbx_rel = f"fbx/{track.player_id}.fbx"
+            if not (export_dir / fbx_rel).exists():
+                continue
+            n = int(track.frames.shape[0])
+            if n == 0:
+                continue
+            mn = track.root_t.min(axis=0)
+            mx = track.root_t.max(axis=0)
+            players.append(
+                PlayerEntry(
+                    player_id=track.player_id,
+                    fbx=fbx_rel,
+                    frame_range=(int(track.frames[0]), int(track.frames[-1])),
+                    world_bbox=WorldBBox(
+                        min=(float(mn[0]), float(mn[1]), float(mn[2])),
+                        max=(float(mx[0]), float(mx[1]), float(mx[2])),
+                    ),
+                )
+            )
+
+        if not players:
+            logger.info("[export] no player FBX present, skipping manifest")
+            return
+
+        camera_path = self.output_dir / "camera" / "camera_track.json"
+        if not camera_path.exists():
+            logger.warning("[export] camera_track.json missing; using defaults")
+            fps = 30.0
+            clip_range = (
+                min(p.frame_range[0] for p in players),
+                max(p.frame_range[1] for p in players),
+            )
+            cam_meta = {}
+        else:
+            cam_meta = json.loads(camera_path.read_text())
+            fps = float(cam_meta.get("fps", 30.0)) or 30.0
+            cam_frames = cam_meta.get("frames", [])
+            if cam_frames:
+                clip_range = (
+                    int(cam_frames[0]["frame"]),
+                    int(cam_frames[-1]["frame"]),
+                )
+            else:
+                clip_range = (
+                    min(p.frame_range[0] for p in players),
+                    max(p.frame_range[1] for p in players),
+                )
+
+        ball_entry: BallEntry | None = None
+        ball_fbx = fbx_dir / "ball.fbx"
+        ball_track_path = self.output_dir / "ball" / "ball_track.json"
+        if ball_fbx.exists() and ball_track_path.exists():
+            ball_meta = json.loads(ball_track_path.read_text())
+            ball_frames = [
+                f["frame"]
+                for f in ball_meta.get("frames", [])
+                if f.get("world_xyz")
+            ]
+            if ball_frames:
+                ball_entry = BallEntry(
+                    fbx="fbx/ball.fbx",
+                    frame_range=(int(ball_frames[0]), int(ball_frames[-1])),
+                )
+
+        camera_entry: CameraEntry | None = None
+        camera_fbx = fbx_dir / "camera.fbx"
+        if camera_fbx.exists() and cam_meta:
+            cam_frames = cam_meta.get("frames", [])
+            image_size = tuple(cam_meta.get("image_size", [1920, 1080]))
+            if cam_frames:
+                camera_entry = CameraEntry(
+                    fbx="fbx/camera.fbx",
+                    image_size=(int(image_size[0]), int(image_size[1])),
+                    frame_range=(
+                        int(cam_frames[0]["frame"]),
+                        int(cam_frames[-1]["frame"]),
+                    ),
+                )
+
+        pitch_cfg = self.config.get("pitch", {}) or {}
+        manifest = UeManifest(
+            schema_version=1,
+            clip_name=clip_name,
+            fps=fps,
+            frame_range=clip_range,
+            pitch=PitchInfo(
+                length_m=float(pitch_cfg.get("length_m", 105.0)),
+                width_m=float(pitch_cfg.get("width_m", 68.0)),
+            ),
+            players=players,
+            ball=ball_entry,
+            camera=camera_entry,
+        )
+        manifest.save(export_dir / "ue_manifest.json")
+        logger.info(
+            "[export] wrote ue_manifest.json with %d player(s), ball=%s, camera=%s",
+            len(players),
+            ball_entry is not None,
+            camera_entry is not None,
+        )

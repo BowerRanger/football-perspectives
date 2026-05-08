@@ -62,8 +62,17 @@ def run_pipeline(
     stages: str,
     from_stage: str | None,
     config: dict,
+    shot_filter: str | None = None,
     **stage_kwargs,
 ) -> None:
+    """Run pipeline stages.
+
+    ``shot_filter`` (optional): when set, every stage that iterates the
+    shots manifest will only process the named shot. Stages that don't
+    use the manifest ignore it. Used by the dashboard's
+    /api/run-shot endpoint to re-run a single stage for a single shot
+    without re-running everything.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     active = resolve_stages(stages, from_stage)
     for name in _STAGE_NAMES:
@@ -74,7 +83,9 @@ def run_pipeline(
             print(f"  [SKIP] {name} (not implemented)")
             continue
         stage = StageClass(config=config, output_dir=output_dir, **stage_kwargs)
-        if stage.is_complete() and from_stage != name:
+        if shot_filter is not None:
+            stage.shot_filter = shot_filter
+        if stage.is_complete() and from_stage != name and shot_filter is None:
             print(f"  [SKIP] {name} (cached)")
             continue
         print(f"  [RUN]  {name}")

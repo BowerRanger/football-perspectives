@@ -228,7 +228,8 @@
   <span class="spacer"></span>
   <span id="status">Ready</span>
   <button id="save-btn" class="primary">Save Anchors</button>
-  <a href="/" style="color:#94a3b8;text-decoration:none;font-size:12px;border:1px solid #475569;padding:4px 10px;border-radius:4px;">← Dashboard</a>
+  <button id="rerun-camera-btn" style="background:#0ea5e9;border-color:#38bdf8;color:#fff;">Rerun camera tracking</button>
+  <a href="/" id="dashboard-link" style="color:#94a3b8;text-decoration:none;font-size:12px;margin-left:8px;">← Dashboard</a>
 </header>
 
 <main>
@@ -469,7 +470,7 @@ async function loadClip(clipId) {
 
 async function loadAnchors() {
   try {
-    const data = await fetchJson("/anchors");
+    const data = await fetchJson(`/anchors/${state.clipId}`);
     if (data && data.clip_id === state.clipId) {
       state.anchors = new Map();
       for (const a of data.anchors || []) {
@@ -1081,7 +1082,7 @@ els.saveBtn.addEventListener("click", async () => {
   els.saveBtn.disabled = true;
   setStatus("Saving…", "#fbbf24");
   try {
-    const res = await fetch("/anchors", {
+    const res = await fetch(`/anchors/${state.clipId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1095,6 +1096,81 @@ els.saveBtn.addEventListener("click", async () => {
     els.saveBtn.disabled = false;
   }
 });
+
+// ── Rerun camera tracking ───────────────────────────────────────────
+// Auto-saves the current anchors, then dispatches a single-stage,
+// single-shot pipeline run via /api/run-shot. Surfaces the job log
+// inline; on completion offers a link to the viewer for that shot.
+const rerunCameraBtn = document.getElementById("rerun-camera-btn");
+rerunCameraBtn.addEventListener("click", async () => {
+  if (!state.clipId) {
+    setStatus("No shot selected", "#f87171");
+    return;
+  }
+  rerunCameraBtn.disabled = true;
+  const originalText = "Rerun camera tracking";
+  rerunCameraBtn.textContent = "Saving anchors…";
+  try {
+    const payload = {
+      clip_id: state.clipId,
+      image_size: state.imageSize,
+      anchors: serialiseAnchors(),
+      stadium: state.stadium || null,
+    };
+    const saveRes = await fetch(`/anchors/${state.clipId}`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!saveRes.ok) throw new Error(`save failed: ${saveRes.status}`);
+
+    rerunCameraBtn.textContent = "Running camera stage…";
+    const runRes = await fetch("/api/run-shot", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({stage: "camera", shot_id: state.clipId}),
+    });
+    if (!runRes.ok) throw new Error(`run failed: ${runRes.status}`);
+    const job = await runRes.json();
+    setStatus(`Camera stage running for ${state.clipId}…`, "#fbbf24");
+
+    // Poll job status until done/error.
+    let lastStatus = "running";
+    while (lastStatus === "running") {
+      await new Promise(r => setTimeout(r, 500));
+      const sres = await fetch(`/api/jobs/${job.job_id}/status`);
+      if (!sres.ok) throw new Error(`status poll failed: ${sres.status}`);
+      const s = await sres.json();
+      lastStatus = s.status;
+    }
+    if (lastStatus === "error") {
+      throw new Error("camera stage errored — see logs");
+    }
+    rerunCameraBtn.textContent = `Done — Open viewer`;
+    rerunCameraBtn.onclick = () => {
+      window.location.href = `/viewer?shot=${encodeURIComponent(state.clipId)}`;
+    };
+    setStatus(`Camera stage finished for ${state.clipId}`, "#86efac");
+  } catch (err) {
+    setStatus(`Rerun failed: ${err.message}`, "#f87171");
+    rerunCameraBtn.textContent = originalText;
+  } finally {
+    rerunCameraBtn.disabled = false;
+  }
+});
+
+// Helper used by both Save and Rerun buttons.
+function serialiseAnchors() {
+  const out = [];
+  for (const [frame, payload] of state.anchors.entries()) {
+    out.push({
+      frame,
+      landmarks: payload.points || [],
+      lines: payload.lines || [],
+    });
+  }
+  return out.sort((a, b) => a.frame - b.frame);
+}
 
 // ── Frame controls wiring ───────────────────────────────────────────
 els.prevBtn.addEventListener("click", () => { els.video.pause(); seekToFrame(state.frame - 1); });

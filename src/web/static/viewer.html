@@ -53,6 +53,9 @@
   </select>
   <button id="ball-btn">Ball: ON</button>
   <button id="bones-btn" class="toggle-off">Bones: OFF</button>
+  <select id="shot-select" title="Switch which shot's reconstruction is loaded">
+    <option value="">All shots…</option>
+  </select>
   <span id="info">Frame 0 / 0</span>
 </div>
 
@@ -368,13 +371,58 @@ async function fetchJson(url) {
   return await r.json();
 }
 
+// Multi-shot routing: parse ?shot=xxx from the URL once, used to drive
+// every backend fetch (camera_track / players / ball). Empty string =
+// "let the server pick" (legacy or first-shot fallback).
+const _qs = new URLSearchParams(window.location.search);
+const SHOT_FILTER = _qs.get('shot') || '';
+
+async function populateShotSelect() {
+  let resp = null;
+  try { resp = await fetchJson('/api/output/shots'); } catch (_) { return; }
+  const sel = document.getElementById('shot-select');
+  sel.innerHTML = '';
+  const shots = (resp && resp.shots) || [];
+  if (shots.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = ''; opt.textContent = 'No shots';
+    sel.appendChild(opt);
+    sel.disabled = true;
+    return;
+  }
+  for (const id of shots) {
+    const opt = document.createElement('option');
+    opt.value = id; opt.textContent = id;
+    sel.appendChild(opt);
+  }
+  if (SHOT_FILTER && shots.includes(SHOT_FILTER)) {
+    sel.value = SHOT_FILTER;
+  } else {
+    sel.value = shots[0];
+  }
+  sel.addEventListener('change', () => {
+    const target = sel.value;
+    const params = new URLSearchParams(window.location.search);
+    if (target) params.set('shot', target); else params.delete('shot');
+    window.location.search = params.toString();
+  });
+}
+
+function _shotQuery(prefix) {
+  // Append ?shot=... or &shot=... depending on whether url already has params.
+  if (!SHOT_FILTER) return '';
+  return `${prefix}shot=${encodeURIComponent(SHOT_FILTER)}`;
+}
+
 async function loadScene() {
   const sidebar = document.getElementById('sidebar');
   sidebar.innerHTML = '<h4>Pitch-registered scene</h4>';
 
   // 1. Camera track tells us fps + frame-count bounds
   let camTrack = null;
-  try { camTrack = await fetchJson('/camera/track'); } catch (_) {}
+  try {
+    camTrack = await fetchJson(`/camera/track${_shotQuery('?')}`);
+  } catch (_) {}
   if (camTrack && camTrack.fps > 0) fps = camTrack.fps;
   if (camTrack && camTrack.frames && camTrack.frames.length > 0) {
     totalFrames = Math.max(totalFrames, camTrack.frames.length);
@@ -387,7 +435,7 @@ async function loadScene() {
   let playerIds = [];
   const playerNames = new Map();   // player_id -> player_name (when known)
   try {
-    const list = await fetchJson('/hmr_world/players');
+    const list = await fetchJson(`/hmr_world/players${_shotQuery('?')}`);
     const rows = list.players || [];
     for (const r of rows) {
       if (typeof r === 'string') {
@@ -422,7 +470,7 @@ async function loadScene() {
 
   // 4. Ball
   try {
-    const ball = await fetchJson('/ball/preview');
+    const ball = await fetchJson(`/ball/preview${_shotQuery('?')}`);
     ballFrames = ball.frames || [];
     if (ballFrames.length > 0) {
       totalFrames = Math.max(totalFrames, ballFrames[ballFrames.length - 1].frame + 1);
@@ -730,6 +778,7 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight - 60);
 });
 
+populateShotSelect();
 loadScene();
 requestAnimationFrame(animate);
 </script>

@@ -491,6 +491,51 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         ids = sorted(p.stem for p in shots_dir.glob("*.mp4"))
         return {"shots": ids}
 
+    @app.get("/api/output/shot-status/{shot_id}")
+    def get_shot_status(shot_id: str):
+        """Per-shot artefact-existence summary used by the dashboard's
+        multi-shot status panel. ``camera_stale`` flags the case where
+        the camera_track exists but its mtime predates the anchors —
+        i.e. the user edited anchors after the last camera solve."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", shot_id):
+            raise HTTPException(status_code=400, detail="Invalid shot_id")
+        cam_path = output_dir / "camera" / f"{shot_id}_camera_track.json"
+        anchors_path = output_dir / "camera" / f"{shot_id}_anchors.json"
+        has_camera = cam_path.exists()
+        has_anchors = anchors_path.exists()
+        camera_stale = (
+            has_camera and has_anchors
+            and cam_path.stat().st_mtime < anchors_path.stat().st_mtime
+        )
+        anchor_count = 0
+        if has_anchors:
+            try:
+                anchor_count = len(AnchorSet.load(anchors_path).anchors)
+            except Exception:
+                anchor_count = 0
+        hmr_dir = output_dir / "hmr_world"
+        hmr_count = 0
+        if hmr_dir.exists():
+            for npz in hmr_dir.glob("*_smpl_world.npz"):
+                try:
+                    z = np.load(npz, allow_pickle=False)
+                    sid = str(z["shot_id"]) if "shot_id" in z.files else ""
+                except Exception:
+                    sid = ""
+                if sid == shot_id:
+                    hmr_count += 1
+        return {
+            "shot_id": shot_id,
+            "has_anchors": has_anchors,
+            "anchor_count": anchor_count,
+            "has_camera": has_camera,
+            "camera_stale": camera_stale,
+            "has_hmr": hmr_count > 0,
+            "hmr_player_count": hmr_count,
+            "has_ball": (output_dir / "ball" / f"{shot_id}_ball_track.json").exists(),
+            "has_export": (output_dir / "export" / "gltf" / f"{shot_id}_scene.glb").exists(),
+        }
+
     @app.get("/landmarks")
     def get_landmarks():
         return {
@@ -679,10 +724,28 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         }
 
     @app.get("/camera/track")
-    def get_camera_track():
-        track_path = output_dir / "camera" / "camera_track.json"
+    def get_camera_track(shot: str | None = None):
+        """Return a CameraTrack as JSON.
+
+        ``?shot=xxx`` returns ``{shot}_camera_track.json``; absent or
+        empty returns the legacy singular ``camera_track.json`` (or, if
+        a manifest is present, the first shot's track) for backwards
+        compatibility with viewer / dashboard callers that don't yet
+        pass a shot filter.
+        """
+        if shot:
+            track_path = output_dir / "camera" / f"{shot}_camera_track.json"
+        else:
+            track_path = output_dir / "camera" / "camera_track.json"
+            if not track_path.exists():
+                first = _first_shot_id()
+                if first is not None:
+                    track_path = output_dir / "camera" / f"{first}_camera_track.json"
         if not track_path.exists():
-            return {"clip_id": "", "fps": 0.0, "image_size": [0, 0], "t_world": [0.0, 0.0, 0.0], "frames": []}
+            return {
+                "clip_id": shot or "", "fps": 0.0, "image_size": [0, 0],
+                "t_world": [0.0, 0.0, 0.0], "frames": [],
+            }
         try:
             track = CameraTrack.load(track_path)
         except Exception as exc:
@@ -820,7 +883,15 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         return data
 
     @app.get("/hmr_world/players")
-    def list_hmr_players():
+    def list_hmr_players(shot: str | None = None):
+        """List player_ids with HMR-world output.
+
+        ``?shot=xxx`` filters to players whose ``SmplWorldTrack.shot_id``
+        equals ``xxx``. Without the param all players are returned (the
+        legacy single-shot view). Filtering loads each NPZ to read
+        shot_id; for clips with hundreds of players this is fine
+        because the load is metadata-only.
+        """
         hmr_dir = output_dir / "hmr_world"
         if not hmr_dir.exists():
             return {"players": []}
@@ -828,6 +899,14 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         rows = []
         for npz_path in sorted(hmr_dir.glob("*_smpl_world.npz")):
             pid = npz_path.stem.replace("_smpl_world", "")
+            if shot:
+                try:
+                    z = np.load(npz_path, allow_pickle=False)
+                    track_shot = str(z["shot_id"]) if "shot_id" in z.files else ""
+                except Exception:
+                    track_shot = ""
+                if track_shot != shot:
+                    continue
             rows.append({"player_id": pid, "player_name": names.get(pid, "")})
         return {"players": rows}
 
@@ -876,10 +955,17 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         return payload
 
     @app.get("/ball/preview")
-    def get_ball_preview():
-        ball_path = output_dir / "ball" / "ball_track.json"
+    def get_ball_preview(shot: str | None = None):
+        if shot:
+            ball_path = output_dir / "ball" / f"{shot}_ball_track.json"
+        else:
+            ball_path = output_dir / "ball" / "ball_track.json"
+            if not ball_path.exists():
+                first = _first_shot_id()
+                if first is not None:
+                    ball_path = output_dir / "ball" / f"{first}_ball_track.json"
         if not ball_path.exists():
-            return {"clip_id": "", "fps": 0.0, "frames": [], "flight_segments": []}
+            return {"clip_id": shot or "", "fps": 0.0, "frames": [], "flight_segments": []}
         try:
             track = BallTrack.load(ball_path)
         except Exception as exc:

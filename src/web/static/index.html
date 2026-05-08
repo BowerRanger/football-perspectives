@@ -662,6 +662,57 @@ async function renderPrepareShots(panel) {
   }
   body.appendChild(t);
   panel.appendChild(wrap);
+
+  await renderMultiShotStatus(panel, data.shots);
+}
+
+// Per-shot artefact-existence summary so the operator can see at a glance
+// which shots are missing anchors, have stale camera tracks (anchors edited
+// after the last solve), or have no HMR/ball/export output yet.
+async function renderMultiShotStatus(panel, shotIds) {
+  const { wrap, body } = makePanel("Multi-Shot Status");
+  const { t, tbody } = makeTable([
+    "Shot", "Anchors", "Camera", "HMR", "Ball", "Export",
+  ]);
+  const cell = (ok, stale, label) => {
+    const span = document.createElement("span");
+    if (stale) {
+      span.textContent = "⚠";
+      span.title = `${label}: stale (anchors edited after last solve)`;
+      span.style.color = "#f59e0b";
+    } else if (ok) {
+      span.textContent = "✓";
+      span.title = `${label}: present`;
+      span.style.color = "#22c55e";
+    } else {
+      span.textContent = "✗";
+      span.title = `${label}: missing`;
+      span.style.color = "#64748b";
+    }
+    span.style.fontWeight = "bold";
+    return span;
+  };
+  for (const sid of shotIds) {
+    const s = await fetchJsonOrNull(`/api/output/shot-status/${encodeURIComponent(sid)}`);
+    if (!s) {
+      addRow(tbody, [sid, "—", "—", "—", "—", "—"]);
+      continue;
+    }
+    const anchorLabel = s.has_anchors ? `${s.anchor_count}` : "✗";
+    const anchorEl = document.createElement("span");
+    anchorEl.textContent = anchorLabel;
+    anchorEl.style.color = s.has_anchors ? "#22c55e" : "#64748b";
+    addRow(tbody, [
+      sid,
+      { el: anchorEl },
+      { el: cell(s.has_camera, s.camera_stale, "Camera") },
+      { el: cell(s.has_hmr, false, `HMR (${s.hmr_player_count} players)`) },
+      { el: cell(s.has_ball, false, "Ball") },
+      { el: cell(s.has_export, false, "Export") },
+    ]);
+  }
+  body.appendChild(t);
+  panel.appendChild(wrap);
 }
 
 async function renderTracking(panel) {

@@ -78,27 +78,61 @@ class HmrWorldStage(BaseStage):
         return out.exists() and any(out.glob("*_smpl_world.npz"))
 
     def run(self) -> None:
+        from src.schemas.shots import ShotsManifest
+
         cfg = self.config.get("hmr_world", {})
         track_dir = self.output_dir / "tracks"
-        camera_path = self.output_dir / "camera" / "camera_track.json"
         out_dir = self.output_dir / "hmr_world"
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        camera_track = CameraTrack.load(camera_path)
-        per_frame_K = {f.frame: np.array(f.K, dtype=float) for f in camera_track.frames}
-        per_frame_R = {f.frame: np.array(f.R, dtype=float) for f in camera_track.frames}
-        # Per-frame t when available (current camera stage always writes
-        # it). Fall back to clip-shared t_world for legacy tracks. Per-
-        # frame t is essential for static-camera clips where t varies
-        # with R while the body centre stays put.
-        t_world_fallback = np.array(camera_track.t_world, dtype=float)
-        per_frame_t: dict[int, np.ndarray] = {}
-        for f in camera_track.frames:
-            if f.t is not None:
-                per_frame_t[f.frame] = np.array(f.t, dtype=float)
-            else:
-                per_frame_t[f.frame] = t_world_fallback
-        distortion = camera_track.distortion
+        # Load every shot's camera_track separately. Each player's
+        # animation is solved against the camera track of the shot they
+        # were detected in (group_shot[pid] → shot_id → camera).
+        manifest_path = self.output_dir / "shots" / "shots_manifest.json"
+        camera_tracks_by_shot: dict[str, CameraTrack] = {}
+        per_frame_K_by_shot: dict[str, dict[int, np.ndarray]] = {}
+        per_frame_R_by_shot: dict[str, dict[int, np.ndarray]] = {}
+        per_frame_t_by_shot: dict[str, dict[int, np.ndarray]] = {}
+        distortion_by_shot: dict[str, tuple[float, float]] = {}
+
+        def _build_per_frame(shot_key: str, cam: CameraTrack) -> None:
+            camera_tracks_by_shot[shot_key] = cam
+            per_frame_K_by_shot[shot_key] = {
+                f.frame: np.array(f.K, dtype=float) for f in cam.frames
+            }
+            per_frame_R_by_shot[shot_key] = {
+                f.frame: np.array(f.R, dtype=float) for f in cam.frames
+            }
+            t_fb = np.array(cam.t_world, dtype=float)
+            per_frame_t_by_shot[shot_key] = {
+                f.frame: (np.array(f.t, dtype=float) if f.t is not None else t_fb)
+                for f in cam.frames
+            }
+            distortion_by_shot[shot_key] = cam.distortion
+
+        if manifest_path.exists():
+            manifest = ShotsManifest.load(manifest_path)
+            for shot in manifest.shots:
+                p = self.output_dir / "camera" / f"{shot.id}_camera_track.json"
+                if not p.exists():
+                    logger.warning(
+                        "hmr_world skipping shot %s — no camera track at %s",
+                        shot.id, p,
+                    )
+                    continue
+                _build_per_frame(shot.id, CameraTrack.load(p))
+
+        # Legacy single-shot fallback: if no per-shot files but a singular
+        # one exists, register it under shot_id="" so downstream lookup
+        # still works (with the same key when group_shot lookup misses).
+        if not camera_tracks_by_shot:
+            legacy = self.output_dir / "camera" / "camera_track.json"
+            if legacy.exists():
+                _build_per_frame("", CameraTrack.load(legacy))
+        logger.info(
+            "[hmr_world] camera tracks loaded for %d shot(s): %s",
+            len(camera_tracks_by_shot), list(camera_tracks_by_shot.keys()),
+        )
 
         min_track_frames = int(cfg.get("min_track_frames", 10))
         savgol_window = int(cfg.get("theta_savgol_window", 11))
@@ -118,33 +152,9 @@ class HmrWorldStage(BaseStage):
         # 0 disables. Sign convention: positive = tilt body toward camera.
         lean_correction_deg = float(cfg.get("lean_correction_deg", 0.0))
 
-        # Build per-player frame lists by walking each shot's TracksResult.
-        # Tracks share a player_id (assigned via the dashboard's annotation
-        # UI: name/split/merge); fallback to track_id when the operator
-        # hasn't annotated yet so the stage still runs against raw tracking
-        # output. Tracks named "ignore" are dropped entirely.
-        groups: dict[str, list[tuple[int, tuple[int, int, int, int]]]] = {}
-        group_shot: dict[str, str] = {}
         if not track_dir.exists():
             return
-        for tracks_path in sorted(track_dir.glob("*_tracks.json")):
-            try:
-                tr = TracksResult.load(tracks_path)
-            except Exception:
-                continue
-            for track in tr.tracks:
-                if track.class_name not in ("player", "goalkeeper"):
-                    continue
-                if track.player_name == "ignore":
-                    continue
-                pid = track.player_id or track.track_id
-                if pid not in groups:
-                    groups[pid] = []
-                    group_shot[pid] = tr.shot_id
-                groups[pid].extend(
-                    (int(f.frame), tuple(int(x) for x in f.bbox))
-                    for f in track.frames
-                )
+        groups, group_shot = self._build_player_groups()
 
         # Sort players for stable ordering across runs (deterministic
         # resume: the same partial order each time means the operator
@@ -183,16 +193,20 @@ class HmrWorldStage(BaseStage):
         for i, (player_id, frames) in enumerate(ordered, start=1):
             frames = sorted(set(frames), key=lambda x: x[0])
             t0 = time.time()
+            shot_id_for_pid = group_shot[player_id]
+            shot_key = (
+                shot_id_for_pid if shot_id_for_pid in camera_tracks_by_shot else ""
+            )
             status = self._process_player(
                 player_id=player_id,
-                shot_id=group_shot[player_id],
+                shot_id=shot_id_for_pid,
                 track_frames=frames,
                 out_dir=out_dir,
                 cfg=cfg,
-                per_frame_K=per_frame_K,
-                per_frame_R=per_frame_R,
-                per_frame_t=per_frame_t,
-                distortion=distortion,
+                per_frame_K=per_frame_K_by_shot.get(shot_key, {}),
+                per_frame_R=per_frame_R_by_shot.get(shot_key, {}),
+                per_frame_t=per_frame_t_by_shot.get(shot_key, {}),
+                distortion=distortion_by_shot.get(shot_key, (0.0, 0.0)),
                 min_track_frames=min_track_frames,
                 savgol_window=savgol_window,
                 savgol_order=savgol_order,
@@ -228,6 +242,55 @@ class HmrWorldStage(BaseStage):
         print(
             f"[hmr_world] done — total wall {_fmt_duration(time.time() - run_start)}"
         )
+
+    def _build_player_groups(
+        self,
+    ) -> tuple[
+        dict[str, list[tuple[int, tuple[int, int, int, int]]]],
+        dict[str, str],
+    ]:
+        """Walk every {shot_id}_tracks.json and group track frames by
+        player_id. Unannotated tracks (no player_id, no player_name) get
+        a shot-prefixed pid (``"{shot_id}_T{track_id}"``) so collisions
+        between shots can't merge two physically-different players into
+        one.
+
+        Returns ``(groups, group_shot)`` where:
+          - ``groups[pid]`` = list of ``(frame, bbox)`` tuples
+          - ``group_shot[pid]`` = the shot_id that pid was detected in
+        """
+        groups: dict[str, list[tuple[int, tuple[int, int, int, int]]]] = {}
+        group_shot: dict[str, str] = {}
+        track_dir = self.output_dir / "tracks"
+        if not track_dir.exists():
+            return groups, group_shot
+        for tracks_path in sorted(track_dir.glob("*_tracks.json")):
+            try:
+                tr = TracksResult.load(tracks_path)
+            except Exception:
+                continue
+            for track in tr.tracks:
+                if track.class_name not in ("player", "goalkeeper"):
+                    continue
+                if track.player_name == "ignore":
+                    continue
+                pid = (
+                    track.player_id
+                    or (
+                        f"{tr.shot_id}_T{track.track_id}"
+                        if track.track_id else None
+                    )
+                )
+                if pid is None:
+                    continue
+                if pid not in groups:
+                    groups[pid] = []
+                    group_shot[pid] = tr.shot_id
+                groups[pid].extend(
+                    (int(f.frame), tuple(int(x) for x in f.bbox))
+                    for f in track.frames
+                )
+        return groups, group_shot
 
     def _process_player(
         self,

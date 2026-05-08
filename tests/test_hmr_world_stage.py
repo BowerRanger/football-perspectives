@@ -26,18 +26,20 @@ from src.stages.hmr_world import HmrWorldStage
 
 
 def _identity_track(n_frames: int) -> CameraTrack:
-    """A camera oriented so SMPL-canonical frame maps to pitch-world directly.
+    """A camera oriented so an upright body in pitch yields root_z ≈ 1 m.
 
-    With ``R_world_to_cam = SMPL_TO_PITCH_STATIC``, the
-    ``smpl_root_in_pitch_frame`` formula
-    ``R_world_to_cam.T @ SMPL_TO_PITCH_STATIC @ root_R_cam``
-    reduces to ``root_R_cam`` itself (since SMPL_TO_PITCH_STATIC is
-    orthogonal). Combined with the fake's identity ``root_R_cam`` this
-    keeps the foot offset ``(0, 0, -0.95)`` aligned with pitch -z, so
-    a foot at z=0.05 yields root z=1.0 — clean to assert against.
+    Convention reminders (post the Phase-2 simplification of
+    ``smpl_pitch_transform``):
+      - Pitch world is z-up.
+      - OpenCV camera is y-down, z-into-scene.
+      - The chain is now ``R_w2c.T @ root_R_cam`` (no X_180 bridge).
+      - For an upright body in OpenCV cam, ``root_R_cam`` is ``X_180``
+        (canonical y-up → cam y-down) — see the fake runner below for
+        the actual matrix used.
 
-    See decision-log D10 for why the plan's original camera orientation
-    was changed for this fixture.
+    With ``R_w2c = [[1,0,0],[0,0,-1],[0,1,0]]`` and ``root_R_cam = X_180``:
+    ``R_world @ (0,-0.95,0) = (0, 0, -0.95)`` — i.e. the foot offset maps
+    cleanly to pitch -z, so a foot at z=0.05 yields root z = 1.0.
     """
     R_world_to_cam = [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]]
     return CameraTrack(
@@ -83,10 +85,16 @@ def fake_gvhmr(monkeypatch):
         kp2d = np.zeros((n, 17, 3), dtype=np.float32)
         kp2d[:, 15] = (150.0, 380.0, 0.9)  # left ankle
         kp2d[:, 16] = (160.0, 380.0, 0.9)  # right ankle
+        # X_180 around +x: maps SMPL canonical y-up to OpenCV camera
+        # y-down. That's what GVHMR's smpl_params_incam.global_orient
+        # gives for an upright body under the post-Phase-2 chain.
+        x_180 = np.array(
+            [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
+        )
         return {
             "thetas": np.zeros((n, 24, 3)),
             "betas": np.tile(np.linspace(0, 1, 10), (n, 1)),
-            "root_R_cam": np.tile(np.eye(3), (n, 1, 1)),
+            "root_R_cam": np.tile(x_180, (n, 1, 1)),
             "root_t_cam": np.zeros((n, 3)),
             "joint_confidence": np.full((n, 24), 0.9),
             "kp2d": kp2d,
@@ -271,3 +279,90 @@ def test_hmr_world_reuses_one_estimator_across_players(
     assert len(set(seen_estimator_ids)) == 1, (
         f"each player got a different estimator instance: {seen_estimator_ids}"
     )
+
+
+@pytest.mark.unit
+def test_unannotated_track_id_is_prefixed_with_shot(tmp_path: Path) -> None:
+    """ByteTrack reuses track_id=3 across shots; the player_id used by
+    hmr_world must be unique across shots when the user hasn't yet
+    annotated a name. Format: ``{shot_id}_T{track_id}``."""
+    from src.schemas.shots import Shot, ShotsManifest
+
+    (tmp_path / "tracks").mkdir()
+    for shot_id in ("alpha", "beta"):
+        TracksResult(
+            shot_id=shot_id,
+            tracks=[Track(
+                track_id="3",            # collision across shots
+                player_id=None,          # not annotated
+                player_name=None,
+                team=None,
+                class_name="player",
+                frames=[TrackFrame(
+                    frame=0, bbox=[0, 0, 10, 10], confidence=0.9,
+                    pitch_position=None,
+                )],
+            )],
+        ).save(tmp_path / "tracks" / f"{shot_id}_tracks.json")
+    (tmp_path / "shots").mkdir()
+    ShotsManifest(
+        source_file="x", fps=25.0, total_frames=1,
+        shots=[
+            Shot(id="alpha", start_frame=0, end_frame=0, start_time=0,
+                 end_time=0.04, clip_file="shots/alpha.mp4"),
+            Shot(id="beta", start_frame=0, end_frame=0, start_time=0,
+                 end_time=0.04, clip_file="shots/beta.mp4"),
+        ],
+    ).save(tmp_path / "shots" / "shots_manifest.json")
+
+    stage = HmrWorldStage(config={}, output_dir=tmp_path)
+    groups, group_shot = stage._build_player_groups()
+    assert "alpha_T3" in groups, f"got pids: {list(groups)}"
+    assert "beta_T3" in groups, f"got pids: {list(groups)}"
+    assert group_shot["alpha_T3"] == "alpha"
+    assert group_shot["beta_T3"] == "beta"
+
+
+@pytest.mark.unit
+def test_hmr_world_loads_per_shot_camera_tracks(tmp_path: Path) -> None:
+    """Two shots each with their own camera_track.json — both files exist
+    after prepare_shots/camera; hmr_world.run() must not fail when only
+    finding the per-shot files (no legacy camera_track.json)."""
+    from src.schemas.shots import Shot, ShotsManifest
+
+    eye = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    cam_alpha = CameraTrack(
+        clip_id="alpha", fps=25.0, image_size=(640, 360),
+        t_world=[0.0, 0.0, 0.0],
+        frames=(CameraFrame(
+            frame=0, K=eye, R=eye, confidence=1.0, is_anchor=True,
+        ),),
+    )
+    cam_beta = CameraTrack(
+        clip_id="beta", fps=25.0, image_size=(640, 360),
+        t_world=[0.0, 0.0, 0.0],
+        frames=(CameraFrame(
+            frame=0, K=eye, R=eye, confidence=1.0, is_anchor=True,
+        ),),
+    )
+    (tmp_path / "camera").mkdir(parents=True)
+    cam_alpha.save(tmp_path / "camera" / "alpha_camera_track.json")
+    cam_beta.save(tmp_path / "camera" / "beta_camera_track.json")
+    (tmp_path / "shots").mkdir()
+    ShotsManifest(
+        source_file=str(tmp_path), fps=25.0, total_frames=2,
+        shots=[
+            Shot(id="alpha", start_frame=0, end_frame=0, start_time=0.0,
+                 end_time=0.04, clip_file="shots/alpha.mp4"),
+            Shot(id="beta", start_frame=0, end_frame=0, start_time=0.0,
+                 end_time=0.04, clip_file="shots/beta.mp4"),
+        ],
+    ).save(tmp_path / "shots" / "shots_manifest.json")
+
+    # No tracks dir → stage returns early after loading cameras. The
+    # invariant we're checking is that loading both per-shot files works.
+    stage = HmrWorldStage(config={"hmr_world": {"min_track_frames": 1}}, output_dir=tmp_path)
+    stage.run()  # must not raise
+    # Sanity: per-shot tracks did get saved (we just authored them above).
+    assert (tmp_path / "camera" / "alpha_camera_track.json").exists()
+    assert (tmp_path / "camera" / "beta_camera_track.json").exists()

@@ -76,3 +76,60 @@ def test_ball_stage_recovers_grounded_and_flight(tmp_path: Path):
     # flight segments may or may not pass the residual gate on this synthetic
     # data; assert at least the schema invariant.
     assert len(out.frames) == n
+
+
+@pytest.mark.integration
+def test_ball_stage_emits_per_shot_track(tmp_path: Path):
+    """Two shots, two camera_tracks, two raw ball_tracks → two per-shot
+    BallTrack outputs. Single-shot path stays via legacy fallback."""
+    from src.schemas.shots import Shot, ShotsManifest
+
+    n = 30
+    K, R, t = _render_and_save_camera(tmp_path, n)
+    # Move the per-shot camera_track output into per-shot naming.
+    legacy = tmp_path / "camera" / "camera_track.json"
+    (tmp_path / "camera" / "alpha_camera_track.json").write_text(
+        legacy.read_text()
+    )
+    legacy.unlink()
+
+    # And a duplicate for beta.
+    (tmp_path / "camera" / "beta_camera_track.json").write_text(
+        (tmp_path / "camera" / "alpha_camera_track.json").read_text()
+    )
+
+    # Manifest with two shots.
+    fps = 30.0
+    end = n - 1
+    (tmp_path / "shots").mkdir(exist_ok=True)
+    ShotsManifest(
+        source_file="x", fps=fps, total_frames=2 * n,
+        shots=[
+            Shot(id="alpha", start_frame=0, end_frame=end, start_time=0.0,
+                 end_time=(end + 1) / fps, clip_file="shots/alpha.mp4"),
+            Shot(id="beta", start_frame=0, end_frame=end, start_time=0.0,
+                 end_time=(end + 1) / fps, clip_file="shots/beta.mp4"),
+        ],
+    ).save(tmp_path / "shots" / "shots_manifest.json")
+
+    # Synthetic raw ball detections, same trajectory in both shots.
+    pts = []
+    for i in range(n):
+        p = np.array([50.0 + 0.5 * i, 30.0, 0.11])
+        cam = R @ p + t
+        pix = K @ cam
+        uv = pix[:2] / pix[2]
+        pts.append({"frame": i, "bbox_centre": list(uv), "confidence": 0.85})
+    (tmp_path / "tracks").mkdir(exist_ok=True)
+    (tmp_path / "tracks" / "alpha_ball_track.json").write_text(
+        json.dumps({"clip_id": "alpha", "frames": pts})
+    )
+    (tmp_path / "tracks" / "beta_ball_track.json").write_text(
+        json.dumps({"clip_id": "beta", "frames": pts})
+    )
+
+    stage = BallStage(config={"ball": {}}, output_dir=tmp_path)
+    stage.run()
+
+    assert (tmp_path / "ball" / "alpha_ball_track.json").exists()
+    assert (tmp_path / "ball" / "beta_ball_track.json").exists()

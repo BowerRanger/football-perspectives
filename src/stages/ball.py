@@ -42,11 +42,67 @@ class BallStage(BaseStage):
     name = "ball"
 
     def is_complete(self) -> bool:
-        return (self.output_dir / "ball" / "ball_track.json").exists()
+        from src.schemas.shots import ShotsManifest
+        manifest_path = self.output_dir / "shots" / "shots_manifest.json"
+        if not manifest_path.exists():
+            return (self.output_dir / "ball" / "ball_track.json").exists()
+        manifest = ShotsManifest.load(manifest_path)
+        return all(
+            (self.output_dir / "ball" / f"{shot.id}_ball_track.json").exists()
+            for shot in manifest.shots
+        )
 
     def run(self) -> None:
+        from src.schemas.shots import ShotsManifest
         cfg = self.config.get("ball", {})
-        camera = CameraTrack.load(self.output_dir / "camera" / "camera_track.json")
+        manifest_path = self.output_dir / "shots" / "shots_manifest.json"
+        if not manifest_path.exists():
+            # Legacy single-shot path. If both legacy files exist, run
+            # against them; otherwise fail with the same message as before.
+            cam_path = self.output_dir / "camera" / "camera_track.json"
+            ball_in = self.output_dir / "tracks" / "ball_track.json"
+            ball_out = self.output_dir / "ball" / "ball_track.json"
+            if cam_path.exists() and ball_in.exists():
+                self._run_shot("", cam_path, ball_in, ball_out, cfg)
+                return
+            raise FileNotFoundError(
+                f"ball stage requires manifest at {manifest_path}; run prepare_shots first"
+            )
+        manifest = ShotsManifest.load(manifest_path)
+        shot_filter = getattr(self, "shot_filter", None)
+        for shot in manifest.shots:
+            if shot_filter is not None and shot.id != shot_filter:
+                continue
+            cam_path = self.output_dir / "camera" / f"{shot.id}_camera_track.json"
+            ball_in = self.output_dir / "tracks" / f"{shot.id}_ball_track.json"
+            ball_out = self.output_dir / "ball" / f"{shot.id}_ball_track.json"
+            if not cam_path.exists():
+                logger = __import__("logging").getLogger(__name__)
+                logger.warning(
+                    "ball stage skipping shot %s — no camera_track at %s",
+                    shot.id, cam_path,
+                )
+                continue
+            if not ball_in.exists():
+                logger = __import__("logging").getLogger(__name__)
+                logger.warning(
+                    "ball stage skipping shot %s — no raw ball detections at %s",
+                    shot.id, ball_in,
+                )
+                continue
+            self._run_shot(shot.id, cam_path, ball_in, ball_out, cfg)
+
+    def _run_shot(
+        self,
+        shot_id: str,
+        camera_path: Path,
+        ball_in_path: Path,
+        ball_out_path: Path,
+        cfg: dict,
+    ) -> None:
+        """Single-shot ball reconstruction. Body is the original run()'s
+        logic with input/output paths parameterised on shot_id."""
+        camera = CameraTrack.load(camera_path)
         per_frame_K = {f.frame: np.array(f.K) for f in camera.frames}
         per_frame_R = {f.frame: np.array(f.R) for f in camera.frames}
         # Per-frame t when present (current camera stage always writes it).
@@ -58,8 +114,7 @@ class BallStage(BaseStage):
         }
         distortion = camera.distortion
 
-        ball_track_path = self.output_dir / "tracks" / "ball_track.json"
-        with ball_track_path.open() as fh:
+        with ball_in_path.open() as fh:
             ball_input = json.load(fh)
 
         ball_radius = float(cfg.get("ball_radius_m", 0.11))
@@ -176,4 +231,4 @@ class BallStage(BaseStage):
             frames=tuple(per_frame),
             flight_segments=tuple(flight_outs),
         )
-        track.save(self.output_dir / "ball" / "ball_track.json")
+        track.save(ball_out_path)

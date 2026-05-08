@@ -685,6 +685,7 @@ def run_on_track(
     device: str,
     batch_size: int,
     max_sequence_length: int,
+    estimator: "GVHMREstimator | None" = None,
 ) -> dict[str, np.ndarray]:
     """Run GVHMR over a single player's track.
 
@@ -703,6 +704,12 @@ def run_on_track(
     max_sequence_length:
         Maximum number of frames per inference call. Long tracks are
         chunked to avoid the MPS allocation issue noted in the spec.
+    estimator:
+        Optional pre-constructed estimator. When supplied, its already-loaded
+        GVHMR + ViTPose-Huge + HMR2-ViT + SMPLX models are reused, saving
+        the 30-60s per-call load. Pass ``None`` to construct a fresh
+        estimator (legacy behaviour). The caller is responsible for
+        ensuring the estimator's checkpoint/device match.
 
     Returns
     -------
@@ -741,7 +748,8 @@ def run_on_track(
             "Download from https://github.com/zju3dv/GVHMR or run scripts/setup_gvhmr.sh"
         )
 
-    estimator = GVHMREstimator(checkpoint=str(checkpoint), device=device)
+    if estimator is None:
+        estimator = GVHMREstimator(checkpoint=str(checkpoint), device=device)
 
     frame_indices = [int(fi) for fi, _ in track_frames]
     bboxes = [list(map(float, bb)) for _, bb in track_frames]

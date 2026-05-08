@@ -164,6 +164,20 @@ class HmrWorldStage(BaseStage):
             f"{cached} cached on disk, {to_process} to process"
         )
 
+        # Build one estimator for the whole stage. GVHMR + ViTPose-Huge +
+        # HMR2.0 ViT-Huge + SMPLX load is 30-60s; without this, every
+        # player paid that cost (the previous run_on_track constructed a
+        # fresh estimator per call). Lazy: only build when there's
+        # something to process — an all-cached run is still torch-free.
+        estimator = None
+        if to_process > 0:
+            from src.utils.gvhmr_estimator import GVHMREstimator
+
+            estimator = GVHMREstimator(
+                checkpoint=str(cfg.get("checkpoint", "")),
+                device=str(cfg.get("device", "auto")),
+            )
+
         run_start = time.time()
         elapsed_per_player: list[float] = []
         for i, (player_id, frames) in enumerate(ordered, start=1):
@@ -187,6 +201,7 @@ class HmrWorldStage(BaseStage):
                 root_t_savgol_window=root_t_savgol_window,
                 root_t_savgol_order=root_t_savgol_order,
                 lean_correction_deg=lean_correction_deg,
+                estimator=estimator,
             )
             dt = time.time() - t0
             if status == "ran":
@@ -234,6 +249,7 @@ class HmrWorldStage(BaseStage):
         root_t_savgol_window: int,
         root_t_savgol_order: int,
         lean_correction_deg: float,
+        estimator: object | None = None,
     ) -> str:
         """Process one player. Returns one of:
         - ``"too_short"`` — track had fewer than ``min_track_frames`` frames
@@ -276,6 +292,7 @@ class HmrWorldStage(BaseStage):
             device=str(cfg.get("device", "auto")),
             batch_size=int(cfg.get("batch_size", 16)),
             max_sequence_length=int(cfg.get("max_sequence_length", 120)),
+            estimator=estimator,
         )
         thetas = np.asarray(hmr_out["thetas"])             # (N, 24, 3)
         betas_all = np.asarray(hmr_out["betas"])           # (N, 10)

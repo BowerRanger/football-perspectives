@@ -67,7 +67,16 @@ def fake_gvhmr(monkeypatch):
     drives the root-z assertion downstream.
     """
 
-    def _runner(track_frames, *, video_path, checkpoint, device, batch_size, max_sequence_length):
+    def _runner(
+        track_frames,
+        *,
+        video_path,
+        checkpoint,
+        device,
+        batch_size,
+        max_sequence_length,
+        estimator=None,
+    ):
         n = len(track_frames)
         # COCO-17: keypoints 15/16 are left/right ankles. Other joints are
         # zero-confidence (don't contribute to the foot anchor).
@@ -161,3 +170,104 @@ def test_hmr_world_emits_track_in_pitch_frame(tmp_path: Path, fake_gvhmr) -> Non
     first_frame_kps = kp2d_data["frames"][0]["keypoints"]
     assert first_frame_kps[15] == pytest.approx([150.0, 380.0, 0.9], abs=1e-5)
     assert first_frame_kps[16] == pytest.approx([160.0, 380.0, 0.9], abs=1e-5)
+
+
+@pytest.mark.integration
+def test_hmr_world_reuses_one_estimator_across_players(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Slice 1 speed-up: one GVHMREstimator should serve all players in a run.
+
+    Previously ``run_on_track`` constructed a fresh ``GVHMREstimator`` per
+    call, paying the 30-60s GVHMR + ViTPose-Huge + HMR2-ViT + SMPLX load
+    cost for every player. The stage now builds one estimator before the
+    player loop and threads it through. This test captures the estimator
+    identity each call sees and asserts it's a non-None instance and the
+    same object across all players.
+    """
+    n_frames = 20
+    n_players = 3
+
+    (tmp_path / "shots").mkdir()
+    (tmp_path / "shots" / "play.mp4").write_bytes(b"")
+
+    track = _identity_track(n_frames)
+    track.save(tmp_path / "camera" / "camera_track.json")
+
+    track_dir = tmp_path / "tracks"
+    track_dir.mkdir()
+    tr = TracksResult(
+        shot_id="play",
+        tracks=[
+            Track(
+                track_id=f"T{p:03d}",
+                class_name="player",
+                team="A",
+                player_id=f"P{p:03d}",
+                player_name="",
+                frames=[
+                    TrackFrame(
+                        frame=i,
+                        bbox=[100, 100, 200, 400],
+                        confidence=0.9,
+                        pitch_position=None,
+                    )
+                    for i in range(n_frames)
+                ],
+            )
+            for p in range(1, n_players + 1)
+        ],
+    )
+    tr.save(track_dir / "play_tracks.json")
+
+    seen_estimator_ids: list[int | None] = []
+
+    def _runner(
+        track_frames,
+        *,
+        video_path,
+        checkpoint,
+        device,
+        batch_size,
+        max_sequence_length,
+        estimator=None,
+    ):
+        seen_estimator_ids.append(id(estimator) if estimator is not None else None)
+        n = len(track_frames)
+        kp2d = np.zeros((n, 17, 3), dtype=np.float32)
+        kp2d[:, 15] = (150.0, 380.0, 0.9)
+        kp2d[:, 16] = (160.0, 380.0, 0.9)
+        return {
+            "thetas": np.zeros((n, 24, 3)),
+            "betas": np.tile(np.linspace(0, 1, 10), (n, 1)),
+            "root_R_cam": np.tile(np.eye(3), (n, 1, 1)),
+            "root_t_cam": np.zeros((n, 3)),
+            "joint_confidence": np.full((n, 24), 0.9),
+            "kp2d": kp2d,
+        }
+
+    monkeypatch.setattr(
+        "src.utils.gvhmr_estimator.run_on_track", _runner, raising=False
+    )
+
+    stage = HmrWorldStage(
+        config={
+            "hmr_world": {
+                "min_track_frames": 5,
+                "checkpoint": "ignored",
+                "ground_snap_velocity": 0.0,
+            }
+        },
+        output_dir=tmp_path,
+    )
+    stage.run()
+
+    assert len(seen_estimator_ids) == n_players, (
+        f"expected one run_on_track call per player, got {len(seen_estimator_ids)}"
+    )
+    assert all(eid is not None for eid in seen_estimator_ids), (
+        "stage passed estimator=None — caching is disabled"
+    )
+    assert len(set(seen_estimator_ids)) == 1, (
+        f"each player got a different estimator instance: {seen_estimator_ids}"
+    )

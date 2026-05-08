@@ -23,3 +23,7 @@ def test_run_on_track_signature() -> None:
     assert "device" in sig.parameters
     assert "batch_size" in sig.parameters
     assert "max_sequence_length" in sig.parameters
+    # estimator is optional: passing a pre-constructed GVHMREstimator
+    # avoids reloading the model per player (Slice 1 speed-up).
+    assert "estimator" in sig.parameters
+    assert sig.parameters["estimator"].default is None

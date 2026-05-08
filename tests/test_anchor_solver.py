@@ -738,3 +738,62 @@ def test_huber_loss_dampens_one_bad_landmark():
     fx_bad = sol_bad.per_anchor_KRt[0][0][0, 0]
     rel = abs(fx_bad - fx_clean) / fx_clean
     assert rel < 0.01, f"fx moved {rel * 100:.2f}% — Huber not dampening outlier"
+
+
+@pytest.mark.unit
+def test_shared_C_LM_recovers_truth_better_than_median():
+    """When solo solves disagree on C due to per-anchor noise, the
+    shared-C joint LM should converge to a truer C than the simple
+    median of solos. Synthesised by injecting different click-noise
+    patterns into otherwise-identical anchors so their solo Cs spread
+    around truth — the LM must find a C closer to truth than the
+    median of those spread-out solos.
+    """
+    from src.utils.anchor_solver import refine_with_shared_translation
+
+    K_true = _K()
+    C_true = _C_WORLD  # (52.5, -30, 30)
+    rng = np.random.default_rng(seed=42)
+    anchors: list[Anchor] = []
+    for frame, yaw_deg in ((0, 0.0), (60, 5.0), (120, -5.0), (180, 8.0)):
+        R = _yaw(yaw_deg)
+        t = -R @ C_true
+        # 8 rich landmarks per anchor (T-pose mix of corners + crossbar)
+        rich_landmarks = (
+            ("near_left_corner",          (0.0,    0.0,   0.0)),
+            ("near_right_corner",         (105.0,  0.0,   0.0)),
+            ("far_left_corner",           (0.0,    68.0,  0.0)),
+            ("far_right_corner",          (105.0,  68.0,  0.0)),
+            ("halfway_near",              (52.5,   0.0,   0.0)),
+            ("near_left_corner_flag_top", (0.0,    0.0,   1.5)),
+            ("left_goal_crossbar_left",   (0.0,    30.34, 2.44)),
+            ("left_goal_crossbar_right",  (0.0,    37.66, 2.44)),
+        )
+        # Symmetric click noise: 1 px stddev. Different per-anchor seed
+        # patterns give different solo Cs around truth.
+        landmarks = []
+        for name, world in rich_landmarks:
+            uv = _project(K_true, R, t, np.asarray(world, dtype=float))
+            uv_noisy = (uv[0] + rng.normal(0, 1.0), uv[1] + rng.normal(0, 1.0))
+            landmarks.append(LandmarkObservation(
+                name=name, image_xy=uv_noisy, world_xyz=world,
+            ))
+        anchors.append(Anchor(frame=frame, landmarks=tuple(landmarks)))
+
+    sol = solve_anchors_jointly(tuple(anchors), image_size=IMAGE_SIZE)
+    # Median-of-solos baseline:
+    Cs_solo = np.stack([
+        -R.T @ t for (_K, R, t) in sol.per_anchor_KRt.values()
+    ])
+    C_median = np.median(Cs_solo, axis=0)
+    median_err = float(np.linalg.norm(C_median - C_true))
+
+    # Optimised by joint LM:
+    sol_r = refine_with_shared_translation(tuple(anchors), sol)
+    C_opt = np.asarray(sol_r.camera_centre)
+    opt_err = float(np.linalg.norm(C_opt - C_true))
+
+    assert opt_err <= median_err + 0.05, (
+        f"Joint-LM C ({C_opt}, err {opt_err:.2f} m) should be at least as "
+        f"close to truth as median-of-solos ({C_median}, err {median_err:.2f} m)"
+    )

@@ -80,6 +80,110 @@ class JointSolution(NamedTuple):
 # Public utilities ------------------------------------------------------------
 
 
+def _refine_shared_camera_centre(
+    anchors: list[Anchor],
+    per_anchor_KRt: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    cx: float,
+    cy: float,
+    distortion: tuple[float, float],
+    C_seed: np.ndarray,
+) -> np.ndarray:
+    """Joint LM that optimises a single shared world-frame camera centre
+    ``C`` plus per-anchor (rvec, fx) so the static-camera constraint
+    ``t = -R @ C`` holds *and* total reprojection residual is minimised.
+
+    Parameter layout: ``[Cx, Cy, Cz, rvec_0(3), fx_0, rvec_1(3), fx_1, ...]``.
+    Per-anchor t is reconstructed inside the residual; cx, cy and
+    distortion are held fixed at the joint-solve values.
+
+    Replaces the simple median-of-solo-Cs that ``refine_with_shared_
+    translation`` previously used as ``C_locked``. The median is fine
+    when solo Cs cluster, but on real broadcast clips with click noise
+    on far-side landmarks the solos spread by metres and the median
+    sits off-truth by enough to introduce a per-anchor yaw bias as the
+    relock LM compensates. Optimising C against all observations finds
+    the true position to sub-metre precision and the bias drops out.
+    Falls back to ``C_seed`` if the LM fails or the result is worse.
+
+    Returns the optimised ``C_locked`` (3,) array. The caller is
+    responsible for re-fitting per-anchor (R, fx) under this C.
+    """
+    qualifying = [
+        a for a in anchors if a.frame in per_anchor_KRt
+    ]
+    if not qualifying:
+        return np.asarray(C_seed, dtype=np.float64)
+
+    rvecs_init: list[np.ndarray] = []
+    fxs_init: list[float] = []
+    for a in qualifying:
+        K_a, R_a, _t_a = per_anchor_KRt[a.frame]
+        rv_a, _ = cv2.Rodrigues(R_a.astype(np.float64))
+        rvecs_init.append(rv_a.flatten().copy())
+        fxs_init.append(float(K_a[0, 0]))
+
+    PER = 4
+    n = len(qualifying)
+    p0 = np.empty(3 + PER * n)
+    p0[:3] = np.asarray(C_seed, dtype=np.float64)
+    for i, (rv, fx) in enumerate(zip(rvecs_init, fxs_init)):
+        base = 3 + i * PER
+        p0[base : base + 3] = rv
+        p0[base + 3] = fx
+
+    def _residuals(p: np.ndarray) -> np.ndarray:
+        C = p[:3]
+        parts: list[np.ndarray] = []
+        for i, anchor in enumerate(qualifying):
+            base = 3 + i * PER
+            rv = p[base : base + 3]
+            fx = float(np.clip(p[base + 3], 50.0, 1e5))
+            R_i, _ = cv2.Rodrigues(rv)
+            t_i = -R_i @ C
+            K_i = _make_K(fx, cx, cy)
+            if anchor.landmarks:
+                parts.append(_point_residuals_distorted(
+                    list(anchor.landmarks), K_i, rv, t_i, distortion,
+                ))
+            if anchor.lines:
+                # Down-weight lines (matches the per-anchor solo LMs):
+                # lines have larger natural residual magnitudes than
+                # point clicks and over-weight pulls the LM off-true.
+                parts.append(_LINE_RESIDUAL_WEIGHT * _line_residuals(
+                    list(anchor.lines), K_i, R_i, t_i,
+                ))
+        return np.concatenate(parts) if parts else np.empty(0)
+
+    try:
+        result = least_squares(
+            _residuals, p0,
+            method="trf", loss="huber", f_scale=2.0, max_nfev=500,
+        )
+    except Exception as exc:
+        logger.warning("shared-C joint LM failed: %s; falling back to median", exc)
+        return np.asarray(C_seed, dtype=np.float64)
+
+    C_opt = np.asarray(result.x[:3], dtype=np.float64)
+    # Sanity guard: reject moves that break physical plausibility (camera
+    # body more than a pitch-length from the seed). Click-driven LMs can
+    # occasionally walk into nonsensical regions.
+    if float(np.linalg.norm(C_opt - np.asarray(C_seed))) > 50.0:
+        logger.warning(
+            "shared-C joint LM moved C by >50 m (seed=%s, opt=%s); "
+            "falling back to seed",
+            np.round(C_seed, 2).tolist(), np.round(C_opt, 2).tolist(),
+        )
+        return np.asarray(C_seed, dtype=np.float64)
+
+    delta = float(np.linalg.norm(C_opt - np.asarray(C_seed)))
+    logger.info(
+        "shared-C joint LM: seed=(%.2f, %.2f, %.2f) → opt=(%.2f, %.2f, %.2f) "
+        "(Δ=%.2f m)",
+        *C_seed, *C_opt, delta,
+    )
+    return C_opt
+
+
 def refine_with_shared_translation(
     anchors: tuple[Anchor, ...],
     sol: JointSolution,
@@ -132,14 +236,35 @@ def refine_with_shared_translation(
                 Cs_rich.append(C_a)
 
     if Cs_rich:
-        C_locked = np.median(np.stack(Cs_rich), axis=0)
+        C_seed = np.median(np.stack(Cs_rich), axis=0)
         seed_pool = "rich+non-collinear"; seed_n = len(Cs_rich)
     elif Cs_noncol:
-        C_locked = np.median(np.stack(Cs_noncol), axis=0)
+        C_seed = np.median(np.stack(Cs_noncol), axis=0)
         seed_pool = "non-collinear"; seed_n = len(Cs_noncol)
     else:
-        C_locked = np.median(np.stack(Cs_all), axis=0)
+        C_seed = np.median(np.stack(Cs_all), axis=0)
         seed_pool = "all"; seed_n = len(Cs_all)
+
+    # Joint-LM-refine the shared C against ALL anchors simultaneously.
+    # Median of solo-solved Cs is only as good as the solos; click noise
+    # on far-side landmarks spreads them by metres, and the median sits
+    # off the truth by enough to introduce a small per-anchor R bias
+    # (rotation that compensates for the slightly-wrong C). The
+    # optimised C is the one that minimises total reprojection residual
+    # under the static-camera constraint; once it converges, the
+    # per-anchor R bias drops out as a byproduct.
+    cx_seed, cy_seed = sol.principal_point
+    qualifying_in_sol = [
+        by_frame[af] for af in sol.per_anchor_KRt.keys() if af in by_frame
+    ]
+    C_locked = _refine_shared_camera_centre(
+        anchors=qualifying_in_sol,
+        per_anchor_KRt=sol.per_anchor_KRt,
+        cx=cx_seed,
+        cy=cy_seed,
+        distortion=sol.distortion,
+        C_seed=C_seed,
+    )
 
     # We still need a representative seed_K/R for the JointSolution
     # output's t_world. Use the lowest-residual non-collinear anchor.

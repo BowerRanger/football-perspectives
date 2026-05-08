@@ -7,6 +7,24 @@ import re
 import cv2
 
 
+_SHOT_ID_PATTERN = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _sanitise_shot_id(raw: str) -> str:
+    """Reduce a clip filename stem to a filesystem-safe shot id.
+
+    Strips characters outside ``[A-Za-z0-9_-]`` and truncates to 64
+    chars. Raises ``ValueError`` if the result is empty (e.g. input was
+    ``"   "``), since downstream code uses shot_id as a routing key
+    and an empty key collides across shots.
+    """
+    cleaned = _SHOT_ID_PATTERN.sub("", raw)
+    cleaned = cleaned[:64]
+    if not cleaned:
+        raise ValueError(f"shot_id sanitised to empty string from {raw!r}")
+    return cleaned
+
+
 @dataclass
 class Shot:
     id: str

@@ -105,6 +105,18 @@ class HmrWorldStage(BaseStage):
         savgol_order = int(cfg.get("theta_savgol_order", 2))
         slerp_w = int(cfg.get("root_slerp_window", 5))
         ground_snap_velocity = float(cfg.get("ground_snap_velocity", 0.1))
+        # Translation jitter dampener — Savgol-smoothed across time. Same
+        # signal source (per-frame foot-anchor ray-cast) carries any
+        # camera-tracking jitter through to root_t; a 5-frame window
+        # cancels it without flattening sprint accelerations.
+        root_t_savgol_window = int(cfg.get("root_t_savgol_window", 5))
+        root_t_savgol_order = int(cfg.get("root_t_savgol_order", 2))
+        # Constant tilt-correction (degrees) for the monocular HMR's
+        # lean-away-from-camera bias. Rotates root_R_pitch around the
+        # horizontal axis perpendicular to camera-to-player so the body
+        # stands "lean_correction_deg" further toward the camera.
+        # 0 disables. Sign convention: positive = tilt body toward camera.
+        lean_correction_deg = float(cfg.get("lean_correction_deg", 0.0))
 
         # Build per-player frame lists by walking each shot's TracksResult.
         # Tracks share a player_id (assigned via the dashboard's annotation
@@ -172,6 +184,9 @@ class HmrWorldStage(BaseStage):
                 savgol_order=savgol_order,
                 slerp_w=slerp_w,
                 ground_snap_velocity=ground_snap_velocity,
+                root_t_savgol_window=root_t_savgol_window,
+                root_t_savgol_order=root_t_savgol_order,
+                lean_correction_deg=lean_correction_deg,
             )
             dt = time.time() - t0
             if status == "ran":
@@ -216,6 +231,9 @@ class HmrWorldStage(BaseStage):
         savgol_order: int,
         slerp_w: int,
         ground_snap_velocity: float,
+        root_t_savgol_window: int,
+        root_t_savgol_order: int,
+        lean_correction_deg: float,
     ) -> str:
         """Process one player. Returns one of:
         - ``"too_short"`` — track had fewer than ``min_track_frames`` frames
@@ -348,6 +366,40 @@ class HmrWorldStage(BaseStage):
                     root_t[i] = last_anchored
                 confidence[i] = 0.0
                 continue
+            # Lean-correction: rotate root_R_pitch[i] around the horizontal
+            # axis perpendicular to (camera → player) by a fixed angle to
+            # counter monocular HMR's away-from-camera bias. Applied
+            # before the foot-anchor translation so the foot stays glued
+            # to its detected pitch position under the corrected R.
+            if lean_correction_deg != 0.0:
+                cam_centre = -R.T @ t
+                v_horiz = np.array(
+                    [foot_world[0] - cam_centre[0],
+                     foot_world[1] - cam_centre[1],
+                     0.0],
+                    dtype=float,
+                )
+                v_norm = float(np.linalg.norm(v_horiz))
+                if v_norm > 1e-6:
+                    v_horiz /= v_norm
+                    z_up = np.array([0.0, 0.0, 1.0])
+                    lean_axis = np.cross(v_horiz, z_up)
+                    lean_axis_norm = float(np.linalg.norm(lean_axis))
+                    if lean_axis_norm > 1e-6:
+                        lean_axis /= lean_axis_norm
+                        ang = np.deg2rad(lean_correction_deg)
+                        K_x = np.array([
+                            [0.0, -lean_axis[2], lean_axis[1]],
+                            [lean_axis[2], 0.0, -lean_axis[0]],
+                            [-lean_axis[1], lean_axis[0], 0.0],
+                        ])
+                        # Rodrigues' rotation matrix.
+                        correction_R = (
+                            np.eye(3)
+                            + np.sin(ang) * K_x
+                            + (1 - np.cos(ang)) * K_x @ K_x
+                        )
+                        root_R_pitch[i] = correction_R @ root_R_pitch[i]
             root_t[i] = anchor_translation(
                 foot_world, _FOOT_IN_ROOT, root_R_pitch[i]
             )
@@ -365,6 +417,22 @@ class HmrWorldStage(BaseStage):
         # needed. ``ground_snap_velocity`` is kept in the signature for
         # backwards-compat but is now ignored.
         _ = ground_snap_velocity
+
+        # 7. Translation jitter dampener. Camera-tracking jitter feeds
+        # directly into root_t via the per-frame foot-anchor ray-cast;
+        # a Savgol smoother across time absorbs sub-frame noise without
+        # flattening the player's actual motion. Skip when the track is
+        # too short to apply the window or the smoother is disabled.
+        if (
+            root_t_savgol_window > 1
+            and root_t.shape[0] >= root_t_savgol_window
+        ):
+            root_t = savgol_axis(
+                root_t,
+                window=root_t_savgol_window,
+                order=root_t_savgol_order,
+                axis=0,
+            )
 
         track = SmplWorldTrack(
             player_id=str(player_id),

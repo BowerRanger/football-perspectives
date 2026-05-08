@@ -135,6 +135,30 @@ const pitchGroup = new THREE.Group();
   };
   box18(0, 1);
   box18(PITCH_L, -1);
+
+  // Goal frames at each end. FIFA: 7.32 m wide, 2.44 m tall, centred on the
+  // pitch midline along y. Drawn as bright LineSegments slightly thicker
+  // than the pitch markings so they read clearly from any orbit angle.
+  const goalMat = new THREE.LineBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.85,
+  });
+  const GOAL_HALF_W = 7.32 / 2;          // 3.66
+  const GOAL_H = 2.44;
+  const goalY1 = PITCH_W / 2 - GOAL_HALF_W;  // 30.34
+  const goalY2 = PITCH_W / 2 + GOAL_HALF_W;  // 37.66
+  function goalFrame(xs) {
+    // Three line segments per goal: left post, right post, crossbar.
+    // pitchToThree maps (x_pitch, y_pitch, z_pitch) → (x, z, -y)_three.
+    const pts = [
+      pitchToThree([xs, goalY1, 0]),     pitchToThree([xs, goalY1, GOAL_H]),
+      pitchToThree([xs, goalY2, 0]),     pitchToThree([xs, goalY2, GOAL_H]),
+      pitchToThree([xs, goalY1, GOAL_H]), pitchToThree([xs, goalY2, GOAL_H]),
+    ].map((p) => new THREE.Vector3(p[0], p[1], p[2]));
+    const geom = new THREE.BufferGeometry().setFromPoints(pts);
+    pitchGroup.add(new THREE.LineSegments(geom, goalMat));
+  }
+  goalFrame(0);
+  goalFrame(PITCH_L);
 }
 scene.add(pitchGroup);
 

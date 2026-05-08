@@ -53,6 +53,18 @@ hmr_world:
   theta_savgol_order: 2
   ground_snap_velocity: 0.1
   foot_anchor_max_occlusion_frames: 10
+  # Translation-jitter dampener — smooths root_t across time. The same
+  # camera-tracking jitter that drives ~mm pose drift also reaches root_t
+  # via the foot-anchor ray-cast; a 5-frame Savgol kills the noise without
+  # flattening sprint accelerations. Set window=1 to disable.
+  root_t_savgol_window: 5
+  root_t_savgol_order: 2
+  # Constant tilt-correction (degrees) for monocular-HMR's
+  # lean-away-from-camera bias. Rotates root_R_pitch around the horizontal
+  # axis perpendicular to the camera-to-player direction by this many
+  # degrees toward the camera. 0 disables; 5 is a good empirical starting
+  # point on broadcast clips.
+  lean_correction_deg: 5.0
 
 ball:
   flight_px_velocity: 25.0

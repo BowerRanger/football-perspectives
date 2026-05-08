@@ -134,6 +134,33 @@ def main(argv: list[str]) -> int:
             pb.rotation_mode = "QUATERNION"
         return arm
 
+    def _add_placeholder_skinned_mesh(arm: object, name: str) -> object:
+        """Attach a minimal mesh skinned to ``pelvis`` so UE's Skeletal
+        Mesh importer accepts the FBX.
+
+        UE5 has no "skeleton-only" import path; an armature-only FBX is
+        rejected with "no data to import". A 3-vertex 1mm triangle bound
+        100% to pelvis is enough to satisfy the importer; the mesh
+        itself is incidental and can be ignored on the UE side — what
+        matters is the imported ``SK_SMPL`` skeleton asset.
+        """
+        mesh = bpy.data.meshes.new(f"{name}_placeholder_mesh")
+        verts = [(0.001, 0.0, 0.0), (-0.001, 0.0, 0.0), (0.0, 0.001, 0.0)]
+        faces = [(0, 1, 2)]
+        mesh.from_pydata(verts, [], faces)
+        mesh.update()
+        obj = bpy.data.objects.new(f"{name}_placeholder", mesh)
+        bpy.context.collection.objects.link(obj)
+        # Parent to the armature with an Armature modifier; bind 100% to
+        # pelvis via a vertex group.
+        obj.parent = arm
+        vg = obj.vertex_groups.new(name="pelvis")
+        vg.add([0, 1, 2], 1.0, "REPLACE")
+        mod = obj.modifiers.new(name="Armature", type="ARMATURE")
+        mod.object = arm
+        mod.use_vertex_groups = True
+        return obj
+
     # --- Player FBX --------------------------------------------------
 
     hmr_dir = output_dir / "hmr_world"
@@ -161,6 +188,7 @@ def main(argv: list[str]) -> int:
             scene.render.fps = int(round(fps))
             arm = _build_smpl_armature(player_id)
             arm.rotation_mode = "QUATERNION"
+            placeholder = _add_placeholder_skinned_mesh(arm, player_id)
 
             for i, fi in enumerate(frames.tolist()):
                 # Armature object: root translation in pitch z-up + root_R
@@ -195,6 +223,8 @@ def main(argv: list[str]) -> int:
 
             bpy.ops.object.select_all(action="DESELECT")
             arm.select_set(True)
+            placeholder.select_set(True)
+            bpy.context.view_layer.objects.active = arm
             _export_fbx(fbx_dir / f"{player_id}.fbx")
 
     # --- Ball FBX ----------------------------------------------------

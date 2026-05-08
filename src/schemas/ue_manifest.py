@@ -42,6 +42,13 @@ class PlayerEntry:
     fbx: str
     frame_range: tuple[int, int]
     world_bbox: WorldBBox
+    display_name: str = ""
+
+    def __post_init__(self) -> None:
+        # Default display_name to player_id when omitted, so the UE side
+        # always has a non-empty asset-name source.
+        if not self.display_name:
+            self.display_name = self.player_id
 
 
 @dataclass
@@ -100,6 +107,7 @@ class UeManifest:
             "players": [
                 {
                     "player_id": p.player_id,
+                    "display_name": p.display_name,
                     "fbx": p.fbx,
                     "frame_range": list(p.frame_range),
                     "world_bbox": {
@@ -140,6 +148,7 @@ class UeManifest:
             players=[
                 PlayerEntry(
                     player_id=p["player_id"],
+                    display_name=p.get("display_name", ""),
                     fbx=p["fbx"],
                     frame_range=tuple(p["frame_range"]),
                     world_bbox=WorldBBox(

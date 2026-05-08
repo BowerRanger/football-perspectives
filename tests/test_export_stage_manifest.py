@@ -65,6 +65,57 @@ def test_manifest_written_with_one_player(tmp_path: Path) -> None:
     assert m.players[0].fbx == "fbx/P001.fbx"
 
 
+def test_manifest_uses_player_name_mapping(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    _write_min_inputs(output_dir)
+    fbx_dir = output_dir / "export" / "fbx"
+    fbx_dir.mkdir(parents=True)
+    # Mapping makes the FBX file appear under the mapped name.
+    (fbx_dir / "Bellingham.fbx").write_bytes(b"\x00")
+    (output_dir / "players.json").write_text(
+        json.dumps({"P001": "Bellingham"})
+    )
+
+    cfg = {
+        "export": {"gltf_enabled": False, "fbx_enabled": False},
+        "pitch": {"length_m": 105.0, "width_m": 68.0},
+        "ball": {"ball_radius_m": 0.11},
+    }
+    stage = ExportStage(output_dir=output_dir, config=cfg)
+    stage.write_ue_manifest(clip_name="clip_demo")
+
+    m = UeManifest.load(output_dir / "export" / "ue_manifest.json")
+    assert m.players[0].player_id == "P001"
+    assert m.players[0].display_name == "Bellingham"
+    assert m.players[0].fbx == "fbx/Bellingham.fbx"
+
+
+def test_manifest_falls_back_to_legacy_id_named_fbx(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    _write_min_inputs(output_dir)
+    fbx_dir = output_dir / "export" / "fbx"
+    fbx_dir.mkdir(parents=True)
+    # Mapping says Bellingham, but the FBX on disk is still legacy P001.fbx.
+    (fbx_dir / "P001.fbx").write_bytes(b"\x00")
+    (output_dir / "players.json").write_text(
+        json.dumps({"P001": "Bellingham"})
+    )
+
+    cfg = {
+        "export": {"gltf_enabled": False, "fbx_enabled": False},
+        "pitch": {"length_m": 105.0, "width_m": 68.0},
+        "ball": {"ball_radius_m": 0.11},
+    }
+    stage = ExportStage(output_dir=output_dir, config=cfg)
+    stage.write_ue_manifest(clip_name="clip_demo")
+
+    m = UeManifest.load(output_dir / "export" / "ue_manifest.json")
+    assert m.players[0].display_name == "Bellingham"
+    assert m.players[0].fbx == "fbx/P001.fbx"
+
+
 def test_manifest_skipped_when_no_player_fbx(tmp_path: Path) -> None:
     output_dir = tmp_path / "output"
     output_dir.mkdir()

@@ -43,6 +43,7 @@ from src.schemas.ue_manifest import (
     WorldBBox,
 )
 from src.utils.gltf_builder import SceneBundle, build_glb
+from src.utils.player_names import display_name_for, load_player_names
 
 logger = logging.getLogger(__name__)
 
@@ -296,12 +297,20 @@ class ExportStage(BaseStage):
         hmr_dir = self.output_dir / "hmr_world"
         npz_files = sorted(hmr_dir.glob("*_smpl_world.npz")) if hmr_dir.exists() else []
 
+        name_mapping = load_player_names(self.output_dir)
         players: list[PlayerEntry] = []
         for npz in npz_files:
             track = SmplWorldTrack.load(npz)
-            fbx_rel = f"fbx/{track.player_id}.fbx"
+            display_name = display_name_for(track.player_id, name_mapping)
+            fbx_rel = f"fbx/{display_name}.fbx"
             if not (export_dir / fbx_rel).exists():
-                continue
+                # Fall back to the legacy ID-named FBX if a name-mapped
+                # file isn't on disk (e.g. mapping added after export).
+                legacy_rel = f"fbx/{track.player_id}.fbx"
+                if (export_dir / legacy_rel).exists():
+                    fbx_rel = legacy_rel
+                else:
+                    continue
             n = int(track.frames.shape[0])
             if n == 0:
                 continue
@@ -310,6 +319,7 @@ class ExportStage(BaseStage):
             players.append(
                 PlayerEntry(
                     player_id=track.player_id,
+                    display_name=display_name,
                     fbx=fbx_rel,
                     frame_range=(int(track.frames[0]), int(track.frames[-1])),
                     world_bbox=WorldBBox(

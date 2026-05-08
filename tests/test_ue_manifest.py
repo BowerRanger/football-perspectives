@@ -98,3 +98,24 @@ def test_rejects_inverted_frame_range() -> None:
     bad.frame_range = (10, 5)
     with pytest.raises(UeManifestError, match="frame_range"):
         bad.validate()
+
+
+def test_display_name_defaults_to_player_id() -> None:
+    p = PlayerEntry(
+        player_id="P001",
+        fbx="fbx/P001.fbx",
+        frame_range=(0, 1),
+        world_bbox=WorldBBox(min=(0.0, 0.0, 0.0), max=(1.0, 1.0, 1.0)),
+    )
+    assert p.display_name == "P001"
+
+
+def test_display_name_round_trips(tmp_path: Path) -> None:
+    m = _good()
+    m.players[0].display_name = "Bellingham"
+    p = tmp_path / "ue_manifest.json"
+    m.save(p)
+    raw = json.loads(p.read_text())
+    assert raw["players"][0]["display_name"] == "Bellingham"
+    loaded = UeManifest.load(p)
+    assert loaded.players[0].display_name == "Bellingham"

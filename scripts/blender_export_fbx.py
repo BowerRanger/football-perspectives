@@ -71,6 +71,10 @@ def main(argv: list[str]) -> int:
         SMPL_REST_JOINTS_YUP,
         axis_angle_to_quaternion,
     )
+    from src.utils.player_names import (  # noqa: E402
+        display_name_for,
+        load_player_names,
+    )
     from mathutils import Matrix, Quaternion  # type: ignore  # noqa: E402
 
     # --- Helpers -----------------------------------------------------
@@ -169,10 +173,13 @@ def main(argv: list[str]) -> int:
         cam_meta = json.loads((output_dir / "camera" / "camera_track.json").read_text())
         fps = float(cam_meta.get("fps", 30.0)) or 30.0
 
+    name_mapping = load_player_names(output_dir)
+
     if hmr_dir.exists():
         for npz_path in sorted(hmr_dir.glob("*_smpl_world.npz")):
             data = np.load(npz_path)
             player_id = str(data["player_id"])
+            display_name = display_name_for(player_id, name_mapping)
             frames = data["frames"]
             thetas = data["thetas"]      # (N, 24, 3)
             root_R = data["root_R"]      # (N, 3, 3)
@@ -186,9 +193,9 @@ def main(argv: list[str]) -> int:
             scene.frame_start = int(frames[0])
             scene.frame_end = int(frames[-1])
             scene.render.fps = int(round(fps))
-            arm = _build_smpl_armature(player_id)
+            arm = _build_smpl_armature(display_name)
             arm.rotation_mode = "QUATERNION"
-            placeholder = _add_placeholder_skinned_mesh(arm, player_id)
+            placeholder = _add_placeholder_skinned_mesh(arm, display_name)
 
             for i, fi in enumerate(frames.tolist()):
                 # Armature object: root translation in pitch z-up + root_R
@@ -225,7 +232,7 @@ def main(argv: list[str]) -> int:
             arm.select_set(True)
             placeholder.select_set(True)
             bpy.context.view_layer.objects.active = arm
-            _export_fbx(fbx_dir / f"{player_id}.fbx")
+            _export_fbx(fbx_dir / f"{display_name}.fbx")
 
     # --- Ball FBX ----------------------------------------------------
 

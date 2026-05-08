@@ -48,14 +48,38 @@ logger = logging.getLogger(__name__)
 
 
 def _derive_clip_name(output_dir: Path) -> str:
-    """Read the prepared-shots manifest and return a folder-safe clip name."""
-    manifest = output_dir / "shots" / "manifest.json"
-    if not manifest.exists():
-        return "clip"
-    raw = json.loads(manifest.read_text())
-    name = Path(raw.get("source", "clip")).stem
-    safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name)
-    return safe or "clip"
+    """Read the prepared-shots manifest and return a folder-safe clip name.
+
+    Falls back through ``shots_manifest.json`` (current schema with
+    ``source_file``) → ``manifest.json`` (legacy with ``source``) →
+    ``"clip"``.
+    """
+    candidates = [
+        (output_dir / "shots" / "shots_manifest.json", "source_file"),
+        (output_dir / "shots" / "manifest.json", "source"),
+    ]
+    for path, key in candidates:
+        if not path.exists():
+            continue
+        raw = json.loads(path.read_text())
+        # Prefer the first shot's clip_file stem if available — survives
+        # source_file == "unknown".
+        shots = raw.get("shots") or []
+        if shots:
+            first = shots[0]
+            for shot_key in ("id", "clip_file"):
+                if shot_key in first and first[shot_key] not in (None, ""):
+                    name = Path(str(first[shot_key])).stem
+                    break
+            else:
+                name = "clip"
+        else:
+            name = Path(str(raw.get(key, "clip"))).stem
+        if name in ("", "unknown"):
+            name = "clip"
+        safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name)
+        return safe or "clip"
+    return "clip"
 
 
 class ExportStage(BaseStage):

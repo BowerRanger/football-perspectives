@@ -522,6 +522,7 @@ class HmrWorldStage(BaseStage):
             root_R=root_R_pitch.astype(np.float32),
             root_t=root_t.astype(np.float32),
             confidence=confidence.astype(np.float32),
+            shot_id=shot_id,
         )
         track.save(out_dir / f"{player_id}_smpl_world.npz")
 

@@ -62,7 +62,15 @@ class ExportStage(BaseStage):
     name = "export"
 
     def is_complete(self) -> bool:
-        return (self.output_dir / "export" / "gltf" / "scene.glb").exists()
+        from src.schemas.shots import ShotsManifest
+        manifest_path = self.output_dir / "shots" / "shots_manifest.json"
+        if not manifest_path.exists():
+            return (self.output_dir / "export" / "gltf" / "scene.glb").exists()
+        manifest = ShotsManifest.load(manifest_path)
+        return all(
+            (self.output_dir / "export" / "gltf" / f"{shot.id}_scene.glb").exists()
+            for shot in manifest.shots
+        )
 
     # ------------------------------------------------------------------
 
@@ -92,19 +100,80 @@ class ExportStage(BaseStage):
     # ------------------------------------------------------------------
 
     def _export_gltf(self, pitch_cfg: dict, ball_cfg: dict) -> None:
-        camera_path = self.output_dir / "camera" / "camera_track.json"
-        if not camera_path.exists():
-            raise FileNotFoundError(
-                f"camera_track.json not found at {camera_path}; run the camera "
-                "stage first"
+        from src.schemas.shots import ShotsManifest
+
+        manifest_path = self.output_dir / "shots" / "shots_manifest.json"
+        gltf_dir = self.output_dir / "export" / "gltf"
+        gltf_dir.mkdir(parents=True, exist_ok=True)
+
+        # Legacy single-shot path: no manifest, but a singular camera_track
+        # exists. Emit one scene.glb (no shot prefix) and bail.
+        if not manifest_path.exists():
+            cam_path = self.output_dir / "camera" / "camera_track.json"
+            if not cam_path.exists():
+                raise FileNotFoundError(
+                    f"camera_track.json not found at {cam_path}; run the "
+                    "camera stage first"
+                )
+            self._export_gltf_for_shot(
+                shot_id=None,
+                camera_path=cam_path,
+                ball_path=self.output_dir / "ball" / "ball_track.json",
+                gltf_dir=gltf_dir,
+                pitch_cfg=pitch_cfg,
+                ball_cfg=ball_cfg,
             )
+            return
+
+        manifest = ShotsManifest.load(manifest_path)
+        shot_filter = getattr(self, "shot_filter", None)
+        for shot in manifest.shots:
+            if shot_filter is not None and shot.id != shot_filter:
+                continue
+            cam_path = self.output_dir / "camera" / f"{shot.id}_camera_track.json"
+            if not cam_path.exists():
+                logger.warning(
+                    "[export] skipping shot %s — no camera_track at %s",
+                    shot.id, cam_path,
+                )
+                continue
+            self._export_gltf_for_shot(
+                shot_id=shot.id,
+                camera_path=cam_path,
+                ball_path=self.output_dir / "ball" / f"{shot.id}_ball_track.json",
+                gltf_dir=gltf_dir,
+                pitch_cfg=pitch_cfg,
+                ball_cfg=ball_cfg,
+            )
+
+    def _export_gltf_for_shot(
+        self,
+        shot_id: str | None,
+        camera_path: Path,
+        ball_path: Path,
+        gltf_dir: Path,
+        pitch_cfg: dict,
+        ball_cfg: dict,
+    ) -> None:
         camera_track = CameraTrack.load(camera_path)
 
+        # Filter players to those detected in this shot. SmplWorldTrack
+        # carries a shot_id attribute; legacy NPZ files (pre-multi-shot)
+        # have it set to "" and are included in the legacy single-shot
+        # path (shot_id=None on the caller side).
         hmr_dir = self.output_dir / "hmr_world"
-        npz_files = sorted(hmr_dir.glob("*_smpl_world.npz")) if hmr_dir.exists() else []
-        players: list[SmplWorldTrack] = [SmplWorldTrack.load(p) for p in npz_files]
+        npz_files = (
+            sorted(hmr_dir.glob("*_smpl_world.npz"))
+            if hmr_dir.exists() else []
+        )
+        all_players = [SmplWorldTrack.load(p) for p in npz_files]
+        if shot_id is None:
+            players: list[SmplWorldTrack] = all_players
+        else:
+            players = [
+                p for p in all_players if getattr(p, "shot_id", "") == shot_id
+            ]
 
-        ball_path = self.output_dir / "ball" / "ball_track.json"
         ball_track = BallTrack.load(ball_path) if ball_path.exists() else None
 
         bundle = SceneBundle(
@@ -117,11 +186,10 @@ class ExportStage(BaseStage):
         )
         glb_bytes, metadata = build_glb(bundle)
 
-        gltf_dir = self.output_dir / "export" / "gltf"
-        gltf_dir.mkdir(parents=True, exist_ok=True)
-        glb_path = gltf_dir / "scene.glb"
+        prefix = "" if shot_id is None else f"{shot_id}_"
+        glb_path = gltf_dir / f"{prefix}scene.glb"
         glb_path.write_bytes(glb_bytes)
-        meta_path = gltf_dir / "scene_metadata.json"
+        meta_path = gltf_dir / f"{prefix}scene_metadata.json"
         meta_path.write_text(json.dumps(metadata, indent=2))
         logger.info(
             "[export] wrote glTF %s (%d bytes); %d player(s)",

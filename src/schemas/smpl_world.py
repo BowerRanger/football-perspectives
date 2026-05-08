@@ -23,6 +23,11 @@ class SmplWorldTrack:
     root_R: np.ndarray          # (N, 3, 3)
     root_t: np.ndarray          # (N, 3)      pitch metres
     confidence: np.ndarray      # (N,)
+    # Multi-shot routing: which shot the player was detected in.
+    # Default empty string for backwards-compat with pre-multi-shot
+    # NPZ files; downstream stages (export) treat "" as "include in
+    # the legacy single-shot scene".
+    shot_id: str = ""
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -35,6 +40,7 @@ class SmplWorldTrack:
             root_R=self.root_R,
             root_t=self.root_t,
             confidence=self.confidence,
+            shot_id=self.shot_id,
         )
 
     @classmethod
@@ -48,4 +54,5 @@ class SmplWorldTrack:
             root_R=z["root_R"],
             root_t=z["root_t"],
             confidence=z["confidence"],
+            shot_id=str(z["shot_id"]) if "shot_id" in z.files else "",
         )

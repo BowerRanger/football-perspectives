@@ -265,21 +265,24 @@ class HmrWorldStage(BaseStage):
         joint_conf = np.asarray(hmr_out["joint_confidence"])  # (N, 24)
         kp2d = np.asarray(hmr_out["kp2d"])                 # (N, 17, 3)
 
-        # GVHMR's body_pose axis-angles are stored in its internal
-        # 'ay' (y-down, gravity-aligned) frame. Standard SMPL FK
-        # (used by every downstream consumer — our viewer, smplx, FBX
-        # exporters, UE5 retargeters) expects axis-angles in canonical
-        # SMPL y-up. Re-expressing the same physical rotation across
-        # those two conventions is a 180° rotation around +x acting on
-        # the AXIS vector — which negates the y and z components of
-        # each axis-angle while leaving x and the magnitude unchanged.
-        # Empirically validated on real clips: with this conversion an
-        # upright running player produces shoulder > elbow with hands
-        # swinging high when the arm is forward (running pose); without
-        # it the elbow ends up *above* both shoulder and hand
-        # ("Dead Space necromorph" arms).
-        thetas[:, 1:22, 1] *= -1.0
-        thetas[:, 1:22, 2] *= -1.0
+        # GVHMR's body_pose is in canonical SMPL convention — verified by
+        # reading their FK code (third_party/gvhmr/hmr4d/utils/body_model/
+        # smpl_lite.py:92), which feeds body_pose directly into
+        # axis_angle_to_matrix and on to standard SMPL FK with no axis
+        # conversion. The 'ay' (y-down, gravity-aligned) label refers to
+        # the *world frame the body sits in*, driven by global_orient and
+        # transl — not the per-joint axis-angle frame.
+        #
+        # An earlier version of this stage applied a 180°-around-X
+        # conjugation to body_pose ("thetas[:, 1:22, 1:3] *= -1") because
+        # without it arms looked like "Dead Space necromorph". That fix
+        # was a band-aid that masked an issue elsewhere (likely in the
+        # global_orient → pitch-world conversion): the conjugation
+        # *reverses yaw and roll on every body joint* while preserving
+        # pitch, which made the user-reported "upper body facing
+        # backward" and "feet pointing the wrong way" defects. The
+        # correct treatment is to leave body_pose alone here and fix any
+        # remaining arm orientation issue at the root-rotation step.
 
         # 2. Median shape across track.
         betas = np.median(betas_all, axis=0)

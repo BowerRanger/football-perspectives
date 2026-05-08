@@ -52,6 +52,7 @@
     <option value="behind-goal">Behind Goal</option>
   </select>
   <button id="ball-btn">Ball: ON</button>
+  <button id="bones-btn" class="toggle-off">Bones: OFF</button>
   <span id="info">Frame 0 / 0</span>
 </div>
 
@@ -143,6 +144,9 @@ let currentFrame = 0;
 let playing = false;
 let speed = 1;
 let showBall = true;
+// Bone-orientation overlay: per-joint name labels + small forward-direction
+// arrows. Off by default — diagnostic tool for verifying SMPL pose conversion.
+let showBones = false;
 let fps = 25;
 // When a player is selected from the sidebar, OrbitControls.target is
 // retargeted to that player's pelvis on every frame (camera follows
@@ -176,6 +180,14 @@ const SMPL_PARENTS = [
 const SMPL_BONES = SMPL_PARENTS
   .map((p, i) => [p, i])
   .filter((pair) => pair[0] >= 0);
+// SMPL joint names — used by the Bones overlay to label each joint.
+const SMPL_JOINT_NAMES = [
+  "pelvis", "l_hip", "r_hip", "spine1", "l_knee", "r_knee", "spine2",
+  "l_ankle", "r_ankle", "spine3", "l_foot", "r_foot", "neck", "l_collar",
+  "r_collar", "head", "l_shoulder", "r_shoulder", "l_elbow", "r_elbow",
+  "l_wrist", "r_wrist", "l_hand", "r_hand",
+];
+
 // SMPL T-pose joint positions in **standard SMPL canonical (y-up)**
 // space, neutral shape, pelvis at origin. ``root_R`` (computed by
 // hmr_world via the corrected bridge in ``smpl_pitch_transform.py``)
@@ -258,10 +270,10 @@ function matVec3(M, v) {
   ];
 }
 
-// SMPL forward kinematics for one frame. Returns joints (24,3) in
-// pitch-world coordinates. No cosmetic corrections — what hmr_world
-// emitted is what gets rendered, so any wrongness is visible and
-// diagnosable rather than masked.
+// SMPL forward kinematics for one frame. Returns joint world positions
+// (24,3) and accumulated rotation matrices (24, 3x3) in pitch-world.
+// No cosmetic corrections — what hmr_world emitted is what gets
+// rendered, so any wrongness is visible and diagnosable rather than masked.
 //   thetas: (24, 3) axis-angle. theta[0] is intentionally ignored —
 //           ``root_R`` already carries the pitch-frame root orientation.
 //   root_R: (3, 3) world rotation of the root joint (pitch frame).
@@ -284,7 +296,43 @@ function smplFK(thetas, root_R, root_t) {
       pos[par][2] + offW[2],
     ];
   }
-  return pos;
+  return { pos, rot };
+}
+
+// ── Bones overlay helpers ──
+// A small canvas-rendered text sprite. Used to label SMPL joints in
+// the Bones overlay so the operator can identify which joint is which
+// without counting bones from the pelvis.
+function makeLabelSprite(text) {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  const fontPx = 36;
+  ctx.font = `${fontPx}px -apple-system, "Segoe UI", sans-serif`;
+  const padX = 8, padY = 4;
+  const metrics = ctx.measureText(text);
+  canvas.width = Math.ceil(metrics.width) + padX * 2;
+  canvas.height = fontPx + padY * 2;
+  // Re-set font after canvas resize (resize wipes ctx state).
+  ctx.font = `${fontPx}px -apple-system, "Segoe UI", sans-serif`;
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#ffe28a';
+  ctx.fillText(text, padX, padY);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  const mat = new THREE.SpriteMaterial({
+    map: tex, transparent: true, depthTest: false,
+  });
+  const sprite = new THREE.Sprite(mat);
+  // Scale so the sprite reads at typical orbit zoom — ~6 cm tall world units.
+  const aspect = canvas.width / canvas.height;
+  const heightWorld = 0.08;
+  sprite.scale.set(heightWorld * aspect, heightWorld, 1);
+  // Stay on top of bone lines so labels are readable when joints overlap.
+  sprite.renderOrder = 999;
+  return sprite;
 }
 
 // Ball
@@ -406,11 +454,42 @@ function addPlayerMarker(p, sidebar, playerNames) {
   joints.frustumCulled = false;
   scene.add(joints);
 
+  // Bones overlay: per-joint name label + forward-direction arrow.
+  // Wrapped in a single THREE.Group so the toggle just flips visibility
+  // without bulk-iterating children. Hidden until ``showBones`` is on.
+  const bonesGroup = new THREE.Group();
+  bonesGroup.visible = false;
+  bonesGroup.frustumCulled = false;
+  const labelSprites = new Array(SMPL_J_REST.length);
+  const forwardArrows = new Array(SMPL_J_REST.length);
+  for (let i = 0; i < SMPL_J_REST.length; i++) {
+    const sprite = makeLabelSprite(SMPL_JOINT_NAMES[i]);
+    sprite.position.set(0, 0, 0);
+    bonesGroup.add(sprite);
+    labelSprites[i] = sprite;
+    // Forward arrow = joint's local +z mapped through accumulated rot.
+    // 0.15 m shaft so it reads at human scale without obscuring bones.
+    const arrow = new THREE.ArrowHelper(
+      new THREE.Vector3(0, 0, 1),  // initial direction (overwritten per frame)
+      new THREE.Vector3(0, 0, 0),  // initial origin
+      0.15,                         // length (m)
+      0x4488ff,                     // shaft colour (blue = z = forward)
+      0.05,                         // head length
+      0.04,                         // head width
+    );
+    bonesGroup.add(arrow);
+    forwardArrows[i] = arrow;
+  }
+  scene.add(bonesGroup);
+
   playerObjects.set(p.player_id, {
     skel,
     joints,
     posBuf,
     jointBuf,
+    bonesGroup,
+    labelSprites,
+    forwardArrows,
     frames: p.frames || [],
     root_t: p.root_t || [],
     root_R: p.root_R || [],
@@ -483,12 +562,15 @@ function updateFrame(fi) {
     if (!valid) {
       obj.skel.visible = false;
       obj.joints.visible = false;
+      obj.bonesGroup.visible = false;
       continue;
     }
-    // Compute joint positions in pitch-world via SMPL FK, then convert
-    // to three.js (y-up) and write into both the bone and joint vertex
-    // buffers in one pass.
-    const positions = smplFK(theta, R, t);
+    // Compute joint positions + accumulated rotations in pitch-world via
+    // SMPL FK, then convert to three.js (y-up) and write into the bone
+    // and joint vertex buffers in one pass.
+    const fk = smplFK(theta, R, t);
+    const positions = fk.pos;
+    const rotations = fk.rot;
     for (let b = 0; b < SMPL_BONES.length; b++) {
       const [pa, pb] = SMPL_BONES[b];
       const a3 = pitchToThree(positions[pa]);
@@ -510,6 +592,30 @@ function updateFrame(fi) {
     obj.joints.geometry.attributes.position.needsUpdate = true;
     obj.skel.visible = true;
     obj.joints.visible = true;
+
+    // Bones overlay: position the label sprite at each joint and orient
+    // the forward arrow along the joint's local +z mapped through its
+    // accumulated rotation. Skipped when the toggle is off — the
+    // group's visibility is the cheap path; we still avoid the per-joint
+    // inner loop when nothing is going to be drawn.
+    if (showBones) {
+      for (let i = 0; i < positions.length; i++) {
+        const v3 = pitchToThree(positions[i]);
+        obj.labelSprites[i].position.set(v3[0], v3[1] + 0.05, v3[2]);
+        // Joint's local +z direction in pitch-world = rotations[i] @ (0,0,1).
+        // That's the third column of the rotation matrix.
+        const Rmat = rotations[i];
+        const fwdPitch = [Rmat[0][2], Rmat[1][2], Rmat[2][2]];
+        const fwdThree = pitchToThree(fwdPitch);
+        obj.forwardArrows[i].position.set(v3[0], v3[1], v3[2]);
+        obj.forwardArrows[i].setDirection(
+          new THREE.Vector3(fwdThree[0], fwdThree[1], fwdThree[2]).normalize(),
+        );
+      }
+      obj.bonesGroup.visible = true;
+    } else {
+      obj.bonesGroup.visible = false;
+    }
   }
 
   if (ballMesh && ballFrames.length > 0) {
@@ -550,6 +656,7 @@ const timeline = document.getElementById('timeline');
 const speedSelect = document.getElementById('speed-select');
 const cameraSelectEl = document.getElementById('camera-select');
 const ballBtn = document.getElementById('ball-btn');
+const bonesBtn = document.getElementById('bones-btn');
 
 playBtn.addEventListener('click', () => {
   playing = !playing;
@@ -563,6 +670,12 @@ ballBtn.addEventListener('click', () => {
   showBall = !showBall;
   ballBtn.textContent = `Ball: ${showBall ? 'ON' : 'OFF'}`;
   ballBtn.classList.toggle('toggle-off', !showBall);
+  updateFrame(currentFrame);
+});
+bonesBtn.addEventListener('click', () => {
+  showBones = !showBones;
+  bonesBtn.textContent = `Bones: ${showBones ? 'ON' : 'OFF'}`;
+  bonesBtn.classList.toggle('toggle-off', !showBones);
   updateFrame(currentFrame);
 });
 

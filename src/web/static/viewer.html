@@ -53,20 +53,6 @@
   </select>
   <button id="ball-btn">Ball: ON</button>
   <button id="bones-btn" class="toggle-off">Bones: OFF</button>
-  <select id="pose-convention" title="Per-joint axis-angle transform applied at render time (debug)">
-    <option value="none" selected>Pose: none</option>
-    <option value="neg_x">Pose: -x</option>
-    <option value="neg_y">Pose: -y</option>
-    <option value="neg_z">Pose: -z</option>
-    <option value="neg_xy">Pose: -x,-y</option>
-    <option value="neg_xz">Pose: -x,-z</option>
-    <option value="neg_yz">Pose: -y,-z</option>
-    <option value="neg_all">Pose: invert</option>
-    <option value="transpose">Pose: Rl^T</option>
-    <option value="swap_yz">Pose: y↔z</option>
-    <option value="swap_xz">Pose: x↔z</option>
-    <option value="swap_xy">Pose: x↔y</option>
-  </select>
   <span id="info">Frame 0 / 0</span>
 </div>
 
@@ -161,10 +147,6 @@ let showBall = true;
 // Bone-orientation overlay: per-joint name labels + small forward-direction
 // arrows. Off by default — diagnostic tool for verifying SMPL pose conversion.
 let showBones = false;
-// Debug: per-joint axis-angle transform applied at render time. The pipeline
-// emitted thetas under whatever convention hmr_world chose; this lets the
-// operator empirically try alternative conventions without re-running GVHMR.
-let poseConvention = 'none';
 let fps = 25;
 // When a player is selected from the sidebar, OrbitControls.target is
 // retargeted to that player's pelvis on every frame (camera follows
@@ -288,44 +270,8 @@ function matVec3(M, v) {
   ];
 }
 
-// Apply the active per-joint axis-angle convention transform. Returns a
-// new (3,) axis-angle vector. The default ('none') is a passthrough.
-// Other modes are diagnostic — they let the operator try alternative
-// conventions live in the viewer without re-running GVHMR.
-function applyPoseConvention(aa) {
-  const x = aa[0] || 0, y = aa[1] || 0, z = aa[2] || 0;
-  switch (poseConvention) {
-    case 'neg_x':     return [-x,  y,  z];
-    case 'neg_y':     return [ x, -y,  z];
-    case 'neg_z':     return [ x,  y, -z];
-    case 'neg_xy':    return [-x, -y,  z];
-    case 'neg_xz':    return [-x,  y, -z];
-    case 'neg_yz':    return [ x, -y, -z];
-    case 'neg_all':   return [-x, -y, -z];   // inverse rotation
-    case 'transpose': return null;           // signal: use Rl^T downstream
-    case 'swap_yz':   return [ x,  z,  y];
-    case 'swap_xz':   return [ z,  y,  x];
-    case 'swap_xy':   return [ y,  x,  z];
-    case 'none':
-    default:          return [ x,  y,  z];
-  }
-}
-
-function transpose3(M) {
-  return [
-    [M[0][0], M[1][0], M[2][0]],
-    [M[0][1], M[1][1], M[2][1]],
-    [M[0][2], M[1][2], M[2][2]],
-  ];
-}
-
 // SMPL forward kinematics for one frame. Returns joint world positions
 // (24,3) and accumulated rotation matrices (24, 3x3) in pitch-world.
-//
-// The optional ``poseConvention`` (UI dropdown) maps each per-joint
-// axis-angle vector through ``applyPoseConvention`` before composing it
-// into the FK chain — diagnostic only, leaves underlying pipeline data
-// unchanged.
 //   thetas: (24, 3) axis-angle. theta[0] is intentionally ignored —
 //           ``root_R`` already carries the pitch-frame root orientation.
 //   root_R: (3, 3) world rotation of the root joint (pitch frame).
@@ -338,14 +284,7 @@ function smplFK(thetas, root_R, root_t) {
   pos[0] = [root_t[0], root_t[1], root_t[2]];
   for (let i = 1; i < N; i++) {
     const par = SMPL_PARENTS[i];
-    const transformed = applyPoseConvention(thetas[i] || [0, 0, 0]);
-    let Rl;
-    if (transformed === null) {
-      // 'transpose' mode: invert the per-joint rotation matrix.
-      Rl = transpose3(aaToMat(thetas[i] || [0, 0, 0]));
-    } else {
-      Rl = aaToMat(transformed);
-    }
+    const Rl = aaToMat(thetas[i] || [0, 0, 0]);
     rot[i] = matMul3(rot[par], Rl);
     const off = SMPL_LOCAL_OFFSET[i];
     const offW = matVec3(rot[par], off);
@@ -735,12 +674,6 @@ bonesBtn.addEventListener('click', () => {
   showBones = !showBones;
   bonesBtn.textContent = `Bones: ${showBones ? 'ON' : 'OFF'}`;
   bonesBtn.classList.toggle('toggle-off', !showBones);
-  updateFrame(currentFrame);
-});
-
-const poseConventionEl = document.getElementById('pose-convention');
-poseConventionEl.addEventListener('change', () => {
-  poseConvention = poseConventionEl.value;
   updateFrame(currentFrame);
 });
 

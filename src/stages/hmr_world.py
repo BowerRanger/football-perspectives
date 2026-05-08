@@ -265,24 +265,27 @@ class HmrWorldStage(BaseStage):
         joint_conf = np.asarray(hmr_out["joint_confidence"])  # (N, 24)
         kp2d = np.asarray(hmr_out["kp2d"])                 # (N, 17, 3)
 
-        # GVHMR's body_pose is in canonical SMPL convention — verified by
-        # reading their FK code (third_party/gvhmr/hmr4d/utils/body_model/
-        # smpl_lite.py:92), which feeds body_pose directly into
-        # axis_angle_to_matrix and on to standard SMPL FK with no axis
-        # conversion. The 'ay' (y-down, gravity-aligned) label refers to
-        # the *world frame the body sits in*, driven by global_orient and
-        # transl — not the per-joint axis-angle frame.
+        # GVHMR's body_pose axis-angles, when fed through our viewer's
+        # standard right-multiply FK chain (rot[i] = rot[par] @ Rl[i]),
+        # render every joint with REVERSED rotation: knees hyperextend,
+        # spine arches backward, arms swing up and behind. Inverting
+        # each axis-angle vector (negating all three components, which
+        # equivalently transposes the corresponding rotation matrix)
+        # produces correct anatomical motion. Confirmed empirically via
+        # a per-joint pose-convention selector in the viewer.
         #
-        # An earlier version of this stage applied a 180°-around-X
-        # conjugation to body_pose ("thetas[:, 1:22, 1:3] *= -1") because
-        # without it arms looked like "Dead Space necromorph". That fix
-        # was a band-aid that masked an issue elsewhere (likely in the
-        # global_orient → pitch-world conversion): the conjugation
-        # *reverses yaw and roll on every body joint* while preserving
-        # pitch, which made the user-reported "upper body facing
-        # backward" and "feet pointing the wrong way" defects. The
-        # correct treatment is to leave body_pose alone here and fix any
-        # remaining arm orientation issue at the root-rotation step.
+        # GVHMR's own SMPL FK in third_party/gvhmr/.../smplx_lite.py:267
+        # is mathematically the same chain as ours, so the underlying
+        # cause is some implicit convention we haven't fully isolated
+        # (handed differently between SMPL releases or between PyTorch3D
+        # axis-angle and our JS Rodrigues). The fix is small and
+        # local; investigating the upstream root cause is an open task.
+        #
+        # The historical "thetas[:, 1:22, 1:3] *= -1" (180°-around-X
+        # conjugation) was a partial fix that handled some axes but
+        # left yaw/roll reversed; the full-vector negation here covers
+        # all three axes uniformly.
+        thetas[:, 1:22, :] *= -1.0
 
         # 2. Median shape across track.
         betas = np.median(betas_all, axis=0)

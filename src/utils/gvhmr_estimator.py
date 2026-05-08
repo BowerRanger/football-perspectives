@@ -465,12 +465,19 @@ class GVHMREstimator:
         with torch.no_grad(), _redirect_cuda(self._device):
             pred = self._model.predict(data, static_cam=self._static_cam)
 
-        # Extract global params (in 'ay' coordinate frame)
-        global_params = pred["smpl_params_global"]
-        global_orient = global_params["global_orient"].cpu().numpy()  # (N, 3)
-        body_pose = global_params["body_pose"].cpu().numpy()          # (N, 63)
-        betas = global_params["betas"].cpu().numpy()                  # (N, 10)
-        transl = global_params["transl"].cpu().numpy()                # (N, 3)
+        # Extract incam params: global_orient maps SMPL canonical (y-up)
+        # straight to OpenCV camera frame (y-down, z-into-scene). The
+        # GVHMR demo feeds these into SMPL and renders the output verts
+        # directly in camera view (no intermediate 'ay' frame), so this
+        # is the convention to bridge into pitch world via R_w2c.T.
+        # body_pose is identical between incam and global (they share the
+        # same per-joint canonical axis-angles); betas likewise. transl
+        # we don't use — hmr_world computes its own foot-anchored root_t.
+        incam_params = pred["smpl_params_incam"]
+        global_orient = incam_params["global_orient"].cpu().numpy()   # (N, 3)
+        body_pose = incam_params["body_pose"].cpu().numpy()           # (N, 63)
+        betas = incam_params["betas"].cpu().numpy()                   # (N, 10)
+        transl = incam_params["transl"].cpu().numpy()                 # (N, 3)
 
         # Average betas across frames
         betas_avg = betas.mean(axis=0)  # (10,)

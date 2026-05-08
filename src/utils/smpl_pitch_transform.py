@@ -1,28 +1,28 @@
-"""GVHMR camera-frame SMPL root → pitch-world rotation.
+"""GVHMR per-frame SMPL root → pitch-world rotation.
 
-GVHMR predicts ``root_R_cam`` in a **y-up** camera frame (matching its
-internal SMPL canonical convention: x-right, y-up, z-toward-camera).
-The pipeline's ``R_world_to_cam`` is in the standard **y-down OpenCV**
-convention (x-right, y-down, z-into-scene).
+GVHMR's ``smpl_params_incam`` exposes a ``global_orient`` whose rotation
+matrix maps a SMPL canonical (y-up) body vector directly to the OpenCV
+camera frame (y-down, z-into-scene). The GVHMR demo confirms this — see
+``third_party/gvhmr/tools/demo/demo.py:215``, where the demo feeds
+``smpl_params_incam`` into SMPL and renders the resulting verts directly
+in the camera view with no intermediate frame conversion.
 
-To go from a SMPL canonical (y-up) body vector all the way to a pitch
-z-up world vector we need to bridge the two camera conventions. They
-differ by a 180° rotation around the camera +x axis — the matrix
-``GVHMR_TO_OPENCV_CAM`` below. The full chain is:
+To lift that into the pipeline's pitch z-up world we just transpose
+``R_w2c``:
 
-    V_world  =  R_w2c.T  @  GVHMR_TO_OPENCV_CAM  @  root_R_cam  @  V_smpl
+    V_world  =  R_w2c.T  @  root_R_cam  @  V_smpl
 
-(i) ``root_R_cam`` rotates the SMPL canonical body vector into GVHMR's
-    y-up camera frame.
-(ii) ``GVHMR_TO_OPENCV_CAM`` re-expresses that vector in OpenCV y-down
-     camera axes.
-(iii) ``R_w2c.T`` carries it from camera to z-up world.
+(i) ``root_R_cam`` rotates the SMPL canonical body vector into OpenCV
+    camera coords.
+(ii) ``R_w2c.T`` carries that vector from camera to pitch z-up world.
 
-Note: the previous version of this module used the matrix
-[[1,0,0],[0,0,-1],[0,1,0]] in slot (ii), which is a 90° rotation rather
-than the 180° flip the conventions actually need. That misalignment
-left an upright player rendering ~90° tipped over in pitch frame and
-the foot-anchor projecting the pelvis below the pitch.
+History note: an earlier version of this module bridged ``root_R_cam``
+through a 180° rotation around +x ("GVHMR_TO_OPENCV_CAM") on the
+assumption that ``global_orient`` was in GVHMR's y-up cam frame, but
+that source was actually ``smpl_params_global`` (in the gravity-view
+``ay`` world frame), not the camera frame. The bridge was both wrong-
+matrix and wrong-source. Switching to ``smpl_params_incam`` makes the
+chain a clean ``R_w2c.T @ root_R_cam`` with no implicit handedness flip.
 """
 
 from __future__ import annotations
@@ -30,32 +30,15 @@ from __future__ import annotations
 import numpy as np
 
 
-# Re-express a vector from GVHMR's y-up camera frame in OpenCV y-down
-# camera axes. The two cameras share the +x axis (right) but their y
-# and z axes are flipped (y-up vs y-down, z-toward-camera vs
-# z-into-scene). A 180° rotation around the +x axis maps between them.
-GVHMR_TO_OPENCV_CAM: np.ndarray = np.array(
-    [[1,  0,  0],
-     [0, -1,  0],
-     [0,  0, -1]],
-    dtype=float,
-)
-
-# Backwards-compatible alias. The old name was misleading — this matrix
-# is not a SMPL-to-pitch axis remapping, it's a camera-frame y-up↔y-down
-# bridge. Kept for any external imports.
-SMPL_TO_PITCH_STATIC = GVHMR_TO_OPENCV_CAM
-
-
 def smpl_root_in_pitch_frame(
-    root_R_cam: np.ndarray,        # 3x3, GVHMR root rotation (y-up cam frame)
+    root_R_cam: np.ndarray,        # 3x3, GVHMR root rotation (OpenCV cam frame)
     R_world_to_cam: np.ndarray,    # 3x3, OpenCV extrinsic (world -> y-down cam)
 ) -> np.ndarray:
     """Lift GVHMR's camera-frame SMPL root rotation into pitch-world.
 
     See module docstring for the conventions. Returns a 3×3 rotation
     that maps a SMPL canonical (y-up) body vector to a z-up pitch-world
-    vector — i.e. ``R @ (0,1,0)`` is the body's "up" direction in
+    vector — i.e. ``R @ (0, 1, 0)`` is the body's "up" direction in
     pitch metres for an upright player.
     """
-    return R_world_to_cam.T @ GVHMR_TO_OPENCV_CAM @ root_R_cam
+    return R_world_to_cam.T @ root_R_cam

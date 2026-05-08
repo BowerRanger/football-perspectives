@@ -64,4 +64,5 @@ markers = [
     "unit: fast unit tests (no external deps)",
     "integration: tests that hit local services (web API, file IO)",
     "e2e: end-to-end tests requiring real fixtures or GPU (skipped by default)",
+    "fbx: tests that shell out to Blender for FBX serialisation (skipped if blender not on PATH)",
 ]

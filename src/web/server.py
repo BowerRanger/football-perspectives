@@ -51,6 +51,7 @@ import io
 import json
 import logging
 import re
+import shutil
 import sys
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -167,6 +168,10 @@ class RunRequest(BaseModel):
     stages: str = "all"
     from_stage: str | None = None
     device: str = "auto"
+    # Multi-shot: when set, every stage that iterates manifest.shots
+    # will only process the named shot. Stages without a manifest
+    # ignore this. Used by the dashboard's /api/run-shot endpoint.
+    shot_filter: str | None = None
 
 
 def _emit(job: Job, line: str) -> None:
@@ -230,6 +235,7 @@ def _run_job(job: Job, output_dir: Path, config_path: Path | None, params: RunRe
             from_stage=params.from_stage,
             config=cfg,
             device=params.device,
+            shot_filter=params.shot_filter,
         )
         job.status = "done"
     except Exception as exc:
@@ -541,8 +547,57 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             ]
         }
 
+    class AnchorPayload(BaseModel):
+        clip_id: str
+        image_size: tuple[int, int]
+        anchors: list[dict[str, Any]]
+        stadium: str | None = None
+
+    def _first_shot_id() -> str | None:
+        """Return the manifest's first shot_id, or None when no manifest."""
+        from src.schemas.shots import ShotsManifest
+        manifest_path = output_dir / "shots" / "shots_manifest.json"
+        if not manifest_path.exists():
+            return None
+        try:
+            manifest = ShotsManifest.load(manifest_path)
+        except Exception:
+            return None
+        return manifest.shots[0].id if manifest.shots else None
+
+    @app.get("/anchors/{shot_id}")
+    def get_anchors_for_shot(shot_id: str):
+        anchor_path = output_dir / "camera" / f"{shot_id}_anchors.json"
+        if not anchor_path.exists():
+            return {"clip_id": shot_id, "image_size": [0, 0], "anchors": []}
+        try:
+            anchor_set = AnchorSet.load(anchor_path)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to load anchors: {exc}")
+        return _anchor_set_to_dict(anchor_set)
+
+    @app.post("/anchors/{shot_id}")
+    def post_anchors_for_shot(shot_id: str, payload: AnchorPayload):
+        try:
+            anchor_set = _dict_to_anchor_set(payload.dict())
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid anchor payload: {exc}")
+        anchor_path = output_dir / "camera" / f"{shot_id}_anchors.json"
+        anchor_path.parent.mkdir(parents=True, exist_ok=True)
+        anchor_set.save(anchor_path)
+        return {"saved": True, "path": str(anchor_path), "count": len(anchor_set.anchors)}
+
     @app.get("/anchors")
     def get_anchors():
+        """Legacy endpoint: redirects to the first shot's per-shot file
+        when a manifest is present, falls back to the old
+        ``output/camera/anchors.json`` otherwise. Logged as deprecated."""
+        logging.getLogger(__name__).warning(
+            "GET /anchors is deprecated; use /anchors/{shot_id}"
+        )
+        first = _first_shot_id()
+        if first is not None:
+            return get_anchors_for_shot(first)
         anchor_path = output_dir / "camera" / "anchors.json"
         if not anchor_path.exists():
             return {"clip_id": "", "image_size": [0, 0], "anchors": []}
@@ -552,14 +607,17 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"Failed to load anchors: {exc}")
         return _anchor_set_to_dict(anchor_set)
 
-    class AnchorPayload(BaseModel):
-        clip_id: str
-        image_size: tuple[int, int]
-        anchors: list[dict[str, Any]]
-        stadium: str | None = None
-
     @app.post("/anchors")
     def post_anchors(payload: AnchorPayload):
+        """Legacy endpoint: redirects writes to the first shot's per-shot
+        file when a manifest is present, falls back to the old
+        ``output/camera/anchors.json`` otherwise."""
+        logging.getLogger(__name__).warning(
+            "POST /anchors is deprecated; use /anchors/{shot_id}"
+        )
+        first = _first_shot_id()
+        if first is not None:
+            return post_anchors_for_shot(first, payload)
         try:
             anchor_set = _dict_to_anchor_set(payload.dict())
         except (KeyError, TypeError, ValueError) as exc:
@@ -567,6 +625,58 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         anchor_path = output_dir / "camera" / "anchors.json"
         anchor_set.save(anchor_path)
         return {"saved": True, "path": str(anchor_path), "count": len(anchor_set.anchors)}
+
+    class RunShotRequest(BaseModel):
+        stage: str
+        shot_id: str
+
+    @app.post("/api/run-shot")
+    def post_run_shot(req: RunShotRequest):
+        """Wipe the target shot's stage artefacts and run only that stage
+        for that shot. Reuses the existing background-job runner with a
+        ``shot_filter`` param plumbed through ``run_pipeline``."""
+        # Wipe per-shot artefacts for this stage. The legacy single-shot
+        # paths in _STAGE_ARTIFACTS (e.g. "ball/ball_track.json") become
+        # per-shot ("ball/{shot_id}_ball_track.json") here.
+        artefacts = _STAGE_ARTIFACTS.get(req.stage, [])
+        for relpath in artefacts:
+            # Try the per-shot variant first; fall back to legacy if needed.
+            target = output_dir / relpath
+            if target.is_file():
+                stem = target.stem
+                per_shot = target.with_name(f"{req.shot_id}_{stem}{target.suffix}")
+                if per_shot.exists():
+                    per_shot.unlink()
+            elif target.is_dir():
+                for child in target.glob(f"{req.shot_id}_*"):
+                    if child.is_file():
+                        child.unlink()
+                    else:
+                        shutil.rmtree(child, ignore_errors=True)
+
+        params = RunRequest(stages=req.stage, shot_filter=req.shot_id)
+        with _jobs_lock:
+            running_jobs = sum(
+                1 for j in _jobs.values() if j.status == "running"
+            )
+            if running_jobs >= _MAX_CONCURRENT_JOBS:
+                raise HTTPException(
+                    status_code=429, detail="Too many concurrent jobs",
+                )
+        job_id = str(uuid.uuid4())[:8]
+        job = Job(job_id=job_id, stages=params.stages)
+        with _jobs_lock:
+            _jobs[job_id] = job
+        Thread(
+            target=_run_job,
+            args=(job, output_dir, app.state.config_path, params),
+            daemon=True,
+        ).start()
+        return {
+            "job_id": job_id,
+            "stage": req.stage,
+            "shot_id": req.shot_id,
+        }
 
     @app.get("/camera/track")
     def get_camera_track():

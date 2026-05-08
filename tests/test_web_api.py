@@ -366,3 +366,67 @@ def test_merge_by_name_consolidates_tracks(client) -> None:
     assert [f.frame for f in salah.frames] == [0, 1, 2, 3]
     # Both Salah tracks share the same canonical player_id.
     assert salah.player_id.startswith("P")
+
+
+@pytest.mark.unit
+def test_get_anchors_per_shot(client):
+    c, tmp_path = client
+    (tmp_path / "camera").mkdir()
+    (tmp_path / "camera" / "alpha_anchors.json").write_text(
+        '{"clip_id":"alpha","image_size":[640,360],"anchors":[]}'
+    )
+    r = c.get("/anchors/alpha")
+    assert r.status_code == 200
+    assert r.json()["clip_id"] == "alpha"
+
+
+@pytest.mark.unit
+def test_get_anchors_per_shot_returns_empty_stub_for_missing(client):
+    c, _ = client
+    r = c.get("/anchors/beta")
+    assert r.status_code == 200
+    j = r.json()
+    assert j["clip_id"] == "beta"
+    assert j["anchors"] == []
+
+
+@pytest.mark.unit
+def test_post_anchors_per_shot(client):
+    c, tmp_path = client
+    payload = {
+        "clip_id": "alpha",
+        "image_size": [640, 360],
+        "anchors": [],
+    }
+    r = c.post("/anchors/alpha", json=payload)
+    assert r.status_code == 200
+    assert (tmp_path / "camera" / "alpha_anchors.json").exists()
+
+
+@pytest.mark.unit
+def test_run_shot_endpoint_dispatches_filtered_job(client, monkeypatch):
+    """POST /api/run-shot dispatches a background job with the correct
+    stages= and shot_filter= values plumbed through to run_pipeline."""
+    c, tmp_path = client
+    captured: dict = {}
+
+    def fake_run_pipeline(*args, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("src.web.server.run_pipeline", fake_run_pipeline)
+    r = c.post(
+        "/api/run-shot",
+        json={"stage": "camera", "shot_id": "alpha"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["stage"] == "camera"
+    assert body["shot_id"] == "alpha"
+    # The background thread should run quickly with our fake.
+    import time
+    for _ in range(20):
+        if "stages" in captured:
+            break
+        time.sleep(0.05)
+    assert captured.get("stages") == "camera"
+    assert captured.get("shot_filter") == "alpha"

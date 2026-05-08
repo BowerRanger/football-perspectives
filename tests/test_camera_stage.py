@@ -63,6 +63,29 @@ def _write_clip_mp4(clip, clip_path: Path) -> None:
     vw.release()
 
 
+def _write_single_shot_manifest(
+    output_dir: Path, shot_id: str, clip, n_frames: int,
+) -> None:
+    """Multi-shot plumbing: every camera-stage test now needs a
+    shots_manifest.json so the stage can iterate per-shot."""
+    from src.schemas.shots import Shot, ShotsManifest
+    fps = clip.fps if clip.fps > 0 else 25.0
+    end_frame = max(0, n_frames - 1)
+    ShotsManifest(
+        source_file="test",
+        fps=fps,
+        total_frames=n_frames,
+        shots=[Shot(
+            id=shot_id,
+            start_frame=0,
+            end_frame=end_frame,
+            start_time=0.0,
+            end_time=(end_frame + 1) / fps,
+            clip_file=f"shots/{shot_id}.mp4",
+        )],
+    ).save(output_dir / "shots" / "shots_manifest.json")
+
+
 # Six landmarks visible-or-projectable in the synthetic clip, with two
 # non-coplanar (corner-flag-top, crossbar) so the first-anchor DLT is
 # identifiable.
@@ -88,16 +111,17 @@ def test_camera_stage_recovers_anchor_frames_exactly(tmp_path: Path) -> None:
     shots = tmp_path / "shots"
     shots.mkdir()
     _write_clip_mp4(clip, shots / "play.mp4")
+    _write_single_shot_manifest(tmp_path, "play", clip, len(clip.frames))
 
     n = len(clip.frames)
     anchor_frames = [0, n // 2, n - 1]
     anchor_set = _build_anchor_set(clip, anchor_frames, _LANDMARK_WORLD)
-    anchor_set.save(tmp_path / "camera" / "anchors.json")
+    anchor_set.save(tmp_path / "camera" / "play_anchors.json")
 
     stage = CameraStage(config={"camera": {"static_camera": False}}, output_dir=tmp_path)
     stage.run()
 
-    track = CameraTrack.load(tmp_path / "camera" / "camera_track.json")
+    track = CameraTrack.load(tmp_path / "camera" / "play_camera_track.json")
 
     by_frame = {f.frame: f for f in track.frames}
     for af in anchor_frames:
@@ -133,16 +157,17 @@ def test_camera_stage_recovers_trajectory(tmp_path: Path) -> None:
     shots = tmp_path / "shots"
     shots.mkdir()
     _write_clip_mp4(clip, shots / "play.mp4")
+    _write_single_shot_manifest(tmp_path, "play", clip, len(clip.frames))
 
     n = len(clip.frames)
     anchor_frames = [0, n // 2, n - 1]
     anchor_set = _build_anchor_set(clip, anchor_frames, _LANDMARK_WORLD)
-    anchor_set.save(tmp_path / "camera" / "anchors.json")
+    anchor_set.save(tmp_path / "camera" / "play_anchors.json")
 
     stage = CameraStage(config={"camera": {"static_camera": False}}, output_dir=tmp_path)
     stage.run()
 
-    track = CameraTrack.load(tmp_path / "camera" / "camera_track.json")
+    track = CameraTrack.load(tmp_path / "camera" / "play_camera_track.json")
     assert len(track.frames) == len(clip.frames)
 
     test_frame = n // 2 - 5
@@ -170,6 +195,7 @@ def test_camera_stage_picks_later_anchor_as_primary_when_first_is_thin(
     shots = tmp_path / "shots"
     shots.mkdir()
     _write_clip_mp4(clip, shots / "play.mp4")
+    _write_single_shot_manifest(tmp_path, "play", clip, len(clip.frames))
 
     # Anchor 0 has only 2 coplanar landmarks (corner + halfway) — not enough
     # for either full or subsequent solve. Anchor 1 has the full 6 (matches
@@ -208,12 +234,12 @@ def test_camera_stage_picks_later_anchor_as_primary_when_first_is_thin(
         image_size=clip.image_size,
         anchors=tuple(anchors_list),
     )
-    anchor_set.save(tmp_path / "camera" / "anchors.json")
+    anchor_set.save(tmp_path / "camera" / "play_anchors.json")
 
     stage = CameraStage(config={"camera": {"static_camera": False}}, output_dir=tmp_path)
     stage.run()  # must not raise — frame 20 should be promoted to primary
 
-    track = CameraTrack.load(tmp_path / "camera" / "camera_track.json")
+    track = CameraTrack.load(tmp_path / "camera" / "play_camera_track.json")
     by_frame = {f.frame: f for f in track.frames}
     # Primary anchor (frame 20) must be present and recovered exactly.
     assert 20 in by_frame
@@ -264,6 +290,7 @@ def test_static_camera_invariant_holds_on_every_frame(tmp_path: Path) -> None:
     shots = tmp_path / "shots"
     shots.mkdir()
     _write_clip_mp4(clip, shots / "play.mp4")
+    _write_single_shot_manifest(tmp_path, "play", clip, len(clip.frames))
 
     C_world = np.array([52.5, -30.0, 30.0])
     n = len(clip.frames)
@@ -271,14 +298,14 @@ def test_static_camera_invariant_holds_on_every_frame(tmp_path: Path) -> None:
     anchor_set = _build_static_anchor_set(
         clip, anchor_frames, _LANDMARK_WORLD, C_world,
     )
-    anchor_set.save(tmp_path / "camera" / "anchors.json")
+    anchor_set.save(tmp_path / "camera" / "play_anchors.json")
 
     stage = CameraStage(
         config={"camera": {"static_camera": True}}, output_dir=tmp_path,
     )
     stage.run()
 
-    track = CameraTrack.load(tmp_path / "camera" / "camera_track.json")
+    track = CameraTrack.load(tmp_path / "camera" / "play_camera_track.json")
     assert track.camera_centre is not None, "camera_centre missing on saved track"
     C = np.asarray(track.camera_centre)
     # Solver-recovered C should be close to the synthesised one.
@@ -293,3 +320,42 @@ def test_static_camera_invariant_holds_on_every_frame(tmp_path: Path) -> None:
         assert np.allclose(recovered, C, atol=1e-3), (
             f"frame {f.frame}: -R^T @ t = {recovered} != C = {C}"
         )
+
+
+@pytest.mark.integration
+def test_camera_stage_processes_each_shot_independently(tmp_path: Path) -> None:
+    """Two shots, two anchor files, two camera_tracks. Each shot's tracks
+    are independent; one shot missing anchors is skipped with a warning."""
+    from src.schemas.shots import ShotsManifest, Shot
+
+    clip_a = render_synthetic_clip(n_frames=20)
+    clip_b = render_synthetic_clip(n_frames=20)
+    shots = tmp_path / "shots"
+    shots.mkdir()
+    _write_clip_mp4(clip_a, shots / "alpha.mp4")
+    _write_clip_mp4(clip_b, shots / "beta.mp4")
+    fps = clip_a.fps if clip_a.fps > 0 else 25.0
+    ShotsManifest(
+        source_file=str(shots),
+        fps=fps,
+        total_frames=40,
+        shots=[
+            Shot(id="alpha", start_frame=0, end_frame=19, start_time=0.0,
+                 end_time=20 / fps, clip_file="shots/alpha.mp4"),
+            Shot(id="beta", start_frame=0, end_frame=19, start_time=0.0,
+                 end_time=20 / fps, clip_file="shots/beta.mp4"),
+        ],
+    ).save(shots / "shots_manifest.json")
+
+    # Anchors only for alpha; beta has none.
+    n = len(clip_a.frames)
+    anchor_set = _build_anchor_set(clip_a, [0, n // 2, n - 1], _LANDMARK_WORLD)
+    anchor_set.save(tmp_path / "camera" / "alpha_anchors.json")
+
+    stage = CameraStage(
+        config={"camera": {"static_camera": False}}, output_dir=tmp_path,
+    )
+    stage.run()  # must not raise even though beta has no anchors
+
+    assert (tmp_path / "camera" / "alpha_camera_track.json").exists()
+    assert not (tmp_path / "camera" / "beta_camera_track.json").exists()

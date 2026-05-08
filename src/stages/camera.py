@@ -34,23 +34,61 @@ class CameraStage(BaseStage):
     name = "camera"
 
     def is_complete(self) -> bool:
-        return (self.output_dir / "camera" / "camera_track.json").exists()
+        from src.schemas.shots import ShotsManifest
+        manifest_path = self.output_dir / "shots" / "shots_manifest.json"
+        if not manifest_path.exists():
+            # Legacy: no manifest, but a single camera_track may exist.
+            return (self.output_dir / "camera" / "camera_track.json").exists()
+        manifest = ShotsManifest.load(manifest_path)
+        return all(
+            (self.output_dir / "camera" / f"{shot.id}_camera_track.json").exists()
+            for shot in manifest.shots
+        )
 
     def run(self) -> None:
+        from src.schemas.shots import ShotsManifest
         cfg = self.config.get("camera", {})
-        anchors_path = self.output_dir / "camera" / "anchors.json"
-        if not anchors_path.exists():
+        manifest_path = self.output_dir / "shots" / "shots_manifest.json"
+        if not manifest_path.exists():
             raise FileNotFoundError(
-                f"camera stage requires user-supplied anchors at {anchors_path}. "
-                "Open the web viewer (recon.py serve) and place keyframes."
+                f"camera stage requires a shots manifest at {manifest_path}; "
+                "run prepare_shots first"
             )
-        anchors = AnchorSet.load(anchors_path)
+        manifest = ShotsManifest.load(manifest_path)
+        shot_filter = getattr(self, "shot_filter", None)
+        any_processed = False
+        for shot in manifest.shots:
+            if shot_filter is not None and shot.id != shot_filter:
+                continue
+            anchors_path = (
+                self.output_dir / "camera" / f"{shot.id}_anchors.json"
+            )
+            if not anchors_path.exists():
+                logger.warning(
+                    "camera stage skipping shot %s — no anchors at %s. Open "
+                    "the anchor editor and place keyframes before re-running.",
+                    shot.id, anchors_path,
+                )
+                continue
+            clip_path = self.output_dir / shot.clip_file
+            self._run_shot(shot.id, anchors_path, clip_path, cfg)
+            any_processed = True
+        if not any_processed and shot_filter is None:
+            logger.warning(
+                "camera stage produced no output — no shot in the manifest "
+                "had matching anchors. Place keyframes via the anchor editor."
+            )
 
-        clip_dir = self.output_dir / "shots"
-        clips = list(clip_dir.glob("*.mp4"))
-        if not clips:
-            raise FileNotFoundError(f"no clip in {clip_dir}")
-        clip_path = clips[0]
+    def _run_shot(
+        self,
+        shot_id: str,
+        anchors_path: Path,
+        clip_path: Path,
+        cfg: dict,
+    ) -> None:
+        """Single-shot camera solve. The body is the original run() logic
+        with file paths parameterised on shot_id."""
+        anchors = AnchorSet.load(anchors_path)
 
         cap = cv2.VideoCapture(str(clip_path))
         if not cap.isOpened():
@@ -233,7 +271,7 @@ class CameraStage(BaseStage):
             ),
             distortion=tuple(float(x) for x in sol.distortion),
         )
-        track.save(self.output_dir / "camera" / "camera_track.json")
+        track.save(self.output_dir / "camera" / f"{shot_id}_camera_track.json")
 
     def _propagate_pair(
         self,

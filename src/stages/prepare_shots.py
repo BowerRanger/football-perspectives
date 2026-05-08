@@ -1,11 +1,17 @@
-"""Stage 1: Prepare shots — treat the input clip as one already-trimmed shot.
+"""Stage 1: Prepare shots — copy pre-trimmed clips into ``shots/``.
 
-The user manually trims clips in CapCut (or similar) and provides them as
-``--input clip.mp4``. This stage simply copies the clip into ``shots/`` and
-writes a flat single-shot manifest. No automatic scene segmentation is
-performed.
+The user manually trims clips in CapCut (or similar) and provides them
+either as a single ``--input clip.mp4`` (single-shot) or as a directory
+``--input clips/`` (multi-shot). This stage simply copies the clip(s)
+into ``output/shots/`` and writes a flat manifest. No automatic scene
+segmentation is performed.
 
-See spec section 5.1.
+When called against an existing single-shot output dir (legacy artefacts
+at ``output/camera/anchors.json`` etc., no shot prefix), it migrates
+those files in-place to the per-shot naming the rest of the pipeline
+expects. Idempotent.
+
+See spec section 5.1 and ``docs/superpowers/specs/2026-05-08-multi-shot-plumbing-design.md``.
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ from pathlib import Path
 import cv2
 
 from src.pipeline.base import BaseStage
-from src.schemas.shots import Shot, ShotsManifest
+from src.schemas.shots import Shot, ShotsManifest, _sanitise_shot_id
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +39,41 @@ def _video_metadata(clip_path: Path) -> tuple[float, int]:
         return fps, frames
     finally:
         cap.release()
+
+
+def _migrate_legacy_artefacts(output_dir: Path, shot_id: str) -> None:
+    """Rename legacy single-shot artefacts to per-shot naming.
+
+    Idempotent — files that don't exist are skipped silently. If the
+    per-shot variant already exists, the legacy file is left in place
+    (the per-shot file wins; caller can clean up manually).
+    """
+    legacy_pairs = [
+        (output_dir / "camera" / "anchors.json",
+         output_dir / "camera" / f"{shot_id}_anchors.json"),
+        (output_dir / "camera" / "camera_track.json",
+         output_dir / "camera" / f"{shot_id}_camera_track.json"),
+        (output_dir / "ball" / "ball_track.json",
+         output_dir / "ball" / f"{shot_id}_ball_track.json"),
+        (output_dir / "export" / "gltf" / "scene.glb",
+         output_dir / "export" / "gltf" / f"{shot_id}_scene.glb"),
+        (output_dir / "export" / "gltf" / "scene_metadata.json",
+         output_dir / "export" / "gltf" / f"{shot_id}_scene_metadata.json"),
+    ]
+    migrated: list[str] = []
+    for legacy, new in legacy_pairs:
+        if not legacy.exists():
+            continue
+        if new.exists():
+            continue
+        legacy.rename(new)
+        migrated.append(legacy.name)
+    if migrated:
+        logger.info(
+            "[prepare_shots] migrated legacy single-shot artefacts to "
+            "per-shot layout under shot_id=%s: %s",
+            shot_id, ", ".join(migrated),
+        )
 
 
 class PrepareShotsStage(BaseStage):
@@ -54,52 +95,80 @@ class PrepareShotsStage(BaseStage):
     def run(self) -> None:
         if self.video_path is None:
             raise ValueError(
-                "PrepareShotsStage requires video_path; pass --input <clip.mp4>"
+                "PrepareShotsStage requires video_path; pass --input <clip.mp4 or dir>"
             )
         clip_src = Path(self.video_path).resolve()
         if not clip_src.exists():
-            raise FileNotFoundError(f"Input clip not found: {clip_src}")
+            raise FileNotFoundError(f"Input not found: {clip_src}")
+
+        if clip_src.is_dir():
+            clip_files = sorted(clip_src.glob("*.mp4"))
+            if not clip_files:
+                raise FileNotFoundError(f"no .mp4 files in {clip_src}")
+        else:
+            clip_files = [clip_src]
 
         shots_dir = self.output_dir / "shots"
         shots_dir.mkdir(parents=True, exist_ok=True)
 
-        shot_id = clip_src.stem
-        clip_dest = shots_dir / f"{shot_id}.mp4"
+        # Single-input → also migrate any legacy single-shot artefacts to
+        # per-shot naming under the resulting shot_id.
+        if len(clip_files) == 1:
+            legacy_shot_id = _sanitise_shot_id(clip_files[0].stem)
+            _migrate_legacy_artefacts(self.output_dir, legacy_shot_id)
 
-        # Copy the clip into shots/ unless it already lives there.
-        try:
-            same_file = clip_dest.exists() and clip_dest.samefile(clip_src)
-        except FileNotFoundError:
-            same_file = False
-        if not same_file:
-            shutil.copy2(clip_src, clip_dest)
+        seen_ids: set[str] = set()
+        shots: list[Shot] = []
+        fps_observed = 25.0
+        total_frames = 0
+        source_label = str(clip_src)
 
-        fps, frame_count = _video_metadata(clip_dest)
-        if frame_count <= 0:
-            logger.warning(
-                "prepare_shots: cv2 reported 0 frames for %s — manifest will "
-                "still be written but downstream stages may fail.",
-                clip_dest,
-            )
-        effective_fps = fps if fps > 0 else 25.0
-        end_frame = max(0, frame_count - 1)
+        for clip_path in clip_files:
+            shot_id = _sanitise_shot_id(clip_path.stem)
+            if shot_id in seen_ids:
+                raise ValueError(
+                    f"duplicate shot_id {shot_id!r} from {clip_path}; "
+                    "rename one of the input clips so their stems differ "
+                    "after sanitisation"
+                )
+            seen_ids.add(shot_id)
 
-        shot = Shot(
-            id=shot_id,
-            start_frame=0,
-            end_frame=end_frame,
-            start_time=0.0,
-            end_time=(end_frame + 1) / effective_fps if frame_count > 0 else 0.0,
-            clip_file=str(clip_dest.relative_to(self.output_dir)),
-        )
+            clip_dest = shots_dir / f"{shot_id}.mp4"
+            try:
+                same_file = clip_dest.exists() and clip_dest.samefile(clip_path)
+            except FileNotFoundError:
+                same_file = False
+            if not same_file:
+                shutil.copy2(clip_path, clip_dest)
+
+            fps, frame_count = _video_metadata(clip_dest)
+            if frame_count <= 0:
+                logger.warning(
+                    "prepare_shots: cv2 reported 0 frames for %s — manifest "
+                    "entry written but downstream stages may fail.",
+                    clip_dest,
+                )
+            effective_fps = fps if fps > 0 else 25.0
+            end_frame = max(0, frame_count - 1)
+            shots.append(Shot(
+                id=shot_id,
+                start_frame=0,
+                end_frame=end_frame,
+                start_time=0.0,
+                end_time=(end_frame + 1) / effective_fps if frame_count > 0 else 0.0,
+                clip_file=str(clip_dest.relative_to(self.output_dir)),
+            ))
+            fps_observed = effective_fps
+            total_frames += frame_count
+
         manifest = ShotsManifest(
-            source_file=str(clip_src),
-            fps=effective_fps,
-            total_frames=frame_count,
-            shots=[shot],
+            source_file=source_label,
+            fps=fps_observed,
+            total_frames=total_frames,
+            shots=shots,
         )
         manifest.save(shots_dir / "shots_manifest.json")
         logger.info(
-            "prepare_shots: wrote 1 shot (%s, %d frames @ %.2f fps)",
-            shot_id, frame_count, effective_fps,
+            "prepare_shots: wrote %d shot(s) (%s)",
+            len(shots), ", ".join(s.id for s in shots),
         )

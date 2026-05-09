@@ -73,6 +73,18 @@ def main() -> int:
     faces = np.asarray(data["f"], dtype=np.int32)
     weights = np.asarray(data["weights"], dtype=np.float32)
 
+    # The joint positions are computed from v_template via the
+    # J_regressor matrix. We store these so the Blender exporter places
+    # bones at the actual SMPL joint locations (matching the mesh)
+    # rather than relying on the hand-typed SMPL_REST_JOINTS_YUP table,
+    # which has the pelvis re-centred to (0,0,0) and so sits ~22cm
+    # above the real joint positions.
+    j_reg = data["J_regressor"]
+    if hasattr(j_reg, "todense"):
+        j_reg = j_reg.todense()
+    j_regressor = np.asarray(j_reg, dtype=np.float32)
+    joint_positions = (j_regressor @ v_template).astype(np.float32)
+
     expected_v = 6890
     expected_j = 24
     if v_template.shape != (expected_v, 3):
@@ -86,6 +98,11 @@ def main() -> int:
     if faces.ndim != 2 or faces.shape[1] != 3:
         sys.stderr.write(f"unexpected faces shape: {faces.shape}\n")
         return 2
+    if joint_positions.shape != (expected_j, 3):
+        sys.stderr.write(
+            f"unexpected joint_positions shape: {joint_positions.shape}\n"
+        )
+        return 2
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
@@ -93,10 +110,12 @@ def main() -> int:
         v_template=v_template,
         faces=faces,
         weights=weights,
+        joint_positions=joint_positions,
     )
     print(
         f"[smpl-extract] wrote {OUT_PATH} "
-        f"(v={v_template.shape[0]}, f={faces.shape[0]}, w={weights.shape})"
+        f"(v={v_template.shape[0]}, f={faces.shape[0]}, "
+        f"w={weights.shape}, j={joint_positions.shape})"
     )
     return 0
 

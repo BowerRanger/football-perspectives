@@ -119,8 +119,23 @@ def main(argv: list[str]) -> int:
         arm.data.name = f"{name}_data"
         return arm
 
-    def _build_smpl_armature(name: str) -> object:
-        """Create a 24-bone SMPL armature in canonical y-up rest pose."""
+    def _build_smpl_armature(name: str, joint_positions=None) -> object:
+        """Create a 24-bone SMPL armature in canonical y-up rest pose.
+
+        ``joint_positions``: (24, 3) array of joint positions in canonical
+        y-up. When supplied, these (typically ``J_regressor @ v_template``
+        from the bundled SMPL pkl) are used so the bones align with the
+        SMPL mesh. Falls back to the hand-typed ``SMPL_REST_JOINTS_YUP``
+        table when ``None`` — that table has the pelvis re-centred to the
+        origin and so sits ~22cm above the real joint positions, which
+        is fine for the JS viewer's bone overlay but mis-aligns the
+        skeleton against the SMPL mesh in UE.
+        """
+        joints = (
+            joint_positions
+            if joint_positions is not None
+            else SMPL_REST_JOINTS_YUP
+        )
         bpy.ops.object.armature_add(enter_editmode=True)
         arm = bpy.context.active_object
         arm.name = name
@@ -133,7 +148,7 @@ def main(argv: list[str]) -> int:
         bones: list[object] = []
         for j, jname in enumerate(SMPL_JOINT_NAMES):
             eb = edit_bones.new(jname)
-            head = SMPL_REST_JOINTS_YUP[j]
+            head = joints[j]
             # Tail must differ from head; pick a 5cm offset along +y so
             # bones are visible in viewport. Direction is irrelevant for
             # FBX export of pose-bone rotations.
@@ -224,10 +239,16 @@ def main(argv: list[str]) -> int:
     # Optional: real SMPL body mesh for preview before retargeting.
     smpl_npz_path = repo_root / "data" / "models" / "smpl_neutral.npz"
     smpl_data = None
+    smpl_joint_positions = None
     if smpl_npz_path.exists():
         smpl_data = dict(np.load(smpl_npz_path))
+        # Older npz files lack joint_positions; fall through to the
+        # hardcoded table in that case.
+        if "joint_positions" in smpl_data:
+            smpl_joint_positions = smpl_data["joint_positions"]
         sys.stdout.write(
-            f"[player-fbx] using real SMPL body mesh from {smpl_npz_path}\n"
+            f"[player-fbx] using real SMPL body mesh from {smpl_npz_path}"
+            f"{' + joint_positions' if smpl_joint_positions is not None else ''}\n"
         )
     else:
         sys.stdout.write(
@@ -247,7 +268,7 @@ def main(argv: list[str]) -> int:
         scene.frame_start = 0
         scene.frame_end = 0
         scene.render.fps = int(round(fps))
-        arm = _build_smpl_armature("SMPL_APose")
+        arm = _build_smpl_armature("SMPL_APose", joint_positions=smpl_joint_positions)
         arm.rotation_mode = "QUATERNION"
         if smpl_data is not None:
             mesh_obj = _add_smpl_skinned_mesh(arm, "SMPL_APose", smpl_data)
@@ -322,7 +343,7 @@ def main(argv: list[str]) -> int:
             scene.frame_start = int(frames[0])
             scene.frame_end = int(frames[-1])
             scene.render.fps = int(round(fps))
-            arm = _build_smpl_armature(display_name)
+            arm = _build_smpl_armature(display_name, joint_positions=smpl_joint_positions)
             arm.rotation_mode = "QUATERNION"
             if smpl_data is not None:
                 placeholder = _add_smpl_skinned_mesh(arm, display_name, smpl_data)

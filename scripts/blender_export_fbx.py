@@ -240,16 +240,43 @@ def main(argv: list[str]) -> int:
     smpl_npz_path = repo_root / "data" / "models" / "smpl_neutral.npz"
     smpl_data = None
     smpl_joint_positions = None
+    # Pelvis position in canonical-space (after the foot-midpoint shift
+    # below). The per-clip branch needs this to compute per-frame
+    # ``arm.location = root_t - root_R @ pelvis_canon_shifted`` so the
+    # pelvis still lands at root_t even though the canonical layout
+    # has been re-anchored on the foot midpoint.
+    pelvis_canon_shifted = np.zeros(3, dtype=np.float64)
     if smpl_npz_path.exists():
         smpl_data = dict(np.load(smpl_npz_path))
-        # Older npz files lack joint_positions; fall through to the
-        # hardcoded table in that case.
-        if "joint_positions" in smpl_data:
+        if "joint_positions" in smpl_data and "v_template" in smpl_data:
+            # Re-anchor canonical space so the foot midpoint sits at
+            # (0, 0, 0). Both the bone hierarchy and the mesh vertices
+            # are shifted; the armature object's origin then lands
+            # between the feet at ground level in UE.
+            jp = np.asarray(smpl_data["joint_positions"], dtype=np.float64)
+            l_foot_idx = SMPL_JOINT_NAMES.index("l_foot")
+            r_foot_idx = SMPL_JOINT_NAMES.index("r_foot")
+            foot_midpoint = (jp[l_foot_idx] + jp[r_foot_idx]) / 2.0
+            shift = -foot_midpoint
+            smpl_data["joint_positions"] = (jp + shift).astype(np.float32)
+            smpl_data["v_template"] = (
+                np.asarray(smpl_data["v_template"], dtype=np.float64) + shift
+            ).astype(np.float32)
             smpl_joint_positions = smpl_data["joint_positions"]
-        sys.stdout.write(
-            f"[player-fbx] using real SMPL body mesh from {smpl_npz_path}"
-            f"{' + joint_positions' if smpl_joint_positions is not None else ''}\n"
-        )
+            pelvis_canon_shifted = np.asarray(
+                smpl_joint_positions[0], dtype=np.float64
+            )
+            sys.stdout.write(
+                f"[player-fbx] using real SMPL body mesh from {smpl_npz_path}"
+                f" (foot-midpoint anchored; pelvis canon = "
+                f"{tuple(float(x) for x in pelvis_canon_shifted)})\n"
+            )
+        else:
+            sys.stdout.write(
+                f"[player-fbx] {smpl_npz_path} missing joint_positions or "
+                "v_template; re-run scripts/extract_smpl_neutral.py.\n"
+            )
+            smpl_data = None
     else:
         sys.stdout.write(
             "[player-fbx] no SMPL body npz found; falling back to placeholder triangle. "
@@ -276,31 +303,12 @@ def main(argv: list[str]) -> int:
             mesh_obj = _add_placeholder_skinned_mesh(arm, "SMPL_APose")
 
         # Armature object: rotate canonical y-up rest skeleton into pitch
-        # z-up world (90° about +X), then lift along world +Z so the
-        # mesh's lowest vertex sits at z=0. This makes the asset's
-        # origin in UE end up between the feet at ground level, rather
-        # than at the pelvis (canonical origin). Centre the foot
-        # midpoint horizontally on the world Y axis too.
+        # z-up world (90° about +X). No translation — the canonical-space
+        # shift above already re-anchored the bone hierarchy on the foot
+        # midpoint, so the asset origin in UE lands between the feet at
+        # ground level when arm.location = (0, 0, 0).
         from math import cos, sin, pi
-        if smpl_data is not None and "v_template" in smpl_data:
-            foot_clearance = float(-smpl_data["v_template"][:, 1].min())
-        else:
-            # SMPL mean-shape sole-of-foot clearance from canonical origin.
-            foot_clearance = 1.16
-        if smpl_joint_positions is not None:
-            # Foot midpoint depth: average l_foot, r_foot canonical Z.
-            l_foot_idx = SMPL_JOINT_NAMES.index("l_foot")
-            r_foot_idx = SMPL_JOINT_NAMES.index("r_foot")
-            foot_mid_z_canon = float(
-                (smpl_joint_positions[l_foot_idx, 2]
-                 + smpl_joint_positions[r_foot_idx, 2]) / 2.0
-            )
-        else:
-            foot_mid_z_canon = 0.0
-        # R_yz maps canonical (cx, cy, cz) → world (cx, -cz, cy). To
-        # shift the foot midpoint to world (0, 0, 0): arm.location =
-        # (0, +foot_mid_z_canon, +foot_clearance).
-        arm.location = (0.0, foot_mid_z_canon, foot_clearance)
+        arm.location = (0.0, 0.0, 0.0)
         # Quaternion for 90° about +X: w=cos(45°), x=sin(45°).
         arm.rotation_quaternion = Quaternion(
             (float(cos(pi / 4)), float(sin(pi / 4)), 0.0, 0.0)
@@ -373,14 +381,20 @@ def main(argv: list[str]) -> int:
                 placeholder = _add_placeholder_skinned_mesh(arm, display_name)
 
             for i, fi in enumerate(frames.tolist()):
-                # Armature object: root translation in pitch z-up + root_R
-                # rotation. ``root_R`` maps SMPL canonical y-up to pitch
-                # z-up, so applying it as the armature's world rotation
-                # lifts the y-up rest skeleton into pitch z-up at runtime.
+                # Armature object: rotation = root_R[i] (SMPL canonical
+                # y-up → pitch z-up + player body orientation). Location
+                # is set so the pelvis ends up at root_t[i] in world,
+                # accounting for the canonical-space foot-midpoint
+                # anchor — pelvis sits at canonical pelvis_canon_shifted
+                # in armature local space, so its world position is
+                # arm.location + root_R[i] @ pelvis_canon_shifted.
+                pelvis_world_offset_i = (
+                    root_R[i] @ pelvis_canon_shifted
+                )
                 arm.location = (
-                    float(root_t[i, 0]),
-                    float(root_t[i, 1]),
-                    float(root_t[i, 2]),
+                    float(root_t[i, 0] - pelvis_world_offset_i[0]),
+                    float(root_t[i, 1] - pelvis_world_offset_i[1]),
+                    float(root_t[i, 2] - pelvis_world_offset_i[2]),
                 )
                 R = root_R[i]
                 m = Matrix((

@@ -276,10 +276,32 @@ def main(argv: list[str]) -> int:
             mesh_obj = _add_placeholder_skinned_mesh(arm, "SMPL_APose")
 
         # Armature object: rotate canonical y-up rest skeleton into pitch
-        # z-up world (90° about +X). No translation.
-        arm.location = (0.0, 0.0, 0.0)
-        # Quaternion for 90° about +X: w=cos(45°), x=sin(45°).
+        # z-up world (90° about +X), then lift along world +Z so the
+        # mesh's lowest vertex sits at z=0. This makes the asset's
+        # origin in UE end up between the feet at ground level, rather
+        # than at the pelvis (canonical origin). Centre the foot
+        # midpoint horizontally on the world Y axis too.
         from math import cos, sin, pi
+        if smpl_data is not None and "v_template" in smpl_data:
+            foot_clearance = float(-smpl_data["v_template"][:, 1].min())
+        else:
+            # SMPL mean-shape sole-of-foot clearance from canonical origin.
+            foot_clearance = 1.16
+        if smpl_joint_positions is not None:
+            # Foot midpoint depth: average l_foot, r_foot canonical Z.
+            l_foot_idx = SMPL_JOINT_NAMES.index("l_foot")
+            r_foot_idx = SMPL_JOINT_NAMES.index("r_foot")
+            foot_mid_z_canon = float(
+                (smpl_joint_positions[l_foot_idx, 2]
+                 + smpl_joint_positions[r_foot_idx, 2]) / 2.0
+            )
+        else:
+            foot_mid_z_canon = 0.0
+        # R_yz maps canonical (cx, cy, cz) → world (cx, -cz, cy). To
+        # shift the foot midpoint to world (0, 0, 0): arm.location =
+        # (0, +foot_mid_z_canon, +foot_clearance).
+        arm.location = (0.0, foot_mid_z_canon, foot_clearance)
+        # Quaternion for 90° about +X: w=cos(45°), x=sin(45°).
         arm.rotation_quaternion = Quaternion(
             (float(cos(pi / 4)), float(sin(pi / 4)), 0.0, 0.0)
         )

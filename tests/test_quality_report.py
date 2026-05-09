@@ -157,3 +157,24 @@ def test_quality_report_body_drift_for_static_camera(tmp_path: Path) -> None:
     write_quality_report(tmp_path)
     report = json.loads((tmp_path / "quality_report.json").read_text())
     assert report["camera"]["body_drift_max_m"] == pytest.approx(drift, abs=1e-6)
+
+
+@pytest.mark.unit
+def test_quality_report_includes_refined_poses_section(tmp_path: Path) -> None:
+    refined_dir = tmp_path / "refined_poses"
+    refined_dir.mkdir()
+    summary = {
+        "players_refined": 3,
+        "single_shot_players": 1,
+        "multi_shot_players": 2,
+        "total_fused_frames": 100,
+        "single_view_frames": 20,
+        "high_disagreement_frames": 4,
+        "shots_missing_sync": [],
+        "beta_disagreement_warnings": [],
+    }
+    (refined_dir / "refined_poses_summary.json").write_text(json.dumps(summary))
+    write_quality_report(tmp_path)
+    report = json.loads((tmp_path / "quality_report.json").read_text())
+    assert report["refined_poses"]["players_refined"] == 3
+    assert report["refined_poses"]["high_disagreement_frames"] == 4

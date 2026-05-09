@@ -134,5 +134,9 @@ def write_quality_report(output_dir: Path) -> None:
             ),
         }
 
+    refined_summary_path = output_dir / "refined_poses" / "refined_poses_summary.json"
+    if refined_summary_path.exists():
+        report["refined_poses"] = json.loads(refined_summary_path.read_text())
+
     out = output_dir / "quality_report.json"
     out.write_text(json.dumps(report, indent=2))

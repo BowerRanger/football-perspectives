@@ -34,6 +34,7 @@ from src.utils.pose_fusion import (
     so3_chordal_mean,
     so3_geodesic_distance,
 )
+from src.utils.temporal_smoothing import savgol_axis, slerp_window
 
 logger = logging.getLogger(__name__)
 
@@ -333,7 +334,16 @@ class RefinedPosesStage(BaseStage):
                     cfg.get("beta_disagreement_warn", 0.3),
                 )
 
-        # Smoothing — wired in Task 7.
+        # Smoothing on the fused track.
+        sw = int(cfg.get("savgol_window", 7))
+        spo = int(cfg.get("savgol_poly", 3))
+        if len(union) >= spo + 2 and sw > 1:
+            fused_root_t = savgol_axis(fused_root_t, window=sw, order=spo, axis=0)
+            fused_thetas = savgol_axis(fused_thetas, window=sw, order=spo, axis=0)
+
+        if bool(cfg.get("smooth_rotations", True)) and len(union) >= 3:
+            fused_root_R = slerp_window(fused_root_R, window=sw if sw > 1 else 5)
+
         contributing_shots = tuple(sorted({sid for sid, _ in contribs if sid}))
 
         refined = RefinedPose(

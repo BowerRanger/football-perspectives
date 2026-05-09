@@ -236,3 +236,36 @@ def test_refined_poses_outlier_view_dropped(tmp_path: Path) -> None:
     assert refined.view_count[2] == 3
     assert diag.frames[0].dropped_shots == ()
     assert diag.frames[2].dropped_shots == ()
+
+
+@pytest.mark.integration
+def test_refined_poses_savgol_smooths_root_t(tmp_path: Path) -> None:
+    """Single shot, noisy root_t → smoothing reduces RMS error vs ground truth."""
+    output_dir = tmp_path
+    (output_dir / "hmr_world").mkdir()
+    _write_sync_map(output_dir, ref="A", offsets={"A": 0})
+
+    n = 30
+    frames = np.arange(n, dtype=np.int64)
+    truth = np.column_stack([frames * 0.1, np.zeros(n), np.zeros(n)])
+    rng = np.random.default_rng(0)
+    noisy = truth + rng.normal(scale=0.05, size=truth.shape)
+    track = SmplWorldTrack(
+        player_id="P001", frames=frames, betas=np.zeros(10),
+        thetas=np.zeros((n, 24, 3)),
+        root_R=np.tile(np.eye(3), (n, 1, 1)),
+        root_t=noisy,
+        confidence=np.ones(n), shot_id="A",
+    )
+    track.save(output_dir / "hmr_world" / "A__P001_smpl_world.npz")
+
+    cfg = _default_config()
+    cfg["refined_poses"]["savgol_window"] = 7
+    cfg["refined_poses"]["savgol_poly"] = 3
+    stage = RefinedPosesStage(config=cfg, output_dir=output_dir)
+    stage.run()
+    refined = RefinedPose.load(output_dir / "refined_poses" / "P001_refined.npz")
+
+    raw_rms = float(np.sqrt(np.mean((noisy - truth) ** 2)))
+    smooth_rms = float(np.sqrt(np.mean((refined.root_t - truth) ** 2)))
+    assert smooth_rms < raw_rms

@@ -12,6 +12,7 @@ _STAGE_NAMES: list[str] = [
     "camera",
     "hmr_world",
     "ball",
+    "refined_poses",
     "export",
 ]
 
@@ -33,6 +34,9 @@ def _stage_class(name: str) -> type[BaseStage] | None:
     if name == "ball":
         from src.stages.ball import BallStage
         return BallStage
+    if name == "refined_poses":
+        from src.stages.refined_poses import RefinedPosesStage
+        return RefinedPosesStage
     if name == "export":
         from src.stages.export import ExportStage
         return ExportStage

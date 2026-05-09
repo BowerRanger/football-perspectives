@@ -16,8 +16,22 @@ def test_resolve_all():
         "camera",
         "hmr_world",
         "ball",
+        "refined_poses",
         "export",
     ]
+
+
+@pytest.mark.unit
+def test_resolve_all_includes_refined_poses_between_ball_and_export() -> None:
+    stages = resolve_stages("all", None)
+    assert "refined_poses" in stages
+    assert stages.index("refined_poses") == stages.index("ball") + 1
+    assert stages.index("export") == stages.index("refined_poses") + 1
+
+
+@pytest.mark.unit
+def test_resolve_from_refined_poses_includes_export_only() -> None:
+    assert resolve_stages("all", "refined_poses") == ["refined_poses", "export"]
 
 
 @pytest.mark.unit
@@ -34,7 +48,7 @@ def test_resolve_unknown_raises():
 @pytest.mark.unit
 def test_resolve_with_from_stage_skips_earlier():
     result = resolve_stages("all", "hmr_world")
-    assert result == ["hmr_world", "ball", "export"]
+    assert result == ["hmr_world", "ball", "refined_poses", "export"]
 
 
 @pytest.mark.integration

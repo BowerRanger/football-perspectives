@@ -29,7 +29,11 @@ from src.schemas.refined_pose import (
 )
 from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.sync_map import SyncMap
-from src.utils.pose_fusion import so3_chordal_mean, so3_geodesic_distance
+from src.utils.pose_fusion import (
+    robust_translation_fuse,
+    so3_chordal_mean,
+    so3_geodesic_distance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -219,25 +223,32 @@ class RefinedPosesStage(BaseStage):
                 )
                 continue
 
-            # Multi-view path (no outlier rejection yet — wired in Task 6).
-            kept = np.ones(len(views), dtype=bool)
-            kept_sids = tuple(v[0] for v in views)
-            dropped_sids: tuple[str, ...] = ()
-
+            # Multi-view path with MAD-based outlier rejection on positions.
             weights = np.array([v[4] for v in views])
             ts = np.stack([v[1] for v in views])
             Rs = np.stack([v[2] for v in views])
             thetass = np.stack([v[3] for v in views])
 
-            fused_t = (weights[:, None] * ts).sum(axis=0) / weights.sum()
-            fused_R = so3_chordal_mean(Rs, weights)
+            fused_t, kept = robust_translation_fuse(
+                ts, weights, k_sigma=float(cfg.get("outlier_k_sigma", 3.0))
+            )
+            kept_sids = tuple(v[0] for v, k in zip(views, kept) if k)
+            dropped_sids = tuple(v[0] for v, k in zip(views, kept) if not k)
+            kept_idx = np.where(kept)[0]
+            kept_weights = weights[kept_idx]
+            kept_Rs = Rs[kept_idx]
+            kept_thetas = thetass[kept_idx]
+            fused_R = so3_chordal_mean(kept_Rs, kept_weights)
 
             joint_R_per_view = np.stack(
-                [_axis_angle_to_so3_batch(thetass[v]) for v in range(len(views))]
-            )
+                [
+                    _axis_angle_to_so3_batch(kept_thetas[v])
+                    for v in range(len(kept_idx))
+                ]
+            )  # (Vk, 24, 3, 3)
             fused_joint_R = np.stack(
                 [
-                    so3_chordal_mean(joint_R_per_view[:, j], weights)
+                    so3_chordal_mean(joint_R_per_view[:, j], kept_weights)
                     for j in range(24)
                 ]
             )
@@ -248,22 +259,23 @@ class RefinedPosesStage(BaseStage):
             fused_root_t[i] = fused_t
             fused_root_R[i] = fused_R
             fused_thetas[i] = fused_theta
-            fused_conf[i] = float(weights.sum())
-            view_count[i] = int(kept.sum())
+            fused_conf[i] = float(kept_weights.sum())
+            view_count[i] = int(len(kept_idx))
 
+            kept_ts = ts[kept_idx]
             pos_dis = (
-                float(np.max(np.linalg.norm(ts - fused_t, axis=1)))
-                if len(ts) > 0
+                float(np.max(np.linalg.norm(kept_ts - fused_t, axis=1)))
+                if len(kept_ts) > 0
                 else 0.0
             )
             rot_dis = (
                 float(
                     max(
-                        so3_geodesic_distance(Rs[v], fused_R)
-                        for v in range(len(views))
+                        so3_geodesic_distance(kept_Rs[v], fused_R)
+                        for v in range(len(kept_idx))
                     )
                 )
-                if len(views) > 0
+                if len(kept_idx) > 0
                 else 0.0
             )
             min_views = int(cfg.get("min_contributing_views", 1))
@@ -274,7 +286,7 @@ class RefinedPosesStage(BaseStage):
                     dropped_shots=dropped_sids,
                     pos_disagreement_m=pos_dis,
                     rot_disagreement_rad=rot_dis,
-                    low_coverage=(int(kept.sum()) < min_views),
+                    low_coverage=(int(len(kept_idx)) < min_views),
                     high_disagreement=(
                         pos_dis > float(cfg.get("high_disagreement_pos_m", 0.5))
                         or rot_dis

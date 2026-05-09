@@ -168,3 +168,71 @@ def test_refined_poses_two_shots_fuses_root_t(tmp_path: Path) -> None:
     )
     assert refined.view_count.tolist() == [2] * 10
     assert set(refined.contributing_shots) == {"A", "B"}
+
+
+@pytest.mark.integration
+def test_refined_poses_outlier_view_dropped(tmp_path: Path) -> None:
+    """Three shots overlap on a reference frame; one shot's root_t is 50 m off.
+
+    Expected: outlier shot is dropped from that frame's contribution; fused
+    root_t equals the weighted mean of the two agreeing shots; diagnostic
+    records the dropped shot.
+    """
+    output_dir = tmp_path
+    (output_dir / "hmr_world").mkdir()
+    _write_sync_map(output_dir, ref="A", offsets={"A": 0, "B": 0, "C": 0})
+
+    n = 3
+    frames = np.arange(n, dtype=np.int64)
+    base = np.column_stack([frames * 1.0, np.zeros(n), np.zeros(n)])
+
+    a = SmplWorldTrack(
+        player_id="P001", frames=frames, betas=np.zeros(10),
+        thetas=np.zeros((n, 24, 3)),
+        root_R=np.tile(np.eye(3), (n, 1, 1)),
+        root_t=base.copy(),
+        confidence=np.ones(n), shot_id="A",
+    )
+    b = SmplWorldTrack(
+        player_id="P001", frames=frames, betas=np.zeros(10),
+        thetas=np.zeros((n, 24, 3)),
+        root_R=np.tile(np.eye(3), (n, 1, 1)),
+        root_t=base + np.array([0.05, 0.0, 0.0]),
+        confidence=np.ones(n), shot_id="B",
+    )
+    # Shot C is wildly off at frame 1 only.
+    c_root_t = base.copy()
+    c_root_t[1] = [50.0, 0.0, 0.0]
+    c = SmplWorldTrack(
+        player_id="P001", frames=frames, betas=np.zeros(10),
+        thetas=np.zeros((n, 24, 3)),
+        root_R=np.tile(np.eye(3), (n, 1, 1)),
+        root_t=c_root_t,
+        confidence=np.ones(n), shot_id="C",
+    )
+    a.save(output_dir / "hmr_world" / "A__P001_smpl_world.npz")
+    b.save(output_dir / "hmr_world" / "B__P001_smpl_world.npz")
+    c.save(output_dir / "hmr_world" / "C__P001_smpl_world.npz")
+
+    stage = RefinedPosesStage(config=_default_config(), output_dir=output_dir)
+    stage.run()
+
+    refined = RefinedPose.load(output_dir / "refined_poses" / "P001_refined.npz")
+    diag = RefinedPoseDiagnostics.load(
+        output_dir / "refined_poses" / "P001_diagnostics.json"
+    )
+
+    # Frame 1: C dropped, fused root_t ~= mean(A, B) at that frame.
+    assert refined.view_count[1] == 2
+    np.testing.assert_allclose(
+        refined.root_t[1], [(1.0 + 1.05) / 2, 0.0, 0.0], atol=1e-9
+    )
+    fd1 = diag.frames[1]
+    assert "C" in fd1.dropped_shots
+    assert "A" in fd1.contributing_shots and "B" in fd1.contributing_shots
+
+    # Frames 0 and 2: all three agree → no drops.
+    assert refined.view_count[0] == 3
+    assert refined.view_count[2] == 3
+    assert diag.frames[0].dropped_shots == ()
+    assert diag.frames[2].dropped_shots == ()

@@ -1463,6 +1463,25 @@ async function renderMultiShotStatus(panel, shotIds) {
     ]);
   }
   body.appendChild(t);
+
+  // Refined-poses summary line — single per-pipeline summary, sourced
+  // from quality_report.json (so the value reflects the most recent
+  // pipeline run).
+  const refinedLine = document.createElement("div");
+  refinedLine.style.cssText = "padding:8px 14px;font-size:13px;color:#cbd5e1;";
+  const report = await fetchJsonOrNull("/api/output/quality-report");
+  const rp = report && report.refined_poses;
+  if (!rp) {
+    refinedLine.innerHTML = "<strong>Refined poses:</strong> not run";
+  } else {
+    refinedLine.innerHTML =
+      `<strong>Refined poses:</strong> ${rp.players_refined} players ` +
+      `(${rp.multi_shot_players} multi-shot, ${rp.single_shot_players} single-shot), ` +
+      `${rp.total_fused_frames} frames, ` +
+      `${rp.high_disagreement_frames} flagged`;
+  }
+  body.appendChild(refinedLine);
+
   panel.appendChild(wrap);
 }
 

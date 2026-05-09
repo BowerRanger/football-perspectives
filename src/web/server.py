@@ -644,6 +644,24 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         ids = sorted(p.stem for p in shots_dir.glob("*.mp4"))
         return {"shots": ids}
 
+    @app.get("/api/output/quality-report")
+    def get_quality_report():
+        """Return the most recent ``quality_report.json`` (or {} if absent).
+
+        The dashboard's Multi-Shot Status panel reads this to render the
+        refined-poses summary line. Stays read-only — quality_report is
+        produced by the pipeline, never edited via the dashboard.
+        """
+        path = output_dir / "quality_report.json"
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text())
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to load quality_report: {exc}",
+            )
+
     @app.get("/api/shots/manifest")
     def get_shots_manifest():
         """Return the full ShotsManifest as JSON.

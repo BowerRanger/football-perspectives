@@ -77,6 +77,20 @@ ball:
     z_max_m: 50.0
     horizontal_speed_max_m_s: 40.0
 
+refined_poses:
+  # Outlier rejection (per frame, per view) using MAD on root_t.
+  outlier_k_sigma: 3.0
+  min_contributing_views: 1
+  high_disagreement_pos_m: 0.5
+  high_disagreement_rot_rad: 0.5
+  # Smoothing (reuses src/utils/temporal_smoothing.py).
+  savgol_window: 7
+  savgol_poly: 3
+  smooth_rotations: true
+  # Beta fusion across all shots a player appears in.
+  beta_aggregation: weighted_mean
+  beta_disagreement_warn: 0.3
+
 export:
   gltf_enabled: true
   fbx_enabled: true

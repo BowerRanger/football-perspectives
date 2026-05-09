@@ -30,10 +30,14 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import numpy as np
+
 from src.pipeline.base import BaseStage
 from src.schemas.ball_track import BallTrack
 from src.schemas.camera_track import CameraTrack
+from src.schemas.refined_pose import RefinedPose
 from src.schemas.smpl_world import SmplWorldTrack
+from src.schemas.sync_map import SyncMap
 from src.schemas.ue_manifest import (
     BallEntry,
     CameraEntry,
@@ -81,6 +85,63 @@ def _derive_clip_name(output_dir: Path) -> str:
         safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name)
         return safe or "clip"
     return "clip"
+
+
+def _per_shot_smpl_tracks(
+    output_dir: Path, *, shot_id: str | None
+) -> list[SmplWorldTrack]:
+    """Return per-shot SmplWorldTracks consumed by the export builder.
+
+    Prefers ``output/refined_poses/*_refined.npz`` (one fused track per
+    player on the reference timeline). For each refined track we slice
+    the frames inside the shot's local window after applying the
+    reverse sync offset (``f_local = f_ref + offset``) and emit a
+    SmplWorldTrack-shaped view that the existing builder already knows
+    how to consume.
+
+    Falls back to ``output/hmr_world/*_smpl_world.npz`` when the
+    refined directory is empty (e.g. user re-runs ``--stages export``
+    without first running refined_poses).
+    """
+    refined_dir = output_dir / "refined_poses"
+    refined_files = (
+        sorted(refined_dir.glob("*_refined.npz")) if refined_dir.exists() else []
+    )
+    if refined_files:
+        sync_path = output_dir / "shots" / "sync_map.json"
+        sync_map = (
+            SyncMap.load(sync_path)
+            if sync_path.exists()
+            else SyncMap(reference_shot="", alignments=[])
+        )
+        offset = sync_map.offset_for(shot_id) if shot_id else 0
+        out: list[SmplWorldTrack] = []
+        for p in refined_files:
+            r = RefinedPose.load(p)
+            ref_frames = np.asarray(r.frames, dtype=np.int64)
+            local = ref_frames + offset
+            out.append(
+                SmplWorldTrack(
+                    player_id=r.player_id,
+                    frames=local,
+                    betas=np.asarray(r.betas),
+                    thetas=np.asarray(r.thetas),
+                    root_R=np.asarray(r.root_R),
+                    root_t=np.asarray(r.root_t),
+                    confidence=np.asarray(r.confidence),
+                    shot_id=shot_id or "",
+                )
+            )
+        return out
+
+    # Legacy fallback: per-shot SmplWorldTracks from hmr_world/.
+    hmr_dir = output_dir / "hmr_world"
+    if not hmr_dir.exists():
+        return []
+    tracks = [SmplWorldTrack.load(p) for p in sorted(hmr_dir.glob("*_smpl_world.npz"))]
+    if shot_id is None:
+        return tracks
+    return [t for t in tracks if getattr(t, "shot_id", "") == shot_id]
 
 
 class ExportStage(BaseStage):
@@ -182,22 +243,10 @@ class ExportStage(BaseStage):
     ) -> None:
         camera_track = CameraTrack.load(camera_path)
 
-        # Filter players to those detected in this shot. SmplWorldTrack
-        # carries a shot_id attribute; legacy NPZ files (pre-multi-shot)
-        # have it set to "" and are included in the legacy single-shot
-        # path (shot_id=None on the caller side).
-        hmr_dir = self.output_dir / "hmr_world"
-        npz_files = (
-            sorted(hmr_dir.glob("*_smpl_world.npz"))
-            if hmr_dir.exists() else []
-        )
-        all_players = [SmplWorldTrack.load(p) for p in npz_files]
-        if shot_id is None:
-            players: list[SmplWorldTrack] = all_players
-        else:
-            players = [
-                p for p in all_players if getattr(p, "shot_id", "") == shot_id
-            ]
+        # Per-player SMPL tracks for this shot. Pulls from the fused
+        # refined_poses output when present (default), with a fallback to
+        # raw hmr_world tracks when refined_poses hasn't run.
+        players = _per_shot_smpl_tracks(self.output_dir, shot_id=shot_id)
 
         ball_track = BallTrack.load(ball_path) if ball_path.exists() else None
 
@@ -294,13 +343,11 @@ class ExportStage(BaseStage):
             logger.info("[export] no fbx dir, skipping manifest")
             return
 
-        hmr_dir = self.output_dir / "hmr_world"
-        npz_files = sorted(hmr_dir.glob("*_smpl_world.npz")) if hmr_dir.exists() else []
+        all_tracks = _per_shot_smpl_tracks(self.output_dir, shot_id=None)
 
         name_mapping = load_player_names(self.output_dir)
         players: list[PlayerEntry] = []
-        for npz in npz_files:
-            track = SmplWorldTrack.load(npz)
+        for track in all_tracks:
             display_name = display_name_for(track.player_id, name_mapping)
             shot_id = getattr(track, "shot_id", "") or ""
             keyed = f"{shot_id}__{display_name}" if shot_id else display_name

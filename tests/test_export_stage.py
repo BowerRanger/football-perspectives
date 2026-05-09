@@ -69,3 +69,79 @@ def test_export_emits_one_glb_per_shot(tmp_path: Path) -> None:
     assert (tmp_path / "export" / "gltf" / "beta_scene.glb").exists()
     # Legacy unprefixed file should NOT exist when manifest is present.
     assert not (tmp_path / "export" / "gltf" / "scene.glb").exists()
+
+
+@pytest.mark.integration
+def test_export_consumes_refined_poses_when_present(tmp_path: Path) -> None:
+    """Export's per-shot player loader pulls from refined_poses/*.npz when that
+    directory is non-empty, projecting frames back to the shot's local timeline.
+    """
+    from src.schemas.refined_pose import RefinedPose
+    from src.schemas.sync_map import Alignment, SyncMap
+    from src.stages.export import _per_shot_smpl_tracks
+
+    output_dir = tmp_path
+    (output_dir / "shots").mkdir()
+    SyncMap(
+        reference_shot="A",
+        alignments=[
+            Alignment(shot_id="A", frame_offset=0),
+            Alignment(shot_id="B", frame_offset=5),
+        ],
+    ).save(output_dir / "shots" / "sync_map.json")
+
+    refined = RefinedPose(
+        player_id="P001",
+        frames=np.arange(10, dtype=np.int64),
+        betas=np.zeros(10),
+        thetas=np.zeros((10, 24, 3)),
+        root_R=np.tile(np.eye(3), (10, 1, 1)),
+        root_t=np.column_stack(
+            [np.arange(10, dtype=np.float64), np.zeros(10), np.zeros(10)]
+        ),
+        confidence=np.ones(10),
+        view_count=np.full(10, 2, dtype=np.int32),
+        contributing_shots=("A", "B"),
+    )
+    (output_dir / "refined_poses").mkdir()
+    refined.save(output_dir / "refined_poses" / "P001_refined.npz")
+
+    a_tracks = _per_shot_smpl_tracks(output_dir, shot_id="A")
+    assert len(a_tracks) == 1
+    assert a_tracks[0].player_id == "P001"
+    assert a_tracks[0].shot_id == "A"
+    np.testing.assert_array_equal(a_tracks[0].frames, np.arange(10))
+
+    b_tracks = _per_shot_smpl_tracks(output_dir, shot_id="B")
+    assert len(b_tracks) == 1
+    # Reference frames 0..9 → B-local frames 5..14 via f_local = f_ref + offset.
+    np.testing.assert_array_equal(b_tracks[0].frames, np.arange(5, 15))
+    np.testing.assert_allclose(
+        b_tracks[0].root_t[:, 0], np.arange(10, dtype=np.float64)
+    )
+
+
+@pytest.mark.integration
+def test_export_falls_back_to_smpl_world_when_refined_dir_empty(tmp_path: Path) -> None:
+    """When output/refined_poses/ is empty, export reads SmplWorldTracks
+    from output/hmr_world/ as before.
+    """
+    from src.stages.export import _per_shot_smpl_tracks
+
+    output_dir = tmp_path
+    (output_dir / "hmr_world").mkdir()
+    SmplWorldTrack(
+        player_id="P001",
+        frames=np.arange(5, dtype=np.int64),
+        betas=np.zeros(10),
+        thetas=np.zeros((5, 24, 3)),
+        root_R=np.tile(np.eye(3), (5, 1, 1)),
+        root_t=np.zeros((5, 3)),
+        confidence=np.ones(5),
+        shot_id="A",
+    ).save(output_dir / "hmr_world" / "A__P001_smpl_world.npz")
+
+    tracks = _per_shot_smpl_tracks(output_dir, shot_id="A")
+    assert len(tracks) == 1
+    assert tracks[0].player_id == "P001"
+    assert tracks[0].shot_id == "A"

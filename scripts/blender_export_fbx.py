@@ -155,11 +155,47 @@ def main(argv: list[str]) -> int:
         mesh.update()
         obj = bpy.data.objects.new(f"{name}_placeholder", mesh)
         bpy.context.collection.objects.link(obj)
-        # Parent to the armature with an Armature modifier; bind 100% to
-        # pelvis via a vertex group.
         obj.parent = arm
         vg = obj.vertex_groups.new(name="pelvis")
         vg.add([0, 1, 2], 1.0, "REPLACE")
+        mod = obj.modifiers.new(name="Armature", type="ARMATURE")
+        mod.object = arm
+        mod.use_vertex_groups = True
+        return obj
+
+    def _add_smpl_skinned_mesh(arm: object, name: str, smpl_data) -> object:
+        """Attach the full SMPL body mesh (mean shape) skinned to all 24
+        joints. Used for previewing animations on ``SK_SMPL`` in UE
+        before retargeting to a mannequin.
+
+        ``smpl_data`` is a numpy NpzFile with keys:
+            v_template (6890, 3) — y-up canonical rest vertices
+            faces      (13776, 3) int32
+            weights    (6890, 24) — per-vertex skinning weights
+        """
+        v_template = smpl_data["v_template"]
+        faces = smpl_data["faces"]
+        weights = smpl_data["weights"]
+
+        mesh = bpy.data.meshes.new(f"{name}_smpl_mesh")
+        verts = [(float(v[0]), float(v[1]), float(v[2])) for v in v_template]
+        face_list = [(int(t[0]), int(t[1]), int(t[2])) for t in faces]
+        mesh.from_pydata(verts, [], face_list)
+        mesh.update()
+        obj = bpy.data.objects.new(f"{name}_body", mesh)
+        bpy.context.collection.objects.link(obj)
+        obj.parent = arm
+
+        # One vertex group per SMPL joint; populate from the per-vertex
+        # weight matrix. Skip near-zero weights to keep the FBX small.
+        weight_threshold = 1e-5
+        for j, jname in enumerate(SMPL_JOINT_NAMES):
+            vg = obj.vertex_groups.new(name=jname)
+            col = weights[:, j]
+            nonzero = np.where(col > weight_threshold)[0]
+            for vi in nonzero:
+                vg.add([int(vi)], float(col[vi]), "REPLACE")
+
         mod = obj.modifiers.new(name="Armature", type="ARMATURE")
         mod.object = arm
         mod.use_vertex_groups = True
@@ -174,6 +210,20 @@ def main(argv: list[str]) -> int:
         fps = float(cam_meta.get("fps", 30.0)) or 30.0
 
     name_mapping = load_player_names(output_dir)
+
+    # Optional: real SMPL body mesh for preview before retargeting.
+    smpl_npz_path = repo_root / "data" / "models" / "smpl_neutral.npz"
+    smpl_data = None
+    if smpl_npz_path.exists():
+        smpl_data = dict(np.load(smpl_npz_path))
+        sys.stdout.write(
+            f"[player-fbx] using real SMPL body mesh from {smpl_npz_path}\n"
+        )
+    else:
+        sys.stdout.write(
+            "[player-fbx] no SMPL body npz found; falling back to placeholder triangle. "
+            f"Run scripts/extract_smpl_neutral.py to enable.\n"
+        )
 
     if hmr_dir.exists():
         for npz_path in sorted(hmr_dir.glob("*_smpl_world.npz")):
@@ -195,7 +245,10 @@ def main(argv: list[str]) -> int:
             scene.render.fps = int(round(fps))
             arm = _build_smpl_armature(display_name)
             arm.rotation_mode = "QUATERNION"
-            placeholder = _add_placeholder_skinned_mesh(arm, display_name)
+            if smpl_data is not None:
+                placeholder = _add_smpl_skinned_mesh(arm, display_name, smpl_data)
+            else:
+                placeholder = _add_placeholder_skinned_mesh(arm, display_name)
 
             for i, fi in enumerate(frames.tolist()):
                 # Armature object: root translation in pitch z-up + root_R

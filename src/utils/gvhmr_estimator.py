@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,19 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _GVHMR_ROOT = _REPO_ROOT / "third_party" / "gvhmr"
 _GVHMR_SHIMS = _REPO_ROOT / "third_party" / "gvhmr_shims"
+
+# Module-level lock guarding every GVHMR inference call. The shim that
+# redirects ``.cuda()`` to ``.to(device)`` mutates process-global state
+# (``torch.Tensor.cuda``) and is *not* thread-safe — two concurrent
+# ``estimate_sequence`` calls race each other's monkey-patch save/
+# restore and one of them ends up calling the original C-level
+# ``.cuda()``, which on a non-CUDA build raises
+# ``AssertionError: Torch not compiled with CUDA enabled``.
+#
+# Serialising at the call site is the cheapest robust fix: GVHMR is
+# CPU/GPU bound and saturates one device anyway, so concurrent calls
+# weren't speeding anything up — they were just corrupting state.
+_GVHMR_INFERENCE_LOCK = threading.Lock()
 
 
 @contextlib.contextmanager
@@ -371,6 +385,19 @@ class GVHMREstimator:
         logger.info("GVHMR loaded successfully on %s", self._device)
 
     def estimate_sequence(
+        self,
+        frames_bgr: list[np.ndarray],
+        bboxes: list[list[float]],
+        fps: float = 30.0,
+    ) -> dict[str, np.ndarray]:
+        # Serialise across the whole process — see the lock's docstring
+        # for the rationale. This blocks rather than failing because the
+        # caller is a stage worker that has nothing useful to do until
+        # the prior estimate finishes.
+        with _GVHMR_INFERENCE_LOCK:
+            return self._estimate_sequence_locked(frames_bgr, bboxes, fps)
+
+    def _estimate_sequence_locked(
         self,
         frames_bgr: list[np.ndarray],
         bboxes: list[list[float]],

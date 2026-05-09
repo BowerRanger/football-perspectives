@@ -498,7 +498,12 @@ async function loadAnchors() {
 
 async function loadCameraTrack() {
   try {
-    const data = await fetchJson("/camera/track");
+    // Per-shot fetch — without ``?shot=`` the server falls back to the
+    // first shot's track, which makes the projected-pitch overlay
+    // silently disappear whenever the operator works on any other shot.
+    const data = await fetchJson(
+      `/camera/track?shot=${encodeURIComponent(state.clipId)}`,
+    );
     if (data && data.clip_id === state.clipId && (data.frames || []).length > 0) {
       state.cameraTrack = data;
       if (data.fps && data.fps > 0) {

@@ -10,6 +10,11 @@ class BaseStage(ABC):
     # check this and skip non-matching shots; stages that don't use the
     # manifest ignore it.
     shot_filter: str | None = None
+    # Optional per-player filter — used by hmr_world to limit fitting
+    # to a single player_id (paired with ``shot_filter``) so the
+    # operator can iterate on one player without re-running the whole
+    # roster. Stages that don't iterate per-player ignore it.
+    player_filter: str | None = None
 
     def __init__(self, config: dict, output_dir: Path, **kwargs) -> None:
         self.config = config

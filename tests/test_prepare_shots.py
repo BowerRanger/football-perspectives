@@ -100,3 +100,58 @@ def test_legacy_single_shot_migration(tmp_path: Path) -> None:
     # Idempotent: a second run is a no-op (no legacy files left to migrate).
     stage.run()
     assert (output_dir / "camera" / "play_anchors.json").exists()
+
+
+@pytest.mark.unit
+def test_rerun_merges_new_clips_without_overwriting(tmp_path: Path) -> None:
+    """Re-running prepare_shots with a new clip directory adds the new
+    shot to the manifest while leaving the existing shot untouched.
+    """
+    output_dir = tmp_path / "out"
+
+    first_dir = tmp_path / "clips_a"
+    first_dir.mkdir()
+    _write_dummy_mp4(first_dir / "alpha.mp4")
+    PrepareShotsStage(config={}, output_dir=output_dir, video_path=first_dir).run()
+
+    second_dir = tmp_path / "clips_b"
+    second_dir.mkdir()
+    _write_dummy_mp4(second_dir / "beta.mp4")
+    PrepareShotsStage(config={}, output_dir=output_dir, video_path=second_dir).run()
+
+    manifest = ShotsManifest.load(output_dir / "shots" / "shots_manifest.json")
+    assert [s.id for s in manifest.shots] == ["alpha", "beta"]
+    assert (output_dir / "shots" / "alpha.mp4").exists()
+    assert (output_dir / "shots" / "beta.mp4").exists()
+
+
+@pytest.mark.unit
+def test_run_without_video_path_picks_up_orphan_clips(tmp_path: Path) -> None:
+    """When video_path is omitted, the stage scans shots/ for clips not
+    yet recorded in the manifest and registers them. This is the path
+    used by the dashboard's Add Shots upload + Continue button.
+    """
+    output_dir = tmp_path / "out"
+    shots_dir = output_dir / "shots"
+    shots_dir.mkdir(parents=True)
+    # Bootstrap with one registered clip.
+    _write_dummy_mp4(shots_dir / "alpha.mp4")
+    PrepareShotsStage(
+        config={}, output_dir=output_dir, video_path=shots_dir / "alpha.mp4",
+    ).run()
+
+    # Drop a second clip directly into shots/ without going through the stage.
+    _write_dummy_mp4(shots_dir / "gamma.mp4")
+
+    PrepareShotsStage(config={}, output_dir=output_dir, video_path=None).run()
+
+    manifest = ShotsManifest.load(shots_dir / "shots_manifest.json")
+    assert sorted(s.id for s in manifest.shots) == ["alpha", "gamma"]
+
+
+@pytest.mark.unit
+def test_run_without_video_path_and_no_clips_raises(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    stage = PrepareShotsStage(config={}, output_dir=output_dir, video_path=None)
+    with pytest.raises(ValueError, match="no clips to register"):
+        stage.run()

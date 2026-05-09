@@ -63,6 +63,7 @@ def run_pipeline(
     from_stage: str | None,
     config: dict,
     shot_filter: str | None = None,
+    player_filter: str | None = None,
     **stage_kwargs,
 ) -> None:
     """Run pipeline stages.
@@ -72,6 +73,12 @@ def run_pipeline(
     use the manifest ignore it. Used by the dashboard's
     /api/run-shot endpoint to re-run a single stage for a single shot
     without re-running everything.
+
+    ``player_filter`` (optional): when set, hmr_world will only fit the
+    named ``player_id`` (paired with ``shot_filter`` to disambiguate
+    when the same player_id appears in multiple shots). Stages that
+    don't iterate per-player ignore it. Used by the dashboard's
+    /api/run-shot-player endpoint to iterate quickly on one player.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     active = resolve_stages(stages, from_stage)
@@ -85,7 +92,13 @@ def run_pipeline(
         stage = StageClass(config=config, output_dir=output_dir, **stage_kwargs)
         if shot_filter is not None:
             stage.shot_filter = shot_filter
-        if stage.is_complete() and from_stage != name and shot_filter is None:
+        if player_filter is not None:
+            stage.player_filter = player_filter
+        # Filtered runs (shot or player) always re-enter the stage —
+        # is_complete() reflects the unfiltered state and would short-
+        # circuit a per-shot or per-player retry otherwise.
+        filtered = shot_filter is not None or player_filter is not None
+        if stage.is_complete() and from_stage != name and not filtered:
             print(f"  [SKIP] {name} (cached)")
             continue
         print(f"  [RUN]  {name}")

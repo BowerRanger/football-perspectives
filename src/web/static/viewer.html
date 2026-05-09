@@ -432,20 +432,30 @@ async function loadScene() {
   // [{player_id, player_name}] (since the dashboard rebuild); we also
   // tolerate the old bare-string shape so this viewer keeps working
   // against legacy outputs.
-  let playerIds = [];
+  // playerRefs holds {player_id, shot_id} per row so we can pass both
+  // to /hmr_world/preview. With multi-shot, files on disk are keyed
+  // ``{shot_id}__{player_id}_smpl_world.npz`` — fetching by player_id
+  // alone falls back to a legacy filename that no longer exists, so
+  // every preview 404s and the viewer renders an empty pitch.
+  const playerRefs = [];
   const playerNames = new Map();   // player_id -> player_name (when known)
   try {
     const list = await fetchJson(`/hmr_world/players${_shotQuery('?')}`);
     const rows = list.players || [];
     for (const r of rows) {
       if (typeof r === 'string') {
-        playerIds.push(r);
+        playerRefs.push({ player_id: r, shot_id: SHOT_FILTER || '' });
       } else if (r && r.player_id) {
-        playerIds.push(r.player_id);
+        playerRefs.push({
+          player_id: r.player_id,
+          shot_id: r.shot_id || SHOT_FILTER || '',
+        });
         if (r.player_name) playerNames.set(r.player_id, r.player_name);
       }
     }
-  } catch (_) {}
+  } catch (err) {
+    console.warn('hmr_world/players fetch failed:', err);
+  }
 
   // 3. Fetch each player's preview WITH pose data (frames + root_t +
   // root_R + thetas + confidence). include_pose=1 inflates payload by
@@ -453,17 +463,23 @@ async function loadScene() {
   // trajectory panel calls without that flag and gets the lighter
   // response.
   const playerEntries = [];
-  for (const pid of playerIds) {
+  for (const ref of playerRefs) {
     try {
-      const preview = await fetchJson(
-        `/hmr_world/preview?player_id=${encodeURIComponent(pid)}&include_pose=1`
-      );
+      const params = new URLSearchParams();
+      params.set('player_id', ref.player_id);
+      params.set('include_pose', '1');
+      if (ref.shot_id) params.set('shot', ref.shot_id);
+      const preview = await fetchJson(`/hmr_world/preview?${params.toString()}`);
       playerEntries.push(preview);
       if (preview.frames && preview.frames.length > 0) {
         const last = preview.frames[preview.frames.length - 1];
         totalFrames = Math.max(totalFrames, last + 1);
       }
-    } catch (_) {}
+    } catch (err) {
+      console.warn(
+        `hmr_world/preview failed for ${ref.shot_id}__${ref.player_id}:`, err,
+      );
+    }
   }
 
   for (const p of playerEntries) addPlayerMarker(p, sidebar, playerNames);

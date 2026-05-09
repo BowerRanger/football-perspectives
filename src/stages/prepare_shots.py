@@ -2,9 +2,20 @@
 
 The user manually trims clips in CapCut (or similar) and provides them
 either as a single ``--input clip.mp4`` (single-shot) or as a directory
-``--input clips/`` (multi-shot). This stage simply copies the clip(s)
-into ``output/shots/`` and writes a flat manifest. No automatic scene
+``--input clips/`` (multi-shot). This stage copies the clip(s) into
+``output/shots/`` and writes a flat manifest. No automatic scene
 segmentation is performed.
+
+Re-running the stage merges new clips into the existing manifest rather
+than overwriting it. Clips already present (matching ``shot_id`` and
+destination filename) are left alone, so the dashboard's "Add Shots"
+upload + "Continue" buttons can incrementally grow the shot list
+without wiping per-shot artefacts produced by later stages.
+
+When ``video_path`` is omitted the stage scans ``output/shots/`` for any
+``.mp4`` files not yet recorded in the manifest and registers them — this
+is the path the dashboard uses after writing uploaded clips directly
+into ``shots/``.
 
 When called against an existing single-shot output dir (legacy artefacts
 at ``output/camera/anchors.json`` etc., no shot prefix), it migrates
@@ -76,6 +87,28 @@ def _migrate_legacy_artefacts(output_dir: Path, shot_id: str) -> None:
         )
 
 
+def _build_shot(shot_id: str, clip_dest: Path, output_dir: Path) -> tuple[Shot, float, int]:
+    """Probe ``clip_dest`` and return ``(shot, fps, frame_count)``."""
+    fps, frame_count = _video_metadata(clip_dest)
+    if frame_count <= 0:
+        logger.warning(
+            "prepare_shots: cv2 reported 0 frames for %s — manifest "
+            "entry written but downstream stages may fail.",
+            clip_dest,
+        )
+    effective_fps = fps if fps > 0 else 25.0
+    end_frame = max(0, frame_count - 1)
+    shot = Shot(
+        id=shot_id,
+        start_frame=0,
+        end_frame=end_frame,
+        start_time=0.0,
+        end_time=(end_frame + 1) / effective_fps if frame_count > 0 else 0.0,
+        clip_file=str(clip_dest.relative_to(output_dir)),
+    )
+    return shot, effective_fps, frame_count
+
+
 class PrepareShotsStage(BaseStage):
     name = "prepare_shots"
 
@@ -93,23 +126,31 @@ class PrepareShotsStage(BaseStage):
         return (self.output_dir / "shots" / "shots_manifest.json").exists()
 
     def run(self) -> None:
-        if self.video_path is None:
-            raise ValueError(
-                "PrepareShotsStage requires video_path; pass --input <clip.mp4 or dir>"
-            )
-        clip_src = Path(self.video_path).resolve()
-        if not clip_src.exists():
-            raise FileNotFoundError(f"Input not found: {clip_src}")
-
-        if clip_src.is_dir():
-            clip_files = sorted(clip_src.glob("*.mp4"))
-            if not clip_files:
-                raise FileNotFoundError(f"no .mp4 files in {clip_src}")
-        else:
-            clip_files = [clip_src]
-
         shots_dir = self.output_dir / "shots"
         shots_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = shots_dir / "shots_manifest.json"
+
+        existing = (
+            ShotsManifest.load(manifest_path)
+            if manifest_path.exists()
+            else ShotsManifest(source_file="", fps=25.0, total_frames=0, shots=[])
+        )
+        known_ids = {s.id for s in existing.shots}
+
+        # Resolve the input. ``video_path`` is optional so the dashboard's
+        # "Continue" button can rescan ``shots/`` for clips uploaded out-
+        # of-band without forcing the operator to re-pick them.
+        clip_files: list[Path] = []
+        if self.video_path is not None:
+            clip_src = Path(self.video_path).resolve()
+            if not clip_src.exists():
+                raise FileNotFoundError(f"Input not found: {clip_src}")
+            if clip_src.is_dir():
+                clip_files = sorted(clip_src.glob("*.mp4"))
+                if not clip_files and not existing.shots:
+                    raise FileNotFoundError(f"no .mp4 files in {clip_src}")
+            else:
+                clip_files = [clip_src]
 
         # Single-input → also migrate any legacy single-shot artefacts to
         # per-shot naming under the resulting shot_id.
@@ -117,21 +158,20 @@ class PrepareShotsStage(BaseStage):
             legacy_shot_id = _sanitise_shot_id(clip_files[0].stem)
             _migrate_legacy_artefacts(self.output_dir, legacy_shot_id)
 
-        seen_ids: set[str] = set()
-        shots: list[Shot] = []
-        fps_observed = 25.0
-        total_frames = 0
-        source_label = str(clip_src)
+        new_shots: list[Shot] = []
+        seen_new: set[str] = set()
+        fps_observed = existing.fps if existing.shots else 25.0
+        added_frames = 0
 
         for clip_path in clip_files:
             shot_id = _sanitise_shot_id(clip_path.stem)
-            if shot_id in seen_ids:
+            if shot_id in seen_new:
                 raise ValueError(
                     f"duplicate shot_id {shot_id!r} from {clip_path}; "
                     "rename one of the input clips so their stems differ "
                     "after sanitisation"
                 )
-            seen_ids.add(shot_id)
+            seen_new.add(shot_id)
 
             clip_dest = shots_dir / f"{shot_id}.mp4"
             try:
@@ -141,34 +181,61 @@ class PrepareShotsStage(BaseStage):
             if not same_file:
                 shutil.copy2(clip_path, clip_dest)
 
-            fps, frame_count = _video_metadata(clip_dest)
-            if frame_count <= 0:
-                logger.warning(
-                    "prepare_shots: cv2 reported 0 frames for %s — manifest "
-                    "entry written but downstream stages may fail.",
-                    clip_dest,
+            if shot_id in known_ids:
+                logger.info(
+                    "prepare_shots: skipping already-registered shot %s",
+                    shot_id,
                 )
-            effective_fps = fps if fps > 0 else 25.0
-            end_frame = max(0, frame_count - 1)
-            shots.append(Shot(
-                id=shot_id,
-                start_frame=0,
-                end_frame=end_frame,
-                start_time=0.0,
-                end_time=(end_frame + 1) / effective_fps if frame_count > 0 else 0.0,
-                clip_file=str(clip_dest.relative_to(self.output_dir)),
-            ))
+                continue
+
+            shot, effective_fps, frame_count = _build_shot(
+                shot_id, clip_dest, self.output_dir,
+            )
+            new_shots.append(shot)
             fps_observed = effective_fps
-            total_frames += frame_count
+            added_frames += frame_count
+
+        # Pick up any clips already in shots/ that aren't in the manifest
+        # — covers the "files uploaded directly into shots/ via the
+        # dashboard's Add Shots button" flow as well as manual drops.
+        for clip_path in sorted(shots_dir.glob("*.mp4")):
+            shot_id = _sanitise_shot_id(clip_path.stem)
+            if shot_id in known_ids or shot_id in seen_new:
+                continue
+            shot, effective_fps, frame_count = _build_shot(
+                shot_id, clip_path, self.output_dir,
+            )
+            new_shots.append(shot)
+            seen_new.add(shot_id)
+            fps_observed = effective_fps
+            added_frames += frame_count
+
+        if not new_shots and not existing.shots:
+            raise ValueError(
+                "prepare_shots: no clips to register — pass --input "
+                "<clip.mp4 or dir> or upload clips via the dashboard."
+            )
 
         manifest = ShotsManifest(
-            source_file=source_label,
+            source_file=(
+                str(self.video_path.resolve())
+                if self.video_path is not None
+                else existing.source_file
+            ),
             fps=fps_observed,
-            total_frames=total_frames,
-            shots=shots,
+            total_frames=existing.total_frames + added_frames,
+            shots=existing.shots + new_shots,
         )
-        manifest.save(shots_dir / "shots_manifest.json")
-        logger.info(
-            "prepare_shots: wrote %d shot(s) (%s)",
-            len(shots), ", ".join(s.id for s in shots),
-        )
+        manifest.save(manifest_path)
+        if new_shots:
+            logger.info(
+                "prepare_shots: added %d shot(s) (%s); total now %d",
+                len(new_shots),
+                ", ".join(s.id for s in new_shots),
+                len(manifest.shots),
+            )
+        else:
+            logger.info(
+                "prepare_shots: manifest unchanged (%d shot(s) already registered)",
+                len(manifest.shots),
+            )

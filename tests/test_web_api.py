@@ -404,6 +404,356 @@ def test_post_anchors_per_shot(client):
 
 
 @pytest.mark.unit
+def test_run_shot_player_dispatches_filtered_hmr_job(client, monkeypatch):
+    """POST /api/run-shot-player wipes the per-(shot, player) hmr_world
+    artefacts and dispatches a background hmr_world job filtered to
+    just that pair."""
+    c, tmp_path = client
+    captured: dict = {}
+
+    def fake_run_pipeline(*args, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("src.web.server.run_pipeline", fake_run_pipeline)
+
+    hmr_dir = tmp_path / "hmr_world"
+    hmr_dir.mkdir()
+    # The endpoint should remove the targeted pair's artefacts...
+    target_npz = hmr_dir / "alpha__P001_smpl_world.npz"
+    target_npz.write_bytes(b"to-be-wiped")
+    target_kp = hmr_dir / "alpha__P001_kp2d.json"
+    target_kp.write_text("{}")
+    # ...but leave other shots/players alone.
+    keep_npz = hmr_dir / "alpha__P002_smpl_world.npz"
+    keep_npz.write_bytes(b"untouched")
+    other_shot = hmr_dir / "beta__P001_smpl_world.npz"
+    other_shot.write_bytes(b"untouched")
+
+    r = c.post(
+        "/api/run-shot-player",
+        json={"shot_id": "alpha", "player_id": "P001"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["stage"] == "hmr_world"
+    assert body["shot_id"] == "alpha"
+    assert body["player_id"] == "P001"
+
+    # Wipe scoping
+    assert not target_npz.exists()
+    assert not target_kp.exists()
+    assert keep_npz.exists()
+    assert other_shot.exists()
+
+    # The dispatched job carries both filters.
+    import time
+    for _ in range(20):
+        if "stages" in captured:
+            break
+        time.sleep(0.05)
+    assert captured.get("stages") == "hmr_world"
+    assert captured.get("from_stage") == "hmr_world"
+    assert captured.get("shot_filter") == "alpha"
+    assert captured.get("player_filter") == "P001"
+
+
+@pytest.mark.unit
+def test_run_shot_player_rejects_when_hmr_already_running(client, monkeypatch):
+    """Concurrent hmr_world dispatches corrupt GVHMR's process-global
+    Tensor.cuda monkey-patch (one job restores it mid-extract for the
+    other and the original C-level .cuda() raises). The endpoint must
+    block the second dispatch with 409 instead of letting both proceed."""
+    c, _ = client
+    monkeypatch.setattr("src.web.server.run_pipeline", lambda *a, **k: None)
+
+    # Inject a fake "running" hmr_world job into the registry. The
+    # endpoint reads from the same module-level dict, so we don't need
+    # the dispatched thread to actually run.
+    from src.web.server import Job, _jobs, _jobs_lock
+    fake = Job(job_id="abc12345", stages="hmr_world")
+    fake.status = "running"
+    with _jobs_lock:
+        _jobs["abc12345"] = fake
+
+    try:
+        r = c.post(
+            "/api/run-shot-player",
+            json={"shot_id": "alpha", "player_id": "P001"},
+        )
+        assert r.status_code == 409
+        assert "already running" in r.json()["detail"]
+
+        r2 = c.post(
+            "/api/run-shot",
+            json={"stage": "hmr_world", "shot_id": "alpha"},
+        )
+        assert r2.status_code == 409
+
+        # Other stages aren't gated by hmr_world.
+        r3 = c.post(
+            "/api/run-shot",
+            json={"stage": "camera", "shot_id": "alpha"},
+        )
+        assert r3.status_code == 200
+    finally:
+        with _jobs_lock:
+            _jobs.pop("abc12345", None)
+
+
+@pytest.mark.unit
+def test_run_shot_player_rejects_invalid_ids(client, monkeypatch):
+    c, _ = client
+    monkeypatch.setattr("src.web.server.run_pipeline", lambda *a, **k: None)
+    r = c.post(
+        "/api/run-shot-player",
+        json={"shot_id": "../etc", "player_id": "P001"},
+    )
+    assert r.status_code == 400
+    r = c.post(
+        "/api/run-shot-player",
+        json={"shot_id": "alpha", "player_id": "../etc"},
+    )
+    assert r.status_code == 400
+
+
+@pytest.mark.unit
+def test_export_endpoints_are_shot_aware_and_fall_back(client):
+    """``/api/export/{scene.glb,metadata}`` should resolve per-shot
+    files when ``?shot=`` is supplied, and fall back to the first
+    available per-shot file when the legacy singular file is absent
+    (covers the multi-shot-only output of the modern export stage).
+    ``/api/export/shots`` lists every shot with a baked scene."""
+    c, tmp_path = client
+    gltf_dir = tmp_path / "export" / "gltf"
+    gltf_dir.mkdir(parents=True)
+    (gltf_dir / "alpha_scene.glb").write_bytes(b"alpha-glb")
+    (gltf_dir / "alpha_scene_metadata.json").write_text('{"shot":"alpha"}')
+    (gltf_dir / "beta_scene.glb").write_bytes(b"beta-glb")
+    (gltf_dir / "beta_scene_metadata.json").write_text('{"shot":"beta"}')
+
+    # Per-shot resolution
+    r = c.get("/api/export/scene.glb?shot=beta")
+    assert r.status_code == 200
+    assert r.content == b"beta-glb"
+    r = c.get("/api/export/metadata?shot=alpha")
+    assert r.json() == {"shot": "alpha"}
+
+    # Legacy fallback — no singular files, but per-shot exist
+    r = c.get("/api/export/metadata")
+    assert r.status_code == 200
+    assert r.json()["shot"] in {"alpha", "beta"}
+
+    # Listing
+    r = c.get("/api/export/shots")
+    assert r.json() == {"shots": ["alpha", "beta"]}
+
+    # Bad shot id rejected
+    assert c.get("/api/export/scene.glb?shot=../etc").status_code == 400
+    assert c.get("/api/export/metadata?shot=../etc").status_code == 400
+
+
+@pytest.mark.unit
+def test_hmr_players_resolves_name_for_unannotated_track_with_player_name(client):
+    """A track whose ``player_name`` was set but whose ``player_id`` is
+    blank lands on disk as ``{shot_id}__{shot_id}_T{track_id}_smpl_world.npz``
+    (per ``HmrWorldStage._build_player_groups``). The dashboard must
+    resolve the name from the operator-set ``player_name`` even though
+    the filename's pid doesn't match the bare ``track_id``."""
+    c, tmp_path = client
+
+    # Tracks: alpha shot has Matip with player_id="" (named only),
+    # beta shot has Matip with player_id="P005" (named + merged).
+    tracks_dir = tmp_path / "tracks"
+    tracks_dir.mkdir()
+    tracks_dir.joinpath("alpha_tracks.json").write_text(
+        '{"shot_id":"alpha","tracks":[{"track_id":"T004","player_id":"",'
+        '"player_name":"Matip","team":"unknown","class_name":"player",'
+        '"frames":[]}]}'
+    )
+    tracks_dir.joinpath("beta_tracks.json").write_text(
+        '{"shot_id":"beta","tracks":[{"track_id":"T004","player_id":"P005",'
+        '"player_name":"Matip","team":"unknown","class_name":"player",'
+        '"frames":[]}]}'
+    )
+
+    # HMR outputs for both shots, named the same way the stage would.
+    hmr_dir = tmp_path / "hmr_world"
+    hmr_dir.mkdir()
+    (hmr_dir / "alpha__alpha_TT004_smpl_world.npz").write_bytes(b"x")
+    (hmr_dir / "beta__P005_smpl_world.npz").write_bytes(b"x")
+
+    body_alpha = c.get("/hmr_world/players?shot=alpha").json()
+    by_pid = {p["player_id"]: p for p in body_alpha["players"]}
+    assert "alpha_TT004" in by_pid
+    assert by_pid["alpha_TT004"]["player_name"] == "Matip"
+
+    body_beta = c.get("/hmr_world/players?shot=beta").json()
+    by_pid = {p["player_id"]: p for p in body_beta["players"]}
+    assert "P005" in by_pid
+    assert by_pid["P005"]["player_name"] == "Matip"
+
+
+@pytest.mark.unit
+def test_hmr_players_cross_shot_player_id_fallback(client):
+    """If shot A merged Matip to player_id=P005 (filename uses P005)
+    but shot B was not merged, B's filename pid would still be P005 if
+    the operator manually merged in B. But if B's hmr filename uses
+    P005 even though B's tracks file has no player_id=P005 entry, the
+    name should still resolve via the cross-shot ("", "P005") fallback."""
+    c, tmp_path = client
+
+    tracks_dir = tmp_path / "tracks"
+    tracks_dir.mkdir()
+    # Only alpha names P005; beta has nothing about P005.
+    tracks_dir.joinpath("alpha_tracks.json").write_text(
+        '{"shot_id":"alpha","tracks":[{"track_id":"T01","player_id":"P005",'
+        '"player_name":"Matip","team":"unknown","class_name":"player",'
+        '"frames":[]}]}'
+    )
+
+    hmr_dir = tmp_path / "hmr_world"
+    hmr_dir.mkdir()
+    # Beta's HMR file uses P005 even though beta's tracks don't name it.
+    (hmr_dir / "beta__P005_smpl_world.npz").write_bytes(b"x")
+
+    body = c.get("/hmr_world/players?shot=beta").json()
+    assert body["players"][0]["player_name"] == "Matip"
+
+
+@pytest.mark.unit
+def test_hmr_players_endpoint_filters_by_shot(client):
+    """``/hmr_world/players?shot=xxx`` returns only the rows whose
+    filename key starts with ``xxx__``."""
+    c, tmp_path = client
+    hmr_dir = tmp_path / "hmr_world"
+    hmr_dir.mkdir()
+    for stem in ("alpha__P001", "alpha__P002", "beta__P001"):
+        (hmr_dir / f"{stem}_smpl_world.npz").write_bytes(b"x")
+
+    body_all = c.get("/hmr_world/players").json()
+    keys_all = sorted(
+        f"{p['shot_id']}__{p['player_id']}" for p in body_all["players"]
+    )
+    assert keys_all == ["alpha__P001", "alpha__P002", "beta__P001"]
+
+    body_alpha = c.get("/hmr_world/players?shot=alpha").json()
+    keys_alpha = sorted(p["player_id"] for p in body_alpha["players"])
+    assert keys_alpha == ["P001", "P002"]
+    assert all(p["shot_id"] == "alpha" for p in body_alpha["players"])
+
+
+@pytest.mark.unit
+def test_camera_stage_complete_requires_every_shot_track(client):
+    """The camera stage shows green only when every shot in the manifest
+    has its per-shot ``{shot_id}_camera_track.json`` on disk. A partial
+    multi-shot solve must not flip the stage to complete."""
+    c, tmp_path = client
+
+    shots_dir = tmp_path / "shots"
+    shots_dir.mkdir()
+    (shots_dir / "shots_manifest.json").write_text(
+        '{"source_file":"x","fps":30,"total_frames":0,"shots":['
+        '{"id":"alpha","start_frame":0,"end_frame":0,"start_time":0.0,'
+        '"end_time":0.0,"clip_file":"shots/alpha.mp4"},'
+        '{"id":"beta","start_frame":0,"end_frame":0,"start_time":0.0,'
+        '"end_time":0.0,"clip_file":"shots/beta.mp4"}]}'
+    )
+
+    cam_dir = tmp_path / "camera"
+    cam_dir.mkdir()
+
+    def stage_complete(stage_name):
+        body = c.get("/api/stages").json()
+        return next(s for s in body if s["name"] == stage_name)["complete"]
+
+    assert stage_complete("camera") is False
+
+    (cam_dir / "alpha_camera_track.json").write_text("{}")
+    assert stage_complete("camera") is False
+
+    (cam_dir / "beta_camera_track.json").write_text("{}")
+    assert stage_complete("camera") is True
+
+
+@pytest.mark.unit
+def test_upload_shots_writes_files_and_dispatches_job(client, monkeypatch):
+    """POST /api/shots/upload saves uploaded .mp4 files into shots/ and
+    fires a prepare_shots job that runs without wiping the directory."""
+    c, tmp_path = client
+    captured: dict = {}
+
+    def fake_run_pipeline(*args, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("src.web.server.run_pipeline", fake_run_pipeline)
+
+    files = [
+        ("files", ("alpha.mp4", b"fake-mp4-bytes-1", "video/mp4")),
+        ("files", ("beta clip.mp4", b"fake-mp4-bytes-2", "video/mp4")),
+    ]
+    r = c.post("/api/shots/upload", files=files)
+    assert r.status_code == 200
+    body = r.json()
+    assert sorted(body["saved"]) == ["alpha", "betaclip"]
+    assert body["skipped"] == []
+    assert body["job_id"] is not None
+
+    # Files landed under sanitised names.
+    assert (tmp_path / "shots" / "alpha.mp4").read_bytes() == b"fake-mp4-bytes-1"
+    assert (tmp_path / "shots" / "betaclip.mp4").read_bytes() == b"fake-mp4-bytes-2"
+
+    # The dispatched job runs prepare_shots with from_stage set, so the
+    # runner doesn't short-circuit on its is_complete() cache.
+    import time
+    for _ in range(20):
+        if "stages" in captured:
+            break
+        time.sleep(0.05)
+    assert captured.get("stages") == "prepare_shots"
+    assert captured.get("from_stage") == "prepare_shots"
+
+
+@pytest.mark.unit
+def test_upload_shots_skips_existing_shot_id(client, monkeypatch):
+    """An upload whose sanitised name collides with an existing shot is
+    skipped rather than overwriting the on-disk clip."""
+    c, tmp_path = client
+    monkeypatch.setattr("src.web.server.run_pipeline", lambda *a, **k: None)
+
+    shots_dir = tmp_path / "shots"
+    shots_dir.mkdir()
+    (shots_dir / "alpha.mp4").write_bytes(b"already here")
+
+    r = c.post(
+        "/api/shots/upload",
+        files=[("files", ("alpha.mp4", b"new bytes", "video/mp4"))],
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["saved"] == []
+    assert len(body["skipped"]) == 1
+    assert "already exists" in body["skipped"][0]["reason"]
+    # Existing file untouched.
+    assert (shots_dir / "alpha.mp4").read_bytes() == b"already here"
+    # No job dispatched when nothing was saved.
+    assert body["job_id"] is None
+
+
+@pytest.mark.unit
+def test_upload_shots_rejects_non_mp4(client, monkeypatch):
+    c, _ = client
+    monkeypatch.setattr("src.web.server.run_pipeline", lambda *a, **k: None)
+    r = c.post(
+        "/api/shots/upload",
+        files=[("files", ("notes.txt", b"hello", "text/plain"))],
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["saved"] == []
+    assert body["skipped"][0]["reason"] == "not an .mp4 file"
+
+
+@pytest.mark.unit
 def test_run_shot_endpoint_dispatches_filtered_job(client, monkeypatch):
     """POST /api/run-shot dispatches a background job with the correct
     stages= and shot_filter= values plumbed through to run_pipeline."""

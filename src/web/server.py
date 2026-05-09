@@ -61,7 +61,7 @@ from threading import Lock, Thread
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -87,11 +87,82 @@ STAGE_ORDER: list[str] = [
     "export",
 ]
 
+def _manifest_shot_ids(output_dir: Path) -> list[str]:
+    """Return the shot ids from ``shots_manifest.json``, or [] if absent."""
+    from src.schemas.shots import ShotsManifest
+
+    manifest_path = output_dir / "shots" / "shots_manifest.json"
+    if not manifest_path.exists():
+        return []
+    try:
+        return [s.id for s in ShotsManifest.load(manifest_path).shots]
+    except Exception:
+        return []
+
+
+def _camera_complete(output_dir: Path) -> bool:
+    """Camera stage is green only when every shot in the manifest has a
+    ``{shot_id}_camera_track.json`` on disk. With no manifest we fall
+    back to the legacy singular ``camera_track.json``."""
+    shot_ids = _manifest_shot_ids(output_dir)
+    if not shot_ids:
+        return (output_dir / "camera" / "camera_track.json").exists()
+    return all(
+        (output_dir / "camera" / f"{sid}_camera_track.json").exists()
+        for sid in shot_ids
+    )
+
+
+def _hmr_world_complete(output_dir: Path) -> bool:
+    """Green only when every (shot_id, player_id) group expected by
+    ``HmrWorldStage._build_player_groups`` has its
+    ``{shot_id}__{player_id}_smpl_world.npz`` on disk. Falls back to
+    "any new-scheme file exists" when there's no tracks dir to compute
+    expectations from."""
+    out = output_dir / "hmr_world"
+    if not out.exists():
+        return False
+    new_scheme_files = {
+        p.stem.replace("_smpl_world", "")
+        for p in out.glob("*_smpl_world.npz")
+        if "__" in p.stem
+    }
+    if not new_scheme_files:
+        return False
+    tracks_dir = output_dir / "tracks"
+    if not tracks_dir.exists():
+        return True
+    expected: set[str] = set()
+    for tracks_path in tracks_dir.glob("*_tracks.json"):
+        try:
+            tr = TracksResult.load(tracks_path)
+        except Exception:
+            continue
+        for track in tr.tracks:
+            if track.class_name not in ("player", "goalkeeper"):
+                continue
+            if track.player_name == "ignore":
+                continue
+            pid = (
+                track.player_id
+                or (
+                    f"{tr.shot_id}_T{track.track_id}"
+                    if track.track_id else None
+                )
+            )
+            if pid is None:
+                continue
+            expected.add(f"{tr.shot_id}__{pid}")
+    if not expected:
+        return True
+    return expected.issubset(new_scheme_files)
+
+
 _STAGE_COMPLETE = {
     "prepare_shots": lambda d: (d / "shots" / "shots_manifest.json").exists(),
     "tracking": lambda d: any((d / "tracks").glob("*_tracks.json")),
-    "camera": lambda d: (d / "camera" / "camera_track.json").exists(),
-    "hmr_world": lambda d: any((d / "hmr_world").glob("*_smpl_world.npz")),
+    "camera": _camera_complete,
+    "hmr_world": _hmr_world_complete,
     "ball": lambda d: (d / "ball" / "ball_track.json").exists(),
     "export": lambda d: (d / "export" / "gltf" / "scene.glb").exists(),
 }
@@ -172,6 +243,11 @@ class RunRequest(BaseModel):
     # will only process the named shot. Stages without a manifest
     # ignore this. Used by the dashboard's /api/run-shot endpoint.
     shot_filter: str | None = None
+    # Per-player: when set, hmr_world only fits the named player_id
+    # (paired with shot_filter to disambiguate multi-shot collisions).
+    # Other stages ignore this. Used by the dashboard's
+    # /api/run-shot-player endpoint for fast iteration on one player.
+    player_filter: str | None = None
 
 
 def _emit(job: Job, line: str) -> None:
@@ -236,6 +312,7 @@ def _run_job(job: Job, output_dir: Path, config_path: Path | None, params: RunRe
             config=cfg,
             device=params.device,
             shot_filter=params.shot_filter,
+            player_filter=params.player_filter,
         )
         job.status = "done"
     except Exception as exc:
@@ -365,8 +442,39 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
     def get_config():
         return load_config(app.state.config_path)
 
+    def _hmr_world_in_flight() -> Job | None:
+        """Return the currently-running hmr_world job, if any.
+
+        hmr_world holds a process-global lock during inference (see
+        ``_GVHMR_INFERENCE_LOCK`` in gvhmr_estimator.py), so concurrent
+        hmr_world dispatches just queue up behind each other and waste
+        server slots. Reject the second one with 409 so the operator
+        gets immediate, actionable feedback rather than a job that
+        looks alive in the dashboard but is silently blocked on a lock.
+        """
+        with _jobs_lock:
+            for j in _jobs.values():
+                if j.status != "running":
+                    continue
+                stages_str = (j.stages or "")
+                if "hmr_world" in stages_str.split(",") or stages_str == "all":
+                    return j
+        return None
+
     @app.post("/api/run", status_code=202)
     def run_stages(params: RunRequest):
+        requested_stages = (params.stages or "").split(",")
+        wants_hmr = "hmr_world" in requested_stages or params.stages == "all"
+        if wants_hmr:
+            blocker = _hmr_world_in_flight()
+            if blocker is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"hmr_world is already running (job {blocker.job_id}). "
+                        "Wait for it to finish or stop the dashboard process."
+                    ),
+                )
         with _jobs_lock:
             running_jobs = sum(1 for job in _jobs.values() if job.status == "running")
             if running_jobs >= _MAX_CONCURRENT_JOBS:
@@ -466,18 +574,63 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         return FileResponse(str(viewer_path), headers=_NO_STORE)
 
     @app.get("/api/export/scene.glb")
-    def get_scene_glb():
-        glb_path = output_dir / "export" / "gltf" / "scene.glb"
+    def get_scene_glb(shot: str | None = None):
+        """Return ``{shot}_scene.glb`` when ``?shot=`` is supplied,
+        otherwise the legacy singular ``scene.glb``. The viewer uses
+        ``/api/output/shots`` to drive the per-shot routing."""
+        gltf_dir = output_dir / "export" / "gltf"
+        if shot:
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
+                raise HTTPException(status_code=400, detail="Invalid shot id")
+            glb_path = gltf_dir / f"{shot}_scene.glb"
+        else:
+            glb_path = gltf_dir / "scene.glb"
+            if not glb_path.exists():
+                # Backwards-compat: when only per-shot files exist (the
+                # multi-shot output of the modern export stage), serve
+                # the first available so legacy callers that don't pass
+                # a shot still get *something*.
+                per_shot = sorted(gltf_dir.glob("*_scene.glb"))
+                if per_shot:
+                    glb_path = per_shot[0]
         if not glb_path.exists():
             raise HTTPException(status_code=404, detail="scene.glb not found")
         return FileResponse(str(glb_path), media_type="model/gltf-binary")
 
     @app.get("/api/export/metadata")
-    def get_scene_metadata():
-        meta_path = output_dir / "export" / "gltf" / "scene_metadata.json"
+    def get_scene_metadata(shot: str | None = None):
+        """Return ``{shot}_scene_metadata.json`` when ``?shot=`` is
+        supplied, else the legacy singular file. Falls back to the
+        first per-shot metadata file when the legacy one is missing —
+        so the dashboard can render *something* in multi-shot mode
+        even when only one shot has been exported."""
+        gltf_dir = output_dir / "export" / "gltf"
+        if shot:
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
+                raise HTTPException(status_code=400, detail="Invalid shot id")
+            meta_path = gltf_dir / f"{shot}_scene_metadata.json"
+        else:
+            meta_path = gltf_dir / "scene_metadata.json"
+            if not meta_path.exists():
+                per_shot = sorted(gltf_dir.glob("*_scene_metadata.json"))
+                if per_shot:
+                    meta_path = per_shot[0]
         if not meta_path.exists():
             raise HTTPException(status_code=404, detail="scene_metadata.json not found")
         return json.loads(meta_path.read_text())
+
+    @app.get("/api/export/shots")
+    def list_export_shots():
+        """List shot ids that have a ``{shot}_scene.glb`` ready to
+        view. Drives the export panel's shot picker."""
+        gltf_dir = output_dir / "export" / "gltf"
+        if not gltf_dir.exists():
+            return {"shots": []}
+        ids = sorted(
+            p.stem.replace("_scene", "")
+            for p in gltf_dir.glob("*_scene.glb")
+        )
+        return {"shots": ids}
 
     # ------------------------------------------------------------------
     # Anchor editor + pipeline-output viewers (broadcast-mono, Phase 4a)
@@ -490,6 +643,30 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             return {"shots": []}
         ids = sorted(p.stem for p in shots_dir.glob("*.mp4"))
         return {"shots": ids}
+
+    @app.get("/api/shots/manifest")
+    def get_shots_manifest():
+        """Return the full ShotsManifest as JSON.
+
+        Used by the dashboard's sync timeline to size each clip block by
+        its actual frame count. Returns an empty manifest skeleton when
+        no manifest is on disk so the front-end can render an empty
+        timeline without a 404 detour.
+        """
+        from src.schemas.shots import ShotsManifest
+
+        manifest_path = output_dir / "shots" / "shots_manifest.json"
+        if not manifest_path.exists():
+            return {
+                "source_file": "", "fps": 0.0, "total_frames": 0, "shots": [],
+            }
+        try:
+            manifest = ShotsManifest.load(manifest_path)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to load manifest: {exc}",
+            )
+        return asdict(manifest)
 
     @app.get("/api/output/shot-status/{shot_id}")
     def get_shot_status(shot_id: str):
@@ -535,6 +712,141 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             "has_ball": (output_dir / "ball" / f"{shot_id}_ball_track.json").exists(),
             "has_export": (output_dir / "export" / "gltf" / f"{shot_id}_scene.glb").exists(),
         }
+
+    # ------------------------------------------------------------------
+    # Sync map (manual shot-to-shot frame alignment)
+    # ------------------------------------------------------------------
+
+    class SyncAlignmentPayload(BaseModel):
+        shot_id: str
+        frame_offset: int
+        method: str = "manual"
+        confidence: float = 1.0
+
+    class SyncMapPayload(BaseModel):
+        reference_shot: str
+        alignments: list[SyncAlignmentPayload]
+
+    def _sync_map_path() -> Path:
+        return output_dir / "shots" / "sync_map.json"
+
+    def _manifest_shot_ids_or_empty() -> list[str]:
+        # Re-uses the helper near the top of the module to read the
+        # shots manifest, with a quiet fallback when no manifest exists
+        # so the dashboard's GET still has something useful to return
+        # mid-bootstrap (e.g. before the first prepare_shots run).
+        return _manifest_shot_ids(output_dir)
+
+    @app.get("/api/sync")
+    def get_sync_map():
+        """Return the SyncMap JSON (operator-edited shot offsets).
+
+        On disk: ``output/shots/sync_map.json``. When absent, return a
+        fresh default with every shot at ``frame_offset=0`` so the
+        dashboard's editor can render one row per shot before the
+        operator has saved anything.
+        """
+        from src.schemas.sync_map import SyncMap, default_sync_map
+
+        path = _sync_map_path()
+        manifest_ids = _manifest_shot_ids_or_empty()
+        if path.exists():
+            try:
+                sm = SyncMap.load(path)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500, detail=f"Failed to load sync_map: {exc}",
+                )
+            saved_ids = {a.shot_id for a in sm.alignments}
+            # If new shots were added since the last save, append them
+            # at offset=0 so the editor surfaces every current shot
+            # without forcing the operator to re-save first.
+            from src.schemas.sync_map import Alignment
+            for sid in manifest_ids:
+                if sid not in saved_ids:
+                    sm.alignments.append(
+                        Alignment(shot_id=sid, frame_offset=0)
+                    )
+            sm.alignments.sort(key=lambda a: a.shot_id)
+            return asdict(sm)
+        if not manifest_ids:
+            return {"reference_shot": "", "alignments": []}
+        return asdict(
+            default_sync_map(reference_shot=manifest_ids[0], shot_ids=manifest_ids)
+        )
+
+    @app.post("/api/sync")
+    def post_sync_map(payload: SyncMapPayload):
+        """Persist a SyncMap. The reference shot must appear in the
+        alignments with ``frame_offset=0``; the dashboard enforces this
+        UX-side too but we re-validate for safety."""
+        from src.schemas.sync_map import (
+            Alignment, SyncMap, validate_method,
+        )
+
+        manifest_ids = set(_manifest_shot_ids_or_empty())
+        if not payload.reference_shot:
+            raise HTTPException(
+                status_code=400, detail="reference_shot is required",
+            )
+        if manifest_ids and payload.reference_shot not in manifest_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"reference_shot {payload.reference_shot!r} is not in"
+                    " the shots manifest"
+                ),
+            )
+        seen: set[str] = set()
+        alignments: list[Alignment] = []
+        for a in payload.alignments:
+            if a.shot_id in seen:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"duplicate shot_id {a.shot_id!r} in alignments",
+                )
+            seen.add(a.shot_id)
+            if manifest_ids and a.shot_id not in manifest_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"shot_id {a.shot_id!r} is not in the shots manifest"
+                    ),
+                )
+            try:
+                method = validate_method(a.method)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            alignments.append(Alignment(
+                shot_id=a.shot_id,
+                frame_offset=int(a.frame_offset),
+                method=method,
+                confidence=float(a.confidence),
+            ))
+        # Reference shot must be pinned to offset=0 so downstream
+        # consumers can compute global frame indices unambiguously.
+        ref_alignment = next(
+            (a for a in alignments if a.shot_id == payload.reference_shot),
+            None,
+        )
+        if ref_alignment is None:
+            alignments.append(Alignment(
+                shot_id=payload.reference_shot, frame_offset=0,
+            ))
+        elif ref_alignment.frame_offset != 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "reference_shot must have frame_offset=0; got "
+                    f"{ref_alignment.frame_offset}"
+                ),
+            )
+        alignments.sort(key=lambda a: a.shot_id)
+        sm = SyncMap(
+            reference_shot=payload.reference_shot, alignments=alignments,
+        )
+        sm.save(_sync_map_path())
+        return {"saved": True, "path": str(_sync_map_path()), "count": len(alignments)}
 
     @app.get("/landmarks")
     def get_landmarks():
@@ -699,6 +1011,16 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     else:
                         shutil.rmtree(child, ignore_errors=True)
 
+        if req.stage == "hmr_world":
+            blocker = _hmr_world_in_flight()
+            if blocker is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"hmr_world is already running (job {blocker.job_id}). "
+                        "Wait for it to finish or stop the dashboard process."
+                    ),
+                )
         params = RunRequest(stages=req.stage, shot_filter=req.shot_id)
         with _jobs_lock:
             running_jobs = sum(
@@ -723,6 +1045,139 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             "shot_id": req.shot_id,
         }
 
+    class RunShotPlayerRequest(BaseModel):
+        shot_id: str
+        player_id: str
+
+    @app.post("/api/run-shot-player")
+    def post_run_shot_player(req: RunShotPlayerRequest):
+        """Re-run hmr_world for one ``(shot_id, player_id)`` pair only.
+
+        Wipes that pair's per-shot artefacts (``{shot}__{pid}_*.json``,
+        ``{shot}__{pid}_*.npz``) so GVHMR re-runs cleanly, then dispatches
+        a filtered ``run_pipeline`` job. Other shots/players in
+        ``hmr_world/`` are untouched, and other stages aren't run."""
+        valid = re.compile(r"[A-Za-z0-9_-]+")
+        if not valid.fullmatch(req.shot_id):
+            raise HTTPException(status_code=400, detail="Invalid shot_id")
+        if not valid.fullmatch(req.player_id):
+            raise HTTPException(status_code=400, detail="Invalid player_id")
+        hmr_dir = output_dir / "hmr_world"
+        blocker = _hmr_world_in_flight()
+        if blocker is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"hmr_world is already running (job {blocker.job_id}). "
+                    "Wait for it to finish or stop the dashboard process."
+                ),
+            )
+        if hmr_dir.exists():
+            for path in hmr_dir.glob(f"{req.shot_id}__{req.player_id}_*"):
+                if path.is_file():
+                    path.unlink()
+        params = RunRequest(
+            stages="hmr_world",
+            from_stage="hmr_world",
+            shot_filter=req.shot_id,
+            player_filter=req.player_id,
+        )
+        with _jobs_lock:
+            running_jobs = sum(
+                1 for j in _jobs.values() if j.status == "running"
+            )
+            if running_jobs >= _MAX_CONCURRENT_JOBS:
+                raise HTTPException(
+                    status_code=429, detail="Too many concurrent jobs",
+                )
+        job_id = str(uuid.uuid4())[:8]
+        job = Job(job_id=job_id, stages=params.stages)
+        with _jobs_lock:
+            _jobs[job_id] = job
+        Thread(
+            target=_run_job,
+            args=(job, output_dir, app.state.config_path, params),
+            daemon=True,
+        ).start()
+        return {
+            "job_id": job_id,
+            "stage": "hmr_world",
+            "shot_id": req.shot_id,
+            "player_id": req.player_id,
+        }
+
+    @app.post("/api/shots/upload")
+    async def upload_shots(files: list[UploadFile] = File(...)):
+        """Accept one or more uploaded video clips, write them into
+        ``output/shots/`` under their sanitised filenames, and dispatch
+        a prepare_shots background job to merge them into the manifest.
+
+        Existing shots in the manifest are preserved — uploads only add
+        new entries. Files whose sanitised name collides with an existing
+        clip are rejected so the operator can rename and re-upload
+        rather than silently overwriting.
+        """
+        from src.schemas.shots import _sanitise_shot_id
+
+        shots_dir = output_dir / "shots"
+        shots_dir.mkdir(parents=True, exist_ok=True)
+
+        saved: list[str] = []
+        skipped: list[dict[str, str]] = []
+        for uf in files:
+            raw_name = Path(uf.filename or "").name
+            if not raw_name.lower().endswith(".mp4"):
+                skipped.append({"name": raw_name, "reason": "not an .mp4 file"})
+                await uf.close()
+                continue
+            try:
+                shot_id = _sanitise_shot_id(Path(raw_name).stem)
+            except ValueError as exc:
+                skipped.append({"name": raw_name, "reason": str(exc)})
+                await uf.close()
+                continue
+            dest = shots_dir / f"{shot_id}.mp4"
+            if dest.exists():
+                skipped.append({
+                    "name": raw_name,
+                    "reason": f"shot_id {shot_id!r} already exists",
+                })
+                await uf.close()
+                continue
+            with dest.open("wb") as out:
+                while True:
+                    chunk = await uf.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+            await uf.close()
+            saved.append(shot_id)
+
+        if not saved:
+            return {"saved": [], "skipped": skipped, "job_id": None}
+
+        # Run prepare_shots without wiping — the stage scans shots/ for
+        # any clips not yet in the manifest and registers them.
+        params = RunRequest(stages="prepare_shots", from_stage="prepare_shots")
+        with _jobs_lock:
+            running_jobs = sum(
+                1 for j in _jobs.values() if j.status == "running"
+            )
+            if running_jobs >= _MAX_CONCURRENT_JOBS:
+                raise HTTPException(
+                    status_code=429, detail="Too many concurrent jobs",
+                )
+        job_id = str(uuid.uuid4())[:8]
+        job = Job(job_id=job_id, stages=params.stages)
+        with _jobs_lock:
+            _jobs[job_id] = job
+        Thread(
+            target=_run_job,
+            args=(job, output_dir, app.state.config_path, params),
+            daemon=True,
+        ).start()
+        return {"saved": saved, "skipped": skipped, "job_id": job_id}
+
     @app.get("/camera/track")
     def get_camera_track(shot: str | None = None):
         """Return a CameraTrack as JSON.
@@ -734,6 +1189,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         pass a shot filter.
         """
         if shot:
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
+                raise HTTPException(status_code=400, detail="Invalid shot id")
             track_path = output_dir / "camera" / f"{shot}_camera_track.json"
         else:
             track_path = output_dir / "camera" / "camera_track.json"
@@ -830,16 +1287,26 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         ]
         return {"shot_id": result.shot_id, "frames": frames}
 
-    def _player_name_index() -> dict[str, str]:
-        """Build {player_id → player_name} from every shot's tracks file.
+    def _player_name_index() -> dict[tuple[str, str], str]:
+        """Build ``{(shot_id, pid_in_hmr_filename) → player_name}`` from
+        every shot's tracks file.
 
-        Used by the hmr_world endpoints so the dashboard can show real
-        names instead of the synthetic P### IDs. Tracks named 'ignore'
-        are skipped; player_id may map to multiple Track records (when a
-        merge wasn't followed by a physical-merge save) — first non-empty
-        wins.
+        ``pid_in_hmr_filename`` mirrors what
+        ``HmrWorldStage._build_player_groups`` synthesises for the
+        ``{shot_id}__{pid}_smpl_world.npz`` filename:
+          - the operator-set ``player_id`` when present, else
+          - ``f"{shot_id}_T{track_id}"`` for unannotated tracks.
+
+        Without this mirror the lookup misses any track whose
+        ``player_name`` was set but whose ``player_id`` is blank — e.g.
+        Matip in shot A might be ``track_id=T004, player_id=""``,
+        ``player_name="Matip"``; the hmr filename would then be
+        ``A__A_TT004_smpl_world.npz`` (pid = ``"A_TT004"``) and a name
+        index keyed only by raw ``track_id`` would miss it. Also
+        registers ``track.player_id`` as an extra key so legacy
+        single-shot callers (no shot context) keep resolving names.
         """
-        names: dict[str, str] = {}
+        names: dict[tuple[str, str], str] = {}
         tracks_dir = output_dir / "tracks"
         if not tracks_dir.exists():
             return names
@@ -849,31 +1316,108 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             except Exception:
                 continue
             for track in tr.tracks:
-                pid = track.player_id or track.track_id
-                if track.player_name and track.player_name != "ignore":
-                    names.setdefault(pid, track.player_name)
+                if not track.player_name or track.player_name == "ignore":
+                    continue
+                shot_pid = (
+                    track.player_id
+                    or (
+                        f"{tr.shot_id}_T{track.track_id}"
+                        if track.track_id else None
+                    )
+                )
+                if shot_pid is None:
+                    continue
+                names.setdefault((tr.shot_id, shot_pid), track.player_name)
+                # Cross-shot fallback: a player_id assigned in *any*
+                # shot's tracks file resolves the same name in every
+                # other shot (e.g. Matip's player_id=P005 in origi02
+                # also names her track in origi01 if the operator forgot
+                # to physically-merge there). Only kicks in when no
+                # exact (shot_id, pid) row already won.
+                if track.player_id:
+                    names.setdefault(("", track.player_id), track.player_name)
         return names
 
-    @app.get("/hmr_world/kp2d_players")
-    def list_kp2d_players():
+    _PID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+    def _resolve_hmr_path(
+        suffix: str, shot: str | None, player_id: str,
+    ) -> Path:
+        """Resolve a per-(shot, player) hmr_world artefact path.
+
+        New scheme (preferred): ``{shot}__{player_id}{suffix}``.
+        Legacy fallback: ``{player_id}{suffix}`` when the per-shot file
+        doesn't exist (covers viewers that haven't updated to the new
+        endpoints yet).
+        """
+        if not _PID_RE.fullmatch(player_id):
+            raise HTTPException(status_code=400, detail="Invalid player_id")
+        if shot is not None and not _PID_RE.fullmatch(shot):
+            raise HTTPException(status_code=400, detail="Invalid shot id")
+        hmr_dir = (output_dir / "hmr_world").resolve()
+        if shot:
+            keyed = (hmr_dir / f"{shot}__{player_id}{suffix}").resolve()
+            if not keyed.is_relative_to(hmr_dir):
+                raise HTTPException(status_code=400, detail="Invalid path")
+            if keyed.exists():
+                return keyed
+        legacy = (hmr_dir / f"{player_id}{suffix}").resolve()
+        if not legacy.is_relative_to(hmr_dir):
+            raise HTTPException(status_code=400, detail="Invalid path")
+        return legacy
+
+    def _list_hmr_files(
+        glob_pattern: str, stem_strip: str, shot: str | None,
+    ) -> list[dict[str, str]]:
+        """Walk ``hmr_world/`` for files matching ``glob_pattern`` (e.g.
+        ``*_smpl_world.npz``). ``stem_strip`` is the trailing tag to
+        remove from each file's stem to recover the
+        ``{shot_id}__{player_id}`` key (e.g. ``_smpl_world`` or
+        ``_kp2d``). Returns one row per file with ``shot_id``,
+        ``player_id`` (the bare id, not the keyed filename), and the
+        operator-supplied ``player_name`` when available."""
         hmr_dir = output_dir / "hmr_world"
         if not hmr_dir.exists():
-            return {"players": []}
+            return []
         names = _player_name_index()
-        rows = []
-        for p in sorted(hmr_dir.glob("*_kp2d.json")):
-            pid = p.stem.replace("_kp2d", "")
-            rows.append({"player_id": pid, "player_name": names.get(pid, "")})
-        return {"players": rows}
+        rows: list[dict[str, str]] = []
+        for path in sorted(hmr_dir.glob(glob_pattern)):
+            stem = path.stem
+            if stem.endswith(stem_strip):
+                stem = stem[: -len(stem_strip)]
+            if "__" in stem:
+                shot_id, _, pid = stem.partition("__")
+            else:
+                shot_id, pid = "", stem
+            if shot is not None and shot_id != shot:
+                continue
+            # Lookup order: exact (shot, pid) → cross-shot fallback by
+            # bare player_id → empty. The cross-shot fallback handles
+            # Matip-style cases where one shot has a player_id assigned
+            # and another shot only has the player_name set.
+            name = (
+                names.get((shot_id, pid))
+                or names.get(("", pid), "")
+            )
+            rows.append({
+                "shot_id": shot_id,
+                "player_id": pid,
+                "player_name": name,
+            })
+        return rows
+
+    @app.get("/hmr_world/kp2d_players")
+    def list_kp2d_players(shot: str | None = None):
+        """List ``(shot_id, player_id)`` pairs with kp2d artefacts.
+
+        ``?shot=xxx`` filters to one shot. Each row is
+        ``{shot_id, player_id, player_name}``.
+        """
+        return {"players": _list_hmr_files("*_kp2d.json", "_kp2d", shot)}
 
     @app.get("/hmr_world/kp2d_preview")
-    def get_kp2d_preview(player_id: str):
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", player_id):
-            raise HTTPException(status_code=400, detail="Invalid player_id")
-        kp2d_path = (output_dir / "hmr_world" / f"{player_id}_kp2d.json").resolve()
-        hmr_dir = (output_dir / "hmr_world").resolve()
-        if not kp2d_path.is_relative_to(hmr_dir):
-            raise HTTPException(status_code=400, detail="Invalid player_id")
+    def get_kp2d_preview(player_id: str, shot: str | None = None):
+        kp2d_path = _resolve_hmr_path("_kp2d.json", shot, player_id)
         if not kp2d_path.exists():
             raise HTTPException(status_code=404, detail=f"kp2d track not found: {player_id}")
         try:
@@ -884,37 +1428,25 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
 
     @app.get("/hmr_world/players")
     def list_hmr_players(shot: str | None = None):
-        """List player_ids with HMR-world output.
+        """List ``(shot_id, player_id)`` pairs with HMR-world output.
 
-        ``?shot=xxx`` filters to players whose ``SmplWorldTrack.shot_id``
-        equals ``xxx``. Without the param all players are returned (the
-        legacy single-shot view). Filtering loads each NPZ to read
-        shot_id; for clips with hundreds of players this is fine
-        because the load is metadata-only.
+        ``?shot=xxx`` filters to one shot. Each row is
+        ``{shot_id, player_id, player_name}``. The player_id field is
+        the bare id (no shot prefix); follow-up calls to /preview need
+        both ``?shot=`` and ``?player_id=``.
         """
-        hmr_dir = output_dir / "hmr_world"
-        if not hmr_dir.exists():
-            return {"players": []}
-        names = _player_name_index()
-        rows = []
-        for npz_path in sorted(hmr_dir.glob("*_smpl_world.npz")):
-            pid = npz_path.stem.replace("_smpl_world", "")
-            if shot:
-                try:
-                    z = np.load(npz_path, allow_pickle=False)
-                    track_shot = str(z["shot_id"]) if "shot_id" in z.files else ""
-                except Exception:
-                    track_shot = ""
-                if track_shot != shot:
-                    continue
-            rows.append({"player_id": pid, "player_name": names.get(pid, "")})
-        return {"players": rows}
+        return {"players": _list_hmr_files("*_smpl_world.npz", "_smpl_world", shot)}
 
     @app.get("/hmr_world/preview")
     def get_hmr_preview(
-        player_id: str, request: Request, include_pose: int = 0,
+        player_id: str,
+        request: Request,
+        include_pose: int = 0,
+        shot: str | None = None,
     ):
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", player_id):
+        try:
+            npz_path = _resolve_hmr_path("_smpl_world.npz", shot, player_id)
+        except HTTPException:
             # Diagnostic: log the Referer so we can pinpoint *which*
             # client page is sending malformed player_id values (the
             # ``[object Object]`` symptom seen when a JS list of objects
@@ -922,14 +1454,10 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             referer = request.headers.get("referer", "<no-referer>")
             ua = request.headers.get("user-agent", "<no-ua>")[:60]
             logging.warning(
-                "/hmr_world/preview rejected player_id=%r referer=%s ua=%s",
-                player_id, referer, ua,
+                "/hmr_world/preview rejected player_id=%r shot=%r referer=%s ua=%s",
+                player_id, shot, referer, ua,
             )
-            raise HTTPException(status_code=400, detail="Invalid player_id")
-        npz_path = (output_dir / "hmr_world" / f"{player_id}_smpl_world.npz").resolve()
-        hmr_dir = (output_dir / "hmr_world").resolve()
-        if not npz_path.is_relative_to(hmr_dir):
-            raise HTTPException(status_code=400, detail="Invalid player_id")
+            raise
         if not npz_path.exists():
             raise HTTPException(status_code=404, detail=f"hmr_world track not found: {player_id}")
         try:
@@ -939,6 +1467,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             confidence = z["confidence"].tolist()
             payload = {
                 "player_id": player_id,
+                "shot_id": str(z["shot_id"]) if "shot_id" in z.files else "",
                 "frames": frames,
                 "root_t": root_t,
                 "confidence": confidence,

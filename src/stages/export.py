@@ -302,15 +302,24 @@ class ExportStage(BaseStage):
         for npz in npz_files:
             track = SmplWorldTrack.load(npz)
             display_name = display_name_for(track.player_id, name_mapping)
-            fbx_rel = f"fbx/{display_name}.fbx"
+            shot_id = getattr(track, "shot_id", "") or ""
+            keyed = f"{shot_id}__{display_name}" if shot_id else display_name
+            fbx_rel = f"fbx/{keyed}.fbx"
             if not (export_dir / fbx_rel).exists():
-                # Fall back to the legacy ID-named FBX if a name-mapped
-                # file isn't on disk (e.g. mapping added after export).
-                legacy_rel = f"fbx/{track.player_id}.fbx"
-                if (export_dir / legacy_rel).exists():
-                    fbx_rel = legacy_rel
-                else:
+                # Try a few fallback names so older FBX files (from
+                # pre-multi-shot export runs) still register: bare
+                # display_name and bare player_id without the shot prefix.
+                candidates = [
+                    f"fbx/{display_name}.fbx",
+                    f"fbx/{track.player_id}.fbx",
+                ]
+                resolved = next(
+                    (c for c in candidates if (export_dir / c).exists()),
+                    None,
+                )
+                if resolved is None:
                     continue
+                fbx_rel = resolved
             n = int(track.frames.shape[0])
             if n == 0:
                 continue

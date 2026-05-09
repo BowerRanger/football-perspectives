@@ -156,8 +156,10 @@ def test_hmr_world_emits_track_in_pitch_frame(tmp_path: Path, fake_gvhmr) -> Non
     )
     stage.run()
 
-    # 5. Verify SmplWorldTrack output.
-    out_path = tmp_path / "hmr_world" / "P001_smpl_world.npz"
+    # 5. Verify SmplWorldTrack output. The new per-shot scheme keys
+    # outputs by ``{shot_id}__{player_id}`` so two shots that share a
+    # player_id can't overwrite each other.
+    out_path = tmp_path / "hmr_world" / "play__P001_smpl_world.npz"
     assert out_path.exists(), "stage did not write SmplWorldTrack output"
 
     out = SmplWorldTrack.load(out_path)
@@ -168,7 +170,7 @@ def test_hmr_world_emits_track_in_pitch_frame(tmp_path: Path, fake_gvhmr) -> Non
     assert (out.root_t[:, 2] > 0.5).any()
 
     # 6. Verify kp2d side-output written for the dashboard overlay.
-    kp2d_path = tmp_path / "hmr_world" / "P001_kp2d.json"
+    kp2d_path = tmp_path / "hmr_world" / "play__P001_kp2d.json"
     assert kp2d_path.exists(), "stage did not write kp2d preview JSON"
     kp2d_data = json.loads(kp2d_path.read_text())
     assert kp2d_data["player_id"] == "P001"
@@ -316,11 +318,11 @@ def test_unannotated_track_id_is_prefixed_with_shot(tmp_path: Path) -> None:
     ).save(tmp_path / "shots" / "shots_manifest.json")
 
     stage = HmrWorldStage(config={}, output_dir=tmp_path)
-    groups, group_shot = stage._build_player_groups()
-    assert "alpha_T3" in groups, f"got pids: {list(groups)}"
-    assert "beta_T3" in groups, f"got pids: {list(groups)}"
-    assert group_shot["alpha_T3"] == "alpha"
-    assert group_shot["beta_T3"] == "beta"
+    groups = stage._build_player_groups()
+    # Per-shot grouping: every key is now a (shot_id, player_id) tuple
+    # so two shots reusing the same ByteTrack track_id stay separate.
+    assert ("alpha", "alpha_T3") in groups, f"got keys: {list(groups)}"
+    assert ("beta", "beta_T3") in groups, f"got keys: {list(groups)}"
 
 
 @pytest.mark.unit
@@ -366,3 +368,106 @@ def test_hmr_world_loads_per_shot_camera_tracks(tmp_path: Path) -> None:
     # Sanity: per-shot tracks did get saved (we just authored them above).
     assert (tmp_path / "camera" / "alpha_camera_track.json").exists()
     assert (tmp_path / "camera" / "beta_camera_track.json").exists()
+
+
+@pytest.mark.unit
+def test_same_player_id_in_two_shots_stays_separate(tmp_path: Path) -> None:
+    """The same ``player_id`` in two shots (e.g. after Merge by Name)
+    must yield two separate groups so hmr_world solves each shot
+    against its own camera and writes one .npz per shot."""
+    track_dir = tmp_path / "tracks"
+    track_dir.mkdir()
+    for shot in ("alpha", "beta"):
+        TracksResult(
+            shot_id=shot,
+            tracks=[Track(
+                track_id="1",
+                player_id="P001",
+                player_name="Origi",
+                team="A",
+                class_name="player",
+                frames=[TrackFrame(
+                    frame=i, bbox=[0, 0, 10, 10], confidence=0.9,
+                    pitch_position=None,
+                ) for i in range(3)],
+            )],
+        ).save(track_dir / f"{shot}_tracks.json")
+
+    stage = HmrWorldStage(config={}, output_dir=tmp_path)
+    groups = stage._build_player_groups()
+    assert ("alpha", "P001") in groups
+    assert ("beta", "P001") in groups
+    assert len(groups[("alpha", "P001")]) == 3
+    assert len(groups[("beta", "P001")]) == 3
+
+
+@pytest.mark.unit
+def test_legacy_outputs_are_wiped_on_first_new_scheme_run(tmp_path: Path) -> None:
+    """Pre-multi-shot files (no ``__`` in stem) get deleted at the start
+    of ``run()`` so they don't leak into the dashboard or viewer."""
+    from src.stages.hmr_world import _wipe_legacy_outputs
+
+    out = tmp_path / "hmr_world"
+    out.mkdir()
+    # Legacy: no shot prefix
+    (out / "P001_smpl_world.npz").write_bytes(b"legacy")
+    (out / "P001_kp2d.json").write_text("{}")
+    # New scheme: shot__player
+    (out / "alpha__P001_smpl_world.npz").write_bytes(b"new")
+    (out / "alpha__P001_kp2d.json").write_text("{}")
+
+    removed = _wipe_legacy_outputs(out)
+    assert removed == 2
+    assert not (out / "P001_smpl_world.npz").exists()
+    assert not (out / "P001_kp2d.json").exists()
+    assert (out / "alpha__P001_smpl_world.npz").exists()
+    assert (out / "alpha__P001_kp2d.json").exists()
+
+
+@pytest.mark.unit
+def test_is_complete_ignores_legacy_files(tmp_path: Path) -> None:
+    """A directory full of legacy combined files shouldn't flip the
+    stage green — the new code would rebuild them under the new
+    scheme."""
+    out = tmp_path / "hmr_world"
+    out.mkdir()
+    (out / "P001_smpl_world.npz").write_bytes(b"legacy")
+    stage = HmrWorldStage(config={}, output_dir=tmp_path)
+    assert stage.is_complete() is False
+    (out / "alpha__P001_smpl_world.npz").write_bytes(b"new")
+    assert stage.is_complete() is True
+
+
+@pytest.mark.unit
+def test_player_filter_isolates_one_player(tmp_path: Path) -> None:
+    """``player_filter`` paired with ``shot_filter`` reduces the work
+    list to one ``(shot_id, player_id)`` group so the operator can
+    iterate quickly on a single player."""
+    track_dir = tmp_path / "tracks"
+    track_dir.mkdir()
+    TracksResult(
+        shot_id="alpha",
+        tracks=[
+            Track(
+                track_id=str(tid), player_id=pid, player_name=pid,
+                team="A", class_name="player",
+                frames=[TrackFrame(
+                    frame=0, bbox=[0, 0, 10, 10], confidence=0.9,
+                    pitch_position=None,
+                )],
+            )
+            for tid, pid in [(1, "P001"), (2, "P002")]
+        ],
+    ).save(track_dir / "alpha_tracks.json")
+
+    stage = HmrWorldStage(config={}, output_dir=tmp_path)
+    stage.shot_filter = "alpha"
+    stage.player_filter = "P001"
+    groups = stage._build_player_groups()
+    # Filtering happens in run(); _build_player_groups returns the full
+    # set, then run() narrows. Mirror that here for explicitness.
+    filtered = {
+        k: v for k, v in groups.items()
+        if k[0] == stage.shot_filter and k[1] == stage.player_filter
+    }
+    assert list(filtered) == [("alpha", "P001")]

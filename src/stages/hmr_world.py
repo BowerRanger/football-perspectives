@@ -1,25 +1,33 @@
 """HMR-in-pitch-frame stage.
 
-Per-player monocular SMPL reconstruction expressed in pitch-world coords.
+Per-player, **per-shot** monocular SMPL reconstruction expressed in
+pitch-world coords. Each shot is solved independently — when the same
+``player_id`` appears in multiple shots (e.g. after Merge by Name), one
+output file is written per shot. Cross-shot data is *not* combined; a
+later convergence stage is responsible for that if/when needed.
 
-For each player track in ``output/tracks/{shot_id}_tracks.json``:
+For each (shot_id, player_id) pair in ``output/tracks/{shot_id}_tracks.json``:
 1. Run GVHMR over the track to obtain per-frame SMPL params in the camera
    frame (root rotation, pose, shape) plus COCO-17 2D keypoints from
    GVHMR's internal ViTPose-Huge.
 2. Median-aggregate the (per-frame-noisy) shape parameters.
-3. Convert root rotation from camera frame to pitch frame via the calibrated
-   camera extrinsic, then SLERP-smooth.
+3. Convert root rotation from camera frame to pitch frame via the
+   calibrated camera extrinsic for *this shot*, then SLERP-smooth.
 4. Savgol-smooth the per-joint axis-angle pose.
 5. Compute per-frame translation by ankle-anchoring: project the 2D ankle
    midpoint (from GVHMR's kp2d) to the pitch ground plane (z = 0.05 m) and
    back-solve the root translation that places the foot exactly there.
-6. Ground-snap z when the avatar is roughly stationary.
 
-Outputs per player:
-- ``output/hmr_world/{player_id}_smpl_world.npz`` — SmplWorldTrack
-- ``output/hmr_world/{player_id}_kp2d.json``      — COCO-17 keypoints
+Outputs per (shot, player) pair:
+- ``output/hmr_world/{shot_id}__{player_id}_smpl_world.npz`` — SmplWorldTrack
+- ``output/hmr_world/{shot_id}__{player_id}_kp2d.json``      — COCO-17 keypoints
   (consumed by the dashboard 2D-overlay panel; same schema the legacy
   pose_2d stage used to emit).
+
+The ``__`` separator delimits shot_id from player_id at the filename
+level. Both substrings are constrained to ``[A-Za-z0-9_-]`` upstream;
+parsers should ``rsplit("__", 1)`` to recover the player_id rather than
+splitting on ``_``.
 """
 
 from __future__ import annotations
@@ -70,12 +78,63 @@ _FOOT_IN_ROOT = np.array([0.0, -0.95, 0.0], dtype=float)
 _FOOT_PLANE_Z = 0.05
 
 
+_OUTPUT_SEPARATOR = "__"
+
+
+def _output_key(shot_id: str, player_id: str) -> str:
+    """Filename-safe key joining ``shot_id`` and ``player_id``.
+
+    The pipeline guarantees both substrings only contain ``[A-Za-z0-9_-]``
+    (see ``_sanitise_shot_id`` and the server-side player_id validator),
+    so a literal ``__`` separator unambiguously splits the pair on
+    ``rsplit("__", 1)``.
+    """
+    return f"{shot_id}{_OUTPUT_SEPARATOR}{player_id}"
+
+
+def _wipe_legacy_outputs(out_dir: Path) -> int:
+    """Delete pre-multi-shot ``hmr_world`` artefacts.
+
+    Files written before the per-shot rename use ``{player_id}_smpl_world.npz``
+    (no ``__`` separator). They were solved against whichever camera the
+    stage saw first for that player_id, which is wrong in multi-shot
+    mode. We delete them on the first new-scheme run so the user can
+    cleanly rebuild without stale combined animations leaking into the
+    viewer.
+    """
+    if not out_dir.exists():
+        return 0
+    removed = 0
+    for path in list(out_dir.glob("*_smpl_world.npz")):
+        if _OUTPUT_SEPARATOR not in path.stem:
+            path.unlink()
+            removed += 1
+    for path in list(out_dir.glob("*_kp2d.json")):
+        if _OUTPUT_SEPARATOR not in path.stem:
+            path.unlink()
+            removed += 1
+    if removed:
+        logger.info(
+            "[hmr_world] wiped %d legacy single-shot artefact(s) — they"
+            " predate the per-shot output rename",
+            removed,
+        )
+    return removed
+
+
 class HmrWorldStage(BaseStage):
     name = "hmr_world"
 
     def is_complete(self) -> bool:
         out = self.output_dir / "hmr_world"
-        return out.exists() and any(out.glob("*_smpl_world.npz"))
+        if not out.exists():
+            return False
+        # Only count new-scheme files. A directory full of legacy combined
+        # files shouldn't flip the stage green when the new code would
+        # rebuild them all.
+        return any(
+            _OUTPUT_SEPARATOR in p.stem for p in out.glob("*_smpl_world.npz")
+        )
 
     def run(self) -> None:
         from src.schemas.shots import ShotsManifest
@@ -84,6 +143,7 @@ class HmrWorldStage(BaseStage):
         track_dir = self.output_dir / "tracks"
         out_dir = self.output_dir / "hmr_world"
         out_dir.mkdir(parents=True, exist_ok=True)
+        _wipe_legacy_outputs(out_dir)
 
         # Load every shot's camera_track separately. Each player's
         # animation is solved against the camera track of the shot they
@@ -154,23 +214,39 @@ class HmrWorldStage(BaseStage):
 
         if not track_dir.exists():
             return
-        groups, group_shot = self._build_player_groups()
+        groups = self._build_player_groups()
 
-        # Sort players for stable ordering across runs (deterministic
-        # resume: the same partial order each time means the operator
-        # can predict which players come next).
+        shot_filter = getattr(self, "shot_filter", None)
+        player_filter = getattr(self, "player_filter", None)
+        if shot_filter is not None:
+            groups = {
+                k: v for k, v in groups.items() if k[0] == shot_filter
+            }
+        if player_filter is not None:
+            groups = {
+                k: v for k, v in groups.items() if k[1] == player_filter
+            }
+
+        # Sort by (shot_id, player_id) for stable ordering across runs
+        # (deterministic resume: the same partial order each time means
+        # the operator can predict which players come next).
         ordered = sorted(groups.items(), key=lambda kv: kv[0])
         total = len(ordered)
         cached = sum(
-            1 for pid, _ in ordered
-            if (out_dir / f"{pid}_smpl_world.npz").exists()
+            1 for (sid, pid), _ in ordered
+            if (out_dir / f"{_output_key(sid, pid)}_smpl_world.npz").exists()
         )
         to_process = total - cached
         if total == 0:
-            print("[hmr_world] no tracks to process")
+            filter_note = ""
+            if shot_filter or player_filter:
+                filter_note = (
+                    f" matching shot={shot_filter!r} player={player_filter!r}"
+                )
+            print(f"[hmr_world] no tracks to process{filter_note}")
             return
         print(
-            f"[hmr_world] {total} player(s): "
+            f"[hmr_world] {total} (shot, player) group(s): "
             f"{cached} cached on disk, {to_process} to process"
         )
 
@@ -190,10 +266,9 @@ class HmrWorldStage(BaseStage):
 
         run_start = time.time()
         elapsed_per_player: list[float] = []
-        for i, (player_id, frames) in enumerate(ordered, start=1):
+        for i, ((shot_id_for_pid, player_id), frames) in enumerate(ordered, start=1):
             frames = sorted(set(frames), key=lambda x: x[0])
             t0 = time.time()
-            shot_id_for_pid = group_shot[player_id]
             shot_key = (
                 shot_id_for_pid if shot_id_for_pid in camera_tracks_by_shot else ""
             )
@@ -217,25 +292,26 @@ class HmrWorldStage(BaseStage):
                 lean_correction_deg=lean_correction_deg,
                 estimator=estimator,
             )
+            label = _output_key(shot_id_for_pid, player_id)
             dt = time.time() - t0
             if status == "ran":
                 elapsed_per_player.append(dt)
                 avg = sum(elapsed_per_player) / len(elapsed_per_player)
                 remaining = sum(
-                    1 for pid, _ in ordered[i:]
-                    if not (out_dir / f"{pid}_smpl_world.npz").exists()
+                    1 for (sid2, pid2), _ in ordered[i:]
+                    if not (out_dir / f"{_output_key(sid2, pid2)}_smpl_world.npz").exists()
                 )
                 eta = avg * remaining
                 print(
-                    f"[hmr_world] ({i}/{total}) {player_id} done in "
+                    f"[hmr_world] ({i}/{total}) {label} done in "
                     f"{_fmt_duration(dt)}  "
                     f"(avg {_fmt_duration(avg)}/player, ~{_fmt_duration(eta)} remaining)"
                 )
             elif status == "cached":
-                print(f"[hmr_world] ({i}/{total}) {player_id} cached, skipping")
+                print(f"[hmr_world] ({i}/{total}) {label} cached, skipping")
             elif status == "too_short":
                 print(
-                    f"[hmr_world] ({i}/{total}) {player_id} skipped "
+                    f"[hmr_world] ({i}/{total}) {label} skipped "
                     f"({len(frames)} < min_track_frames={min_track_frames})"
                 )
 
@@ -245,25 +321,22 @@ class HmrWorldStage(BaseStage):
 
     def _build_player_groups(
         self,
-    ) -> tuple[
-        dict[str, list[tuple[int, tuple[int, int, int, int]]]],
-        dict[str, str],
-    ]:
+    ) -> dict[tuple[str, str], list[tuple[int, tuple[int, int, int, int]]]]:
         """Walk every {shot_id}_tracks.json and group track frames by
-        player_id. Unannotated tracks (no player_id, no player_name) get
-        a shot-prefixed pid (``"{shot_id}_T{track_id}"``) so collisions
-        between shots can't merge two physically-different players into
-        one.
+        ``(shot_id, player_id)`` — never combining across shots. The
+        same ``player_id`` appearing in two shots produces two separate
+        groups (and therefore two separate output files); a later
+        convergence stage can choose how to fuse them if needed.
 
-        Returns ``(groups, group_shot)`` where:
-          - ``groups[pid]`` = list of ``(frame, bbox)`` tuples
-          - ``group_shot[pid]`` = the shot_id that pid was detected in
+        Unannotated tracks (no player_id, no player_name) get a shot-
+        prefixed pid (``"{shot_id}_T{track_id}"``) so different physical
+        players never collapse into one group when the operator hasn't
+        named them yet.
         """
-        groups: dict[str, list[tuple[int, tuple[int, int, int, int]]]] = {}
-        group_shot: dict[str, str] = {}
+        groups: dict[tuple[str, str], list[tuple[int, tuple[int, int, int, int]]]] = {}
         track_dir = self.output_dir / "tracks"
         if not track_dir.exists():
-            return groups, group_shot
+            return groups
         for tracks_path in sorted(track_dir.glob("*_tracks.json")):
             try:
                 tr = TracksResult.load(tracks_path)
@@ -283,14 +356,14 @@ class HmrWorldStage(BaseStage):
                 )
                 if pid is None:
                     continue
-                if pid not in groups:
-                    groups[pid] = []
-                    group_shot[pid] = tr.shot_id
-                groups[pid].extend(
+                key = (tr.shot_id, pid)
+                if key not in groups:
+                    groups[key] = []
+                groups[key].extend(
                     (int(f.frame), tuple(int(x) for x in f.bbox))
                     for f in track.frames
                 )
-        return groups, group_shot
+        return groups
 
     def _process_player(
         self,
@@ -322,18 +395,19 @@ class HmrWorldStage(BaseStage):
         if len(track_frames) < min_track_frames:
             return "too_short"
 
-        # Per-player resume: if the .npz is already on disk, skip GVHMR
-        # for this player. CPU GVHMR is ~5 min/player, so a kill-and-
-        # resume across 20+ players otherwise repeats hours of work. The
-        # dashboard's Re-run Stage button still wipes the directory before
-        # invoking, so an explicit re-run from the UI is unaffected.
-        out_path = out_dir / f"{player_id}_smpl_world.npz"
+        out_key = _output_key(shot_id, player_id)
+        # Per-(shot, player) resume: if the .npz is already on disk, skip
+        # GVHMR. CPU GVHMR is ~5 min/player, so a kill-and-resume across
+        # 20+ players otherwise repeats hours of work. The dashboard's
+        # Re-run Stage button still wipes the directory before invoking,
+        # so an explicit re-run from the UI is unaffected.
+        out_path = out_dir / f"{out_key}_smpl_world.npz"
         if out_path.exists():
             return "cached"
 
         # Announce up front — this player is going to take minutes on CPU.
         print(
-            f"[hmr_world] {player_id} ({shot_id}) running — {len(track_frames)} frames…",
+            f"[hmr_world] {out_key} running — {len(track_frames)} frames…",
             flush=True,
         )
 
@@ -341,12 +415,16 @@ class HmrWorldStage(BaseStage):
         from src.utils.gvhmr_estimator import run_on_track
 
         shots = self.output_dir / "shots"
-        video_candidates = sorted(shots.glob("*.mp4"))
-        if not video_candidates:
+        # Always feed GVHMR the *correct* shot's clip. Globbing for
+        # ``*.mp4`` and taking the first hit silently used the wrong
+        # video in multi-shot runs (the same legacy bug that meant
+        # players from origi02 were fitted against origi01 footage).
+        video_path = shots / f"{shot_id}.mp4"
+        if not video_path.exists():
             raise RuntimeError(
-                f"no shot video found in {shots} — run prepare_shots first"
+                f"hmr_world: shot clip not found at {video_path} — run "
+                "prepare_shots for this shot first"
             )
-        video_path = video_candidates[0]
 
         hmr_out = run_on_track(
             track_frames=track_frames,
@@ -524,11 +602,12 @@ class HmrWorldStage(BaseStage):
             confidence=confidence.astype(np.float32),
             shot_id=shot_id,
         )
-        track.save(out_dir / f"{player_id}_smpl_world.npz")
+        track.save(out_dir / f"{out_key}_smpl_world.npz")
 
         # Side-output: COCO-17 keypoints for the dashboard 2D-overlay panel.
-        # Same JSON schema the legacy pose_2d stage emitted, so the existing
-        # renderer in src/web/static/index.html can consume it unchanged.
+        # Same JSON schema the legacy pose_2d stage emitted; the renderer
+        # in src/web/static/index.html consumes it via the per-shot
+        # /hmr_world/kp2d_* endpoints.
         kp2d_payload = {
             "player_id": str(player_id),
             "shot_id": shot_id,
@@ -537,7 +616,7 @@ class HmrWorldStage(BaseStage):
                 for i, fi in enumerate(frame_indices)
             ],
         }
-        (out_dir / f"{player_id}_kp2d.json").write_text(json.dumps(kp2d_payload))
+        (out_dir / f"{out_key}_kp2d.json").write_text(json.dumps(kp2d_payload))
         return "ran"
 
 

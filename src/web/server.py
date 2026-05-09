@@ -84,6 +84,7 @@ STAGE_ORDER: list[str] = [
     "camera",
     "hmr_world",
     "ball",
+    "refined_poses",
     "export",
 ]
 
@@ -158,12 +159,35 @@ def _hmr_world_complete(output_dir: Path) -> bool:
     return expected.issubset(new_scheme_files)
 
 
+def _refined_poses_complete(output_dir: Path) -> bool:
+    """Green only when every player_id discoverable in
+    ``hmr_world/{shot}__{pid}_smpl_world.npz`` has a matching
+    ``refined_poses/{pid}_refined.npz``. Mirrors
+    ``RefinedPosesStage.is_complete`` so the dashboard's stage badge
+    agrees with the runner's cache decisions."""
+    hmr = output_dir / "hmr_world"
+    refined = output_dir / "refined_poses"
+    if not hmr.exists():
+        return True
+    expected: set[str] = set()
+    for p in hmr.glob("*_smpl_world.npz"):
+        stem = p.stem.removesuffix("_smpl_world")
+        if "__" in stem:
+            expected.add(stem.split("__", 1)[1])
+        else:
+            expected.add(stem)
+    if not expected:
+        return True
+    return all((refined / f"{pid}_refined.npz").exists() for pid in expected)
+
+
 _STAGE_COMPLETE = {
     "prepare_shots": lambda d: (d / "shots" / "shots_manifest.json").exists(),
     "tracking": lambda d: any((d / "tracks").glob("*_tracks.json")),
     "camera": _camera_complete,
     "hmr_world": _hmr_world_complete,
     "ball": lambda d: (d / "ball" / "ball_track.json").exists(),
+    "refined_poses": _refined_poses_complete,
     "export": lambda d: (d / "export" / "gltf" / "scene.glb").exists(),
 }
 
@@ -177,6 +201,7 @@ _STAGE_ARTIFACTS: dict[str, list[str]] = {
     "camera": ["camera/camera_track.json", "camera/debug"],
     "hmr_world": ["hmr_world"],
     "ball": ["ball"],
+    "refined_poses": ["refined_poses"],
     "export": ["export"],
 }
 
@@ -1500,6 +1525,144 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Failed to load hmr_world: {exc}")
         return payload
+
+    # ------------------------------------------------------------------
+    # Refined poses (stage 6 — cross-shot fusion of HMR World output)
+    # ------------------------------------------------------------------
+
+    def _refined_pose_path(player_id: str) -> Path:
+        if not _PID_RE.fullmatch(player_id):
+            raise HTTPException(status_code=400, detail="Invalid player_id")
+        rp_dir = (output_dir / "refined_poses").resolve()
+        path = (rp_dir / f"{player_id}_refined.npz").resolve()
+        if not path.is_relative_to(rp_dir):
+            raise HTTPException(status_code=400, detail="Invalid path")
+        return path
+
+    def _refined_diag_path(player_id: str) -> Path:
+        if not _PID_RE.fullmatch(player_id):
+            raise HTTPException(status_code=400, detail="Invalid player_id")
+        rp_dir = (output_dir / "refined_poses").resolve()
+        path = (rp_dir / f"{player_id}_diagnostics.json").resolve()
+        if not path.is_relative_to(rp_dir):
+            raise HTTPException(status_code=400, detail="Invalid path")
+        return path
+
+    @app.get("/refined_poses/players")
+    def list_refined_players():
+        """List players with a fused track on the reference timeline.
+
+        Each row is ``{player_id, player_name, contributing_shots,
+        n_frames, mean_confidence}``. The ``player_name`` falls back
+        to the operator-supplied name from any track that named the id.
+        """
+        rp_dir = output_dir / "refined_poses"
+        if not rp_dir.exists():
+            return {"players": []}
+        names = _player_name_index()
+        rows: list[dict] = []
+        for path in sorted(rp_dir.glob("*_refined.npz")):
+            pid = path.stem.removesuffix("_refined")
+            try:
+                z = np.load(path, allow_pickle=False)
+                contributing = (
+                    [str(s) for s in z["contributing_shots"]]
+                    if "contributing_shots" in z.files
+                    else []
+                )
+                conf = z["confidence"] if "confidence" in z.files else None
+                n_frames = int(z["frames"].shape[0]) if "frames" in z.files else 0
+                mean_conf = float(conf.mean()) if conf is not None and conf.size else 0.0
+                view_count = (
+                    z["view_count"].astype(int).tolist()
+                    if "view_count" in z.files
+                    else []
+                )
+            except Exception:
+                contributing = []
+                n_frames = 0
+                mean_conf = 0.0
+                view_count = []
+            single_view_frames = sum(1 for v in view_count if v <= 1)
+            multi_view_frames = sum(1 for v in view_count if v > 1)
+            rows.append({
+                "player_id": pid,
+                "player_name": names.get(("", pid), ""),
+                "contributing_shots": contributing,
+                "n_frames": n_frames,
+                "mean_confidence": mean_conf,
+                "single_view_frames": single_view_frames,
+                "multi_view_frames": multi_view_frames,
+            })
+        return {"players": rows}
+
+    @app.get("/refined_poses/preview")
+    def get_refined_preview(player_id: str, include_pose: int = 0):
+        """Per-player time-series on the reference timeline.
+
+        Returns ``{player_id, frames, root_t, confidence, view_count,
+        contributing_shots}``. ``include_pose=1`` adds ``thetas``,
+        ``root_R``, ``betas`` (matches /hmr_world/preview's contract).
+        """
+        path = _refined_pose_path(player_id)
+        if not path.exists():
+            raise HTTPException(
+                status_code=404, detail=f"refined track not found: {player_id}",
+            )
+        try:
+            z = np.load(path, allow_pickle=False)
+            payload = {
+                "player_id": player_id,
+                "frames": z["frames"].tolist(),
+                "root_t": z["root_t"].tolist(),
+                "confidence": z["confidence"].tolist(),
+                "view_count": z["view_count"].astype(int).tolist(),
+                "contributing_shots": [str(s) for s in z["contributing_shots"]],
+            }
+            if include_pose:
+                payload["thetas"] = z["thetas"].tolist()
+                payload["root_R"] = z["root_R"].tolist()
+                payload["betas"] = z["betas"].tolist()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to load refined track: {exc}",
+            )
+        return payload
+
+    @app.get("/refined_poses/diagnostics")
+    def get_refined_diagnostics(player_id: str):
+        """Per-player fusion diagnostics: per-frame disagreement, dropped
+        views, low-coverage / high-disagreement flags, plus a summary."""
+        path = _refined_diag_path(player_id)
+        if not path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"refined diagnostics not found: {player_id}",
+            )
+        try:
+            return json.loads(path.read_text())
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to load diagnostics: {exc}",
+            )
+
+    @app.get("/refined_poses/summary")
+    def get_refined_summary():
+        """Pipeline-level summary written by the refined_poses stage.
+
+        Returns the contents of ``refined_poses_summary.json`` (or {} if
+        the stage hasn't run yet). The dashboard's status panel reads
+        this to render the per-pipeline counters line.
+        """
+        path = output_dir / "refined_poses" / "refined_poses_summary.json"
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text())
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to load summary: {exc}",
+            )
 
     @app.get("/ball/preview")
     def get_ball_preview(shot: str | None = None):

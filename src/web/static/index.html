@@ -296,6 +296,7 @@ const STAGE_DEPS = {
   camera:        ["prepare_shots"],
   hmr_world:     ["tracking", "camera"],
   ball:          ["camera"],
+  refined_poses: ["hmr_world"],
   export:        ["camera"],
 };
 
@@ -591,6 +592,9 @@ async function loadOutput(stageName) {
     case "ball":
       await renderBall(panel);
       break;
+    case "refined_poses":
+      await renderRefinedPoses(panel);
+      break;
     case "export":
       await renderExport(panel);
       break;
@@ -657,6 +661,7 @@ function humanizeStageName(name) {
     camera:        "Camera Tracking",
     hmr_world:     "HMR World",
     ball:          "Ball",
+    refined_poses: "Refined Poses",
     export:        "Export",
   };
   return map[name] || name;
@@ -3673,6 +3678,161 @@ async function renderBall(panel) {
   `;
   body.appendChild(summary);
   panel.appendChild(wrap);
+}
+
+async function renderRefinedPoses(panel) {
+  // ── Controls bar: run button + status ──
+  const controls = document.createElement("div");
+  controls.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 14px;background:#1a1d27;border:1px solid #2d3148;border-radius:8px;font-size:13px;color:#cbd5e1;";
+  const note = document.createElement("span");
+  note.textContent = "Cross-shot fusion of HMR World tracks on the shared reference timeline.";
+  note.style.color = "#94a3b8";
+  const runBtn = document.createElement("button");
+  runBtn.className = "btn btn-primary";
+  runBtn.style.cssText = "font-size:12px;margin-left:auto;";
+  runBtn.textContent = "Run refined_poses";
+  runBtn.title = "Re-run cross-shot fusion for every player.";
+  const status = document.createElement("span");
+  status.style.cssText = "color:#94a3b8;font-size:12px;";
+  controls.append(note, runBtn, status);
+  panel.appendChild(controls);
+
+  const body = document.createElement("div");
+  body.style.cssText = "display:flex;flex-direction:column;gap:20px;margin-top:14px;";
+  panel.appendChild(body);
+
+  runBtn.addEventListener("click", async () => {
+    runBtn.disabled = true;
+    status.style.color = "#94a3b8";
+    status.textContent = "Dispatching refined_poses…";
+    try {
+      const res = await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stages: "refined_poses" }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        status.style.color = "#f87171";
+        status.textContent = `Dispatch failed: ${payload.detail || res.statusText}`;
+        runBtn.disabled = false;
+        return;
+      }
+      status.style.color = "#4ade80";
+      status.textContent = `Job ${payload.job_id} running — log panel above.`;
+      attachToJob(payload.job_id, "refined_poses", async () => {
+        runBtn.disabled = false;
+        await loadStages();
+        await renderRefinedShotBody(body);
+      });
+    } catch (err) {
+      status.style.color = "#f87171";
+      status.textContent = `Failed to dispatch: ${err.message || err}`;
+      runBtn.disabled = false;
+    }
+  });
+
+  await renderRefinedShotBody(body);
+}
+
+async function renderRefinedShotBody(panel) {
+  panel.innerHTML = "";
+
+  const [playersResp, summaryResp] = await Promise.all([
+    fetchJsonOrNull("/refined_poses/players"),
+    fetchJsonOrNull("/refined_poses/summary"),
+  ]);
+  const players = (playersResp && playersResp.players) || [];
+
+  if (players.length === 0) {
+    emptyNote(
+      panel,
+      "No refined tracks yet — run hmr_world first, then click Run refined_poses above.",
+    );
+    return;
+  }
+
+  // ── Summary card (pipeline-wide counters) ──
+  const summary = summaryResp && Object.keys(summaryResp).length ? summaryResp : null;
+  if (summary) {
+    const { wrap: sWrap, body: sBody } = makePanel("Refined poses — pipeline summary");
+    sBody.style.padding = "14px 16px";
+    const lines = [
+      `<div><strong>${summary.players_refined}</strong> players refined ` +
+        `(<strong>${summary.multi_shot_players}</strong> multi-shot, ` +
+        `<strong>${summary.single_shot_players}</strong> single-shot)</div>`,
+      `<div>Fused frames: <strong>${summary.total_fused_frames}</strong> ` +
+        `(<strong>${summary.single_view_frames}</strong> single-view, ` +
+        `<strong>${summary.high_disagreement_frames}</strong> flagged)</div>`,
+    ];
+    if ((summary.shots_missing_sync || []).length > 0) {
+      lines.push(
+        `<div style="color:#fbbf24;">⚠ Shots missing from sync_map: ` +
+          `${summary.shots_missing_sync.join(", ")}</div>`,
+      );
+    }
+    if ((summary.beta_disagreement_warnings || []).length > 0) {
+      lines.push(
+        `<div style="color:#fbbf24;">⚠ Beta disagreement: ` +
+          `${summary.beta_disagreement_warnings.join(", ")}</div>`,
+      );
+    }
+    const div = document.createElement("div");
+    div.style.cssText = "font-size:13px;color:#cbd5e1;line-height:1.7;";
+    div.innerHTML = lines.join("");
+    sBody.appendChild(div);
+    panel.appendChild(sWrap);
+  }
+
+  // ── Per-player table ──
+  const playerList = players.map((p, i) => ({ ...p, colour: playerColour(i) }));
+  const { wrap: tWrap, body: tBody } = makePanel(
+    `Refined poses — ${playerList.length} player${playerList.length === 1 ? "" : "s"}`,
+  );
+  const { t, tbody } = makeTable([
+    "Player", "Frames", "Multi-view", "Single-view", "Contributing shots", "Mean confidence",
+  ]);
+  for (const p of playerList) {
+    const dotHtml = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${p.colour};margin-right:6px;vertical-align:middle;"></span>`;
+    const labelText = p.player_name ? `${p.player_name} (${p.player_id})` : p.player_id;
+    const meanCls = p.mean_confidence > 0.7 ? "cell-green"
+      : p.mean_confidence > 0.4 ? "cell-amber" : "cell-red";
+    addRow(tbody, [
+      { html: `${dotHtml}${labelText}` },
+      p.n_frames,
+      p.multi_view_frames,
+      p.single_view_frames,
+      (p.contributing_shots || []).join(", ") || "—",
+      { html: `<span class="${meanCls}">${fmt(p.mean_confidence, 3)}</span>` },
+    ]);
+  }
+  tBody.appendChild(t);
+  panel.appendChild(tWrap);
+
+  // ── Top-down trajectories (re-uses HMR World's panel) ──
+  // Each player's preview returns the same shape as /hmr_world/preview
+  // (frames + root_t + confidence) — buildTrajectoryPanel ignores any
+  // other fields, so the same renderer works on the fused tracks.
+  const previews = await Promise.all(
+    playerList.map((p) =>
+      fetchJsonOrNull(
+        `/refined_poses/preview?player_id=${encodeURIComponent(p.player_id)}`,
+      ).then((d) => ({ ...p, data: d })),
+    ),
+  );
+  const withRoot = previews.filter(
+    (x) => x.data && Array.isArray(x.data.root_t) && x.data.root_t.length > 0,
+  );
+  if (withRoot.length > 0) {
+    // Pick a context shot for the side-by-side video — first shot any
+    // player contributed to. (Pipeline uses one video per shot; the
+    // refined track itself is on the reference timeline.)
+    const firstShot =
+      withRoot
+        .map((x) => (x.data.contributing_shots || [])[0])
+        .find((s) => !!s) || null;
+    panel.appendChild(buildTrajectoryPanel(withRoot, firstShot));
+  }
 }
 
 async function renderExport(panel) {

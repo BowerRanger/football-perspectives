@@ -780,3 +780,130 @@ def test_run_shot_endpoint_dispatches_filtered_job(client, monkeypatch):
         time.sleep(0.05)
     assert captured.get("stages") == "camera"
     assert captured.get("shot_filter") == "alpha"
+
+
+def _stage_status(stages_response: list[dict], name: str) -> dict | None:
+    for s in stages_response:
+        if s["name"] == name:
+            return s
+    return None
+
+
+@pytest.mark.unit
+def test_refined_poses_appears_in_stages_list(client) -> None:
+    """``GET /api/stages`` includes refined_poses between ball and export
+    so the dashboard sidebar can render it as a first-class stage."""
+    c, _ = client
+    r = c.get("/api/stages")
+    assert r.status_code == 200
+    stages = r.json()
+    names = [s["name"] for s in stages]
+    assert "refined_poses" in names
+    assert names.index("refined_poses") == names.index("ball") + 1
+    assert names.index("export") == names.index("refined_poses") + 1
+
+
+@pytest.mark.integration
+def test_refined_poses_players_endpoint_lists_refined_tracks(client) -> None:
+    """``GET /refined_poses/players`` returns one row per fused track
+    NPZ on disk, including contributing-shot list and view-count
+    breakdown derived from the saved arrays.
+    """
+    import numpy as np
+
+    from src.schemas.refined_pose import RefinedPose
+
+    c, tmp = client
+    rp_dir = tmp / "refined_poses"
+    rp_dir.mkdir()
+    RefinedPose(
+        player_id="P001",
+        frames=np.arange(5, dtype=np.int64),
+        betas=np.zeros(10),
+        thetas=np.zeros((5, 24, 3)),
+        root_R=np.tile(np.eye(3), (5, 1, 1)),
+        root_t=np.zeros((5, 3)),
+        confidence=np.full(5, 0.8),
+        view_count=np.array([2, 2, 1, 2, 2], dtype=np.int32),
+        contributing_shots=("origi01", "origi02"),
+    ).save(rp_dir / "P001_refined.npz")
+
+    r = c.get("/refined_poses/players")
+    assert r.status_code == 200
+    rows = r.json()["players"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["player_id"] == "P001"
+    assert row["contributing_shots"] == ["origi01", "origi02"]
+    assert row["n_frames"] == 5
+    assert row["multi_view_frames"] == 4
+    assert row["single_view_frames"] == 1
+    assert row["mean_confidence"] == pytest.approx(0.8, abs=1e-9)
+
+
+@pytest.mark.integration
+def test_refined_poses_preview_endpoint_returns_track(client) -> None:
+    """``GET /refined_poses/preview?player_id=P001`` returns the fused
+    track on the reference timeline, with view_count and contributing
+    shots so the dashboard can flag low-coverage frames."""
+    import numpy as np
+
+    from src.schemas.refined_pose import RefinedPose
+
+    c, tmp = client
+    rp_dir = tmp / "refined_poses"
+    rp_dir.mkdir()
+    RefinedPose(
+        player_id="P001",
+        frames=np.array([0, 1, 2], dtype=np.int64),
+        betas=np.zeros(10),
+        thetas=np.zeros((3, 24, 3)),
+        root_R=np.tile(np.eye(3), (3, 1, 1)),
+        root_t=np.array([[1.0, 2.0, 0.0], [1.5, 2.0, 0.0], [2.0, 2.0, 0.0]]),
+        confidence=np.array([0.9, 0.7, 0.5]),
+        view_count=np.array([2, 2, 1], dtype=np.int32),
+        contributing_shots=("A", "B"),
+    ).save(rp_dir / "P001_refined.npz")
+
+    r = c.get("/refined_poses/preview?player_id=P001")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["player_id"] == "P001"
+    assert body["frames"] == [0, 1, 2]
+    assert body["view_count"] == [2, 2, 1]
+    assert body["contributing_shots"] == ["A", "B"]
+    assert body["root_t"][0] == [1.0, 2.0, 0.0]
+
+
+@pytest.mark.integration
+def test_refined_poses_preview_returns_404_when_missing(client) -> None:
+    c, _ = client
+    r = c.get("/refined_poses/preview?player_id=NEVER")
+    assert r.status_code == 404
+
+
+@pytest.mark.integration
+def test_refined_poses_summary_endpoint(client) -> None:
+    """``GET /refined_poses/summary`` returns the JSON written by the
+    stage; an empty dict when the stage hasn't run."""
+    c, tmp = client
+    r = c.get("/refined_poses/summary")
+    assert r.status_code == 200
+    assert r.json() == {}
+
+    rp_dir = tmp / "refined_poses"
+    rp_dir.mkdir()
+    summary = {
+        "players_refined": 3,
+        "single_shot_players": 1,
+        "multi_shot_players": 2,
+        "total_fused_frames": 100,
+        "single_view_frames": 20,
+        "high_disagreement_frames": 4,
+        "shots_missing_sync": [],
+        "beta_disagreement_warnings": [],
+    }
+    (rp_dir / "refined_poses_summary.json").write_text(json.dumps(summary))
+    r = c.get("/refined_poses/summary")
+    assert r.status_code == 200
+    assert r.json()["players_refined"] == 3

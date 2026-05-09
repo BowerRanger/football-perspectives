@@ -40,6 +40,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         description="Export FBX bundle for UE5 from broadcast-mono outputs"
     )
     parser.add_argument("--output-dir", required=True, help="Pipeline output directory")
+    parser.add_argument(
+        "--apose-only",
+        action="store_true",
+        help=(
+            "Skip per-clip player/ball/camera export. Emit only "
+            "SMPL_APose.fbx — a single-frame SMPL skeleton in A-pose "
+            "(shoulders rotated 45° down) for use as the IK Retargeter "
+            "retarget pose in UE5."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -225,11 +235,80 @@ def main(argv: list[str]) -> int:
             f"Run scripts/extract_smpl_neutral.py to enable.\n"
         )
 
+    # --- A-pose only mode -------------------------------------------------
+    # Emit a single-frame SMPL_APose.fbx for use as the IK Retargeter
+    # retarget pose in UE5. Shoulders rotated 45° down to match Manny's
+    # A-pose bind. No per-clip data; bypasses the player/ball/camera
+    # branches.
+    if args.apose_only:
+        _reset_scene()
+        _set_unit_scale_metres()
+        scene = bpy.context.scene
+        scene.frame_start = 0
+        scene.frame_end = 0
+        scene.render.fps = int(round(fps))
+        arm = _build_smpl_armature("SMPL_APose")
+        arm.rotation_mode = "QUATERNION"
+        if smpl_data is not None:
+            mesh_obj = _add_smpl_skinned_mesh(arm, "SMPL_APose", smpl_data)
+        else:
+            mesh_obj = _add_placeholder_skinned_mesh(arm, "SMPL_APose")
+
+        # Armature object: rotate canonical y-up rest skeleton into pitch
+        # z-up world (90° about +X). No translation.
+        arm.location = (0.0, 0.0, 0.0)
+        # Quaternion for 90° about +X: w=cos(45°), x=sin(45°).
+        from math import cos, sin, pi
+        arm.rotation_quaternion = Quaternion(
+            (float(cos(pi / 4)), float(sin(pi / 4)), 0.0, 0.0)
+        )
+        arm.keyframe_insert(data_path="location", frame=0)
+        arm.keyframe_insert(data_path="rotation_quaternion", frame=0)
+
+        # Per-bone rotations: identity everywhere except the shoulders.
+        # In SMPL canonical (y-up), the arm at rest points along +X (left
+        # arm) or -X (right arm). Rotating around the canonical +Z axis
+        # tilts the arm in the X-Y plane (i.e. up/down).
+        #   l_shoulder: -45° around +Z brings the arm down and in.
+        #   r_shoulder: +45° around +Z mirrors that.
+        import numpy as _np
+        APOSE_THETAS = _np.zeros((24, 3), dtype=_np.float64)
+        APOSE_THETAS[SMPL_JOINT_NAMES.index("l_shoulder")] = (0.0, 0.0, -pi / 4)
+        APOSE_THETAS[SMPL_JOINT_NAMES.index("r_shoulder")] = (0.0, 0.0, +pi / 4)
+        # Skip pelvis (j=0) — its world rotation is on the armature object.
+        pelvis_pb = arm.pose.bones[SMPL_JOINT_NAMES[0]]
+        pelvis_pb.rotation_quaternion = Quaternion((1.0, 0.0, 0.0, 0.0))
+        pelvis_pb.keyframe_insert(data_path="rotation_quaternion", frame=0)
+        for j in range(1, len(SMPL_JOINT_NAMES)):
+            pb = arm.pose.bones[SMPL_JOINT_NAMES[j]]
+            q = axis_angle_to_quaternion(APOSE_THETAS[j])
+            pb.rotation_quaternion = Quaternion(
+                (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+            )
+            pb.keyframe_insert(data_path="rotation_quaternion", frame=0)
+
+        bpy.ops.object.select_all(action="DESELECT")
+        arm.select_set(True)
+        mesh_obj.select_set(True)
+        bpy.context.view_layer.objects.active = arm
+        _export_fbx(fbx_dir / "SMPL_APose.fbx")
+        sys.stdout.write(
+            f"[apose] wrote {fbx_dir / 'SMPL_APose.fbx'}\n"
+        )
+        return 0
+
     if hmr_dir.exists():
         for npz_path in sorted(hmr_dir.glob("*_smpl_world.npz")):
             data = np.load(npz_path)
             player_id = str(data["player_id"])
+            shot_id = str(data["shot_id"]) if "shot_id" in data.files else ""
             display_name = display_name_for(player_id, name_mapping)
+            # FBX filenames must be unique per (shot, player) — two shots
+            # with the same player_id (e.g. after Merge by Name) would
+            # otherwise overwrite each other on disk.
+            fbx_name = (
+                f"{shot_id}__{display_name}" if shot_id else display_name
+            )
             frames = data["frames"]
             thetas = data["thetas"]      # (N, 24, 3)
             root_R = data["root_R"]      # (N, 3, 3)
@@ -271,10 +350,17 @@ def main(argv: list[str]) -> int:
                 arm.keyframe_insert(data_path="location", frame=int(fi))
                 arm.keyframe_insert(data_path="rotation_quaternion", frame=int(fi))
 
-                # Per-bone parent-relative rotations (in canonical y-up,
-                # which is the bone's local rest frame).
-                for j, jname in enumerate(SMPL_JOINT_NAMES):
-                    pb = arm.pose.bones[jname]
+                # Per-bone parent-relative rotations. The pelvis (j=0)
+                # is intentionally skipped — its world rotation is
+                # already carried by the armature object's root_R, just
+                # like the web viewer's smplFK (viewer.html:smplFK
+                # explicitly ignores thetas[0]). Applying both produces
+                # a double-rotated, flipping pelvis.
+                pelvis_pb = arm.pose.bones[SMPL_JOINT_NAMES[0]]
+                pelvis_pb.rotation_quaternion = Quaternion((1.0, 0.0, 0.0, 0.0))
+                pelvis_pb.keyframe_insert(data_path="rotation_quaternion", frame=int(fi))
+                for j in range(1, len(SMPL_JOINT_NAMES)):
+                    pb = arm.pose.bones[SMPL_JOINT_NAMES[j]]
                     q = axis_angle_to_quaternion(thetas[i, j])
                     pb.rotation_quaternion = Quaternion(
                         (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
@@ -285,7 +371,7 @@ def main(argv: list[str]) -> int:
             arm.select_set(True)
             placeholder.select_set(True)
             bpy.context.view_layer.objects.active = arm
-            _export_fbx(fbx_dir / f"{display_name}.fbx")
+            _export_fbx(fbx_dir / f"{fbx_name}.fbx")
 
     # --- Ball FBX ----------------------------------------------------
 

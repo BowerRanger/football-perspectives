@@ -34,6 +34,94 @@ def test_resolve_from_refined_poses_includes_export_only() -> None:
     assert resolve_stages("all", "refined_poses") == ["refined_poses", "export"]
 
 
+@pytest.mark.integration
+def test_pipeline_refined_poses_end_to_end(tmp_path: Path) -> None:
+    """Two shots, one shared player. Stage HMR outputs directly, then run
+    refined_poses + export through run_pipeline. Asserts one fused NPZ per
+    player and that quality_report picks up the summary.
+    """
+    import json
+
+    import numpy as np
+
+    from src.pipeline.runner import run_pipeline
+    from src.schemas.refined_pose import RefinedPose
+    from src.schemas.shots import Shot, ShotsManifest
+    from src.schemas.smpl_world import SmplWorldTrack
+    from src.schemas.sync_map import Alignment, SyncMap
+
+    out = tmp_path
+    (out / "shots").mkdir()
+    (out / "hmr_world").mkdir()
+
+    ShotsManifest(
+        source_file="",
+        fps=30.0,
+        total_frames=20,
+        shots=[
+            Shot(id="A", start_frame=0, end_frame=9, start_time=0.0,
+                 end_time=0.3, clip_file="shots/A.mp4", speed_factor=1.0),
+            Shot(id="B", start_frame=0, end_frame=9, start_time=0.0,
+                 end_time=0.3, clip_file="shots/B.mp4", speed_factor=1.0),
+        ],
+    ).save(out / "shots" / "shots_manifest.json")
+    SyncMap(
+        reference_shot="A",
+        alignments=[
+            Alignment(shot_id="A", frame_offset=0),
+            Alignment(shot_id="B", frame_offset=0),
+        ],
+    ).save(out / "shots" / "sync_map.json")
+
+    n = 10
+    frames = np.arange(n, dtype=np.int64)
+    base = np.column_stack([frames * 1.0, np.zeros(n), np.zeros(n)])
+    for sid in ("A", "B"):
+        SmplWorldTrack(
+            player_id="P001", frames=frames, betas=np.zeros(10),
+            thetas=np.zeros((n, 24, 3)),
+            root_R=np.tile(np.eye(3), (n, 1, 1)),
+            root_t=base.copy(),
+            confidence=np.ones(n), shot_id=sid,
+        ).save(out / "hmr_world" / f"{sid}__P001_smpl_world.npz")
+
+    config = {
+        "pitch": {"length_m": 105.0, "width_m": 68.0},
+        "ball": {},
+        "export": {"gltf_enabled": False, "fbx_enabled": False},
+        "refined_poses": {
+            "outlier_k_sigma": 3.0,
+            "min_contributing_views": 1,
+            "high_disagreement_pos_m": 0.5,
+            "high_disagreement_rot_rad": 0.5,
+            "savgol_window": 1,
+            "savgol_poly": 2,
+            "smooth_rotations": False,
+            "beta_aggregation": "weighted_mean",
+            "beta_disagreement_warn": 0.3,
+        },
+    }
+    run_pipeline(
+        output_dir=out,
+        stages="refined_poses,export",
+        from_stage=None,
+        config=config,
+    )
+    assert (out / "refined_poses" / "P001_refined.npz").exists()
+    refined = RefinedPose.load(out / "refined_poses" / "P001_refined.npz")
+    assert refined.contributing_shots == ("A", "B")
+    np.testing.assert_array_equal(refined.frames, frames)
+    np.testing.assert_allclose(refined.root_t, base)
+    summary = json.loads(
+        (out / "refined_poses" / "refined_poses_summary.json").read_text()
+    )
+    assert summary["players_refined"] == 1
+    assert summary["multi_shot_players"] == 1
+
+    report = json.loads((out / "quality_report.json").read_text())
+    assert report["refined_poses"]["players_refined"] == 1
+
+
 @pytest.mark.unit
 def test_resolve_subset():
     assert resolve_stages("camera,hmr_world", None) == ["camera", "hmr_world"]

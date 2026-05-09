@@ -5,7 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.utils.pose_fusion import so3_chordal_mean, so3_geodesic_distance
+from src.utils.pose_fusion import (
+    robust_translation_fuse,
+    so3_chordal_mean,
+    so3_geodesic_distance,
+)
 
 
 def _rotation_matrix_z(angle: float) -> np.ndarray:
@@ -67,3 +71,63 @@ def test_so3_geodesic_distance_symmetric() -> None:
     d12 = so3_geodesic_distance(R1, R2)
     d21 = so3_geodesic_distance(R2, R1)
     assert abs(d12 - d21) < 1e-12
+
+
+@pytest.mark.unit
+def test_robust_translation_fuse_two_views_passthrough() -> None:
+    positions = np.array([[1.0, 0.0, 0.0], [3.0, 0.0, 0.0]])
+    weights = np.array([1.0, 1.0])
+    fused, kept = robust_translation_fuse(positions, weights, k_sigma=3.0)
+    np.testing.assert_allclose(fused, [2.0, 0.0, 0.0])
+    assert kept.tolist() == [True, True]
+
+
+@pytest.mark.unit
+def test_robust_translation_fuse_drops_far_outlier() -> None:
+    positions = np.array(
+        [[1.0, 0.0, 0.0], [1.05, 0.0, 0.0], [11.0, 0.0, 0.0]]
+    )
+    weights = np.ones(3)
+    fused, kept = robust_translation_fuse(positions, weights, k_sigma=3.0)
+    assert kept.tolist() == [True, True, False]
+    np.testing.assert_allclose(fused, [1.025, 0.0, 0.0])
+
+
+@pytest.mark.unit
+def test_robust_translation_fuse_weighted_after_drop() -> None:
+    positions = np.array(
+        [[1.0, 0.0, 0.0], [3.0, 0.0, 0.0], [50.0, 0.0, 0.0]]
+    )
+    weights = np.array([1.0, 3.0, 1.0])
+    fused, kept = robust_translation_fuse(positions, weights, k_sigma=3.0)
+    assert kept.tolist() == [True, True, False]
+    np.testing.assert_allclose(fused, [2.5, 0.0, 0.0])
+
+
+@pytest.mark.unit
+def test_robust_translation_fuse_no_drops_when_clustered() -> None:
+    positions = np.array(
+        [[1.0, 0.0, 0.0], [1.05, 0.0, 0.0], [0.95, 0.0, 0.0]]
+    )
+    weights = np.ones(3)
+    fused, kept = robust_translation_fuse(positions, weights, k_sigma=3.0)
+    assert kept.tolist() == [True, True, True]
+    np.testing.assert_allclose(fused, [1.0, 0.0, 0.0])
+
+
+@pytest.mark.unit
+def test_robust_translation_fuse_zero_weight_view_excluded_from_mean() -> None:
+    positions = np.array([[1.0, 0.0, 0.0], [3.0, 0.0, 0.0]])
+    weights = np.array([1.0, 0.0])
+    fused, kept = robust_translation_fuse(positions, weights, k_sigma=3.0)
+    np.testing.assert_allclose(fused, [1.0, 0.0, 0.0])
+    assert kept.tolist() == [True, True]
+
+
+@pytest.mark.unit
+def test_robust_translation_fuse_zero_total_weight_returns_zero() -> None:
+    positions = np.array([[1.0, 0.0, 0.0], [3.0, 0.0, 0.0]])
+    weights = np.zeros(2)
+    fused, kept = robust_translation_fuse(positions, weights, k_sigma=3.0)
+    np.testing.assert_allclose(fused, [0.0, 0.0, 0.0])
+    assert kept.tolist() == [False, False]

@@ -113,3 +113,58 @@ def test_refined_poses_is_complete_after_run(tmp_path: Path) -> None:
 
     (output_dir / "refined_poses" / "P001_refined.npz").unlink()
     assert stage.is_complete() is False
+
+
+@pytest.mark.integration
+def test_refined_poses_two_shots_fuses_root_t(tmp_path: Path) -> None:
+    """Two shots, sync offset, both see player at the same wall-clock instant.
+
+    Each shot's local frame f corresponds to reference frame f - offset.
+    Shot A: offset 0,  local frames 0..9, root_t = [f, 0, 0]
+    Shot B: offset 5,  local frames 5..14, root_t = [(f-5)+0.2, 0, 0]
+                       i.e. on the reference timeline B sees ref_f = local_f - 5
+                       at root_t_x = ref_f + 0.2.
+    """
+    output_dir = tmp_path
+    (output_dir / "hmr_world").mkdir()
+    _write_sync_map(output_dir, ref="A", offsets={"A": 0, "B": 5})
+
+    a = _make_smpl_track(
+        player_id="P001", shot_id="A", n_frames=10, root_t_x_per_frame=1.0
+    )
+    a.save(output_dir / "hmr_world" / "A__P001_smpl_world.npz")
+
+    n_b = 10
+    b_local_frames = np.arange(5, 5 + n_b, dtype=np.int64)
+    b_root_t = np.column_stack(
+        [
+            (b_local_frames - 5) + 0.2,
+            np.zeros(n_b),
+            np.zeros(n_b),
+        ]
+    )
+    b = SmplWorldTrack(
+        player_id="P001",
+        frames=b_local_frames,
+        betas=np.zeros(10),
+        thetas=np.zeros((n_b, 24, 3)),
+        root_R=np.tile(np.eye(3), (n_b, 1, 1)),
+        root_t=b_root_t,
+        confidence=np.ones(n_b),
+        shot_id="B",
+    )
+    b.save(output_dir / "hmr_world" / "B__P001_smpl_world.npz")
+
+    stage = RefinedPosesStage(config=_default_config(), output_dir=output_dir)
+    stage.run()
+    refined = RefinedPose.load(output_dir / "refined_poses" / "P001_refined.npz")
+
+    # Reference timeline: A at ref 0..9, B at ref 0..9 (local 5..14 - offset 5).
+    np.testing.assert_array_equal(refined.frames, np.arange(0, 10))
+    # All ref frames have both A and B contributing.
+    # Mean of ref_f and (ref_f + 0.2) = ref_f + 0.1.
+    np.testing.assert_allclose(
+        refined.root_t[:, 0], np.arange(10) + 0.1, atol=1e-9
+    )
+    assert refined.view_count.tolist() == [2] * 10
+    assert set(refined.contributing_shots) == {"A", "B"}

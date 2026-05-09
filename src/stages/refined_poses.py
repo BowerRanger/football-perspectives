@@ -29,6 +29,7 @@ from src.schemas.refined_pose import (
 )
 from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.sync_map import SyncMap
+from src.utils.pose_fusion import so3_chordal_mean, so3_geodesic_distance
 
 logger = logging.getLogger(__name__)
 
@@ -149,46 +150,247 @@ class RefinedPosesStage(BaseStage):
         sync_map: SyncMap,
         cfg: dict,
     ) -> tuple[RefinedPose, RefinedPoseDiagnostics]:
-        """v1: single-shot passthrough only. Multi-shot path lands in Task 5."""
-        if len({sid for sid, _ in contribs}) != 1:
-            raise NotImplementedError(
-                "multi-shot fusion not yet wired (Task 5)"
+        # Project each contribution onto the reference timeline.
+        on_ref: list[tuple[str, SmplWorldTrack, np.ndarray]] = []
+        for shot_id, track in contribs:
+            offset = sync_map.offset_for(shot_id) if shot_id else 0
+            ref_frames = np.asarray(track.frames, dtype=np.int64) - offset
+            on_ref.append((shot_id, track, ref_frames))
+
+        union = np.unique(np.concatenate([rf for _, _, rf in on_ref]))
+        n = len(union)
+
+        fused_root_t = np.zeros((n, 3))
+        fused_root_R = np.tile(np.eye(3), (n, 1, 1))
+        fused_thetas = np.zeros((n, 24, 3))
+        fused_conf = np.zeros(n)
+        view_count = np.zeros(n, dtype=np.int32)
+
+        # Per-shot frame → row index lookup, for O(1) access at each ref frame.
+        lookups: list[tuple[str, SmplWorldTrack, dict[int, int]]] = [
+            (sid, tr, {int(f): i for i, f in enumerate(rf)})
+            for (sid, tr, rf) in on_ref
+        ]
+
+        diag_frames: list[FrameDiagnostic] = []
+
+        for i, ref in enumerate(union):
+            views: list[
+                tuple[str, np.ndarray, np.ndarray, np.ndarray, float]
+            ] = []
+            for sid, tr, idx in lookups:
+                local_i = idx.get(int(ref))
+                if local_i is None:
+                    continue
+                conf = float(tr.confidence[local_i])
+                if conf <= 0.0:
+                    continue
+                views.append(
+                    (
+                        sid,
+                        np.asarray(tr.root_t[local_i], dtype=np.float64),
+                        np.asarray(tr.root_R[local_i], dtype=np.float64),
+                        np.asarray(tr.thetas[local_i], dtype=np.float64),
+                        conf,
+                    )
+                )
+
+            if not views:
+                continue
+
+            sids = tuple(v[0] for v in views)
+            if len(views) == 1:
+                _, t, R, thetas, conf = views[0]
+                fused_root_t[i] = t
+                fused_root_R[i] = R
+                fused_thetas[i] = thetas
+                fused_conf[i] = conf
+                view_count[i] = 1
+                diag_frames.append(
+                    FrameDiagnostic(
+                        frame=int(ref),
+                        contributing_shots=sids,
+                        dropped_shots=(),
+                        pos_disagreement_m=0.0,
+                        rot_disagreement_rad=0.0,
+                        low_coverage=True,
+                        high_disagreement=False,
+                    )
+                )
+                continue
+
+            # Multi-view path (no outlier rejection yet — wired in Task 6).
+            kept = np.ones(len(views), dtype=bool)
+            kept_sids = tuple(v[0] for v in views)
+            dropped_sids: tuple[str, ...] = ()
+
+            weights = np.array([v[4] for v in views])
+            ts = np.stack([v[1] for v in views])
+            Rs = np.stack([v[2] for v in views])
+            thetass = np.stack([v[3] for v in views])
+
+            fused_t = (weights[:, None] * ts).sum(axis=0) / weights.sum()
+            fused_R = so3_chordal_mean(Rs, weights)
+
+            joint_R_per_view = np.stack(
+                [_axis_angle_to_so3_batch(thetass[v]) for v in range(len(views))]
             )
-        shot_id, track = contribs[0]
-        offset = sync_map.offset_for(shot_id) if shot_id else 0
-        ref_frames = np.asarray(track.frames, dtype=np.int64) - offset
-        n = len(ref_frames)
+            fused_joint_R = np.stack(
+                [
+                    so3_chordal_mean(joint_R_per_view[:, j], weights)
+                    for j in range(24)
+                ]
+            )
+            fused_theta = np.stack(
+                [_so3_to_axis_angle(fused_joint_R[j]) for j in range(24)]
+            )
+
+            fused_root_t[i] = fused_t
+            fused_root_R[i] = fused_R
+            fused_thetas[i] = fused_theta
+            fused_conf[i] = float(weights.sum())
+            view_count[i] = int(kept.sum())
+
+            pos_dis = (
+                float(np.max(np.linalg.norm(ts - fused_t, axis=1)))
+                if len(ts) > 0
+                else 0.0
+            )
+            rot_dis = (
+                float(
+                    max(
+                        so3_geodesic_distance(Rs[v], fused_R)
+                        for v in range(len(views))
+                    )
+                )
+                if len(views) > 0
+                else 0.0
+            )
+            min_views = int(cfg.get("min_contributing_views", 1))
+            diag_frames.append(
+                FrameDiagnostic(
+                    frame=int(ref),
+                    contributing_shots=kept_sids,
+                    dropped_shots=dropped_sids,
+                    pos_disagreement_m=pos_dis,
+                    rot_disagreement_rad=rot_dis,
+                    low_coverage=(int(kept.sum()) < min_views),
+                    high_disagreement=(
+                        pos_dis > float(cfg.get("high_disagreement_pos_m", 0.5))
+                        or rot_dis
+                        > float(cfg.get("high_disagreement_rot_rad", 0.5))
+                    ),
+                )
+            )
+
+        # Drop frames where all views had zero confidence (view_count stayed 0).
+        keep = view_count > 0
+        union = union[keep]
+        fused_root_t = fused_root_t[keep]
+        fused_root_R = fused_root_R[keep]
+        fused_thetas = fused_thetas[keep]
+        fused_conf = fused_conf[keep]
+        view_count = view_count[keep]
+
+        # Beta fusion: weighted mean across all contributing tracks.
+        beta_stack = np.stack([np.asarray(tr.betas) for _, tr in contribs])
+        beta_weights = np.array(
+            [float(np.asarray(tr.confidence).mean()) for _, tr in contribs]
+        )
+        if beta_weights.sum() > 0:
+            fused_betas = (
+                (beta_weights[:, None] * beta_stack).sum(axis=0) / beta_weights.sum()
+            )
+        else:
+            fused_betas = beta_stack.mean(axis=0)
+
+        if len(contribs) > 1:
+            max_beta_dist = float(
+                np.max(
+                    [
+                        np.linalg.norm(beta_stack[i] - fused_betas)
+                        for i in range(len(contribs))
+                    ]
+                )
+            )
+            if max_beta_dist > float(cfg.get("beta_disagreement_warn", 0.3)):
+                logger.warning(
+                    "[refined_poses] %s beta disagreement %.3f exceeds %.3f",
+                    player_id,
+                    max_beta_dist,
+                    cfg.get("beta_disagreement_warn", 0.3),
+                )
+
+        # Smoothing — wired in Task 7.
+        contributing_shots = tuple(sorted({sid for sid, _ in contribs if sid}))
 
         refined = RefinedPose(
             player_id=player_id,
-            frames=ref_frames,
-            betas=np.asarray(track.betas, dtype=np.float64),
-            thetas=np.asarray(track.thetas, dtype=np.float64),
-            root_R=np.asarray(track.root_R, dtype=np.float64),
-            root_t=np.asarray(track.root_t, dtype=np.float64),
-            confidence=np.asarray(track.confidence, dtype=np.float64),
-            view_count=np.ones(n, dtype=np.int32),
-            contributing_shots=(shot_id,) if shot_id else (),
+            frames=union,
+            betas=fused_betas,
+            thetas=fused_thetas,
+            root_R=fused_root_R,
+            root_t=fused_root_t,
+            confidence=fused_conf,
+            view_count=view_count,
+            contributing_shots=contributing_shots,
         )
         diag = RefinedPoseDiagnostics(
             player_id=player_id,
-            contributing_shots=(shot_id,) if shot_id else (),
-            frames=tuple(
-                FrameDiagnostic(
-                    frame=int(ref_frames[i]),
-                    contributing_shots=(shot_id,) if shot_id else (),
-                    dropped_shots=(),
-                    pos_disagreement_m=0.0,
-                    rot_disagreement_rad=0.0,
-                    low_coverage=True,
-                    high_disagreement=False,
-                )
-                for i in range(n)
-            ),
+            contributing_shots=contributing_shots,
+            frames=tuple(diag_frames),
             summary={
-                "total_frames": n,
-                "single_view_frames": n,
-                "high_disagreement_frames": 0,
+                "total_frames": int(len(union)),
+                "single_view_frames": int(
+                    sum(1 for f in diag_frames if f.low_coverage)
+                ),
+                "high_disagreement_frames": int(
+                    sum(1 for f in diag_frames if f.high_disagreement)
+                ),
             },
         )
         return refined, diag
+
+
+# ----------------------------------------------------------------------
+# Rodrigues helpers — local to this module so the public utils stay clean.
+
+
+def _axis_angle_to_so3(omega: np.ndarray) -> np.ndarray:
+    """Rodrigues. omega is (3,). Returns (3, 3)."""
+    theta = float(np.linalg.norm(omega))
+    if theta < 1e-9:
+        return np.eye(3)
+    k = omega / theta
+    K = np.array(
+        [
+            [0.0, -k[2], k[1]],
+            [k[2], 0.0, -k[0]],
+            [-k[1], k[0], 0.0],
+        ]
+    )
+    return np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
+
+
+def _axis_angle_to_so3_batch(thetas: np.ndarray) -> np.ndarray:
+    """thetas: (24, 3) → (24, 3, 3)."""
+    return np.stack([_axis_angle_to_so3(thetas[j]) for j in range(thetas.shape[0])])
+
+
+def _so3_to_axis_angle(R: np.ndarray) -> np.ndarray:
+    """Inverse of Rodrigues. Returns (3,)."""
+    cos_theta = (np.trace(R) - 1.0) / 2.0
+    cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
+    theta = float(np.arccos(cos_theta))
+    if theta < 1e-9:
+        return np.zeros(3)
+    if abs(theta - np.pi) < 1e-6:
+        diag = np.diag(R)
+        i = int(np.argmax(diag))
+        e = np.zeros(3)
+        e[i] = 1.0
+        v = (R[:, i] + e) / np.sqrt(max(2.0 * (1.0 + diag[i]), 1e-12))
+        return theta * v
+    sin_theta = np.sin(theta)
+    omega = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
+    return omega * theta / (2.0 * sin_theta)

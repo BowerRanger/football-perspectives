@@ -132,10 +132,10 @@ class PlayerTrackingStage(BaseStage):
                     print(f"     processed {frame_idx} frames...")
 
                 detections = detector.detect(frame)
-                # Track ball alongside players: ByteTrack handles them
-                # uniformly and the ball class is already in the
-                # class_id mapping.  Triangulation uses class_name to
-                # split ball tracks from player tracks downstream.
+                # Ball-class detections continue to flow through ByteTrack
+                # so the dashboard's class_name=="ball" checks still work
+                # against <shot>_tracks.json. BallStage owns its own
+                # detection pass and does not consume them.
                 player_dets = list(detections)
 
                 if player_dets:

@@ -232,6 +232,14 @@
     font-style: italic;
   }
 </style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.164.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.0/examples/jsm/"
+  }
+}
+</script>
 </head>
 <body>
 
@@ -3654,12 +3662,50 @@ function withAlpha(hexColour, alpha) {
 }
 
 async function renderBall(panel) {
-  const data = await fetchJsonOrNull("/ball/preview");
-  if (!data || !data.frames || data.frames.length === 0) {
-    emptyNote(panel, "No ball track yet — run ball to detect ball positions.");
-    return;
+  // ── Shot picker (only shown if multiple shots exist) ──
+  const shotsData = await fetchJsonOrNull("/api/output/shots");
+  const shotIds = (shotsData && shotsData.shots) || [];
+
+  const controls = document.createElement("div");
+  controls.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 14px;background:#1a1d27;border:1px solid #2d3148;border-radius:8px;font-size:13px;color:#cbd5e1;";
+  const shotLabel = document.createElement("span");
+  shotLabel.textContent = "Shot:";
+  const shotSelect = document.createElement("select");
+  shotSelect.style.cssText = "background:#252840;color:#e2e8f0;border:1px solid #2d3148;border-radius:4px;padding:4px 8px;font-size:13px;";
+  for (const id of shotIds) {
+    const opt = document.createElement("option");
+    opt.value = id; opt.textContent = id;
+    shotSelect.appendChild(opt);
   }
-  const { wrap, body } = makePanel("Ball Track");
+  if (shotIds.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = ""; opt.textContent = "(legacy single-shot)";
+    shotSelect.appendChild(opt);
+    shotSelect.disabled = true;
+  }
+  controls.append(shotLabel, shotSelect);
+  if (shotIds.length > 1) panel.appendChild(controls);
+
+  const body = document.createElement("div");
+  body.style.cssText = "display:flex;flex-direction:column;gap:18px;margin-top:14px;";
+  panel.appendChild(body);
+
+  async function loadShot(shotId) {
+    body.innerHTML = "";
+    const url = shotId ? `/ball/preview?shot=${encodeURIComponent(shotId)}` : "/ball/preview";
+    const data = await fetchJsonOrNull(url);
+    if (!data || !data.frames || data.frames.length === 0) {
+      emptyNote(body, "No ball track yet — run ball to detect ball positions.");
+      return;
+    }
+    renderBallShot(body, data);
+  }
+
+  shotSelect.addEventListener("change", () => loadShot(shotSelect.value));
+  await loadShot(shotIds.length > 0 ? shotIds[0] : "");
+}
+
+function renderBallShot(panel, data) {
   const N = data.frames.length;
   const states = {};
   for (const f of data.frames) {
@@ -3668,16 +3714,435 @@ async function renderBall(panel) {
   const stateSummary = Object.entries(states)
     .map(([s, n]) => `${s}: ${n} (${fmt((n / N) * 100, 1)}%)`)
     .join(", ");
+
+  // ── Summary card ──
+  const { wrap: sumWrap, body: sumBody } = makePanel("Ball Track summary");
   const summary = document.createElement("div");
   summary.style.cssText = "padding:14px 16px;font-size:13px;color:#cbd5e1;line-height:1.7;";
+  const segs = data.flight_segments || [];
+  const segsWithSpin = segs.filter((s) => s.parabola && s.parabola.spin_omega_rad_s != null);
   summary.innerHTML = `
-    <div>Clip: <strong>${data.clip_id}</strong>, FPS: ${fmt(data.fps, 2)}</div>
+    <div>Clip: <strong>${data.clip_id || "(unnamed)"}</strong>, FPS: ${fmt(data.fps, 2)}</div>
     <div>Frames: ${N}</div>
     <div>State distribution: ${stateSummary}</div>
-    <div>Flight segments: ${(data.flight_segments || []).length}</div>
+    <div>Flight segments: ${segs.length} (with spin: ${segsWithSpin.length})</div>
   `;
-  body.appendChild(summary);
-  panel.appendChild(wrap);
+  sumBody.appendChild(summary);
+  panel.appendChild(sumWrap);
+
+  // ── Flight segments table (if any) ──
+  if (segs.length > 0) {
+    const { wrap: tWrap, body: tBody } = makePanel("Flight segments");
+    const tbl = document.createElement("table");
+    tbl.style.cssText = "width:100%;border-collapse:collapse;font-size:12px;color:#cbd5e1;";
+    tbl.innerHTML = `
+      <thead>
+        <tr style="background:#1a1d27;color:#94a3b8;text-align:left;">
+          <th style="padding:8px 10px;">#</th>
+          <th style="padding:8px 10px;">Frames</th>
+          <th style="padding:8px 10px;">Duration</th>
+          <th style="padding:8px 10px;">Fit residual (px)</th>
+          <th style="padding:8px 10px;">|ω| (rad/s)</th>
+          <th style="padding:8px 10px;">Spin axis (world)</th>
+          <th style="padding:8px 10px;">Spin conf</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    `;
+    const tb = tbl.querySelector("tbody");
+    for (const s of segs) {
+      const [a, b] = s.frame_range || [null, null];
+      const dur = data.fps && a != null && b != null ? `${fmt((b - a) / data.fps, 2)}s` : "—";
+      const omega = s.parabola && s.parabola.spin_omega_rad_s;
+      const axis = s.parabola && s.parabola.spin_axis_world;
+      const conf = s.parabola && s.parabola.spin_confidence;
+      const tr = document.createElement("tr");
+      tr.style.borderTop = "1px solid #2d3148";
+      tr.innerHTML = `
+        <td style="padding:6px 10px;">${s.id}</td>
+        <td style="padding:6px 10px;font-variant-numeric:tabular-nums;">${a}–${b}</td>
+        <td style="padding:6px 10px;font-variant-numeric:tabular-nums;">${dur}</td>
+        <td style="padding:6px 10px;font-variant-numeric:tabular-nums;">${fmt(s.fit_residual_px, 2)}</td>
+        <td style="padding:6px 10px;font-variant-numeric:tabular-nums;">${omega != null ? fmt(omega, 2) : "—"}</td>
+        <td style="padding:6px 10px;font-variant-numeric:tabular-nums;">${axis ? `[${axis.map((v) => fmt(v, 2)).join(", ")}]` : "—"}</td>
+        <td style="padding:6px 10px;font-variant-numeric:tabular-nums;">${conf != null ? fmt(conf, 2) : "—"}</td>
+      `;
+      tb.appendChild(tr);
+    }
+    tBody.appendChild(tbl);
+    panel.appendChild(tWrap);
+  }
+
+  // ── Side-by-side previews ──
+  const grid = document.createElement("div");
+  grid.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:18px;";
+  panel.appendChild(grid);
+
+  const topdownPanel = makePanel("Top-down trajectory");
+  const td = buildBallTopdown(data);
+  topdownPanel.body.appendChild(td.element);
+  grid.appendChild(topdownPanel.wrap);
+
+  const threeDPanel = makePanel("3D trajectory");
+  const td3 = buildBall3D(data);
+  threeDPanel.body.appendChild(td3.element);
+  grid.appendChild(threeDPanel.wrap);
+
+  // ── Shared timeline + play controls ──
+  const minFrame = data.frames[0].frame;
+  const maxFrame = data.frames[data.frames.length - 1].frame;
+  const fps = data.fps || 30;
+  const tl = document.createElement("div");
+  tl.style.cssText = "display:flex;align-items:center;gap:8px;padding:8px 14px;background:#1a1d27;border:1px solid #2d3148;border-radius:8px;";
+  const playBtn = makeToolbarBtn("▶", "#4f46e5"); playBtn.style.minWidth = "36px";
+  const stepBack = makeToolbarBtn("◀", "#334155"); stepBack.title = "Previous frame";
+  const stepFwd = makeToolbarBtn("▶", "#334155"); stepFwd.title = "Next frame";
+  const seek = document.createElement("input");
+  seek.type = "range";
+  seek.min = String(minFrame);
+  seek.max = String(maxFrame);
+  seek.value = String(minFrame);
+  seek.style.cssText = "flex:1;";
+  const frameLabel = document.createElement("span");
+  frameLabel.style.cssText = "color:#94a3b8;font-size:11px;min-width:140px;text-align:right;font-variant-numeric:tabular-nums;";
+  tl.append(playBtn, stepBack, stepFwd, seek, frameLabel);
+  panel.appendChild(tl);
+
+  let currentFrame = minFrame;
+  function setFrame(fi) {
+    currentFrame = Math.max(minFrame, Math.min(maxFrame, fi));
+    seek.value = String(currentFrame);
+    const sec = ((currentFrame - minFrame) / Math.max(1, fps)).toFixed(2);
+    frameLabel.textContent = `Frame ${currentFrame}  (${sec}s)`;
+    td.setFrame(currentFrame);
+    td3.setFrame(currentFrame);
+  }
+  setFrame(minFrame);
+  seek.addEventListener("input", () => setFrame(Number(seek.value)));
+  stepBack.addEventListener("click", () => setFrame(currentFrame - 1));
+  stepFwd.addEventListener("click", () => setFrame(currentFrame + 1));
+
+  let playing = false, rafId = null, lastTs = 0;
+  function tick(ts) {
+    if (!playing) return;
+    if (!lastTs) lastTs = ts;
+    const dt = (ts - lastTs) / 1000;
+    const advance = Math.floor(dt * fps);
+    if (advance >= 1) {
+      let next = currentFrame + advance;
+      if (next > maxFrame) next = minFrame;
+      setFrame(next);
+      lastTs = ts;
+    }
+    rafId = requestAnimationFrame(tick);
+  }
+  playBtn.addEventListener("click", () => {
+    playing = !playing;
+    playBtn.textContent = playing ? "❚❚" : "▶";
+    lastTs = 0;
+    if (playing) rafId = requestAnimationFrame(tick);
+    else if (rafId) cancelAnimationFrame(rafId);
+  });
+}
+
+// ── Top-down ball trajectory canvas ─────────────────────────────────
+// Pitch + per-frame ball positions, color-coded by state:
+//   grounded = green, flight = orange, missing = (no marker, line gap).
+// A solid filled dot tracks the current frame.
+function buildBallTopdown(data) {
+  const PITCH_L = 105, PITCH_W = 68;
+  const MARGIN = 8;
+  const scale = 5.5, padding = 20;
+  const W = (PITCH_L + 2 * MARGIN) * scale + padding * 2;
+  const H = (PITCH_W + 2 * MARGIN) * scale + padding * 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = W; canvas.height = H;
+  canvas.style.cssText = "max-width:100%;height:auto;display:block;background:#0a1f10;border-radius:4px;";
+  const ctx = canvas.getContext("2d");
+
+  function pitch2px(x, y) {
+    return [
+      padding + (x + MARGIN) * scale,
+      padding + (PITCH_W + MARGIN - y) * scale,
+    ];
+  }
+
+  function drawPitch() {
+    ctx.fillStyle = "#0a1f10";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#0b3b1a";
+    const [x0, y0] = pitch2px(0, PITCH_W);
+    ctx.fillRect(x0, y0, PITCH_L * scale, PITCH_W * scale);
+    ctx.strokeStyle = "#e2e8f0"; ctx.lineWidth = 1.4;
+    const corners = [[0, 0], [PITCH_L, 0], [PITCH_L, PITCH_W], [0, PITCH_W]];
+    ctx.beginPath();
+    for (let i = 0; i < corners.length; i++) {
+      const [x, y] = pitch2px(...corners[i]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath(); ctx.stroke();
+    // Halfway line + centre circle
+    ctx.beginPath();
+    const m1 = pitch2px(PITCH_L / 2, 0), m2 = pitch2px(PITCH_L / 2, PITCH_W);
+    ctx.moveTo(m1[0], m1[1]); ctx.lineTo(m2[0], m2[1]); ctx.stroke();
+    ctx.beginPath();
+    const c = pitch2px(PITCH_L / 2, PITCH_W / 2);
+    ctx.arc(c[0], c[1], 9.15 * scale, 0, Math.PI * 2); ctx.stroke();
+    // Penalty boxes
+    function rectStroke(xa, ya, xb, yb) {
+      const [pax, pay] = pitch2px(xa, ya);
+      const [pbx, pby] = pitch2px(xb, yb);
+      ctx.strokeRect(
+        Math.min(pax, pbx), Math.min(pay, pby),
+        Math.abs(pbx - pax), Math.abs(pby - pay),
+      );
+    }
+    const yMid = PITCH_W / 2;
+    rectStroke(0, yMid - 20.16, 16.5, yMid + 20.16);
+    rectStroke(PITCH_L, yMid - 20.16, PITCH_L - 16.5, yMid + 20.16);
+    rectStroke(0, yMid - 9.16, 5.5, yMid + 9.16);
+    rectStroke(PITCH_L, yMid - 9.16, PITCH_L - 5.5, yMid + 9.16);
+  }
+
+  // Pre-index frames for O(1) seeks.
+  const byFrame = new Map();
+  for (const f of data.frames) byFrame.set(f.frame, f);
+
+  function render(currentFrame) {
+    drawPitch();
+
+    // Trajectory polyline. Two passes: grounded (green) and flight (orange).
+    function strokeRun(filter, color, lw) {
+      ctx.strokeStyle = color; ctx.lineWidth = lw;
+      let drawing = false;
+      ctx.beginPath();
+      for (const f of data.frames) {
+        if (!f.world_xyz || !filter(f)) {
+          drawing = false;
+          continue;
+        }
+        const [px, py] = pitch2px(f.world_xyz[0], f.world_xyz[1]);
+        if (!drawing) {
+          ctx.moveTo(px, py);
+          drawing = true;
+        } else {
+          ctx.lineTo(px, py);
+        }
+      }
+      ctx.stroke();
+    }
+    strokeRun((f) => f.state === "grounded", "#4ade80", 1.6);
+    strokeRun((f) => f.state === "flight", "#fb923c", 2.2);
+
+    // Current-frame marker.
+    const cur = byFrame.get(currentFrame);
+    if (cur && cur.world_xyz) {
+      const [px, py] = pitch2px(cur.world_xyz[0], cur.world_xyz[1]);
+      ctx.fillStyle = cur.state === "flight" ? "#fb923c" : "#fafafa";
+      ctx.strokeStyle = "#0a0e1a"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    }
+
+    // Legend
+    ctx.font = "11px -apple-system, sans-serif";
+    ctx.fillStyle = "#cbd5e1";
+    ctx.fillText("grounded", padding + 10, 14);
+    ctx.fillStyle = "#4ade80"; ctx.fillRect(padding + 4, 6, 4, 10);
+    ctx.fillStyle = "#cbd5e1";
+    ctx.fillText("flight", padding + 80, 14);
+    ctx.fillStyle = "#fb923c"; ctx.fillRect(padding + 74, 6, 4, 10);
+  }
+
+  return {
+    element: canvas,
+    setFrame: render,
+  };
+}
+
+// ── 3D ball-only viewer (lazy three.js dynamic import) ─────────────
+function buildBall3D(data) {
+  const container = document.createElement("div");
+  container.style.cssText = "position:relative;width:100%;aspect-ratio:16/10;background:#0a0a0a;border-radius:4px;overflow:hidden;";
+  const loading = document.createElement("div");
+  loading.style.cssText = "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:13px;";
+  loading.textContent = "Loading 3D viewer…";
+  container.appendChild(loading);
+
+  let setFrameImpl = () => {};
+  let pending = null;
+
+  (async () => {
+    let THREE, OrbitControls;
+    try {
+      THREE = await import("three");
+      ({ OrbitControls } = await import("three/addons/controls/OrbitControls.js"));
+    } catch (err) {
+      loading.textContent = `3D viewer unavailable (${err.message || err})`;
+      return;
+    }
+    loading.remove();
+
+    const PITCH_L = 105, PITCH_W = 68;
+    function pitchToThree(p) { return [p[0], (p[2] || 0), -(p[1] || 0)]; }
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0a0a0a);
+
+    const cw = container.clientWidth, ch = container.clientHeight;
+    const camera = new THREE.PerspectiveCamera(45, cw / ch, 0.1, 500);
+    camera.position.set(52.5, 35, 50);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(cw, ch);
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(52.5, 0, -34);
+    controls.enableDamping = true;
+    controls.update();
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+    dir.position.set(20, 40, 20);
+    scene.add(dir);
+
+    // Pitch — copied from viewer.html's pattern.
+    const pitchGroup = new THREE.Group();
+    {
+      const pitchMat = new THREE.MeshStandardMaterial({ color: 0x1a5e1a, side: THREE.DoubleSide });
+      const pitchMesh = new THREE.Mesh(new THREE.PlaneGeometry(PITCH_L, PITCH_W), pitchMat);
+      pitchMesh.rotation.x = -Math.PI / 2;
+      pitchMesh.position.set(PITCH_L / 2, 0, -PITCH_W / 2);
+      pitchGroup.add(pitchMesh);
+      const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 });
+      function line(x1, z1, x2, z2) {
+        const pts = [new THREE.Vector3(x1, 0.01, -z1), new THREE.Vector3(x2, 0.01, -z2)];
+        pitchGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), lineMat));
+      }
+      line(0, 0, PITCH_L, 0);
+      line(PITCH_L, 0, PITCH_L, PITCH_W);
+      line(PITCH_L, PITCH_W, 0, PITCH_W);
+      line(0, PITCH_W, 0, 0);
+      line(PITCH_L / 2, 0, PITCH_L / 2, PITCH_W);
+      const circPts = [];
+      for (let a = 0; a <= Math.PI * 2; a += 0.1) {
+        circPts.push(new THREE.Vector3(PITCH_L / 2 + 9.15 * Math.cos(a), 0.01, -(PITCH_W / 2 + 9.15 * Math.sin(a))));
+      }
+      pitchGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(circPts), lineMat));
+      const box18 = (xs, sign) => {
+        line(xs, 13.84, xs + sign * 16.5, 13.84);
+        line(xs + sign * 16.5, 13.84, xs + sign * 16.5, 54.16);
+        line(xs + sign * 16.5, 54.16, xs, 54.16);
+      };
+      box18(0, 1);
+      box18(PITCH_L, -1);
+    }
+    scene.add(pitchGroup);
+
+    // Build trajectory: split into grounded + flight runs so we can colour them.
+    function runsAsLine(filter, color, dashed = false) {
+      const pts = [];
+      const breakAt = [];
+      let runActive = false;
+      for (const f of data.frames) {
+        if (!f.world_xyz || !filter(f)) {
+          if (runActive) breakAt.push(pts.length);
+          runActive = false;
+          continue;
+        }
+        const v = pitchToThree(f.world_xyz);
+        pts.push(new THREE.Vector3(v[0], v[1], v[2]));
+        runActive = true;
+      }
+      if (pts.length < 2) return;
+      const segPts = [];
+      let last = 0;
+      const breakSet = new Set(breakAt);
+      for (let i = 0; i < pts.length - 1; i++) {
+        if (breakSet.has(i + 1)) continue;
+        segPts.push(pts[i], pts[i + 1]);
+      }
+      if (segPts.length === 0) return;
+      const geom = new THREE.BufferGeometry().setFromPoints(segPts);
+      const mat = new THREE.LineBasicMaterial({ color, linewidth: 2 });
+      scene.add(new THREE.LineSegments(geom, mat));
+    }
+    runsAsLine((f) => f.state === "grounded", 0x4ade80);
+    runsAsLine((f) => f.state === "flight", 0xfb923c);
+
+    // Ball marker — small sphere.
+    const ballGeom = new THREE.SphereGeometry(0.4, 24, 16);
+    const ballMat = new THREE.MeshStandardMaterial({ color: 0xfafafa, emissive: 0x222222 });
+    const ballMesh = new THREE.Mesh(ballGeom, ballMat);
+    ballMesh.visible = false;
+    scene.add(ballMesh);
+
+    // Drop shadow line (vertical) for flight clarity.
+    const shadowMat = new THREE.LineDashedMaterial({ color: 0x94a3b8, dashSize: 0.3, gapSize: 0.3, transparent: true, opacity: 0.7 });
+    const shadowGeom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+    const shadowLine = new THREE.Line(shadowGeom, shadowMat);
+    shadowLine.computeLineDistances();
+    shadowLine.visible = false;
+    scene.add(shadowLine);
+
+    camera.lookAt(controls.target);
+
+    function render() { renderer.render(scene, camera); }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      render();
+    }
+    animate();
+
+    const byFrame = new Map();
+    for (const f of data.frames) byFrame.set(f.frame, f);
+
+    setFrameImpl = (frameIdx) => {
+      const f = byFrame.get(frameIdx);
+      if (!f || !f.world_xyz) {
+        ballMesh.visible = false;
+        shadowLine.visible = false;
+        return;
+      }
+      const v = pitchToThree(f.world_xyz);
+      ballMesh.position.set(v[0], v[1], v[2]);
+      ballMesh.material.color.setHex(f.state === "flight" ? 0xfb923c : 0xfafafa);
+      ballMesh.visible = true;
+      // Shadow line straight down to the pitch plane.
+      shadowLine.geometry.setFromPoints([
+        new THREE.Vector3(v[0], v[1], v[2]),
+        new THREE.Vector3(v[0], 0.01, v[2]),
+      ]);
+      shadowLine.computeLineDistances();
+      shadowLine.visible = f.state === "flight" && v[1] > 0.2;
+    };
+
+    // Resize handling — the panel can be docked or expanded, so refit
+    // the renderer when the container's size changes.
+    const ro = new ResizeObserver(() => {
+      const nw = container.clientWidth, nh = container.clientHeight;
+      if (nw === 0 || nh === 0) return;
+      renderer.setSize(nw, nh);
+      camera.aspect = nw / nh;
+      camera.updateProjectionMatrix();
+    });
+    ro.observe(container);
+
+    if (pending !== null) {
+      setFrameImpl(pending);
+      pending = null;
+    }
+  })();
+
+  return {
+    element: container,
+    setFrame: (fi) => {
+      if (setFrameImpl) setFrameImpl(fi);
+      else pending = fi;
+    },
+  };
 }
 
 async function renderRefinedPoses(panel) {

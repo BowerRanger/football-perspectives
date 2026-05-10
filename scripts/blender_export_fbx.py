@@ -90,7 +90,47 @@ def main(argv: list[str]) -> int:
     # --- Helpers -----------------------------------------------------
 
     def _reset_scene() -> None:
+        """Wipe scene + orphan data blocks between exports.
+
+        ``read_factory_settings(use_empty=True)`` clears the scene but
+        leaves orphaned datablocks (armatures, meshes, actions) in
+        ``bpy.data``. Without an explicit purge those orphans get
+        included in the next FBX, which leaks the previous player's
+        armature object name in as a root bone — UE then fails the
+        import with "Mesh contains <prev_id> bone as root" because the
+        animation tracks don't carry that orphan-derived root.
+
+        ``bpy.ops.outliner.orphans_purge`` is unreliable in headless
+        Blender (needs an active outliner area). Iterate the data
+        collections directly: repeat until stable so chained orphans
+        (mesh → material → texture) all go.
+        """
         bpy.ops.wm.read_factory_settings(use_empty=True)
+        _purge_orphans()
+
+    def _purge_orphans() -> None:
+        collections = (
+            bpy.data.objects,
+            bpy.data.meshes,
+            bpy.data.armatures,
+            bpy.data.actions,
+            bpy.data.materials,
+            bpy.data.images,
+            bpy.data.textures,
+            bpy.data.cameras,
+            bpy.data.lights,
+            bpy.data.curves,
+            bpy.data.node_groups,
+        )
+        for _ in range(8):  # bounded fixed-point iteration
+            removed = 0
+            for col in collections:
+                for item in list(col):
+                    if item.users == 0:
+                        col.remove(item)
+                        removed += 1
+            if removed == 0:
+                break
 
     def _set_unit_scale_metres() -> None:
         scene = bpy.context.scene
@@ -119,6 +159,14 @@ def main(argv: list[str]) -> int:
         arm.data.name = f"{name}_data"
         return arm
 
+    # Constant armature object name shared by every per-player export.
+    # Blender's FBX exporter encodes the armature object as the root of
+    # the FBX bone hierarchy. If we used a player-specific name, every
+    # FBX would have a different root and could never bind cleanly to a
+    # single ``SK_SMPL`` skeleton in UE. A constant name lets one
+    # ``SK_SMPL`` import bind every player's animation.
+    SMPL_ARMATURE_NAME = "SMPLArmature"
+
     def _build_smpl_armature(name: str, joint_positions=None) -> object:
         """Create a 24-bone SMPL armature in canonical y-up rest pose.
 
@@ -130,7 +178,12 @@ def main(argv: list[str]) -> int:
         origin and so sits ~22cm above the real joint positions, which
         is fine for the JS viewer's bone overlay but mis-aligns the
         skeleton against the SMPL mesh in UE.
+
+        ``name`` is retained in the signature only for backwards
+        compatibility with callers that also use it to name the skinned
+        mesh; the armature itself is always ``SMPLArmature``.
         """
+        del name  # see SMPL_ARMATURE_NAME above
         joints = (
             joint_positions
             if joint_positions is not None
@@ -138,8 +191,8 @@ def main(argv: list[str]) -> int:
         )
         bpy.ops.object.armature_add(enter_editmode=True)
         arm = bpy.context.active_object
-        arm.name = name
-        arm.data.name = f"{name}_data"
+        arm.name = SMPL_ARMATURE_NAME
+        arm.data.name = f"{SMPL_ARMATURE_NAME}_data"
         arm.rotation_mode = "QUATERNION"
         edit_bones = arm.data.edit_bones
         # Remove the default "Bone" created by armature_add.
@@ -428,6 +481,14 @@ def main(argv: list[str]) -> int:
             arm.select_set(True)
             placeholder.select_set(True)
             bpy.context.view_layer.objects.active = arm
+            # Diagnostic: confirms _reset_scene + _purge_orphans actually
+            # gave us a clean slate per iteration. Any divergence between
+            # arm.name and fbx_name in the log means state leaked.
+            print(
+                f"[blender_export_fbx] exporting {fbx_name}.fbx "
+                f"with arm.name={arm.name!r} arm.data.name={arm.data.name!r} "
+                f"objects_in_scene={[o.name for o in bpy.data.objects]}"
+            )
             _export_fbx(fbx_dir / f"{fbx_name}.fbx")
 
     # --- Ball FBX ----------------------------------------------------

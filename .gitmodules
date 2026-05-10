@@ -5,3 +5,6 @@
 [submodule "third_party/gvhmr"]
 	path = third_party/gvhmr
 	url = https://github.com/zju3dv/GVHMR.git
+[submodule "third_party/wasb_sbdt"]
+	path = third_party/wasb_sbdt
+	url = https://github.com/nttcom/WASB-SBDT

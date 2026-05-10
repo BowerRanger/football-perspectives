@@ -10,7 +10,7 @@ import pytest
 
 from src.pipeline.quality_report import write_quality_report
 from src.schemas.anchor import Anchor, AnchorSet, LandmarkObservation
-from src.schemas.ball_track import BallFrame, BallTrack
+from src.schemas.ball_track import BallFrame, BallTrack, FlightSegment
 from src.schemas.camera_track import CameraFrame, CameraTrack
 from src.schemas.smpl_world import SmplWorldTrack
 
@@ -102,6 +102,54 @@ def test_quality_report_aggregates_three_stages(tmp_path: Path) -> None:
     assert report["ball"]["grounded_frames"] == 11
     assert report["ball"]["flight_segments"] == 0
     assert report["ball"]["missing_frames"] == 0
+
+
+@pytest.mark.unit
+def test_quality_report_ball_spin_coverage(tmp_path: Path) -> None:
+    """spin_coverage_pct = flight frames inside a spin-bearing segment /
+    total flight frames."""
+    frames: list[BallFrame] = []
+    for i in range(20):
+        if 5 <= i <= 9:
+            seg_id, state = 0, "flight"
+        elif 15 <= i <= 19:
+            seg_id, state = 1, "flight"
+        else:
+            seg_id, state = None, "grounded"
+        frames.append(
+            BallFrame(
+                frame=i, world_xyz=(0.0, 0.0, 0.5), state=state,
+                confidence=0.9, flight_segment_id=seg_id,
+            )
+        )
+    segs = (
+        FlightSegment(
+            id=0, frame_range=(5, 9), fit_residual_px=1.0,
+            parabola={
+                "p0": [0, 0, 0.5], "v0": [1, 0, 5], "g": -9.81,
+                "spin_axis_world": None, "spin_omega_rad_s": None,
+                "spin_confidence": None,
+            },
+        ),
+        FlightSegment(
+            id=1, frame_range=(15, 19), fit_residual_px=1.2,
+            parabola={
+                "p0": [10, 0, 0.5], "v0": [1, 0, 5], "g": -9.81,
+                "spin_axis_world": [0.0, 0.0, 1.0],
+                "spin_omega_rad_s": 20.0,
+                "spin_confidence": 0.8,
+            },
+        ),
+    )
+    BallTrack(
+        clip_id="play", fps=30.0, frames=tuple(frames), flight_segments=segs,
+    ).save(tmp_path / "ball" / "ball_track.json")
+
+    write_quality_report(tmp_path)
+    report = json.loads((tmp_path / "quality_report.json").read_text())
+    assert report["ball"]["flight_segments"] == 2
+    # 5 of 10 flight frames are inside the spin-bearing segment.
+    assert report["ball"]["spin_coverage_pct"] == pytest.approx(50.0)
 
 
 @pytest.mark.unit

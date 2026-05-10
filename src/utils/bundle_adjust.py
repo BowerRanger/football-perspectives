@@ -1,14 +1,18 @@
 """Bundle-adjustment helpers for the broadcast-mono pipeline.
 
-Currently exposes one fitter:
+Two fitters live here:
 
 * :func:`fit_parabola_to_image_observations` -- Levenberg-Marquardt fit
   of a constant-gravity parabola (p(t) = p0 + v0*t + 0.5*g*t^2) to a
   sequence of per-frame ball pixel observations, projected through the
   per-frame camera-track ``(K_t, R_t)`` and the clip-shared ``t_world``.
+* :func:`fit_magnus_trajectory` -- Levenberg-Marquardt fit of a
+  Magnus-augmented trajectory, ``dv/dt = g + k * (ω × v)``, integrated
+  with RK4 inside the residual loop.  Recovers ``(p0, v0, ω)``.  Warm-
+  starts from the parabola fit if seeds are supplied.
 
-The seed is computed by ground-projecting the first/last image points
-to a coarse plane (z = 0.5 m, mid-flight) using
+The parabola seed is computed by ground-projecting the first/last image
+points to a coarse plane (z = 0.5 m, mid-flight) using
 :func:`src.utils.foot_anchor.ankle_ray_to_pitch`, and assuming a
 symmetric vertical velocity that places apex at mid-flight.
 """
@@ -120,3 +124,147 @@ def fit_parabola_to_image_observations(
     n = len(observations)
     mean_residual = float(np.linalg.norm(result.fun) / np.sqrt(n))
     return result.x[:3], result.x[3:6], mean_residual
+
+
+def _integrate_magnus_positions(
+    p0: np.ndarray,
+    v0: np.ndarray,
+    omega: np.ndarray,
+    g_vec: np.ndarray,
+    drag_k_over_m: float,
+    sample_times: np.ndarray,
+    substeps_per_interval: int = 4,
+) -> np.ndarray:
+    """RK4-integrate ``dv/dt = g + k * (ω × v)`` and sample at ``sample_times``.
+
+    ``sample_times`` must start at 0 and be monotonically increasing.
+    Returns positions of shape ``(len(sample_times), 3)``.
+    """
+    out = np.zeros((len(sample_times), 3))
+    out[0] = p0
+
+    def accel(v: np.ndarray) -> np.ndarray:
+        return g_vec + drag_k_over_m * np.cross(omega, v)
+
+    p, v = p0.astype(float).copy(), v0.astype(float).copy()
+    for i in range(1, len(sample_times)):
+        t_prev = sample_times[i - 1]
+        t_next = sample_times[i]
+        total = t_next - t_prev
+        if total <= 0:
+            out[i] = p
+            continue
+        h = total / substeps_per_interval
+        for _ in range(substeps_per_interval):
+            k1v = accel(v)
+            k1p = v
+            k2v = accel(v + 0.5 * h * k1v)
+            k2p = v + 0.5 * h * k1v
+            k3v = accel(v + 0.5 * h * k2v)
+            k3p = v + 0.5 * h * k2v
+            k4v = accel(v + h * k3v)
+            k4p = v + h * k3v
+            p = p + (h / 6.0) * (k1p + 2 * k2p + 2 * k3p + k4p)
+            v = v + (h / 6.0) * (k1v + 2 * k2v + 2 * k3v + k4v)
+        out[i] = p
+    return out
+
+
+def fit_magnus_trajectory(
+    observations: list[tuple[int, tuple[float, float]]],
+    *,
+    Ks: list[np.ndarray],
+    Rs: list[np.ndarray],
+    t_world: np.ndarray | list[np.ndarray],
+    fps: float,
+    g: float = -9.81,
+    drag_k_over_m: float = 0.005,
+    p0_seed: np.ndarray | None = None,
+    v0_seed: np.ndarray | None = None,
+    omega_seed: np.ndarray | None = None,
+    max_iter: int = 100,
+    distortion: tuple[float, float] = (0.0, 0.0),
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Fit a Magnus-augmented 3D trajectory to per-frame image observations.
+
+    Optimises ``(p0, v0, ω)`` (9 dof) by minimising pixel reprojection
+    residuals under ``dv/dt = g + drag_k_over_m * (ω × v)``, integrated
+    with RK4 between observation times.
+
+    Args:
+        observations: ``(frame_index, (u, v))`` pairs ordered by time.
+        Ks, Rs, t_world: position-parallel to ``observations`` (see
+            :func:`fit_parabola_to_image_observations` for details).
+        fps: clip frame rate.
+        g: gravity along world-z (default -9.81 m/s^2).
+        drag_k_over_m: lumped drag/Magnus coefficient (k / m).
+        p0_seed, v0_seed: warm-start seeds. If both ``None``, seeds are
+            derived from a parabola fit on the same observations.
+        omega_seed: 3-vector seed for angular velocity (rad/s).  Default
+            zeros — the LM finds a non-zero ω only if it improves the
+            pixel residual.
+        max_iter: LM iteration cap.
+        distortion: unused here (kept for signature symmetry with the
+            parabola fitter; image residuals are computed against raw
+            observations).
+
+    Returns:
+        ``(p0, v0, ω, mean_residual_px)``.
+    """
+    from scipy.optimize import least_squares
+
+    obs_array = np.array([o[1] for o in observations], dtype=float)
+    frame_idx = np.array([o[0] for o in observations], dtype=int)
+    dt = (frame_idx - frame_idx[0]) / fps
+    g_vec = np.array([0.0, 0.0, g])
+
+    n_obs = len(observations)
+    if isinstance(t_world, list) or (
+        isinstance(t_world, np.ndarray) and t_world.ndim == 2
+    ):
+        ts = [np.asarray(t, dtype=float) for t in t_world]
+        if len(ts) != n_obs:
+            raise ValueError(
+                f"per-frame t_world has {len(ts)} entries, expected {n_obs}"
+            )
+    else:
+        t_shared = np.asarray(t_world, dtype=float)
+        ts = [t_shared] * n_obs
+
+    if p0_seed is None or v0_seed is None:
+        p0_seed, v0_seed, _ = fit_parabola_to_image_observations(
+            observations,
+            Ks=Ks,
+            Rs=Rs,
+            t_world=t_world,
+            fps=fps,
+            g=g,
+            max_iter=max_iter,
+            distortion=distortion,
+        )
+    if omega_seed is None:
+        omega_seed = np.zeros(3)
+
+    def _residuals(params: np.ndarray) -> np.ndarray:
+        p0 = params[:3]
+        v0 = params[3:6]
+        omega = params[6:9]
+        pts = _integrate_magnus_positions(
+            p0, v0, omega, g_vec, drag_k_over_m, dt,
+        )
+        residuals = []
+        for i in range(n_obs):
+            cam = Rs[i] @ pts[i] + ts[i]
+            pix = Ks[i] @ cam
+            uv = pix[:2] / pix[2]
+            residuals.append(uv - obs_array[i])
+        return np.concatenate(residuals)
+
+    result = least_squares(
+        _residuals,
+        np.concatenate([p0_seed, v0_seed, omega_seed]),
+        method="lm",
+        max_nfev=max_iter * 50,
+    )
+    mean_residual = float(np.linalg.norm(result.fun) / np.sqrt(n_obs))
+    return result.x[:3], result.x[3:6], result.x[6:9], mean_residual

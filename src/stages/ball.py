@@ -1,48 +1,86 @@
-"""Ball stage: ground projection + parabolic flight reconstruction.
+"""Ball stage: per-frame detection, IMM smoothing, ground projection,
+and 3D trajectory reconstruction.
 
-Reads:
-    - ``output/camera/camera_track.json`` (per-frame K, R; clip-shared t_world)
-    - ``output/tracks/ball_track.json`` (raw 2D ball detections; ``frames``
-      list with ``frame``, ``bbox_centre``, ``confidence``).
+The stage owns the entire ball pipeline.  It reads only the clip video
+files (via the shots manifest) and the camera track from earlier
+stages; it does **not** read any ball detections from
+``output/tracks/``.
 
-Writes:
-    - ``output/ball/ball_track.json`` (BallTrack JSON: per-frame world_xyz,
-      state in {grounded, flight, occluded, missing}, plus FlightSegment
-      entries for each accepted parabolic fit).
+Run flow per shot:
 
-Algorithm:
-    1.  For every detected frame, project the bbox centre to the ground
-        plane at ``z = ball_radius`` (default 0.11 m).
-    2.  Compute pixel velocity vs the previous detected frame.  Runs of
-        frames with velocity >= ``flight_px_velocity`` and length in
-        ``[min_flight_frames, max_flight_frames]`` are flight candidates.
-    3.  For each candidate run an LM parabola fit; if the per-pixel
-        residual < ``flight_max_residual_px``, replace the per-frame
-        ground projection with the parabola evaluation and tag the
-        frames as ``state="flight"``.
-    4.  Frames in the camera span without a detection emit
-        ``state="missing"``.
+1. **Detect** — iterate the clip frames and ask the configured
+   :class:`BallDetector` for ``(u, v, confidence)`` per frame.
+2. **Smooth** — feed the per-frame detections through
+   :class:`BallTracker`, a 2-mode IMM Kalman filter. Output includes a
+   per-frame mode posterior ``p_flight`` and bounded gap-fill.
+3. **Reconstruct 3D position** — ground-project each smoothed pixel to
+   the world frame at ``z = ball_radius_m`` via
+   :func:`src.utils.foot_anchor.ankle_ray_to_pitch`.
+4. **Flight fit** — run-length encode frames where ``p_flight >= 0.5``;
+   for each run run a parabola fit and (when the segment is long
+   enough) a Magnus refinement. Accept Magnus only if it improves the
+   pixel residual by ``ball.spin.min_residual_improvement`` and
+   ``|ω|`` is within ``ball.spin.max_omega_rad_s``.
 """
 
 from __future__ import annotations
 
-import json
+import logging
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from src.pipeline.base import BaseStage
 from src.schemas.ball_track import BallFrame, BallTrack, FlightSegment
 from src.schemas.camera_track import CameraTrack
-from src.utils.bundle_adjust import fit_parabola_to_image_observations
+from src.schemas.shots import ShotsManifest
+from src.utils.ball_detector import BallDetector, YOLOBallDetector
+from src.utils.ball_tracker import BallTracker, TrackerStep
+from src.utils.bundle_adjust import (
+    _integrate_magnus_positions,
+    fit_magnus_trajectory,
+    fit_parabola_to_image_observations,
+)
 from src.utils.foot_anchor import ankle_ray_to_pitch
+
+
+logger = logging.getLogger(__name__)
+
+
+def _build_detector(cfg: dict) -> BallDetector:
+    """Construct a BallDetector from the ``ball.detector`` config key."""
+    backend = str(cfg.get("detector", "yolo")).strip().lower()
+    if backend == "wasb":
+        from src.utils.ball_detector import WASBBallDetector  # lazy import
+        wasb_cfg = cfg.get("wasb", {})
+        return WASBBallDetector(
+            checkpoint=wasb_cfg.get("checkpoint"),
+            confidence=float(wasb_cfg.get("confidence", 0.3)),
+            input_size=tuple(wasb_cfg.get("input_size", (512, 288))),
+        )
+    if backend == "yolo":
+        return YOLOBallDetector(
+            model_name=cfg.get("yolo_model", "yolov8n.pt"),
+            confidence=float(cfg.get("confidence_threshold", 0.3)),
+        )
+    raise ValueError(f"Unknown ball.detector backend: {backend!r}")
 
 
 class BallStage(BaseStage):
     name = "ball"
 
+    def __init__(
+        self,
+        config: dict,
+        output_dir: Path,
+        ball_detector: BallDetector | None = None,
+        **_,
+    ) -> None:
+        super().__init__(config, output_dir)
+        self.ball_detector = ball_detector
+
     def is_complete(self) -> bool:
-        from src.schemas.shots import ShotsManifest
         manifest_path = self.output_dir / "shots" / "shots_manifest.json"
         if not manifest_path.exists():
             return (self.output_dir / "ball" / "ball_track.json").exists()
@@ -53,170 +91,275 @@ class BallStage(BaseStage):
         )
 
     def run(self) -> None:
-        from src.schemas.shots import ShotsManifest
         cfg = self.config.get("ball", {})
+        detector = self.ball_detector if self.ball_detector is not None else _build_detector(cfg)
+
         manifest_path = self.output_dir / "shots" / "shots_manifest.json"
         if not manifest_path.exists():
-            # Legacy single-shot path. If both legacy files exist, run
-            # against them; otherwise fail with the same message as before.
+            # Legacy single-shot path. Use the unprefixed file names.
             cam_path = self.output_dir / "camera" / "camera_track.json"
-            ball_in = self.output_dir / "tracks" / "ball_track.json"
             ball_out = self.output_dir / "ball" / "ball_track.json"
-            if cam_path.exists() and ball_in.exists():
-                self._run_shot("", cam_path, ball_in, ball_out, cfg)
-                return
-            raise FileNotFoundError(
-                f"ball stage requires manifest at {manifest_path}; run prepare_shots first"
-            )
+            if not cam_path.exists():
+                raise FileNotFoundError(
+                    f"ball stage requires manifest at {manifest_path}; run prepare_shots first"
+                )
+            clip_path = self._guess_legacy_clip()
+            self._run_shot("", clip_path, cam_path, ball_out, cfg, detector)
+            return
+
         manifest = ShotsManifest.load(manifest_path)
         shot_filter = getattr(self, "shot_filter", None)
         for shot in manifest.shots:
             if shot_filter is not None and shot.id != shot_filter:
                 continue
             cam_path = self.output_dir / "camera" / f"{shot.id}_camera_track.json"
-            ball_in = self.output_dir / "tracks" / f"{shot.id}_ball_track.json"
             ball_out = self.output_dir / "ball" / f"{shot.id}_ball_track.json"
             if not cam_path.exists():
-                logger = __import__("logging").getLogger(__name__)
                 logger.warning(
                     "ball stage skipping shot %s — no camera_track at %s",
                     shot.id, cam_path,
                 )
                 continue
-            if not ball_in.exists():
-                logger = __import__("logging").getLogger(__name__)
+            clip_path = self.output_dir / shot.clip_file
+            if not clip_path.exists():
                 logger.warning(
-                    "ball stage skipping shot %s — no raw ball detections at %s",
-                    shot.id, ball_in,
+                    "ball stage skipping shot %s — clip missing at %s",
+                    shot.id, clip_path,
                 )
                 continue
-            self._run_shot(shot.id, cam_path, ball_in, ball_out, cfg)
+            self._run_shot(shot.id, clip_path, cam_path, ball_out, cfg, detector)
+
+    def _guess_legacy_clip(self) -> Path:
+        """Find a clip file under shots/ for the legacy no-manifest path."""
+        shots_dir = self.output_dir / "shots"
+        candidates = sorted(shots_dir.glob("*.mp4")) if shots_dir.exists() else []
+        if not candidates:
+            raise FileNotFoundError(
+                f"ball stage: no clip files found under {shots_dir}"
+            )
+        return candidates[0]
 
     def _run_shot(
         self,
         shot_id: str,
+        clip_path: Path,
         camera_path: Path,
-        ball_in_path: Path,
         ball_out_path: Path,
         cfg: dict,
+        detector: BallDetector,
     ) -> None:
-        """Single-shot ball reconstruction. Body is the original run()'s
-        logic with input/output paths parameterised on shot_id."""
         camera = CameraTrack.load(camera_path)
         per_frame_K = {f.frame: np.array(f.K) for f in camera.frames}
         per_frame_R = {f.frame: np.array(f.R) for f in camera.frames}
-        # Per-frame t when present (current camera stage always writes it).
-        # Fall back to clip-shared t_world for legacy tracks.
         t_world_fallback = np.array(camera.t_world)
         per_frame_t = {
             f.frame: (np.array(f.t) if f.t is not None else t_world_fallback)
             for f in camera.frames
         }
         distortion = camera.distortion
-
-        with ball_in_path.open() as fh:
-            ball_input = json.load(fh)
+        n_frames = max(per_frame_K) + 1 if per_frame_K else 0
 
         ball_radius = float(cfg.get("ball_radius_m", 0.11))
-        flight_velocity = float(cfg.get("flight_px_velocity", 25.0))
-        min_flight = int(cfg.get("min_flight_frames", 4))
-        max_flight = int(cfg.get("max_flight_frames", 60))
+        tracker_cfg = cfg.get("tracker", {})
+        spin_cfg = cfg.get("spin", {})
         max_residual = float(cfg.get("flight_max_residual_px", 5.0))
 
-        observations = sorted(ball_input["frames"], key=lambda f: f["frame"])
-        n_frames = max(f.frame for f in camera.frames) + 1
-        provisional: dict[int, tuple[tuple[float, float], np.ndarray, float]] = {}
-        prev_uv: tuple[float, float] | None = None
-        velocities: dict[int, float] = {}
-        for f in observations:
-            fi = int(f["frame"])
-            uv = tuple(f["bbox_centre"])
+        tracker = BallTracker(
+            process_noise_grounded_px=float(tracker_cfg.get("process_noise_grounded_px", 4.0)),
+            process_noise_flight_px=float(tracker_cfg.get("process_noise_flight_px", 12.0)),
+            measurement_noise_px=float(tracker_cfg.get("measurement_noise_px", 2.0)),
+            gating_sigma=float(tracker_cfg.get("gating_sigma", 4.0)),
+            max_gap_frames=int(cfg.get("max_gap_frames", 6)),
+        )
+
+        steps: list[TrackerStep] = []
+        raw_confidences: dict[int, float] = {}
+        cap = cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open clip: {clip_path}")
+        try:
+            frame_idx = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                det = detector.detect(frame)
+                if det is None:
+                    uv: tuple[float, float] | None = None
+                else:
+                    uv = (float(det[0]), float(det[1]))
+                    raw_confidences[frame_idx] = float(det[2])
+                step = tracker.update(frame_idx, uv)
+                steps.append(step)
+                frame_idx += 1
+        finally:
+            cap.release()
+
+        if frame_idx == 0:
+            logger.warning("ball stage: clip %s contained no frames", clip_path)
+            return
+
+        n_frames = max(n_frames, frame_idx)
+
+        # 3D ground projection of every smoothed step.
+        per_frame_world: dict[int, tuple[np.ndarray, float]] = {}
+        for step in steps:
+            if step.uv is None:
+                continue
+            fi = step.frame
             if fi not in per_frame_K:
                 continue
-            world = ankle_ray_to_pitch(
-                uv,
-                K=per_frame_K[fi],
-                R=per_frame_R[fi],
-                t=per_frame_t[fi],
-                plane_z=ball_radius,
-                distortion=distortion,
-            )
-            provisional[fi] = (uv, world, float(f.get("confidence", 0.5)))
-            if prev_uv is not None:
-                velocities[fi] = float(
-                    np.linalg.norm(np.array(uv) - np.array(prev_uv))
+            try:
+                world = ankle_ray_to_pitch(
+                    step.uv,
+                    K=per_frame_K[fi],
+                    R=per_frame_R[fi],
+                    t=per_frame_t[fi],
+                    plane_z=ball_radius,
+                    distortion=distortion,
                 )
-            prev_uv = uv
+            except Exception as exc:
+                logger.debug("ball ground projection failed at frame %d: %s", fi, exc)
+                continue
+            base_conf = raw_confidences.get(fi, 0.5)
+            # Gap-filled frames have no direct detection — discount.
+            conf = base_conf * (0.3 if step.is_gap_fill else 1.0)
+            per_frame_world[fi] = (world, conf)
 
-        # Flight segmentation by pixel velocity.
-        candidate: list[int] = []
-        segments: list[tuple[int, int]] = []
-        for fi in sorted(velocities):
-            if velocities[fi] >= flight_velocity:
-                candidate.append(fi)
-            else:
-                if min_flight <= len(candidate) <= max_flight:
-                    segments.append((candidate[0], candidate[-1]))
-                candidate = []
-        if min_flight <= len(candidate) <= max_flight:
-            segments.append((candidate[0], candidate[-1]))
+        # Flight segmentation by IMM mode posterior.
+        min_flight = int(tracker_cfg.get("min_flight_frames", 6))
+        max_flight = int(tracker_cfg.get("max_flight_frames", 90))
+        flight_runs = self._flight_runs(steps, min_flight, max_flight)
 
-        # Fit each segment via LM; accept if residual gate passes.
-        flight_outs: list[FlightSegment] = []
+        flight_segments: list[FlightSegment] = []
         flight_membership: dict[int, int] = {}
-        for sid, (a, b) in enumerate(segments):
-            obs = [
-                (fi, provisional[fi][0])
+        spin_enabled = bool(spin_cfg.get("enabled", True))
+        spin_min_seconds = float(spin_cfg.get("min_flight_seconds", 0.5))
+        spin_min_improve = float(spin_cfg.get("min_residual_improvement", 0.2))
+        spin_max_omega = float(spin_cfg.get("max_omega_rad_s", 200.0))
+        drag = float(spin_cfg.get("drag_k_over_m", 0.005))
+        g = -9.81
+        g_vec = np.array([0.0, 0.0, g])
+
+        for sid, (a, b) in enumerate(flight_runs):
+            obs_pairs = [
+                (fi, steps[fi].uv)
                 for fi in range(a, b + 1)
-                if fi in provisional
+                if steps[fi].uv is not None and fi in per_frame_K
             ]
-            if len(obs) < min_flight:
+            if len(obs_pairs) < min_flight:
                 continue
-            p0, v0, residual = fit_parabola_to_image_observations(
-                obs,
-                Ks=[per_frame_K.get(o[0], np.eye(3)) for o in obs],
-                Rs=[per_frame_R.get(o[0], np.eye(3)) for o in obs],
-                t_world=[per_frame_t.get(o[0], t_world_fallback) for o in obs],
-                fps=camera.fps,
-                distortion=distortion,
-            )
-            if residual > max_residual:
+            obs = [(o[0], (float(o[1][0]), float(o[1][1]))) for o in obs_pairs]
+            Ks_seg = [per_frame_K[o[0]] for o in obs]
+            Rs_seg = [per_frame_R[o[0]] for o in obs]
+            ts_seg = [per_frame_t[o[0]] for o in obs]
+
+            try:
+                p0, v0, parab_resid = fit_parabola_to_image_observations(
+                    obs, Ks=Ks_seg, Rs=Rs_seg, t_world=ts_seg,
+                    fps=camera.fps, distortion=distortion,
+                )
+            except Exception as exc:
+                logger.debug("parabola fit failed on segment %d: %s", sid, exc)
                 continue
-            for fi, _ in obs:
+            if parab_resid > max_residual:
+                continue
+
+            spin_axis: list[float] | None = None
+            spin_omega: float | None = None
+            spin_confidence: float | None = None
+            effective_p0, effective_v0 = p0, v0
+            effective_resid = parab_resid
+            omega_world: np.ndarray | None = None
+
+            duration_s = (b - a) / camera.fps
+            if spin_enabled and duration_s >= spin_min_seconds:
+                try:
+                    mp0, mv0, momega, magnus_resid = fit_magnus_trajectory(
+                        obs,
+                        Ks=Ks_seg, Rs=Rs_seg, t_world=ts_seg,
+                        fps=camera.fps,
+                        drag_k_over_m=drag,
+                        p0_seed=p0, v0_seed=v0,
+                    )
+                except Exception as exc:
+                    logger.debug("magnus fit failed on segment %d: %s", sid, exc)
+                else:
+                    omega_mag = float(np.linalg.norm(momega))
+                    improvement = (
+                        (parab_resid - magnus_resid) / parab_resid
+                        if parab_resid > 0 else 0.0
+                    )
+                    if (
+                        omega_mag > 0
+                        and omega_mag <= spin_max_omega
+                        and improvement >= spin_min_improve
+                    ):
+                        spin_axis = list((momega / omega_mag).astype(float))
+                        spin_omega = omega_mag
+                        # 0.2 improvement on a 0.5s segment → ~0.4 confidence;
+                        # 0.5 improvement on 1.0s → ~1.0.
+                        duration_factor = min(1.0, duration_s / 1.0)
+                        spin_confidence = float(min(1.0, (improvement / 0.5) * duration_factor))
+                        effective_p0, effective_v0 = mp0, mv0
+                        effective_resid = magnus_resid
+                        omega_world = momega
+
+            # Replace per-frame world_xyz inside the flight with the fitted
+            # trajectory evaluation. Preserves original BallStage behaviour
+            # and gives clean curves through the gltf export.
+            for fi in range(a, b + 1):
+                if fi not in per_frame_K:
+                    continue
                 flight_membership[fi] = sid
                 dt = (fi - a) / camera.fps
-                world = (
-                    p0
-                    + v0 * dt
-                    + 0.5 * np.array([0.0, 0.0, -9.81]) * dt ** 2
-                )
-                provisional[fi] = (provisional[fi][0], world, provisional[fi][2])
-            flight_outs.append(
+                if omega_world is not None:
+                    positions = _integrate_magnus_positions(
+                        effective_p0,
+                        effective_v0,
+                        omega_world,
+                        g_vec,
+                        drag,
+                        np.array([0.0, dt]),
+                    )
+                    pos = positions[-1]
+                else:
+                    pos = effective_p0 + effective_v0 * dt + 0.5 * g_vec * dt ** 2
+                prev_conf = per_frame_world.get(fi, (None, 0.5))[1]
+                per_frame_world[fi] = (pos, prev_conf)
+
+            flight_segments.append(
                 FlightSegment(
                     id=sid,
                     frame_range=(a, b),
-                    parabola={"p0": list(p0), "v0": list(v0), "g": -9.81},
-                    fit_residual_px=residual,
+                    parabola={
+                        "p0": [float(x) for x in effective_p0],
+                        "v0": [float(x) for x in effective_v0],
+                        "g": g,
+                        "spin_axis_world": spin_axis,
+                        "spin_omega_rad_s": spin_omega,
+                        "spin_confidence": spin_confidence,
+                    },
+                    fit_residual_px=effective_resid,
                 )
             )
 
-        # Assemble per-frame output across the camera span.
-        per_frame: list[BallFrame] = []
+        per_frame_out: list[BallFrame] = []
         for fi in range(n_frames):
-            if fi in provisional:
-                _, world, conf = provisional[fi]
+            if fi in per_frame_world:
+                world, conf = per_frame_world[fi]
                 state = "flight" if fi in flight_membership else "grounded"
-                per_frame.append(
+                per_frame_out.append(
                     BallFrame(
                         frame=fi,
                         world_xyz=tuple(float(x) for x in world),
                         state=state,
-                        confidence=conf,
+                        confidence=float(conf),
                         flight_segment_id=flight_membership.get(fi),
                     )
                 )
             else:
-                per_frame.append(
+                per_frame_out.append(
                     BallFrame(
                         frame=fi,
                         world_xyz=None,
@@ -228,7 +371,35 @@ class BallStage(BaseStage):
         track = BallTrack(
             clip_id=camera.clip_id,
             fps=camera.fps,
-            frames=tuple(per_frame),
-            flight_segments=tuple(flight_outs),
+            frames=tuple(per_frame_out),
+            flight_segments=tuple(flight_segments),
         )
         track.save(ball_out_path)
+
+    @staticmethod
+    def _flight_runs(
+        steps: list[TrackerStep], min_flight: int, max_flight: int
+    ) -> list[tuple[int, int]]:
+        """Run-length encode frames with ``p_flight >= 0.5``.
+
+        Returns ``(start_frame, end_frame)`` pairs, both inclusive.
+        Runs shorter than ``min_flight`` or longer than ``max_flight``
+        are dropped (long runs are likely tracker confusion, not real
+        flights).
+        """
+        runs: list[tuple[int, int]] = []
+        start: int | None = None
+        for step in steps:
+            in_flight = step.p_flight >= 0.5 and step.uv is not None
+            if in_flight and start is None:
+                start = step.frame
+            elif not in_flight and start is not None:
+                end = step.frame - 1
+                if min_flight <= (end - start + 1) <= max_flight:
+                    runs.append((start, end))
+                start = None
+        if start is not None and steps:
+            end = steps[-1].frame
+            if min_flight <= (end - start + 1) <= max_flight:
+                runs.append((start, end))
+        return runs

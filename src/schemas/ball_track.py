@@ -28,6 +28,26 @@ class BallFrame:
 
 @dataclass(frozen=True)
 class FlightSegment:
+    """3D trajectory parameters for one ball flight.
+
+    ``parabola`` carries the recovered trajectory model.  Required keys:
+
+    - ``p0`` (list[float]): initial world position (m).
+    - ``v0`` (list[float]): initial world velocity (m/s).
+    - ``g``  (float):       gravity (m/s², negative-z).
+
+    Optional Magnus-fit keys present when ``BallStage`` recovers spin:
+
+    - ``spin_axis_world``  (list[float] | None): unit axis in world frame.
+    - ``spin_omega_rad_s`` (float | None):       angular speed (rad/s).
+    - ``spin_confidence``  (float | None):       0–1 confidence derived
+      from residual improvement vs the pure-parabola fit and segment
+      duration.
+
+    Spin keys default to ``None`` whenever the residual-improvement gate
+    fails or the segment is shorter than ``ball.spin.min_flight_seconds``.
+    """
+
     id: int
     frame_range: tuple[int, int]
     parabola: dict

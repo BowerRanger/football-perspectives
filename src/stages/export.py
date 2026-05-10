@@ -87,6 +87,23 @@ def _derive_clip_name(output_dir: Path) -> str:
     return "clip"
 
 
+def _resolve_primary_shot(output_dir: Path, clip_name: str) -> str | None:
+    """Return ``clip_name`` if it names a real shot in shots_manifest.
+
+    Used by ``write_ue_manifest`` to switch the FBX-path lookup between
+    the multi-shot prefixed layout (``fbx/{shot_id}__{name}.fbx``) and
+    the legacy single-shot layout (``fbx/{name}.fbx``). Returns ``None``
+    when no shots manifest exists or when ``clip_name`` doesn't match
+    any shot id, preserving legacy behaviour.
+    """
+    shots_path = output_dir / "shots" / "shots_manifest.json"
+    if not shots_path.exists():
+        return None
+    raw = json.loads(shots_path.read_text())
+    shot_ids = {shot.get("id") for shot in raw.get("shots", []) if shot.get("id")}
+    return clip_name if clip_name in shot_ids else None
+
+
 def _per_shot_smpl_tracks(
     output_dir: Path, *, shot_id: str | None
 ) -> list[SmplWorldTrack]:
@@ -343,7 +360,14 @@ class ExportStage(BaseStage):
             logger.info("[export] no fbx dir, skipping manifest")
             return
 
-        all_tracks = _per_shot_smpl_tracks(self.output_dir, shot_id=None)
+        # Multi-shot outputs name FBXs as ``{shot_id}__{display_name}.fbx``;
+        # legacy single-shot outputs use ``{display_name}.fbx``. Pick the
+        # right lookup mode by resolving the primary shot from
+        # shots_manifest. Option A (single manifest, primary shot only):
+        # we emit the manifest for whichever shot ``_derive_clip_name``
+        # selected.
+        primary_shot = _resolve_primary_shot(self.output_dir, clip_name)
+        all_tracks = _per_shot_smpl_tracks(self.output_dir, shot_id=primary_shot)
 
         name_mapping = load_player_names(self.output_dir)
         players: list[PlayerEntry] = []

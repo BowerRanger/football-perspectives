@@ -67,12 +67,41 @@ hmr_world:
   lean_correction_deg: 5.0
 
 ball:
-  flight_px_velocity: 25.0
-  min_flight_frames: 4
-  max_flight_frames: 60
+  # Detector backend used by the in-stage detection pass. wasb is the
+  # purpose-built broadcast-sports detector (vendored at
+  # third_party/wasb_sbdt). yolo is the COCO class-32 fallback. fake is
+  # used only in tests via dependency injection.
+  detector: wasb
+  ball_radius_m: 0.11
+  # Max consecutive frames the IMM tracker will gap-fill before emitting
+  # state="missing". 6 ≈ 0.2 s at 30 fps.
+  max_gap_frames: 6
   flight_max_residual_px: 5.0
   max_occlusion_frames: 8
-  ball_radius_m: 0.11
+  wasb:
+    checkpoint: third_party/wasb_sbdt/checkpoints/wasb_soccer.pth
+    confidence: 0.3
+    input_size: [512, 288]
+  tracker:
+    process_noise_grounded_px: 4.0
+    process_noise_flight_px: 12.0
+    measurement_noise_px: 2.0
+    gating_sigma: 4.0
+    # Replaces the old top-level ball.min_flight_frames / max_flight_frames.
+    min_flight_frames: 6
+    max_flight_frames: 90
+  spin:
+    enabled: true
+    min_flight_seconds: 0.5
+    # Magnus fit is only accepted if RMS pixel residual improves by at
+    # least this fraction over the pure-parabola fit on the same segment.
+    min_residual_improvement: 0.20
+    # Sanity bound on recovered angular speed (rad/s). Pro footballers
+    # rarely exceed ~50 rad/s on a kick; we cap conservatively at 200.
+    max_omega_rad_s: 200.0
+    # Lumped drag coefficient k/m used inside the Magnus integrator:
+    #     a = g + (k_drag_over_m) · (ω × v)
+    drag_k_over_m: 0.005
   plausibility:
     z_max_m: 50.0
     horizontal_speed_max_m_s: 40.0

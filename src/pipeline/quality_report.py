@@ -125,6 +125,18 @@ def write_quality_report(output_dir: Path) -> None:
         ball = BallTrack.load(ball_path)
         states = [f.state for f in ball.frames]
         residuals = [s.fit_residual_px for s in ball.flight_segments]
+        spin_seg_ids = {
+            s.id for s in ball.flight_segments
+            if s.parabola.get("spin_omega_rad_s") is not None
+        }
+        flight_frames = [f for f in ball.frames if f.state == "flight"]
+        spin_frames = [
+            f for f in flight_frames if f.flight_segment_id in spin_seg_ids
+        ]
+        spin_coverage = (
+            100.0 * len(spin_frames) / len(flight_frames)
+            if flight_frames else 0.0
+        )
         report["ball"] = {
             "grounded_frames": states.count("grounded"),
             "flight_segments": len(ball.flight_segments),
@@ -132,6 +144,7 @@ def write_quality_report(output_dir: Path) -> None:
             "mean_flight_fit_residual_px": (
                 float(np.mean(residuals)) if residuals else 0.0
             ),
+            "spin_coverage_pct": spin_coverage,
         }
 
     refined_summary_path = output_dir / "refined_poses" / "refined_poses_summary.json"

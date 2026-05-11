@@ -550,3 +550,133 @@ def test_grounded_then_airborne_does_not_interpolate_world(tmp_path: Path):
     assert f7.state == "grounded", (
         f"grounded→airborne boundary should leave in-between frames alone, got {f7.state}"
     )
+
+
+@pytest.mark.integration
+def test_phase2_parabola_fit_through_anchor_bracketed_flight(tmp_path: Path):
+    """A kick + several airborne anchors + bounce should produce a
+    single FlightSegment whose parabola matches the synthesised
+    trajectory within 1 m at every frame in the span."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 70
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    # Synthesise a true parabolic flight from frame 5 (kick) back to
+    # ground at frame 54. v0_z = 8 m/s gives a full cycle of
+    # 2*8/9.81 = 1.631 s ≈ 49 frames at 30 fps. Apex ≈ frame 29 at z ≈ 3.37 m.
+    p0_true = np.array([30.0, 30.0, 0.11])
+    v0_true = np.array([5.0, 1.0, 8.0])
+    g_vec = np.array([0.0, 0.0, -9.81])
+    kick_frame = 5
+    bounce_frame = 54
+
+    def project(p):
+        cam = R @ p + t; pix = K @ cam
+        return (float(pix[0] / pix[2]), float(pix[1] / pix[2]))
+
+    def world_at(fi):
+        dt = (fi - kick_frame) / 30.0
+        return p0_true + v0_true * dt + 0.5 * g_vec * dt ** 2
+
+    detections: list[tuple[float, float, float] | None] = []
+    for i in range(n_frames):
+        if kick_frame <= i <= bounce_frame:
+            u, v = project(world_at(i))
+            detections.append((u, v, 0.85))
+        else:
+            detections.append((640.0, 360.0, 0.85))
+
+    anchor_states = [
+        (kick_frame,         "kick"),
+        (kick_frame +  6,    "airborne_low"),
+        (kick_frame + 14,    "airborne_mid"),
+        (kick_frame + 24,    "airborne_high"),
+        (kick_frame + 34,    "airborne_mid"),
+        (kick_frame + 43,    "airborne_low"),
+        (bounce_frame,       "bounce"),
+    ]
+    anchors = []
+    for fi, state in anchor_states:
+        wp = world_at(fi)
+        if state == "bounce":
+            wp = np.array([wp[0], wp[1], 0.11])
+        anchors.append(BallAnchor(frame=fi, image_xy=project(wp), state=state))
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720), anchors=tuple(anchors),
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    segs = [s for s in track.flight_segments if s.frame_range == (kick_frame, bounce_frame)]
+    assert len(segs) == 1, (
+        f"expected one Phase-2 FlightSegment covering {kick_frame}-{bounce_frame}, "
+        f"got {[(s.id, s.frame_range) for s in track.flight_segments]}"
+    )
+    seg = segs[0]
+    p0_fit = np.array(seg.parabola["p0"])
+    assert np.linalg.norm(p0_fit - p0_true) < 0.5
+
+    for fi in range(kick_frame, bounce_frame + 1):
+        f = next(x for x in track.frames if x.frame == fi)
+        assert f.state == "flight", f"frame {fi} expected flight, got {f.state}"
+
+    # Per-frame world matches the synthesised trajectory within 1 m.
+    for fi in range(kick_frame, bounce_frame + 1):
+        f = next(x for x in track.frames if x.frame == fi)
+        assert f.world_xyz is not None
+        expected = world_at(fi)
+        err = float(np.linalg.norm(np.array(f.world_xyz) - expected))
+        assert err < 1.0, (
+            f"frame {fi}: world {list(f.world_xyz)} vs truth {expected.tolist()}, err={err:.2f} m"
+        )
+
+    span_zs = [
+        f.world_xyz[2] for f in track.frames
+        if kick_frame <= f.frame <= bounce_frame and f.world_xyz is not None
+    ]
+    assert max(span_zs) >= 3.0, f"expected apex z >= 3 m, got max={max(span_zs):.2f}"
+
+
+@pytest.mark.integration
+def test_phase2_fallback_to_linear_when_too_few_obs(tmp_path: Path):
+    """A two-anchor airborne span has fewer than 3 obs — Phase 2 must
+    skip and the linear-interp fallback must still produce a sensible
+    interpolated path (state=flight, world between anchors)."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 20
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+    detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720),
+        anchors=(
+            BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="airborne_low"),
+            BallAnchor(frame=10, image_xy=(720.0, 300.0), state="airborne_mid"),
+        ),
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    # No FlightSegment created (Phase 2 skipped, linear fallback adds
+    # no segment by design).
+    assert not any(
+        s.frame_range[0] >= 5 and s.frame_range[1] <= 10
+        for s in track.flight_segments
+    ), "two-anchor span should fall back to linear interp without a parabola segment"
+    # Frames 5..10 should still be state=flight via forced_flight.
+    for fi in range(5, 11):
+        f = next(x for x in track.frames if x.frame == fi)
+        assert f.state == "flight", f"frame {fi} expected flight, got {f.state}"

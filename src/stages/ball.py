@@ -782,15 +782,164 @@ class BallStage(BaseStage):
                     # might have assigned (rare but possible).
                     flight_membership.pop(fi, None)
 
-        # Layer 5: flight-span interpolation. When consecutive anchors
-        # are BOTH non-grounded (airborne_*, kick, catch, bounce,
-        # header) with no grounded anchor between them, treat the span
-        # as a flight: linearly interpolate world XYZ between the two
-        # anchor ray-casts (each at its own state height) and mark every
-        # intermediate frame as flight so the BallFrame assembly emits
-        # state="flight". off_screen_flight anchors have no pixel so
-        # they don't contribute to the world interpolation, but they
-        # still extend the forced_flight span.
+        # Layer 5 Phase 2: parabola fit through maximal non-grounded
+        # anchor spans. For each contiguous run of non-grounded anchors
+        # (no grounded anchor between them), gather all anchor pixels
+        # as observations and all anchor-state heights as soft knots,
+        # then fit a parabola. If the fit is plausible, fill the span's
+        # unanchored frames with the parabola's per-frame evaluation
+        # and add a real FlightSegment. The linear-interp pass below
+        # serves as the fallback when the parabola fit fails or the
+        # span has too few pixels.
+        parabola_handled_spans: list[tuple[int, int]] = []
+        if anchor_by_frame:
+            ordered_for_spans = sorted(anchor_by_frame.items(), key=lambda kv: kv[0])
+            _NON_GROUNDED = AIRBORNE_STATES | EVENT_STATES
+            spans: list[list[tuple[int, BallAnchor]]] = []
+            current_span: list[tuple[int, BallAnchor]] = []
+            for fi, anc in ordered_for_spans:
+                if anc.state == "grounded":
+                    if len(current_span) >= 2:
+                        spans.append(current_span)
+                    current_span = []
+                elif anc.state in _NON_GROUNDED:
+                    current_span.append((fi, anc))
+                else:
+                    if len(current_span) >= 2:
+                        spans.append(current_span)
+                    current_span = []
+            if len(current_span) >= 2:
+                spans.append(current_span)
+
+            for span in spans:
+                fa_span = span[0][0]
+                fb_span = span[-1][0]
+                # Build obs from every anchor pixel in the span. Only
+                # HARD_KNOT_STATES contribute to knot_frames — airborne
+                # bucket heights (1/6/15 m) are too coarse to pin Z,
+                # and using them as soft constraints would pull the fit
+                # toward the wrong height when the user picks the wrong
+                # bucket. The pixel observations alone constrain XY
+                # along each camera ray; gravity + hard knots constrain
+                # Z.
+                obs_p2: list[tuple[int, tuple[float, float]]] = []
+                Ks_p2: list[np.ndarray] = []
+                Rs_p2: list[np.ndarray] = []
+                ts_p2: list[np.ndarray] = []
+                knots: dict[int, np.ndarray] = {}
+                p0_pin: np.ndarray | None = None
+                for fi, anc in span:
+                    if anc.image_xy is None or fi not in per_frame_K:
+                        continue
+                    obs_p2.append((fi, (float(anc.image_xy[0]), float(anc.image_xy[1]))))
+                    Ks_p2.append(per_frame_K[fi])
+                    Rs_p2.append(per_frame_R[fi])
+                    ts_p2.append(per_frame_t[fi])
+                    if anc.state in HARD_KNOT_STATES:
+                        try:
+                            world_at_anchor = ankle_ray_to_pitch(
+                                anc.image_xy,
+                                K=per_frame_K[fi], R=per_frame_R[fi], t=per_frame_t[fi],
+                                plane_z=state_to_height(anc.state),
+                                distortion=distortion,
+                            )
+                        except Exception:
+                            continue
+                        rel = fi - fa_span
+                        knots[rel] = np.asarray(world_at_anchor, dtype=float)
+                # Need at least 3 obs to make a parabola fit meaningful.
+                if len(obs_p2) < 3:
+                    continue
+                # If the span's start frame is a hard-knot anchor (kick),
+                # promote it to p0_fixed so the segment origin is pinned.
+                if 0 in knots and span[0][1].state in HARD_KNOT_STATES:
+                    p0_pin = knots.pop(0)
+                try:
+                    p2_p0, p2_v0, p2_resid = fit_parabola_to_image_observations(
+                        obs_p2, Ks=Ks_p2, Rs=Rs_p2, t_world=ts_p2,
+                        fps=camera.fps, distortion=distortion,
+                        p0_fixed=p0_pin, knot_frames=knots or None,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Phase 2 parabola fit failed for span %d-%d: %s",
+                        fa_span, fb_span, exc,
+                    )
+                    continue
+                duration_s = (fb_span - fa_span) / camera.fps
+                if duration_s <= 0 or not is_plausible_trajectory(
+                    p2_p0, p2_v0, omega=None,
+                    duration_s=duration_s, fps=camera.fps,
+                    cfg=plaus_cfg, pitch=pitch_dims,
+                ):
+                    logger.info(
+                        "Phase 2 parabola fit for span %d-%d failed plausibility — "
+                        "falling back to linear interp",
+                        fa_span, fb_span,
+                    )
+                    continue
+                # Success: drop any pre-existing flight segments inside
+                # this span (the parabola we just fit is the authoritative
+                # answer) and emit a single new segment.
+                surviving: list[FlightSegment] = []
+                for seg in flight_segments:
+                    seg_a, seg_b = seg.frame_range
+                    if seg_a >= fa_span and seg_b <= fb_span:
+                        for fi in range(seg_a, seg_b + 1):
+                            if flight_membership.get(fi) == seg.id:
+                                flight_membership.pop(fi, None)
+                        continue
+                    surviving.append(seg)
+                flight_segments[:] = surviving
+
+                sid_new = (max(flight_membership.values()) + 1) if flight_membership else 0
+                # Avoid colliding with any segment IDs still in the list.
+                existing_ids = {s.id for s in flight_segments}
+                while sid_new in existing_ids:
+                    sid_new += 1
+                g_vec = np.array([0.0, 0.0, -9.81])
+                # Inside a successful Phase 2 span the parabola is the
+                # authoritative answer for every frame — including the
+                # anchored ones, whose pixels constrained the fit. The
+                # per-anchor ray-cast at bucket heights would otherwise
+                # land 10s of metres off the truth for coarse buckets.
+                for fi in range(fa_span, fb_span + 1):
+                    forced_flight.add(fi)
+                    flight_membership[fi] = sid_new
+                    dt_k = (fi - fa_span) / camera.fps
+                    pos = (
+                        (p0_pin if p0_pin is not None else p2_p0)
+                        + p2_v0 * dt_k + 0.5 * (dt_k ** 2) * g_vec
+                    )
+                    per_frame_world[fi] = (pos, 0.92)
+                flight_segments.append(FlightSegment(
+                    id=sid_new,
+                    frame_range=(fa_span, fb_span),
+                    parabola={
+                        "p0": [float(x) for x in (p0_pin if p0_pin is not None else p2_p0)],
+                        "v0": [float(x) for x in p2_v0],
+                        "g": -9.81,
+                        "spin_axis_world": None,
+                        "spin_omega_rad_s": None,
+                        "spin_confidence": None,
+                    },
+                    fit_residual_px=p2_resid,
+                ))
+                parabola_handled_spans.append((fa_span, fb_span))
+
+        # Layer 5 Phase 1: flight-span LINEAR interpolation — fallback
+        # when Phase 2 didn't handle the span (fit raised, plausibility
+        # failed, or fewer than 3 anchor pixels). When consecutive
+        # anchors are BOTH non-grounded with no grounded anchor between
+        # them, linearly interpolate world XYZ between the two anchor
+        # ray-casts (each at its own state height) and mark every
+        # intermediate frame as flight.
+        def _in_handled_span(fi: int) -> bool:
+            for sa, sb in parabola_handled_spans:
+                if sa <= fi <= sb:
+                    return True
+            return False
+
         if anchor_by_frame:
             ordered = sorted(anchor_by_frame.items(), key=lambda kv: kv[0])
             _NON_GROUNDED = AIRBORNE_STATES | EVENT_STATES
@@ -801,23 +950,20 @@ class BallStage(BaseStage):
                     continue
                 if fb - fa <= 1:
                     continue
-                # Mark every in-between frame as flight (state-only,
-                # no FlightSegment placeholder created later).
+                if _in_handled_span(fa) and _in_handled_span(fb):
+                    continue
                 for fi in range(fa + 1, fb):
                     forced_flight.add(fi)
                     flight_membership.pop(fi, None)
-                # Interpolate world XYZ if both anchors have a pixel
-                # (off_screen_flight has none — skip the world interp
-                # but the forced_flight extension above still applies).
                 wa = per_frame_world.get(fa)
                 wb = per_frame_world.get(fb)
                 if wa is None or wb is None:
                     continue
                 pa, _ = wa
                 pb, _ = wb
-                span = fb - fa
+                span_len = fb - fa
                 for fi in range(fa + 1, fb):
-                    t = (fi - fa) / span
+                    t = (fi - fa) / span_len
                     pos = pa * (1.0 - t) + pb * t
                     per_frame_world[fi] = (pos, 0.85)
 

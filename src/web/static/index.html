@@ -3851,225 +3851,13 @@ function renderBallShot(panel, data, shotId) {
     else if (rafId) cancelAnimationFrame(rafId);
   });
 
-  // Source-view overlay: full-width panel BELOW the shared trajectory
-  // timeline, with its own playback controls.
-  const sourcePanel = makePanel("Source overlay");
-  const src = buildBallSourceOverlay(data, shotId);
-  sourcePanel.body.appendChild(src.element);
-  panel.appendChild(sourcePanel.wrap);
-
-  // Ball anchor editor: inline below the source overlay. Operator
-  // marks per-frame ball positions + state tags here; the next
-  // "Re-run Stage" picks up the saved anchors via Layer 5.
+  // Unified ball editor: video + canvas overlay with toggleable layers
+  // (anchors / predicted ball path). Replaces the previously-separate
+  // Source overlay + Ball Anchor Editor panels.
   const editorPanel = makePanel("Ball Anchor Editor");
   const editor = buildBallAnchorEditor(data, shotId);
   editorPanel.body.appendChild(editor.element);
   panel.appendChild(editorPanel.wrap);
-}
-
-// ── Source-view ball overlay ─────────────────────────────────────────
-// Renders the clip video with the predicted ball position drawn as a
-// circle (state-colored: green=grounded, orange=flight) projected from
-// the per-frame world_xyz using the same camera (K, R, t) the pipeline
-// solved in the camera stage. Mirrors the kp2d overlay pattern used by
-// the hmr_world panel.
-function buildBallSourceOverlay(data, shotId) {
-  const wrap = document.createElement("div");
-  wrap.style.cssText = "display:flex;flex-direction:column;gap:6px;";
-
-  const stage = document.createElement("div");
-  stage.style.cssText = "position:relative;background:#000;border-radius:4px;overflow:hidden;";
-  const video = document.createElement("video");
-  if (shotId) {
-    video.src = `/api/video/${encodeURIComponent(shotId)}`;
-  }
-  video.preload = "metadata";
-  video.muted = true;
-  video.style.cssText = "display:block;width:100%;height:auto;";
-  const overlay = document.createElement("canvas");
-  overlay.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;";
-  stage.appendChild(video);
-  stage.appendChild(overlay);
-  wrap.appendChild(stage);
-
-  // Independent playback controls (the trajectory tiles stay linked to
-  // the shared timeline below; this overlay scrubs on its own).
-  const fps = data.fps || 30;
-  const minFrame = data.frames.length ? data.frames[0].frame : 0;
-  const maxFrame = data.frames.length ? data.frames[data.frames.length - 1].frame : 0;
-  const ctrl = document.createElement("div");
-  ctrl.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 0;";
-  const playBtn = makeToolbarBtn("▶", "#4f46e5"); playBtn.style.minWidth = "36px";
-  const stepBack = makeToolbarBtn("◀", "#334155"); stepBack.title = "Previous frame";
-  const stepFwd = makeToolbarBtn("▶", "#334155"); stepFwd.title = "Next frame";
-  const seek = document.createElement("input");
-  seek.type = "range";
-  seek.min = String(minFrame);
-  seek.max = String(maxFrame);
-  seek.value = String(minFrame);
-  seek.style.cssText = "flex:1;";
-  const frameLabel = document.createElement("span");
-  frameLabel.style.cssText = "color:#94a3b8;font-size:11px;min-width:140px;text-align:right;font-variant-numeric:tabular-nums;";
-  frameLabel.textContent = `Frame ${minFrame}  (0.00s)`;
-  ctrl.append(playBtn, stepBack, stepFwd, seek, frameLabel);
-  wrap.appendChild(ctrl);
-
-  const note = document.createElement("div");
-  note.style.cssText = "color:#94a3b8;font-size:11px;padding:0 4px;";
-  note.textContent = "Loading camera track…";
-  wrap.appendChild(note);
-
-  // Per-frame ball xyz lookup.
-  const ballByFrame = new Map();
-  for (const f of data.frames) {
-    if (f.world_xyz) ballByFrame.set(f.frame, { xyz: f.world_xyz, state: f.state });
-  }
-
-  // Per-frame camera lookup, populated once /camera/track resolves.
-  const camByFrame = new Map();
-  let camFallback = null;
-  let camReady = false;
-  let pendingFrame = data.frames[0] ? data.frames[0].frame : 0;
-
-  const camUrl = shotId ? `/camera/track?shot=${encodeURIComponent(shotId)}` : "/camera/track";
-  fetchJsonOrNull(camUrl).then((cam) => {
-    if (!cam || !cam.frames) {
-      note.textContent = "No camera track available — overlay disabled.";
-      return;
-    }
-    camFallback = cam.t_world ? cam.t_world : null;
-    for (const cf of cam.frames) {
-      camByFrame.set(cf.frame, {
-        K: cf.K, R: cf.R,
-        t: cf.t || camFallback,
-      });
-    }
-    camReady = true;
-    note.textContent = `${camByFrame.size} camera frames loaded. Green = grounded, orange = flight.`;
-    drawFrame(pendingFrame);
-  });
-
-  function projectToPixel(xyz, cam) {
-    // p_cam = R @ p_world + t ; pix = K @ p_cam ; uv = pix[:2] / pix[2]
-    const [x, y, z] = xyz;
-    const R = cam.R, t = cam.t, K = cam.K;
-    if (!R || !t || !K) return null;
-    const cx = R[0][0] * x + R[0][1] * y + R[0][2] * z + t[0];
-    const cy = R[1][0] * x + R[1][1] * y + R[1][2] * z + t[1];
-    const cz = R[2][0] * x + R[2][1] * y + R[2][2] * z + t[2];
-    if (cz <= 0) return null;  // behind the camera
-    const u = (K[0][0] * cx + K[0][1] * cy + K[0][2] * cz) / cz;
-    const v = (K[1][0] * cx + K[1][1] * cy + K[1][2] * cz) / cz;
-    return [u, v];
-  }
-
-  function fitOverlay() {
-    if (!video.videoWidth) return;
-    overlay.width = video.videoWidth;
-    overlay.height = video.videoHeight;
-    overlay.style.width = video.offsetWidth + "px";
-    overlay.style.height = video.offsetHeight + "px";
-  }
-
-  function drawFrame(fi) {
-    pendingFrame = fi;
-    if (!camReady || !overlay.width) return;
-    const ctx = overlay.getContext("2d");
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
-    const ball = ballByFrame.get(fi);
-    if (!ball) return;
-    const cam = camByFrame.get(fi);
-    if (!cam) return;
-    const uv = projectToPixel(ball.xyz, cam);
-    if (!uv) return;
-    const colour = ball.state === "flight" ? "#fb923c"
-                 : ball.state === "grounded" ? "#34d399"
-                 : "#64748b";
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = colour;
-    ctx.fillStyle = colour;
-    // Cross-hair + outline circle: visible against any background.
-    ctx.beginPath();
-    ctx.arc(uv[0], uv[1], 10, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(uv[0], uv[1], 3, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(uv[0] - 16, uv[1]); ctx.lineTo(uv[0] - 4, uv[1]);
-    ctx.moveTo(uv[0] + 4, uv[1]); ctx.lineTo(uv[0] + 16, uv[1]);
-    ctx.moveTo(uv[0], uv[1] - 16); ctx.lineTo(uv[0], uv[1] - 4);
-    ctx.moveTo(uv[0], uv[1] + 4); ctx.lineTo(uv[0], uv[1] + 16);
-    ctx.stroke();
-    // Small state badge above the ball.
-    const label = `${ball.state} z=${ball.xyz[2].toFixed(2)}m`;
-    ctx.font = "bold 11px -apple-system, sans-serif";
-    const tw = ctx.measureText(label).width + 8;
-    ctx.fillStyle = "rgba(0,0,0,0.7)";
-    ctx.fillRect(uv[0] - tw / 2, uv[1] - 30, tw, 14);
-    ctx.fillStyle = colour;
-    ctx.fillText(label, uv[0] - tw / 2 + 4, uv[1] - 19);
-  }
-
-  let currentFrame = minFrame;
-  function setFrame(fi) {
-    currentFrame = Math.max(minFrame, Math.min(maxFrame, fi));
-    seek.value = String(currentFrame);
-    const sec = ((currentFrame - minFrame) / Math.max(1, fps)).toFixed(2);
-    frameLabel.textContent = `Frame ${currentFrame}  (${sec}s)`;
-    if (video.readyState >= 1 && Math.abs(video.currentTime - currentFrame / fps) > 0.5 / fps) {
-      video.currentTime = currentFrame / fps;
-    }
-    drawFrame(currentFrame);
-  }
-
-  video.addEventListener("loadedmetadata", () => {
-    fitOverlay();
-    drawFrame(currentFrame);
-  });
-  new ResizeObserver(fitOverlay).observe(video);
-
-  // Drive overlay updates from the video clock while playing so the
-  // crosshair stays glued to the moving frame.
-  let rafId = null;
-  let playing = false;
-  function tick() {
-    if (!playing) return;
-    const fi = Math.round(video.currentTime * fps);
-    if (fi !== currentFrame) {
-      currentFrame = Math.max(minFrame, Math.min(maxFrame, fi));
-      seek.value = String(currentFrame);
-      const sec = ((currentFrame - minFrame) / Math.max(1, fps)).toFixed(2);
-      frameLabel.textContent = `Frame ${currentFrame}  (${sec}s)`;
-      drawFrame(currentFrame);
-    }
-    rafId = requestAnimationFrame(tick);
-  }
-
-  playBtn.addEventListener("click", () => {
-    if (video.paused) {
-      video.play();
-      playing = true;
-      playBtn.textContent = "⏸";
-      if (!rafId) rafId = requestAnimationFrame(tick);
-    } else {
-      video.pause();
-      playing = false;
-      playBtn.textContent = "▶";
-      cancelAnimationFrame(rafId); rafId = null;
-    }
-  });
-  stepBack.addEventListener("click", () => { video.pause(); playing = false; playBtn.textContent = "▶"; setFrame(currentFrame - 1); });
-  stepFwd.addEventListener("click", () => { video.pause(); playing = false; playBtn.textContent = "▶"; setFrame(currentFrame + 1); });
-  seek.addEventListener("input", () => { video.pause(); playing = false; playBtn.textContent = "▶"; setFrame(Number(seek.value)); });
-  video.addEventListener("pause", () => { playing = false; playBtn.textContent = "▶"; cancelAnimationFrame(rafId); rafId = null; });
-  video.addEventListener("ended", () => { playing = false; playBtn.textContent = "▶"; });
-
-  if (!shotId) {
-    note.textContent = "Source overlay unavailable in legacy single-shot mode.";
-  }
-
-  return { element: wrap };
 }
 
 // ── Inline ball anchor editor ───────────────────────────────────────
@@ -4139,17 +3927,31 @@ function buildBallAnchorEditor(data, shotId) {
     return { element: wrap };
   }
 
-  // Header row: save button + status text + dirty indicator.
+  // Header row: save button + layer toggles + status text + hint.
   const header = document.createElement("div");
-  header.style.cssText = "display:flex;align-items:center;gap:10px;font-size:12px;color:#94a3b8;";
+  header.style.cssText = "display:flex;align-items:center;gap:14px;font-size:12px;color:#94a3b8;flex-wrap:wrap;";
   const saveBtn = makeToolbarBtn("Save anchors", "#4f46e5");
+
+  function makeLayerToggle(labelText, defaultOn) {
+    const wrapEl = document.createElement("label");
+    wrapEl.style.cssText = "display:inline-flex;align-items:center;gap:5px;cursor:pointer;user-select:none;";
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = defaultOn;
+    cb.style.cssText = "accent-color:#4f46e5;";
+    const txt = document.createElement("span");
+    txt.textContent = labelText;
+    wrapEl.append(cb, txt);
+    return { element: wrapEl, checkbox: cb };
+  }
+  const anchorsToggle = makeLayerToggle("Anchors", true);
+  const predictionToggle = makeLayerToggle("Predicted ball path", true);
   const statusEl = document.createElement("span");
-  statusEl.style.cssText = "flex:1;";
+  statusEl.style.cssText = "flex:1;min-width:80px;";
   statusEl.textContent = "Loading…";
   const hint = document.createElement("span");
   hint.style.cssText = "color:#64748b;font-size:11px;";
   hint.textContent = "Left-click = place • Right-click = delete";
-  header.append(saveBtn, statusEl, hint);
+  header.append(saveBtn, anchorsToggle.element, predictionToggle.element, statusEl, hint);
   wrap.appendChild(header);
 
   // 3-column body.
@@ -4212,6 +4014,16 @@ function buildBallAnchorEditor(data, shotId) {
   let anchors = [];
   let selectedTag = "grounded";
   let dirty = false;
+  // Per-frame predicted ball world position from /ball/preview (data.frames).
+  // Projected back to pixels using the camera track after camera loads.
+  const predictedWorldByFrame = new Map();
+  for (const f of (data.frames || [])) {
+    if (f.world_xyz) {
+      predictedWorldByFrame.set(f.frame, { xyz: f.world_xyz, state: f.state });
+    }
+  }
+  const predictedPixelByFrame = new Map();  // populated once camera loads
+  const camByFrame = new Map();
 
   function setStatus(msg) { statusEl.textContent = msg; }
   function setDirty(d) {
@@ -4291,15 +4103,68 @@ function buildBallAnchorEditor(data, shotId) {
     const fi = currentFrame();
     frameLabel.textContent = `Frame ${fi}`;
     seek.value = String(fi);
-    for (const a of anchors) {
-      if (a.frame !== fi || a.image_xy == null) continue;
-      const tag = TAGS.find(x => x.id === a.state) || { color: "#fff" };
-      ctx.strokeStyle = tag.color; ctx.fillStyle = tag.color;
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(a.image_xy[0], a.image_xy[1], 12, 0, Math.PI * 2); ctx.stroke();
-      ctx.beginPath(); ctx.arc(a.image_xy[0], a.image_xy[1], 3, 0, Math.PI * 2); ctx.fill();
+
+    // Layer: predicted ball path. White cross-hair + outline circle,
+    // colored by state (grounded=green, flight=orange) for a quick
+    // sanity check against the operator's anchors.
+    if (predictionToggle.checkbox.checked) {
+      const uv = predictedPixelByFrame.get(fi);
+      const pred = predictedWorldByFrame.get(fi);
+      if (uv && pred) {
+        const colour = pred.state === "flight" ? "#fb923c"
+                     : pred.state === "grounded" ? "#34d399"
+                     : "#64748b";
+        ctx.strokeStyle = colour;
+        ctx.fillStyle = colour;
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(uv[0], uv[1], 10, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(uv[0], uv[1], 3, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(uv[0] - 16, uv[1]); ctx.lineTo(uv[0] - 4, uv[1]);
+        ctx.moveTo(uv[0] + 4, uv[1]); ctx.lineTo(uv[0] + 16, uv[1]);
+        ctx.moveTo(uv[0], uv[1] - 16); ctx.lineTo(uv[0], uv[1] - 4);
+        ctx.moveTo(uv[0], uv[1] + 4); ctx.lineTo(uv[0], uv[1] + 16);
+        ctx.stroke();
+        const label = `${pred.state} z=${pred.xyz[2].toFixed(2)}m`;
+        ctx.font = "bold 11px -apple-system, sans-serif";
+        const tw = ctx.measureText(label).width + 8;
+        ctx.fillStyle = "rgba(0,0,0,0.7)";
+        ctx.fillRect(uv[0] - tw / 2, uv[1] - 30, tw, 14);
+        ctx.fillStyle = colour;
+        ctx.fillText(label, uv[0] - tw / 2 + 4, uv[1] - 19);
+      }
+    }
+
+    // Layer: anchor crosshairs.
+    if (anchorsToggle.checkbox.checked) {
+      for (const a of anchors) {
+        if (a.frame !== fi || a.image_xy == null) continue;
+        const tag = TAGS.find(x => x.id === a.state) || { color: "#fff" };
+        ctx.strokeStyle = tag.color; ctx.fillStyle = tag.color;
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(a.image_xy[0], a.image_xy[1], 12, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(a.image_xy[0], a.image_xy[1], 3, 0, Math.PI * 2); ctx.fill();
+      }
     }
   }
+
+  function projectWorldToPixel(xyz, cf, tFallback) {
+    if (!cf || !cf.R || !cf.K) return null;
+    const tv = cf.t || tFallback;
+    if (!tv) return null;
+    const [x, y, z] = xyz;
+    const R = cf.R, K = cf.K;
+    const cx = R[0][0] * x + R[0][1] * y + R[0][2] * z + tv[0];
+    const cy = R[1][0] * x + R[1][1] * y + R[1][2] * z + tv[1];
+    const cz = R[2][0] * x + R[2][1] * y + R[2][2] * z + tv[2];
+    if (cz <= 0) return null;
+    const u = (K[0][0] * cx + K[0][1] * cy + K[0][2] * cz) / cz;
+    const v = (K[1][0] * cx + K[1][1] * cy + K[1][2] * cz) / cz;
+    return [u, v];
+  }
+
+  anchorsToggle.checkbox.addEventListener("change", drawOverlay);
+  predictionToggle.checkbox.addEventListener("change", drawOverlay);
 
   overlay.addEventListener("click", (e) => {
     if (selectedTag === "off_screen_flight") return;
@@ -4393,11 +4258,20 @@ function buildBallAnchorEditor(data, shotId) {
     }
   };
 
-  // Load camera + existing anchors.
+  // Load camera + existing anchors, then project predicted ball
+  // world_xyz to pixels so the prediction layer can render.
   (async () => {
     const cam = await fetchJsonOrNull(`/camera/track?shot=${encodeURIComponent(shotId)}`);
     if (cam && cam.fps) fps = cam.fps;
     if (cam && cam.image_size) imageSize = cam.image_size;
+    if (cam && cam.frames) {
+      for (const cf of cam.frames) camByFrame.set(cf.frame, cf);
+      const tFallback = cam.t_world || null;
+      for (const [frame, pred] of predictedWorldByFrame.entries()) {
+        const uv = projectWorldToPixel(pred.xyz, camByFrame.get(frame), tFallback);
+        if (uv) predictedPixelByFrame.set(frame, uv);
+      }
+    }
     const ar = await fetchJsonOrNull(`/ball-anchors/${encodeURIComponent(shotId)}`);
     anchors = (ar && ar.anchors) ? ar.anchors.map(a => ({
       frame: a.frame,
@@ -4406,7 +4280,13 @@ function buildBallAnchorEditor(data, shotId) {
     })) : [];
     renderTags();
     renderAnchors();
-    setStatus(`${anchors.length} anchors loaded`);
+    const predCount = predictedPixelByFrame.size;
+    setStatus(
+      predCount > 0
+        ? `${anchors.length} anchors loaded • ${predCount} predicted ball frames`
+        : `${anchors.length} anchors loaded`
+    );
+    drawOverlay();
   })();
 
   return { element: wrap };

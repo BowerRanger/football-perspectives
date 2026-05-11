@@ -69,6 +69,7 @@ from pydantic import BaseModel
 from src.pipeline.config import load_config
 from src.pipeline.runner import run_pipeline
 from src.schemas.anchor import AnchorSet
+from src.schemas.ball_anchor import BallAnchor, BallAnchorSet
 from src.schemas.ball_track import BallTrack
 from src.schemas.camera_track import CameraTrack
 from src.schemas.tracks import Track, TrackFrame, TracksResult
@@ -953,6 +954,16 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         anchors: list[dict[str, Any]]
         stadium: str | None = None
 
+    class BallAnchorEntry(BaseModel):
+        frame: int
+        image_xy: list[float] | None
+        state: str
+
+    class BallAnchorPayload(BaseModel):
+        clip_id: str
+        image_size: list[int]
+        anchors: list[BallAnchorEntry]
+
     def _first_shot_id() -> str | None:
         """Return the manifest's first shot_id, or None when no manifest."""
         from src.schemas.shots import ShotsManifest
@@ -986,6 +997,47 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         anchor_path.parent.mkdir(parents=True, exist_ok=True)
         anchor_set.save(anchor_path)
         return {"saved": True, "path": str(anchor_path), "count": len(anchor_set.anchors)}
+
+    @app.get("/ball-anchors/{shot_id}")
+    def get_ball_anchors_for_shot(shot_id: str):
+        path = output_dir / "ball" / f"{shot_id}_ball_anchors.json"
+        if not path.exists():
+            return {"clip_id": shot_id, "image_size": [0, 0], "anchors": []}
+        try:
+            data = json.loads(path.read_text())
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to load ball anchors: {exc}")
+        return data
+
+    @app.post("/ball-anchors/{shot_id}")
+    def post_ball_anchors_for_shot(shot_id: str, payload: BallAnchorPayload):
+        tmp = output_dir / "ball" / f".{shot_id}_ball_anchors.tmp.json"
+        try:
+            anchors_in: list[BallAnchor] = []
+            for a in payload.anchors:
+                anchors_in.append(BallAnchor(
+                    frame=int(a.frame),
+                    image_xy=tuple(a.image_xy) if a.image_xy is not None else None,
+                    state=a.state,
+                ))
+            aset = BallAnchorSet(
+                clip_id=str(payload.clip_id),
+                image_size=(int(payload.image_size[0]), int(payload.image_size[1])),
+                anchors=tuple(anchors_in),
+            )
+            # Round-trip through JSON to apply state-validation rules.
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            aset.save(tmp)
+            BallAnchorSet.load(tmp)  # validation pass
+        except (KeyError, TypeError, ValueError) as exc:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail=f"Invalid ball anchors: {exc}")
+        final = output_dir / "ball" / f"{shot_id}_ball_anchors.json"
+        tmp.replace(final)
+        return {"saved": True, "path": str(final), "count": len(aset.anchors)}
 
     @app.get("/anchors")
     def get_anchors():

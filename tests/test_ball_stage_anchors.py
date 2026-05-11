@@ -783,3 +783,58 @@ def test_phase2_splits_at_header_and_pins_endpoint(tmp_path: Path):
         f"header anchor frame should pin world to ray-cast at z=2.5; "
         f"expected {header_world}, got {list(f20.world_xyz)}"
     )
+
+
+@pytest.mark.integration
+def test_phase2_pins_p0_at_airborne_start_when_no_kick_present(tmp_path: Path):
+    """When a flight span starts with an airborne_* anchor (the user
+    didn't place a kick), the parabola's p0 should be pinned at the
+    airborne anchor's bucket-midpoint ray-cast. Without this, the LM
+    can drift p0 several metres along the camera ray."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 60
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
+    a_start_uv = (640.0, 360.0)
+    anchors = (
+        BallAnchor(frame=5,  image_xy=a_start_uv,        state="airborne_low"),
+        BallAnchor(frame=10, image_xy=(650.0, 330.0),    state="airborne_mid"),
+        BallAnchor(frame=15, image_xy=(660.0, 320.0),    state="airborne_mid"),
+        BallAnchor(frame=20, image_xy=(670.0, 340.0),    state="airborne_low"),
+        BallAnchor(frame=25, image_xy=(680.0, 360.0),    state="bounce"),
+    )
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720), anchors=anchors,
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    segs = [s for s in track.flight_segments if s.frame_range == (5, 25)]
+    assert segs, f"expected one Phase 2 segment 5-25, got {[s.frame_range for s in track.flight_segments]}"
+    seg = segs[0]
+
+    # The parabola's p0 should equal the airborne_low ray-cast at z=1 m.
+    from src.utils.ball_anchor_heights import state_to_height
+    from src.utils.foot_anchor import ankle_ray_to_pitch
+    expected_p0 = ankle_ray_to_pitch(
+        a_start_uv, K=K, R=R, t=t,
+        plane_z=state_to_height("airborne_low"),
+    )
+    p0 = np.array(seg.parabola["p0"])
+    assert np.allclose(p0, expected_p0, atol=0.05), (
+        f"airborne-start parabola should be pinned to bucket-midpoint ray-cast; "
+        f"expected {expected_p0}, got {p0.tolist()}"
+    )
+
+    # And the kick frame's emitted world position should match p0 exactly.
+    f5 = next(f for f in track.frames if f.frame == 5)
+    assert f5.world_xyz is not None
+    assert np.allclose(f5.world_xyz, expected_p0, atol=0.05)

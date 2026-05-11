@@ -892,10 +892,35 @@ class BallStage(BaseStage):
                 # Need at least 3 obs to make a parabola fit meaningful.
                 if len(obs_p2) < 3:
                     continue
-                # If the span's start frame is a hard-knot anchor (kick),
-                # promote it to p0_fixed so the segment origin is pinned.
-                if 0 in knots and span[0][1].state in HARD_KNOT_STATES:
+                # Pin p0 to a known world position when possible:
+                #   - Hard-knot start (kick/header/etc.): use its exact
+                #     state-height ray-cast (already in knots[0]).
+                #   - Airborne start (no kick anchor was placed): use
+                #     the bucket-midpoint ray-cast. The LM otherwise has
+                #     free reign over p0 along the camera ray and drifts
+                #     several metres from where the user clicked.
+                first_anc = span[0][1]
+                if 0 in knots and first_anc.state in HARD_KNOT_STATES:
                     p0_pin = knots.pop(0)
+                elif (
+                    0 not in knots
+                    and first_anc.state in AIRBORNE_STATES
+                    and first_anc.image_xy is not None
+                    and fa_span in per_frame_K
+                ):
+                    try:
+                        p0_pin = ankle_ray_to_pitch(
+                            first_anc.image_xy,
+                            K=per_frame_K[fa_span], R=per_frame_R[fa_span], t=per_frame_t[fa_span],
+                            plane_z=state_to_height(first_anc.state),
+                            distortion=distortion,
+                        )
+                        p0_pin = np.asarray(p0_pin, dtype=float)
+                        # Drop the z-range hinge at rel=0 since position
+                        # is now pinned directly.
+                        z_ranges.pop(0, None)
+                    except (ValueError, Exception):
+                        p0_pin = None
                 try:
                     p2_p0, p2_v0, p2_resid = fit_parabola_to_image_observations(
                         obs_p2, Ks=Ks_p2, Rs=Rs_p2, t_world=ts_p2,

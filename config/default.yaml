@@ -105,6 +105,7 @@ ball:
   plausibility:
     z_max_m: 50.0
     horizontal_speed_max_m_s: 40.0
+    pitch_margin_m: 5.0
 
 refined_poses:
   # Outlier rejection (per frame, per view) using MAD on root_t.

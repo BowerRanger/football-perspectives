@@ -1039,6 +1039,80 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         tmp.replace(final)
         return {"saved": True, "path": str(final), "count": len(aset.anchors)}
 
+    @app.post("/ball-anchors/{shot_id}/preview")
+    def preview_ball_anchors(shot_id: str, payload: BallAnchorPayload):
+        """Run BallStage in a temp output dir using the posted anchors.
+        Returns the would-be BallTrack JSON without touching the
+        on-disk ball_track. Requires camera_track + shots_manifest in
+        the production output dir.
+        """
+        import tempfile
+
+        from src.stages.ball import BallStage
+
+        cam_path = output_dir / "camera" / f"{shot_id}_camera_track.json"
+        if not cam_path.exists():
+            raise HTTPException(status_code=404,
+                                detail=f"No camera track for shot {shot_id!r}")
+        manifest_path = output_dir / "shots" / "shots_manifest.json"
+        if not manifest_path.exists():
+            raise HTTPException(status_code=404,
+                                detail=f"No shots manifest at {manifest_path}")
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            # Mirror the production camera + shots + (optionally) hmr_world
+            # data into the temp output dir; BallStage writes only to ball/.
+            for sub in ("camera", "shots", "hmr_world"):
+                src = output_dir / sub
+                if src.exists():
+                    shutil.copytree(src, tdp / sub, dirs_exist_ok=True)
+
+            try:
+                anchors_in = tuple(
+                    BallAnchor(
+                        frame=int(a.frame),
+                        image_xy=tuple(a.image_xy) if a.image_xy is not None else None,
+                        state=a.state,
+                    ) for a in payload.anchors
+                )
+                aset = BallAnchorSet(
+                    clip_id=str(payload.clip_id),
+                    image_size=(int(payload.image_size[0]), int(payload.image_size[1])),
+                    anchors=anchors_in,
+                )
+                # Round-trip validation.
+                tmp_validate = tdp / "ball" / f".{shot_id}_validate.json"
+                tmp_validate.parent.mkdir(parents=True, exist_ok=True)
+                aset.save(tmp_validate)
+                BallAnchorSet.load(tmp_validate)
+                tmp_validate.unlink()
+            except (KeyError, TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid ball anchors: {exc}")
+
+            ball_dir = tdp / "ball"
+            ball_dir.mkdir(parents=True, exist_ok=True)
+            aset.save(ball_dir / f"{shot_id}_ball_anchors.json")
+
+            # Use the project's default config so detector + tracker
+            # defaults match production.
+            try:
+                cfg = load_config(None)
+            except Exception as exc:
+                raise HTTPException(status_code=500,
+                                    detail=f"Failed to load default config: {exc}")
+
+            stage = BallStage(config=cfg, output_dir=tdp)
+            stage.shot_filter = shot_id
+            try:
+                stage.run()
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"BallStage preview failed: {exc}")
+            track_path = ball_dir / f"{shot_id}_ball_track.json"
+            if not track_path.exists():
+                raise HTTPException(status_code=500, detail="Preview produced no ball_track")
+            return json.loads(track_path.read_text())
+
     @app.get("/anchors")
     def get_anchors():
         """Legacy endpoint: redirects to the first shot's per-shot file

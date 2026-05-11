@@ -3823,7 +3823,6 @@ function renderBallShot(panel, data, shotId) {
     frameLabel.textContent = `Frame ${currentFrame}  (${sec}s)`;
     td.setFrame(currentFrame);
     td3.setFrame(currentFrame);
-    src.setFrame(currentFrame);
   }
   setFrame(minFrame);
   seek.addEventListener("input", () => setFrame(Number(seek.value)));
@@ -3877,6 +3876,28 @@ function buildBallSourceOverlay(data, shotId) {
   stage.appendChild(video);
   stage.appendChild(overlay);
   wrap.appendChild(stage);
+
+  // Independent playback controls (the trajectory tiles stay linked to
+  // the shared timeline below; this overlay scrubs on its own).
+  const fps = data.fps || 30;
+  const minFrame = data.frames.length ? data.frames[0].frame : 0;
+  const maxFrame = data.frames.length ? data.frames[data.frames.length - 1].frame : 0;
+  const ctrl = document.createElement("div");
+  ctrl.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 0;";
+  const playBtn = makeToolbarBtn("▶", "#4f46e5"); playBtn.style.minWidth = "36px";
+  const stepBack = makeToolbarBtn("◀", "#334155"); stepBack.title = "Previous frame";
+  const stepFwd = makeToolbarBtn("▶", "#334155"); stepFwd.title = "Next frame";
+  const seek = document.createElement("input");
+  seek.type = "range";
+  seek.min = String(minFrame);
+  seek.max = String(maxFrame);
+  seek.value = String(minFrame);
+  seek.style.cssText = "flex:1;";
+  const frameLabel = document.createElement("span");
+  frameLabel.style.cssText = "color:#94a3b8;font-size:11px;min-width:140px;text-align:right;font-variant-numeric:tabular-nums;";
+  frameLabel.textContent = `Frame ${minFrame}  (0.00s)`;
+  ctrl.append(playBtn, stepBack, stepFwd, seek, frameLabel);
+  wrap.appendChild(ctrl);
 
   const note = document.createElement("div");
   note.style.cssText = "color:#94a3b8;font-size:11px;padding:0 4px;";
@@ -3975,26 +3996,65 @@ function buildBallSourceOverlay(data, shotId) {
     ctx.fillText(label, uv[0] - tw / 2 + 4, uv[1] - 19);
   }
 
-  const fps = data.fps || 30;
+  let currentFrame = minFrame;
+  function setFrame(fi) {
+    currentFrame = Math.max(minFrame, Math.min(maxFrame, fi));
+    seek.value = String(currentFrame);
+    const sec = ((currentFrame - minFrame) / Math.max(1, fps)).toFixed(2);
+    frameLabel.textContent = `Frame ${currentFrame}  (${sec}s)`;
+    if (video.readyState >= 1 && Math.abs(video.currentTime - currentFrame / fps) > 0.5 / fps) {
+      video.currentTime = currentFrame / fps;
+    }
+    drawFrame(currentFrame);
+  }
+
   video.addEventListener("loadedmetadata", () => {
     fitOverlay();
-    drawFrame(pendingFrame);
+    drawFrame(currentFrame);
   });
   new ResizeObserver(fitOverlay).observe(video);
+
+  // Drive overlay updates from the video clock while playing so the
+  // crosshair stays glued to the moving frame.
+  let rafId = null;
+  let playing = false;
+  function tick() {
+    if (!playing) return;
+    const fi = Math.round(video.currentTime * fps);
+    if (fi !== currentFrame) {
+      currentFrame = Math.max(minFrame, Math.min(maxFrame, fi));
+      seek.value = String(currentFrame);
+      const sec = ((currentFrame - minFrame) / Math.max(1, fps)).toFixed(2);
+      frameLabel.textContent = `Frame ${currentFrame}  (${sec}s)`;
+      drawFrame(currentFrame);
+    }
+    rafId = requestAnimationFrame(tick);
+  }
+
+  playBtn.addEventListener("click", () => {
+    if (video.paused) {
+      video.play();
+      playing = true;
+      playBtn.textContent = "⏸";
+      if (!rafId) rafId = requestAnimationFrame(tick);
+    } else {
+      video.pause();
+      playing = false;
+      playBtn.textContent = "▶";
+      cancelAnimationFrame(rafId); rafId = null;
+    }
+  });
+  stepBack.addEventListener("click", () => { video.pause(); playing = false; playBtn.textContent = "▶"; setFrame(currentFrame - 1); });
+  stepFwd.addEventListener("click", () => { video.pause(); playing = false; playBtn.textContent = "▶"; setFrame(currentFrame + 1); });
+  seek.addEventListener("input", () => { video.pause(); playing = false; playBtn.textContent = "▶"; setFrame(Number(seek.value)); });
+  video.addEventListener("pause", () => { playing = false; playBtn.textContent = "▶"; cancelAnimationFrame(rafId); rafId = null; });
+  video.addEventListener("ended", () => { playing = false; playBtn.textContent = "▶"; });
 
   if (!shotId) {
     note.textContent = "Source overlay unavailable in legacy single-shot mode.";
   }
 
-  return {
-    element: wrap,
-    setFrame: (fi) => {
-      if (video.readyState >= 1 && Math.abs(video.currentTime - fi / fps) > 0.5 / fps) {
-        video.currentTime = fi / fps;
-      }
-      drawFrame(fi);
-    },
-  };
+  return { element: wrap };
 }
 
 // ── Top-down ball trajectory canvas ─────────────────────────────────

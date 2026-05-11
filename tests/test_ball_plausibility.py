@@ -109,3 +109,21 @@ def test_billion_metre_p0_rejected():
         p0, v0, omega=None, duration_s=0.2, fps=30.0,
         cfg=_cfg(), pitch=_pitch(),
     )
+
+
+def test_rejects_nan_inputs():
+    p0 = np.array([np.nan, 0.0, 0.11])
+    v0 = np.array([10.0, 0.0, 5.0])
+    assert not is_plausible_trajectory(
+        p0, v0, omega=None, duration_s=1.0, fps=30.0,
+        cfg=_cfg(), pitch=_pitch(),
+    )
+
+
+def test_rejects_inf_inputs():
+    p0 = np.array([0.0, 0.0, 0.11])
+    v0 = np.array([np.inf, 0.0, 5.0])
+    assert not is_plausible_trajectory(
+        p0, v0, omega=None, duration_s=1.0, fps=30.0,
+        cfg=_cfg(), pitch=_pitch(),
+    )

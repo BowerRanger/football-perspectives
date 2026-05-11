@@ -83,6 +83,11 @@ def is_plausible_trajectory(
     if duration_s <= 0.0:
         return False
 
+    if not (np.all(np.isfinite(p0)) and np.all(np.isfinite(v0))):
+        return False
+    if omega is not None and not np.all(np.isfinite(omega)):
+        return False
+
     half_len = pitch.length_m / 2.0 + cfg.pitch_margin_m
     half_wid = pitch.width_m / 2.0 + cfg.pitch_margin_m
     speed_cap = cfg.horizontal_speed_max_m_s + 5.0

@@ -457,3 +457,89 @@ def test_kick_anchored_fit_pins_p0_to_foot(tmp_path: Path, monkeypatch):
     assert np.linalg.norm(p0_fit - p0_true) < 0.5, (
         f"expected kick-anchored p0 ≈ {p0_true.tolist()}, got {p0_fit.tolist()}"
     )
+
+
+@pytest.mark.integration
+def test_appearance_bridge_fills_short_detection_gap(tmp_path: Path):
+    """When WASB returns None for 1-3 frames but a fresh template and
+    the IMM prediction agree on a region containing the ball, the
+    appearance bridge fills the gap (no state='missing')."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    clip_path = out / "shots" / "play.mp4"
+    n_frames = 30
+    # Write a clip where the ball is a real white circle on green; the
+    # bridge will find it in the predicted window.
+    clip_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(clip_path), cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (1280, 720)
+    )
+    for i in range(n_frames):
+        img = np.full((720, 1280, 3), [50, 200, 50], dtype=np.uint8)
+        u, v = 200 + 5 * i, 200 + 1 * i
+        cv2.circle(img, (u, v), 8, (240, 240, 240), -1)
+        writer.write(img)
+    writer.release()
+
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    ShotsManifest(
+        source_file="fake.mp4",
+        fps=30.0,
+        total_frames=n_frames,
+        shots=[
+            Shot(
+                id="play",
+                clip_file="shots/play.mp4",
+                start_frame=0,
+                end_frame=n_frames - 1,
+                start_time=0.0,
+                end_time=(n_frames - 1) / 30.0,
+            )
+        ],
+    ).save(out / "shots" / "shots_manifest.json")
+
+    # Detections: present for frames 0..9, missing for 10..12 (3-frame gap), present for 13..29.
+    detections: list[tuple[float, float, float] | None] = []
+    for i in range(n_frames):
+        if 10 <= i <= 12:
+            detections.append(None)
+        else:
+            u, v = 200.0 + 5.0 * i, 200.0 + 1.0 * i
+            detections.append((u, v, 0.85))
+
+    # With max_gap_frames=0 the IMM tracker cannot gap-fill on its own;
+    # only the appearance bridge (max_gap_frames=8) can prevent missing.
+    stage = BallStage(
+        config={
+            "ball": {
+                "detector": "fake",
+                "ball_radius_m": 0.11,
+                "max_gap_frames": 0,
+                "flight_max_residual_px": 5.0,
+                "tracker": {
+                    "process_noise_grounded_px": 4.0,
+                    "process_noise_flight_px": 12.0,
+                    "measurement_noise_px": 2.0,
+                    "gating_sigma": 4.0,
+                    "min_flight_frames": 6,
+                    "max_flight_frames": 90,
+                },
+                "spin": {"enabled": False, "min_flight_seconds": 0.5, "min_residual_improvement": 0.2, "max_omega_rad_s": 200.0, "drag_k_over_m": 0.005},
+                "plausibility": {"z_max_m": 50.0, "horizontal_speed_max_m_s": 40.0, "pitch_margin_m": 5.0},
+                "flight_promotion": {"enabled": False, "min_run_frames": 6, "off_pitch_margin_m": 5.0, "max_ground_speed_m_s": 35.0},
+                "kick_anchor": {"enabled": False, "max_pixel_distance_px": 30.0, "lookahead_frames": 4, "min_pixel_acceleration_px_per_frame": 6.0, "foot_anchor_z_m": 0.11},
+                "appearance_bridge": {"enabled": True, "max_gap_frames": 8, "template_size_px": 32, "search_radius_px": 64, "min_ncc": 0.6, "template_max_age_frames": 30, "template_update_confidence": 0.5},
+            },
+            "pitch": {"length_m": 105.0, "width_m": 68.0},
+        },
+        output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    )
+    stage.run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    # Frames 10..12 must NOT be state="missing".
+    gap_states = [f.state for f in track.frames if 10 <= f.frame <= 12]
+    assert all(s != "missing" for s in gap_states), (
+        f"expected bridge to fill frames 10-12; got {gap_states}"
+    )

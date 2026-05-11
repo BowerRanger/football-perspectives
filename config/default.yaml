@@ -117,6 +117,14 @@ ball:
     lookahead_frames: 4
     min_pixel_acceleration_px_per_frame: 6.0
     foot_anchor_z_m: 0.11
+  appearance_bridge:
+    enabled: true
+    max_gap_frames: 8
+    template_size_px: 32
+    search_radius_px: 64
+    min_ncc: 0.6
+    template_max_age_frames: 30
+    template_update_confidence: 0.5
 
 refined_poses:
   # Outlier rejection (per frame, per view) using MAD on root_t.

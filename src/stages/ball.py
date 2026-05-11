@@ -51,6 +51,10 @@ from src.utils.bundle_adjust import (
     fit_magnus_trajectory,
     fit_parabola_to_image_observations,
 )
+from src.utils.ball_appearance_bridge import (
+    AppearanceBridge,
+    AppearanceBridgeCfg,
+)
 from src.utils.ball_kick_anchor import KickAnchorCfg, find_kick_anchor
 from src.utils.foot_anchor import ankle_ray_to_pitch
 
@@ -256,6 +260,18 @@ class BallStage(BaseStage):
                 self.output_dir / "hmr_world",
             )
 
+        bridge_cfg = AppearanceBridgeCfg(
+            enabled=bool(cfg.get("appearance_bridge", {}).get("enabled", True)),
+            max_gap_frames=int(cfg.get("appearance_bridge", {}).get("max_gap_frames", 8)),
+            template_size_px=int(cfg.get("appearance_bridge", {}).get("template_size_px", 32)),
+            search_radius_px=int(cfg.get("appearance_bridge", {}).get("search_radius_px", 64)),
+            min_ncc=float(cfg.get("appearance_bridge", {}).get("min_ncc", 0.6)),
+            template_max_age_frames=int(cfg.get("appearance_bridge", {}).get("template_max_age_frames", 30)),
+            template_update_confidence=float(cfg.get("appearance_bridge", {}).get("template_update_confidence", 0.5)),
+        )
+        bridge = AppearanceBridge(bridge_cfg)
+        consecutive_misses = 0
+
         steps: list[TrackerStep] = []
         raw_confidences: dict[int, float] = {}
         cap = cv2.VideoCapture(str(clip_path))
@@ -269,10 +285,31 @@ class BallStage(BaseStage):
                     break
                 det = detector.detect(frame)
                 if det is None:
-                    uv: tuple[float, float] | None = None
+                    consecutive_misses += 1
+                    bridge_result = bridge.try_bridge(
+                        frame=frame_idx,
+                        frame_image=frame,
+                        predicted_uv=(
+                            (float(steps[-1].uv[0]), float(steps[-1].uv[1]))
+                            if steps and steps[-1].uv is not None else None
+                        ),
+                        consecutive_misses=consecutive_misses,
+                    )
+                    if bridge_result is None:
+                        uv: tuple[float, float] | None = None
+                    else:
+                        uv, bridged_conf = bridge_result
+                        raw_confidences[frame_idx] = bridged_conf
                 else:
+                    consecutive_misses = 0
                     uv = (float(det[0]), float(det[1]))
                     raw_confidences[frame_idx] = float(det[2])
+                    bridge.update_template(
+                        frame=frame_idx,
+                        frame_image=frame,
+                        uv=uv,
+                        confidence=float(det[2]),
+                    )
                 step = tracker.update(frame_idx, uv)
                 steps.append(step)
                 frame_idx += 1

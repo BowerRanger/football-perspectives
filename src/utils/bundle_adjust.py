@@ -33,6 +33,7 @@ def fit_parabola_to_image_observations(
     max_iter: int = 100,
     distortion: tuple[float, float] = (0.0, 0.0),
     p0_fixed: np.ndarray | None = None,
+    knot_frames: dict[int, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Fit a 3D parabola to per-frame image observations.
 
@@ -57,6 +58,13 @@ def fit_parabola_to_image_observations(
         p0_fixed: when not ``None``, the world-space starting position is
             pinned to this value and only ``v0`` (3 dof) is optimised,
             reducing the ill-conditioned monocular-depth ambiguity.
+        knot_frames: optional mapping of ``{rel_frame_index: world_position}``
+            that adds soft world-space constraints.  Each entry appends a
+            3-row residual block weighted by ``1e3`` so the optimised
+            parabola passes through the target within numerical tolerance.
+            Frame indices are relative to the first observation frame.
+            Composes with ``p0_fixed``: ``p0_fixed`` pins frame 0 exactly
+            while knot entries act as soft constraints at other frames.
 
     Returns:
         ``(p0, v0, mean_residual_px)`` where ``mean_residual_px`` is
@@ -93,6 +101,13 @@ def fit_parabola_to_image_observations(
             pix = Ks[i] @ cam
             uv = pix[:2] / pix[2]
             residuals.append(uv - obs_array[i])
+        if knot_frames:
+            knot_weight = 1.0e3
+            for rel_idx, target_world in knot_frames.items():
+                dt_k = rel_idx / fps
+                pos_k = p0 + v0 * dt_k + 0.5 * (dt_k ** 2) * g_vec
+                target = np.asarray(target_world, dtype=float)
+                residuals.append(knot_weight * (pos_k - target))
         return np.concatenate(residuals)
 
     # Seed from start/end image points -> ground projection (rough).
@@ -138,6 +153,13 @@ def fit_parabola_to_image_observations(
                 pix = Ks[i] @ cam
                 uv = pix[:2] / pix[2]
                 residuals.append(uv - obs_array[i])
+            if knot_frames:
+                knot_weight = 1.0e3
+                for rel_idx, target_world in knot_frames.items():
+                    dt_k = rel_idx / fps
+                    pos_k = p0_pin + v0 * dt_k + 0.5 * (dt_k ** 2) * g_vec
+                    target = np.asarray(target_world, dtype=float)
+                    residuals.append(knot_weight * (pos_k - target))
             return np.concatenate(residuals)
 
         result = least_squares(

@@ -37,7 +37,12 @@ from src.schemas.ball_track import BallFrame, BallTrack, FlightSegment
 from src.schemas.camera_track import CameraTrack
 from src.schemas.shots import ShotsManifest
 from src.schemas.ball_anchor import BallAnchor, BallAnchorSet
-from src.utils.ball_anchor_heights import AIRBORNE_STATES
+from src.utils.ball_anchor_heights import (
+    AIRBORNE_STATES,
+    EVENT_STATES,
+    HARD_KNOT_STATES,
+    state_to_height,
+)
 from src.utils.ball_detector import BallDetector, YOLOBallDetector
 from src.utils.ball_tracker import BallTracker, TrackerStep
 from src.utils.ball_plausibility import (
@@ -428,6 +433,35 @@ class BallStage(BaseStage):
         max_flight = int(tracker_cfg.get("max_flight_frames", 90))
         flight_runs = self._flight_runs(steps, min_flight, max_flight)
 
+        # Layer 5 — event-splitting: kick/catch/bounce anchors split flight runs.
+        # Semantics: a cut at the run start (cut == a_run) keeps the event
+        # frame as the start of the remaining segment (e.g. kick starts a new
+        # arc here); a cut strictly inside the run excludes the event frame
+        # from both sub-runs (e.g. bounce frame is ground contact, not in air).
+        if anchor_by_frame:
+            event_frames = sorted(
+                fi for fi, a_ev in anchor_by_frame.items()
+                if a_ev.state in EVENT_STATES
+            )
+            if event_frames:
+                split_runs: list[tuple[int, int]] = []
+                for (a_run, b_run) in flight_runs:
+                    cuts = [fi for fi in event_frames if a_run <= fi <= b_run]
+                    if not cuts:
+                        split_runs.append((a_run, b_run))
+                        continue
+                    prev = a_run
+                    for cut in cuts:
+                        if cut - 1 >= prev:
+                            split_runs.append((prev, cut - 1))
+                        # When the cut is at the very start of the run there is
+                        # no pre-segment; keep the event frame as the new start
+                        # so that kick anchors remain in their flight segment.
+                        prev = cut if cut == a_run else cut + 1
+                    if prev <= b_run:
+                        split_runs.append((prev, b_run))
+                flight_runs = split_runs
+
         flight_segments: list[FlightSegment] = []
         flight_membership: dict[int, int] = {}
         spin_enabled = bool(spin_cfg.get("enabled", True))
@@ -475,11 +509,35 @@ class BallStage(BaseStage):
                         distortion=distortion,
                     )
 
+            # Layer 5 — hard knots from anchored frames within this segment.
+            knot_frames_arg: dict[int, np.ndarray] = {}
+            for fi in range(a, b + 1):
+                anc = anchor_by_frame.get(fi)
+                if anc is None or anc.state not in HARD_KNOT_STATES:
+                    continue
+                if anc.image_xy is None:
+                    continue
+                if fi not in per_frame_K:
+                    continue
+                z = state_to_height(anc.state)
+                world_at_anchor = ankle_ray_to_pitch(
+                    anc.image_xy,
+                    K=per_frame_K[fi], R=per_frame_R[fi], t=per_frame_t[fi],
+                    plane_z=z, distortion=distortion,
+                )
+                knot_frames_arg[fi - a] = np.asarray(world_at_anchor, dtype=float)
+
+            # If the seed frame is a hard knot AND Layer 3 didn't set
+            # anchor_world, promote frame 0 to p0_fixed.
+            if 0 in knot_frames_arg and anchor_world is None:
+                anchor_world = knot_frames_arg.pop(0)
+
             try:
                 p0, v0, parab_resid = fit_parabola_to_image_observations(
                     obs, Ks=Ks_seg, Rs=Rs_seg, t_world=ts_seg,
                     fps=camera.fps, distortion=distortion,
                     p0_fixed=anchor_world,
+                    knot_frames=knot_frames_arg or None,
                 )
             except Exception as exc:
                 logger.debug("parabola fit failed on segment %d: %s", sid, exc)

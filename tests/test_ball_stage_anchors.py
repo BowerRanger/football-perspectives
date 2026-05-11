@@ -179,3 +179,140 @@ def test_off_screen_flight_anchor_skips_pixel(tmp_path: Path):
     assert all(f.state != "missing" for f in forced), (
         f"off-screen-flight anchors must not emit missing: {[f.state for f in forced]}"
     )
+
+
+@pytest.mark.integration
+def test_kick_event_anchored_pins_p0(tmp_path: Path, monkeypatch):
+    """A 'kick' anchor at the start of a flight segment pins p0 to the
+    pixel ray-cast at z=0.11.
+
+    The IMM is bypassed (via monkeypatch) so the test isolates Layer 5
+    knot-frame logic, not the flight-detection heuristic.
+    """
+    from src.stages.ball import BallStage as _BallStage
+
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 40
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    p0_true = np.array([52.5, 34.0, 0.11])
+    v0_true = np.array([3.0, 0.5, 12.0])
+    g_vec = np.array([0.0, 0.0, -9.81])
+
+    def _proj(p):
+        cam = R @ p + t; pix = K @ cam
+        return (float(pix[0] / pix[2]), float(pix[1] / pix[2]))
+
+    detections: list[tuple[float, float, float] | None] = [None] * 5
+    for i in range(25):
+        dt = i / 30.0
+        pt = p0_true + v0_true * dt + 0.5 * g_vec * dt ** 2
+        u, v = _proj(pt)
+        detections.append((u, v, 0.85))
+    while len(detections) < n_frames:
+        detections.append(None)
+
+    # Anchor the kick at frame 5 (the flight segment start).
+    kick_uv = _proj(p0_true)
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720),
+        anchors=(BallAnchor(frame=5, image_xy=kick_uv, state="kick"),),
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    # Force a single flight run covering frames 5-29 so the IMM is bypassed.
+    monkeypatch.setattr(
+        _BallStage, "_flight_runs",
+        lambda self_arg, steps, min_flight, max_flight: [(5, 29)],
+    )
+
+    cfg = _minimal_cfg()
+    BallStage(
+        config=cfg, output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    assert len(track.flight_segments) >= 1
+    # Find the flight segment that includes frame 5 (the kick).
+    seg = next((s for s in track.flight_segments if s.frame_range[0] <= 5 <= s.frame_range[1]), None)
+    assert seg is not None, "expected a flight segment covering the kick at frame 5"
+    p0_fit = np.array(seg.parabola["p0"])
+    assert np.linalg.norm(p0_fit - p0_true) < 0.5, (
+        f"expected anchored p0 ≈ {p0_true.tolist()}, got {p0_fit.tolist()}"
+    )
+
+
+@pytest.mark.integration
+def test_bounce_event_splits_flight_run(tmp_path: Path, monkeypatch):
+    """A 'bounce' anchor mid-run should terminate one flight segment and
+    start a new one (segment(s) on both sides of the bounce frame).
+
+    The IMM is bypassed (via monkeypatch) so the test isolates the
+    event-splitting logic in Layer 5, not flight-detection heuristics.
+    """
+    from src.stages.ball import BallStage as _BallStage
+
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 60
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    def _proj(p):
+        cam = R @ p + t; pix = K @ cam
+        return (float(pix[0] / pix[2]), float(pix[1] / pix[2]))
+
+    g_vec = np.array([0.0, 0.0, -9.81])
+
+    # Arc A is designed so the ball naturally returns to z=0.11 at exactly
+    # bounce_frame (v0z = 0.5 * 9.81 → 1-second symmetric arc).  This keeps
+    # the bounce anchor pixel within ~3 px of the previous frame so the
+    # Kalman tracker doesn't jump, avoiding corrupted post-bounce tracker UVs.
+    bounce_frame = 30
+    v0z_a = 0.5 * 9.81  # ≈ 4.905 m/s
+    p0_a = np.array([52.5, 34.0, 0.11]); v0_a = np.array([3.0, 0.5, v0z_a])
+    p0_b = p0_a + v0_a * (bounce_frame / 30.0) + 0.5 * g_vec * (bounce_frame / 30.0) ** 2
+    p0_b[2] = 0.11  # pin to ground after bounce
+    v0_b = np.array([2.0, 0.5, v0z_a])  # same upward kick for arc B
+
+    detections: list[tuple[float, float, float] | None] = [None] * 5
+    for i in range(25):
+        dt = i / 30.0
+        pt = p0_a + v0_a * dt + 0.5 * g_vec * dt ** 2
+        u, v = _proj(pt); detections.append((u, v, 0.85))
+    detections.append(None)  # bounce frame placeholder
+    for i in range(20):
+        dt = i / 30.0
+        pt = p0_b + v0_b * dt + 0.5 * g_vec * dt ** 2
+        u, v = _proj(pt); detections.append((u, v, 0.85))
+    while len(detections) < n_frames:
+        detections.append(None)
+
+    bounce_uv = _proj(np.array([p0_b[0], p0_b[1], 0.11]))
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720),
+        anchors=(BallAnchor(frame=bounce_frame, image_xy=bounce_uv, state="bounce"),),
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    # Force a single large flight run (frames 5-54) that the bounce anchor
+    # must split into two sub-runs: [5-29] and [31-54].
+    monkeypatch.setattr(
+        _BallStage, "_flight_runs",
+        lambda self_arg, steps, min_flight, max_flight: [(5, 54)],
+    )
+
+    cfg = _minimal_cfg()
+    BallStage(
+        config=cfg, output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    pre_segs = [s for s in track.flight_segments if s.frame_range[1] < bounce_frame]
+    post_segs = [s for s in track.flight_segments if s.frame_range[0] > bounce_frame]
+    assert pre_segs, f"expected a flight segment ending before frame {bounce_frame}"
+    assert post_segs, f"expected a flight segment starting after frame {bounce_frame}"

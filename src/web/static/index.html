@@ -3788,14 +3788,7 @@ function renderBallShot(panel, data, shotId) {
   threeDPanel.body.appendChild(td3.element);
   grid.appendChild(threeDPanel.wrap);
 
-  // Source-view overlay: full-width panel below the two trajectory tiles
-  // so the clip frame has room to breathe.
-  const sourcePanel = makePanel("Source overlay");
-  const src = buildBallSourceOverlay(data, shotId);
-  sourcePanel.body.appendChild(src.element);
-  panel.appendChild(sourcePanel.wrap);
-
-  // ── Shared timeline + play controls ──
+  // ── Shared timeline + play controls (drives td + td3) ──
   const minFrame = data.frames[0].frame;
   const maxFrame = data.frames[data.frames.length - 1].frame;
   const fps = data.fps || 30;
@@ -3850,6 +3843,13 @@ function renderBallShot(panel, data, shotId) {
     if (playing) rafId = requestAnimationFrame(tick);
     else if (rafId) cancelAnimationFrame(rafId);
   });
+
+  // Source-view overlay: full-width panel BELOW the shared trajectory
+  // timeline, with its own playback controls.
+  const sourcePanel = makePanel("Source overlay");
+  const src = buildBallSourceOverlay(data, shotId);
+  sourcePanel.body.appendChild(src.element);
+  panel.appendChild(sourcePanel.wrap);
 }
 
 // ── Source-view ball overlay ─────────────────────────────────────────

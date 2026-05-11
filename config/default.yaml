@@ -79,7 +79,7 @@ ball:
   flight_max_residual_px: 5.0
   max_occlusion_frames: 8
   wasb:
-    checkpoint: third_party/wasb_sbdt/checkpoints/wasb_soccer.pth
+    checkpoint: third_party/wasb_sbdt/pretrained_weights/wasb_soccer_best.pth.tar
     confidence: 0.3
     input_size: [512, 288]
   tracker:

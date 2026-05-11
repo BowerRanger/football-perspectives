@@ -550,8 +550,11 @@ class BallStage(BaseStage):
                     fps=camera.fps, distortion=distortion,
                 )
             except Exception as exc:
-                logger.debug("promotion refit failed at run %d-%d: %s", run.start, run.end, exc)
-                _demote_run_to_missing(per_frame_world, run.start, run.end)
+                # Refit failure means the data isn't actually a clean
+                # flight arc — the original ground projection (noisy but
+                # bounded) is a better fallback than nothing.
+                logger.debug("promotion refit failed at run %d-%d: %s — leaving as grounded",
+                             run.start, run.end, exc)
                 continue
             seg_duration = (run.end - run.start) / camera.fps
             if not is_plausible_trajectory(
@@ -561,10 +564,9 @@ class BallStage(BaseStage):
             ):
                 logger.info(
                     "ball: promotion refit for run %d-%d failed plausibility; "
-                    "marking frames missing",
+                    "leaving as grounded",
                     run.start, run.end,
                 )
-                _demote_run_to_missing(per_frame_world, run.start, run.end)
                 continue
 
             sid_new = next_segment_id

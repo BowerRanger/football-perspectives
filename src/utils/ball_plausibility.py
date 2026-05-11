@@ -112,3 +112,100 @@ def is_plausible_trajectory(
         return False
 
     return True
+
+
+# ---------------------------------------------------------------------------
+# Layer 2 — grounded-run implausibility detection
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GroundPromotionCfg:
+    enabled: bool
+    min_run_frames: int
+    off_pitch_margin_m: float
+    max_ground_speed_m_s: float
+
+
+@dataclass(frozen=True)
+class GroundedRun:
+    """A contiguous run of grounded frames flagged for refit-as-flight."""
+
+    start: int
+    end: int  # inclusive
+
+
+def _off_pitch_distance(x: float, y: float, pitch: PitchDims) -> float:
+    """Point-to-rectangle distance (0 inside, positive outside) for the
+    axis-aligned pitch centred at the origin."""
+    dx = max(0.0, abs(x) - pitch.length_m / 2.0)
+    dy = max(0.0, abs(y) - pitch.width_m / 2.0)
+    return float(np.hypot(dx, dy))
+
+
+def find_implausible_grounded_runs(
+    *,
+    per_frame_xyz: dict[int, tuple[np.ndarray, float]],
+    per_frame_state: dict[int, str],
+    fps: float,
+    cfg: GroundPromotionCfg,
+    pitch: PitchDims,
+) -> list[GroundedRun]:
+    """Return runs of ``state="grounded"`` frames whose world positions
+    imply impossible rolling motion (off-pitch or > max_ground_speed).
+    Empty list when disabled or nothing qualifies."""
+    if not cfg.enabled:
+        return []
+    if not per_frame_state:
+        return []
+
+    frames = sorted(per_frame_state)
+    out: list[GroundedRun] = []
+    run_start: int | None = None
+    run_max_off_pitch = 0.0
+    run_max_speed = 0.0
+
+    def _close_run(end_frame: int) -> None:
+        nonlocal run_start, run_max_off_pitch, run_max_speed
+        if run_start is None:
+            return
+        length = end_frame - run_start + 1
+        if length >= cfg.min_run_frames and (
+            run_max_off_pitch > cfg.off_pitch_margin_m
+            or run_max_speed > cfg.max_ground_speed_m_s
+        ):
+            out.append(GroundedRun(start=run_start, end=end_frame))
+        run_start = None
+        run_max_off_pitch = 0.0
+        run_max_speed = 0.0
+
+    prev_xy: np.ndarray | None = None
+    prev_frame: int | None = None
+    for fi in frames:
+        state = per_frame_state[fi]
+        if state != "grounded" or fi not in per_frame_xyz:
+            if run_start is not None:
+                _close_run(prev_frame if prev_frame is not None else fi - 1)
+            prev_xy = None
+            prev_frame = None
+            continue
+        xyz, _conf = per_frame_xyz[fi]
+        xy = np.array([xyz[0], xyz[1]])
+        if run_start is None:
+            run_start = fi
+            run_max_off_pitch = _off_pitch_distance(xy[0], xy[1], pitch)
+            run_max_speed = 0.0
+        else:
+            off = _off_pitch_distance(xy[0], xy[1], pitch)
+            run_max_off_pitch = max(run_max_off_pitch, off)
+            if prev_xy is not None and prev_frame is not None and fi > prev_frame:
+                dt = (fi - prev_frame) / fps
+                speed = float(np.linalg.norm(xy - prev_xy) / max(dt, 1e-9))
+                run_max_speed = max(run_max_speed, speed)
+        prev_xy = xy
+        prev_frame = fi
+
+    if run_start is not None and prev_frame is not None:
+        _close_run(prev_frame)
+
+    return out

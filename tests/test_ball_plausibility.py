@@ -127,3 +127,114 @@ def test_rejects_inf_inputs():
         p0, v0, omega=None, duration_s=1.0, fps=30.0,
         cfg=_cfg(), pitch=_pitch(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Layer 2 — find_implausible_grounded_runs
+# ---------------------------------------------------------------------------
+
+from src.utils.ball_plausibility import (
+    GroundedRun,
+    GroundPromotionCfg,
+    find_implausible_grounded_runs,
+)
+
+
+def _promote_cfg(**over) -> GroundPromotionCfg:
+    base = dict(
+        enabled=True,
+        min_run_frames=6,
+        off_pitch_margin_m=5.0,
+        max_ground_speed_m_s=35.0,
+    )
+    base.update(over)
+    return GroundPromotionCfg(**base)
+
+
+def test_no_runs_when_ground_motion_is_credible():
+    # Rolling along the pitch at 5 m/s — well within bounds.
+    xyzs = {
+        i: (np.array([10.0 + 5.0 * i / 30.0, 0.0, 0.11]), 0.5)
+        for i in range(20)
+    }
+    states = {i: "grounded" for i in range(20)}
+    runs = find_implausible_grounded_runs(
+        per_frame_xyz=xyzs,
+        per_frame_state=states,
+        fps=30.0,
+        cfg=_promote_cfg(),
+        pitch=_pitch(),
+    )
+    assert runs == []
+
+
+def test_flags_off_pitch_run():
+    # Ground-projection at y=40 (well past 34 + 5 margin = 39).
+    xyzs = {
+        i: (np.array([0.0, 40.5, 0.11]), 0.5)
+        for i in range(10)
+    }
+    states = {i: "grounded" for i in range(10)}
+    runs = find_implausible_grounded_runs(
+        per_frame_xyz=xyzs,
+        per_frame_state=states,
+        fps=30.0,
+        cfg=_promote_cfg(),
+        pitch=_pitch(),
+    )
+    assert len(runs) == 1
+    assert runs[0].start == 0 and runs[0].end == 9
+
+
+def test_flags_speed_exceeding_run():
+    # 40 m/s ground speed (above 35).
+    xyzs = {
+        i: (np.array([40.0 * i / 30.0, 0.0, 0.11]), 0.5)
+        for i in range(10)
+    }
+    states = {i: "grounded" for i in range(10)}
+    runs = find_implausible_grounded_runs(
+        per_frame_xyz=xyzs,
+        per_frame_state=states,
+        fps=30.0,
+        cfg=_promote_cfg(),
+        pitch=_pitch(),
+    )
+    assert len(runs) == 1
+
+
+def test_ignores_runs_shorter_than_min_run_frames():
+    xyzs = {
+        i: (np.array([0.0, 40.5, 0.11]), 0.5)
+        for i in range(4)
+    }
+    states = {i: "grounded" for i in range(4)}
+    runs = find_implausible_grounded_runs(
+        per_frame_xyz=xyzs,
+        per_frame_state=states,
+        fps=30.0,
+        cfg=_promote_cfg(min_run_frames=6),
+        pitch=_pitch(),
+    )
+    assert runs == []
+
+
+def test_run_terminates_at_non_grounded_state():
+    xyzs = {
+        i: (np.array([0.0, 40.5, 0.11]), 0.5)
+        for i in range(20)
+    }
+    states = {i: "grounded" for i in range(20)}
+    states[8] = "missing"
+    states[9] = "missing"
+    runs = find_implausible_grounded_runs(
+        per_frame_xyz=xyzs,
+        per_frame_state=states,
+        fps=30.0,
+        cfg=_promote_cfg(),
+        pitch=_pitch(),
+    )
+    # Two qualifying runs: 0..7 (length 8) and 10..19 (length 10).
+    assert len(runs) == 2
+    assert (runs[0].start, runs[0].end) == (0, 7)
+    assert (runs[1].start, runs[1].end) == (10, 19)

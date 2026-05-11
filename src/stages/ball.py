@@ -25,6 +25,7 @@ Run flow per shot:
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -50,6 +51,7 @@ from src.utils.bundle_adjust import (
     fit_magnus_trajectory,
     fit_parabola_to_image_observations,
 )
+from src.utils.ball_kick_anchor import KickAnchorCfg, find_kick_anchor
 from src.utils.foot_anchor import ankle_ray_to_pitch
 
 
@@ -83,6 +85,44 @@ def _demote_run_to_missing(
     """Drop world positions for frames [a, b] so they emit state='missing'."""
     for fi in range(a, b + 1):
         per_frame_world.pop(fi, None)
+
+
+def _load_foot_uvs_for_shot(
+    output_dir: Path, shot_id: str
+) -> dict[int, list[tuple[float, float]]]:
+    """Aggregate ankle pixel positions across all players for a shot.
+
+    Reads ``output/hmr_world/<shot>__<player>_kp2d.json`` files (COCO-17
+    keypoints; indices 15 = left_ankle, 16 = right_ankle). Returns a dict
+    keyed by frame index with a list of ankle pixel positions, ignoring
+    any with confidence below 0.3.
+    """
+    hmr_dir = output_dir / "hmr_world"
+    if not hmr_dir.exists():
+        return {}
+    if shot_id:
+        pattern = f"{shot_id}__*_kp2d.json"
+    else:
+        pattern = "*_kp2d.json"
+    feet_by_frame: dict[int, list[tuple[float, float]]] = {}
+    for path in hmr_dir.glob(pattern):
+        try:
+            payload = json.loads(path.read_text())
+        except Exception:
+            continue
+        for entry in payload.get("frames", []):
+            fi = int(entry.get("frame", -1))
+            if fi < 0:
+                continue
+            kps = entry.get("keypoints", [])
+            for idx in (15, 16):
+                if idx >= len(kps):
+                    continue
+                kp = kps[idx]
+                if len(kp) < 3 or kp[2] < 0.3:
+                    continue
+                feet_by_frame.setdefault(fi, []).append((float(kp[0]), float(kp[1])))
+    return feet_by_frame
 
 
 class BallStage(BaseStage):
@@ -198,7 +238,23 @@ class BallStage(BaseStage):
             measurement_noise_px=float(tracker_cfg.get("measurement_noise_px", 2.0)),
             gating_sigma=float(tracker_cfg.get("gating_sigma", 4.0)),
             max_gap_frames=int(cfg.get("max_gap_frames", 6)),
+            initial_p_flight=float(tracker_cfg.get("initial_p_flight", 0.1)),
         )
+
+        feet_pixel_by_frame = _load_foot_uvs_for_shot(self.output_dir, shot_id)
+        kick_cfg = KickAnchorCfg(
+            enabled=bool(cfg.get("kick_anchor", {}).get("enabled", True))
+                    and bool(feet_pixel_by_frame),
+            max_pixel_distance_px=float(cfg.get("kick_anchor", {}).get("max_pixel_distance_px", 30.0)),
+            lookahead_frames=int(cfg.get("kick_anchor", {}).get("lookahead_frames", 4)),
+            min_pixel_acceleration_px_per_frame=float(cfg.get("kick_anchor", {}).get("min_pixel_acceleration_px_per_frame", 6.0)),
+            foot_anchor_z_m=float(cfg.get("kick_anchor", {}).get("foot_anchor_z_m", 0.11)),
+        )
+        if not feet_pixel_by_frame and cfg.get("kick_anchor", {}).get("enabled", True):
+            logger.warning(
+                "ball stage: kick_anchor enabled but no kp2d sidecars found under %s",
+                self.output_dir / "hmr_world",
+            )
 
         steps: list[TrackerStep] = []
         raw_confidences: dict[int, float] = {}
@@ -282,10 +338,35 @@ class BallStage(BaseStage):
             Rs_seg = [per_frame_R[o[0]] for o in obs]
             ts_seg = [per_frame_t[o[0]] for o in obs]
 
+            ball_uvs_seg = {fi: uv for fi, uv in obs}
+            anchor_world: np.ndarray | None = None
+            if kick_cfg.enabled:
+                # Pick the nearest foot per frame in the segment seed region.
+                seed_feet: dict[int, tuple[float, float]] = {}
+                for fi in range(a, min(a + kick_cfg.lookahead_frames + 1, b + 1)):
+                    feet = feet_pixel_by_frame.get(fi, [])
+                    if not feet or fi not in ball_uvs_seg:
+                        continue
+                    bu, bv = ball_uvs_seg[fi]
+                    nearest = min(feet, key=lambda f: (f[0] - bu) ** 2 + (f[1] - bv) ** 2)
+                    seed_feet[fi] = nearest
+                if a in per_frame_K:
+                    anchor_world = find_kick_anchor(
+                        segment_start_frame=a,
+                        ball_uvs=ball_uvs_seg,
+                        foot_uvs_by_frame=seed_feet,
+                        K=per_frame_K[a],
+                        R=per_frame_R[a],
+                        t=per_frame_t[a],
+                        cfg=kick_cfg,
+                        distortion=distortion,
+                    )
+
             try:
                 p0, v0, parab_resid = fit_parabola_to_image_observations(
                     obs, Ks=Ks_seg, Rs=Rs_seg, t_world=ts_seg,
                     fps=camera.fps, distortion=distortion,
+                    p0_fixed=anchor_world,
                 )
             except Exception as exc:
                 logger.debug("parabola fit failed on segment %d: %s", sid, exc)
@@ -320,6 +401,7 @@ class BallStage(BaseStage):
                         fps=camera.fps,
                         drag_k_over_m=drag,
                         p0_seed=p0, v0_seed=v0,
+                        p0_fixed=anchor_world,
                     )
                 except Exception as exc:
                     logger.debug("magnus fit failed on segment %d: %s", sid, exc)

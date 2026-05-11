@@ -111,6 +111,12 @@ ball:
     min_run_frames: 6
     off_pitch_margin_m: 5.0
     max_ground_speed_m_s: 35.0
+  kick_anchor:
+    enabled: true
+    max_pixel_distance_px: 30.0
+    lookahead_frames: 4
+    min_pixel_acceleration_px_per_frame: 6.0
+    foot_anchor_z_m: 0.11
 
 refined_poses:
   # Outlier rejection (per frame, per view) using MAD on root_t.

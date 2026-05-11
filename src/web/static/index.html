@@ -3788,12 +3788,12 @@ function renderBallShot(panel, data, shotId) {
   threeDPanel.body.appendChild(td3.element);
   grid.appendChild(threeDPanel.wrap);
 
-  // Source-view overlay: shows the predicted ball position drawn on the
-  // raw clip, mirroring the 2D-keypoint overlay used by hmr_world.
+  // Source-view overlay: full-width panel below the two trajectory tiles
+  // so the clip frame has room to breathe.
   const sourcePanel = makePanel("Source overlay");
   const src = buildBallSourceOverlay(data, shotId);
   sourcePanel.body.appendChild(src.element);
-  grid.appendChild(sourcePanel.wrap);
+  panel.appendChild(sourcePanel.wrap);
 
   // ── Shared timeline + play controls ──
   const minFrame = data.frames[0].frame;

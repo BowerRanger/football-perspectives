@@ -459,11 +459,17 @@ def test_isolated_airborne_anchor_no_placeholder_segment(tmp_path: Path):
 
 
 @pytest.mark.integration
-def test_consecutive_airborne_anchors_interpolate_flight_span(tmp_path: Path):
+def test_consecutive_airborne_anchors_force_flight_but_no_bucket_interp(tmp_path: Path):
     """Two consecutive airborne anchors with no grounded anchor between
-    them should mark all in-between frames as state=flight and
-    linearly-interpolate the world XYZ between the two anchor ray-casts
-    at their respective state heights."""
+    them mark all in-between frames as state=flight, but with only TWO
+    anchor pixels Phase 2 cannot fit a parabola. The fallback used to
+    linearly interpolate bucket-midpoint ray-casts, which produced large
+    depth swings between airborne_low (z=1m midpoint) and airborne_mid
+    (z=6m midpoint) anchors on different camera rays — the classic
+    top-down zigzag. The fallback now emits world_xyz=None for both
+    airborne-anchored AND unanchored frames in the span. State is still
+    flight (so the operator knows the algorithm respected their intent);
+    the world position is honestly absent."""
     K, R, t = _camera_pose()
     out = tmp_path / "out"
     n_frames = 20
@@ -472,13 +478,11 @@ def test_consecutive_airborne_anchors_interpolate_flight_span(tmp_path: Path):
     _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
 
     detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
-    a_uv = (640.0, 360.0)
-    b_uv = (720.0, 300.0)
     BallAnchorSet(
         clip_id="play", image_size=(1280, 720),
         anchors=(
-            BallAnchor(frame=5,  image_xy=a_uv, state="airborne_low"),
-            BallAnchor(frame=10, image_xy=b_uv, state="airborne_mid"),
+            BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="airborne_low"),
+            BallAnchor(frame=10, image_xy=(720.0, 300.0), state="airborne_mid"),
         ),
     ).save(out / "ball" / "play_ball_anchors.json")
 
@@ -488,33 +492,15 @@ def test_consecutive_airborne_anchors_interpolate_flight_span(tmp_path: Path):
     ).run()
 
     track = BallTrack.load(out / "ball" / "play_ball_track.json")
-    from src.utils.ball_anchor_heights import state_to_height
-    from src.utils.foot_anchor import ankle_ray_to_pitch
-    pa = ankle_ray_to_pitch(a_uv, K=K, R=R, t=t, plane_z=state_to_height("airborne_low"))
-    pb = ankle_ray_to_pitch(b_uv, K=K, R=R, t=t, plane_z=state_to_height("airborne_mid"))
 
-    # All frames 5..10 should be state="flight" (5 and 10 are anchored,
-    # 6..9 are span-interpolated and forced into the flight set).
     for fi in range(5, 11):
         f = next(x for x in track.frames if x.frame == fi)
         assert f.state == "flight", f"frame {fi} expected flight, got {f.state}"
-
-    # Frame 5 (anchor): world position equals airborne_low ray-cast.
-    f5 = next(f for f in track.frames if f.frame == 5)
-    assert f5.world_xyz is not None
-    assert np.allclose(f5.world_xyz, pa, atol=0.05), (
-        f"airborne anchor should ray-cast at its STATE height, not z=0.11; "
-        f"expected {pa}, got {list(f5.world_xyz)}"
-    )
-
-    # Frame 7 (midway through interpolation).
-    f7 = next(f for f in track.frames if f.frame == 7)
-    t7 = (7 - 5) / (10 - 5)
-    expected_7 = pa * (1 - t7) + pb * t7
-    assert f7.world_xyz is not None
-    assert np.allclose(f7.world_xyz, expected_7, atol=0.05), (
-        f"expected airborne-span interp at frame 7 = {expected_7}, got {list(f7.world_xyz)}"
-    )
+        assert f.world_xyz is None, (
+            f"airborne anchors at coarse buckets must NOT emit bucket-midpoint "
+            f"world positions (would zigzag in depth); got world_xyz={f.world_xyz} "
+            f"at frame {fi}"
+        )
 
 
 @pytest.mark.integration

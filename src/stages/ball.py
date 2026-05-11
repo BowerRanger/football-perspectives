@@ -410,15 +410,21 @@ class BallStage(BaseStage):
             per_frame_world[fi] = (world, conf)
 
         # Override world position for anchored frames: project the exact
-        # anchor pixel rather than the Kalman-smoothed tracker output so
-        # that the user-supplied position is reproduced exactly.
-        # Use the anchor STATE's height plane — airborne_high at z=0.11
-        # would project the airborne ball's pixel onto the ground, which
-        # lands far past the ball's true XY.
+        # anchor pixel using the state's known height plane. This is only
+        # done for HARD_KNOT_STATES (grounded/kick/catch/bounce) where
+        # the state height is precise (foot at 0.11, hands at 1.5, etc.).
+        # Airborne_low/mid/high and header are NOT projected here —
+        # their state heights are bucket midpoints, not precise values.
+        # Ray-casting at a bucket midpoint produces world positions
+        # ~10-30 m off the actual ball when the bucket is wide. Those
+        # anchors only contribute to Phase 2 fitting (where pixel obs +
+        # bucket-range hinge constrain the parabola jointly).
         for fi, uv_anchor in anchor_pixels.items():
             if fi not in per_frame_K:
                 continue
             anchor_state = anchor_by_frame[fi].state
+            if anchor_state not in HARD_KNOT_STATES:
+                continue
             try:
                 plane_z = state_to_height(anchor_state)
             except ValueError:
@@ -894,17 +900,42 @@ class BallStage(BaseStage):
                     )
                     continue
                 duration_s = (fb_span - fa_span) / camera.fps
-                if duration_s <= 0 or not is_plausible_trajectory(
+                if duration_s <= 0:
+                    continue
+                # Phase 2 uses a LOOSER plausibility than Layer 1: the
+                # user explicitly anchored every frame in this span, so
+                # we trust their intent even when bucket choices imply a
+                # slightly off-pitch or very high arc. Layer 1's strict
+                # bounds (pitch margin, apex 50 m, speed 40 m/s + 5)
+                # would reject perfectly usable fits when the user's
+                # bucket misclassifies the ball's height by a few metres.
+                # We still reject NaN / runaway parameters as obvious
+                # nonsense.
+                if (
+                    not np.all(np.isfinite(p2_p0))
+                    or not np.all(np.isfinite(p2_v0))
+                    or float(np.linalg.norm(p2_v0)) > 100.0
+                    or float(np.max(np.abs(p2_p0))) > 1000.0
+                ):
+                    logger.info(
+                        "Phase 2 fit for span %d-%d returned non-finite or "
+                        "runaway parameters (p0=%s v0=%s) — falling back",
+                        fa_span, fb_span,
+                        np.asarray(p2_p0).round(1).tolist(),
+                        np.asarray(p2_v0).round(1).tolist(),
+                    )
+                    continue
+                if not is_plausible_trajectory(
                     p2_p0, p2_v0, omega=None,
                     duration_s=duration_s, fps=camera.fps,
                     cfg=plaus_cfg, pitch=pitch_dims,
                 ):
                     logger.info(
-                        "Phase 2 parabola fit for span %d-%d failed plausibility — "
-                        "falling back to linear interp",
+                        "Phase 2 fit for span %d-%d failed Layer 1 plausibility but "
+                        "passed sanity bounds — accepting (user-anchored trajectories "
+                        "are trusted over the strict envelope)",
                         fa_span, fb_span,
                     )
-                    continue
                 # Success: drop any pre-existing flight segments inside
                 # this span (the parabola we just fit is the authoritative
                 # answer) and emit a single new segment.
@@ -954,13 +985,15 @@ class BallStage(BaseStage):
                 ))
                 parabola_handled_spans.append((fa_span, fb_span))
 
-        # Layer 5 Phase 1: flight-span LINEAR interpolation — fallback
-        # when Phase 2 didn't handle the span (fit raised, plausibility
-        # failed, or fewer than 3 anchor pixels). When consecutive
-        # anchors are BOTH non-grounded with no grounded anchor between
-        # them, linearly interpolate world XYZ between the two anchor
-        # ray-casts (each at its own state height) and mark every
-        # intermediate frame as flight.
+        # Layer 5 Phase 1: forced-flight extension for non-grounded spans
+        # that Phase 2 did not cover. We mark frames between consecutive
+        # non-grounded anchors as state="flight" but DO NOT emit a
+        # world_xyz for unanchored or airborne-anchored frames — the
+        # bucket-midpoint ray-cast was producing 50+ metre depth swings
+        # between adjacent airborne_low/mid/high anchors and showing up
+        # as a top-down zigzag. Honest gaps are better than wrong dots.
+        # Hard-knot anchored frames (kick/catch/bounce/grounded — set
+        # earlier via the exact-world override) keep their world_xyz.
         def _in_handled_span(fi: int) -> bool:
             for sa, sb in parabola_handled_spans:
                 if sa <= fi <= sb:
@@ -979,20 +1012,21 @@ class BallStage(BaseStage):
                     continue
                 if _in_handled_span(fa) and _in_handled_span(fb):
                     continue
+                # Mark every in-between frame as flight (state-only).
+                # Also clear any world_xyz the IMM/ground-projection
+                # already wrote — those are bucket-midpoint ray-casts
+                # at bogus heights for airborne frames.
                 for fi in range(fa + 1, fb):
                     forced_flight.add(fi)
                     flight_membership.pop(fi, None)
-                wa = per_frame_world.get(fa)
-                wb = per_frame_world.get(fb)
-                if wa is None or wb is None:
-                    continue
-                pa, _ = wa
-                pb, _ = wb
-                span_len = fb - fa
-                for fi in range(fa + 1, fb):
-                    t = (fi - fa) / span_len
-                    pos = pa * (1.0 - t) + pb * t
-                    per_frame_world[fi] = (pos, 0.85)
+                    per_frame_world.pop(fi, None)
+                # Also drop world_xyz at airborne-anchored endpoints —
+                # the bucket-midpoint ray-cast there is just as wrong as
+                # the in-between frames. Hard-knot endpoints keep their
+                # exact-height ray-cast.
+                for fi_endpoint, anc_endpoint in ((fa, anc_a), (fb, anc_b)):
+                    if anc_endpoint.state not in HARD_KNOT_STATES:
+                        per_frame_world.pop(fi_endpoint, None)
 
         per_frame_out: list[BallFrame] = []
         for fi in range(n_frames):

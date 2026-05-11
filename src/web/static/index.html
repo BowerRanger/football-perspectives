@@ -3698,14 +3698,14 @@ async function renderBall(panel) {
       emptyNote(body, "No ball track yet — run ball to detect ball positions.");
       return;
     }
-    renderBallShot(body, data);
+    renderBallShot(body, data, shotId);
   }
 
   shotSelect.addEventListener("change", () => loadShot(shotSelect.value));
   await loadShot(shotIds.length > 0 ? shotIds[0] : "");
 }
 
-function renderBallShot(panel, data) {
+function renderBallShot(panel, data, shotId) {
   const N = data.frames.length;
   const states = {};
   for (const f of data.frames) {
@@ -3788,6 +3788,13 @@ function renderBallShot(panel, data) {
   threeDPanel.body.appendChild(td3.element);
   grid.appendChild(threeDPanel.wrap);
 
+  // Source-view overlay: shows the predicted ball position drawn on the
+  // raw clip, mirroring the 2D-keypoint overlay used by hmr_world.
+  const sourcePanel = makePanel("Source overlay");
+  const src = buildBallSourceOverlay(data, shotId);
+  sourcePanel.body.appendChild(src.element);
+  grid.appendChild(sourcePanel.wrap);
+
   // ── Shared timeline + play controls ──
   const minFrame = data.frames[0].frame;
   const maxFrame = data.frames[data.frames.length - 1].frame;
@@ -3816,6 +3823,7 @@ function renderBallShot(panel, data) {
     frameLabel.textContent = `Frame ${currentFrame}  (${sec}s)`;
     td.setFrame(currentFrame);
     td3.setFrame(currentFrame);
+    src.setFrame(currentFrame);
   }
   setFrame(minFrame);
   seek.addEventListener("input", () => setFrame(Number(seek.value)));
@@ -3843,6 +3851,150 @@ function renderBallShot(panel, data) {
     if (playing) rafId = requestAnimationFrame(tick);
     else if (rafId) cancelAnimationFrame(rafId);
   });
+}
+
+// ── Source-view ball overlay ─────────────────────────────────────────
+// Renders the clip video with the predicted ball position drawn as a
+// circle (state-colored: green=grounded, orange=flight) projected from
+// the per-frame world_xyz using the same camera (K, R, t) the pipeline
+// solved in the camera stage. Mirrors the kp2d overlay pattern used by
+// the hmr_world panel.
+function buildBallSourceOverlay(data, shotId) {
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+
+  const stage = document.createElement("div");
+  stage.style.cssText = "position:relative;background:#000;border-radius:4px;overflow:hidden;";
+  const video = document.createElement("video");
+  if (shotId) {
+    video.src = `/api/video/${encodeURIComponent(shotId)}`;
+  }
+  video.preload = "metadata";
+  video.muted = true;
+  video.style.cssText = "display:block;width:100%;height:auto;";
+  const overlay = document.createElement("canvas");
+  overlay.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;";
+  stage.appendChild(video);
+  stage.appendChild(overlay);
+  wrap.appendChild(stage);
+
+  const note = document.createElement("div");
+  note.style.cssText = "color:#94a3b8;font-size:11px;padding:0 4px;";
+  note.textContent = "Loading camera track…";
+  wrap.appendChild(note);
+
+  // Per-frame ball xyz lookup.
+  const ballByFrame = new Map();
+  for (const f of data.frames) {
+    if (f.world_xyz) ballByFrame.set(f.frame, { xyz: f.world_xyz, state: f.state });
+  }
+
+  // Per-frame camera lookup, populated once /camera/track resolves.
+  const camByFrame = new Map();
+  let camFallback = null;
+  let camReady = false;
+  let pendingFrame = data.frames[0] ? data.frames[0].frame : 0;
+
+  const camUrl = shotId ? `/camera/track?shot=${encodeURIComponent(shotId)}` : "/camera/track";
+  fetchJsonOrNull(camUrl).then((cam) => {
+    if (!cam || !cam.frames) {
+      note.textContent = "No camera track available — overlay disabled.";
+      return;
+    }
+    camFallback = cam.t_world ? cam.t_world : null;
+    for (const cf of cam.frames) {
+      camByFrame.set(cf.frame, {
+        K: cf.K, R: cf.R,
+        t: cf.t || camFallback,
+      });
+    }
+    camReady = true;
+    note.textContent = `${camByFrame.size} camera frames loaded. Green = grounded, orange = flight.`;
+    drawFrame(pendingFrame);
+  });
+
+  function projectToPixel(xyz, cam) {
+    // p_cam = R @ p_world + t ; pix = K @ p_cam ; uv = pix[:2] / pix[2]
+    const [x, y, z] = xyz;
+    const R = cam.R, t = cam.t, K = cam.K;
+    if (!R || !t || !K) return null;
+    const cx = R[0][0] * x + R[0][1] * y + R[0][2] * z + t[0];
+    const cy = R[1][0] * x + R[1][1] * y + R[1][2] * z + t[1];
+    const cz = R[2][0] * x + R[2][1] * y + R[2][2] * z + t[2];
+    if (cz <= 0) return null;  // behind the camera
+    const u = (K[0][0] * cx + K[0][1] * cy + K[0][2] * cz) / cz;
+    const v = (K[1][0] * cx + K[1][1] * cy + K[1][2] * cz) / cz;
+    return [u, v];
+  }
+
+  function fitOverlay() {
+    if (!video.videoWidth) return;
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+    overlay.style.width = video.offsetWidth + "px";
+    overlay.style.height = video.offsetHeight + "px";
+  }
+
+  function drawFrame(fi) {
+    pendingFrame = fi;
+    if (!camReady || !overlay.width) return;
+    const ctx = overlay.getContext("2d");
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    const ball = ballByFrame.get(fi);
+    if (!ball) return;
+    const cam = camByFrame.get(fi);
+    if (!cam) return;
+    const uv = projectToPixel(ball.xyz, cam);
+    if (!uv) return;
+    const colour = ball.state === "flight" ? "#fb923c"
+                 : ball.state === "grounded" ? "#34d399"
+                 : "#64748b";
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = colour;
+    ctx.fillStyle = colour;
+    // Cross-hair + outline circle: visible against any background.
+    ctx.beginPath();
+    ctx.arc(uv[0], uv[1], 10, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(uv[0], uv[1], 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(uv[0] - 16, uv[1]); ctx.lineTo(uv[0] - 4, uv[1]);
+    ctx.moveTo(uv[0] + 4, uv[1]); ctx.lineTo(uv[0] + 16, uv[1]);
+    ctx.moveTo(uv[0], uv[1] - 16); ctx.lineTo(uv[0], uv[1] - 4);
+    ctx.moveTo(uv[0], uv[1] + 4); ctx.lineTo(uv[0], uv[1] + 16);
+    ctx.stroke();
+    // Small state badge above the ball.
+    const label = `${ball.state} z=${ball.xyz[2].toFixed(2)}m`;
+    ctx.font = "bold 11px -apple-system, sans-serif";
+    const tw = ctx.measureText(label).width + 8;
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.fillRect(uv[0] - tw / 2, uv[1] - 30, tw, 14);
+    ctx.fillStyle = colour;
+    ctx.fillText(label, uv[0] - tw / 2 + 4, uv[1] - 19);
+  }
+
+  const fps = data.fps || 30;
+  video.addEventListener("loadedmetadata", () => {
+    fitOverlay();
+    drawFrame(pendingFrame);
+  });
+  new ResizeObserver(fitOverlay).observe(video);
+
+  if (!shotId) {
+    note.textContent = "Source overlay unavailable in legacy single-shot mode.";
+  }
+
+  return {
+    element: wrap,
+    setFrame: (fi) => {
+      if (video.readyState >= 1 && Math.abs(video.currentTime - fi / fps) > 0.5 / fps) {
+        video.currentTime = fi / fps;
+      }
+      drawFrame(fi);
+    },
+  };
 }
 
 // ── Top-down ball trajectory canvas ─────────────────────────────────

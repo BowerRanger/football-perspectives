@@ -36,6 +36,8 @@ from src.pipeline.base import BaseStage
 from src.schemas.ball_track import BallFrame, BallTrack, FlightSegment
 from src.schemas.camera_track import CameraTrack
 from src.schemas.shots import ShotsManifest
+from src.schemas.ball_anchor import BallAnchor, BallAnchorSet
+from src.utils.ball_anchor_heights import AIRBORNE_STATES
 from src.utils.ball_detector import BallDetector, YOLOBallDetector
 from src.utils.ball_tracker import BallTracker, TrackerStep
 from src.utils.ball_plausibility import (
@@ -127,6 +129,27 @@ def _load_foot_uvs_for_shot(
                     continue
                 feet_by_frame.setdefault(fi, []).append((float(kp[0]), float(kp[1])))
     return feet_by_frame
+
+
+def _load_ball_anchors(
+    output_dir: Path, shot_id: str
+) -> dict[int, BallAnchor]:
+    """Load per-frame ball anchors keyed by frame index.
+
+    Returns an empty dict when no anchor file exists.
+    """
+    if shot_id:
+        path = output_dir / "ball" / f"{shot_id}_ball_anchors.json"
+    else:
+        path = output_dir / "ball" / "ball_anchors.json"
+    if not path.exists():
+        return {}
+    try:
+        aset = BallAnchorSet.load(path)
+    except Exception as exc:
+        logger.warning("ball stage: failed to load anchors at %s: %s", path, exc)
+        return {}
+    return {a.frame: a for a in aset.anchors}
 
 
 class BallStage(BaseStage):
@@ -246,6 +269,24 @@ class BallStage(BaseStage):
         )
 
         feet_pixel_by_frame = _load_foot_uvs_for_shot(self.output_dir, shot_id)
+        anchor_by_frame = _load_ball_anchors(self.output_dir, shot_id)
+        if anchor_by_frame:
+            logger.info(
+                "ball stage: loaded %d anchors for shot %s",
+                len(anchor_by_frame), shot_id or "(legacy)",
+            )
+        forced_flight: set[int] = {
+            fi for fi, a in anchor_by_frame.items()
+            if a.state in AIRBORNE_STATES
+        }
+        # Raw anchor pixels keyed by frame for exact world-position override
+        # after the tracker loop. Off_screen_flight anchors have no pixel and
+        # are excluded here.
+        anchor_pixels: dict[int, tuple[float, float]] = {
+            fi: (float(a.image_xy[0]), float(a.image_xy[1]))
+            for fi, a in anchor_by_frame.items()
+            if a.image_xy is not None
+        }
         kick_cfg = KickAnchorCfg(
             enabled=bool(cfg.get("kick_anchor", {}).get("enabled", True))
                     and bool(feet_pixel_by_frame),
@@ -283,33 +324,48 @@ class BallStage(BaseStage):
                 ret, frame = cap.read()
                 if not ret:
                     break
-                det = detector.detect(frame)
-                if det is None:
-                    consecutive_misses += 1
-                    bridge_result = bridge.try_bridge(
-                        frame=frame_idx,
-                        frame_image=frame,
-                        predicted_uv=(
-                            (float(steps[-1].uv[0]), float(steps[-1].uv[1]))
-                            if steps and steps[-1].uv is not None else None
-                        ),
-                        consecutive_misses=consecutive_misses,
-                    )
-                    if bridge_result is None:
+                anchor = anchor_by_frame.get(frame_idx)
+                if anchor is not None:
+                    if anchor.state == "off_screen_flight":
+                        # No pixel; let the IMM predict, but record the
+                        # forced flight marker for the flight-run pass below.
                         uv: tuple[float, float] | None = None
                     else:
-                        uv, bridged_conf = bridge_result
-                        raw_confidences[frame_idx] = bridged_conf
-                else:
+                        uv = (float(anchor.image_xy[0]), float(anchor.image_xy[1]))
+                        raw_confidences[frame_idx] = 1.0
+                        bridge.update_template(
+                            frame=frame_idx, frame_image=frame,
+                            uv=uv, confidence=1.0,
+                        )
                     consecutive_misses = 0
-                    uv = (float(det[0]), float(det[1]))
-                    raw_confidences[frame_idx] = float(det[2])
-                    bridge.update_template(
-                        frame=frame_idx,
-                        frame_image=frame,
-                        uv=uv,
-                        confidence=float(det[2]),
-                    )
+                else:
+                    det = detector.detect(frame)
+                    if det is None:
+                        consecutive_misses += 1
+                        bridge_result = bridge.try_bridge(
+                            frame=frame_idx,
+                            frame_image=frame,
+                            predicted_uv=(
+                                (float(steps[-1].uv[0]), float(steps[-1].uv[1]))
+                                if steps and steps[-1].uv is not None else None
+                            ),
+                            consecutive_misses=consecutive_misses,
+                        )
+                        if bridge_result is None:
+                            uv = None
+                        else:
+                            uv, bridged_conf = bridge_result
+                            raw_confidences[frame_idx] = bridged_conf
+                    else:
+                        consecutive_misses = 0
+                        uv = (float(det[0]), float(det[1]))
+                        raw_confidences[frame_idx] = float(det[2])
+                        bridge.update_template(
+                            frame=frame_idx,
+                            frame_image=frame,
+                            uv=uv,
+                            confidence=float(det[2]),
+                        )
                 step = tracker.update(frame_idx, uv)
                 steps.append(step)
                 frame_idx += 1
@@ -346,6 +402,26 @@ class BallStage(BaseStage):
             # Gap-filled frames have no direct detection — discount.
             conf = base_conf * (0.3 if step.is_gap_fill else 1.0)
             per_frame_world[fi] = (world, conf)
+
+        # Override world position for anchored frames: project the exact
+        # anchor pixel rather than the Kalman-smoothed tracker output so
+        # that the user-supplied position is reproduced exactly.
+        for fi, uv_anchor in anchor_pixels.items():
+            if fi not in per_frame_K:
+                continue
+            try:
+                world = ankle_ray_to_pitch(
+                    uv_anchor,
+                    K=per_frame_K[fi],
+                    R=per_frame_R[fi],
+                    t=per_frame_t[fi],
+                    plane_z=ball_radius,
+                    distortion=distortion,
+                )
+            except Exception as exc:
+                logger.debug("ball anchor projection failed at frame %d: %s", fi, exc)
+                continue
+            per_frame_world[fi] = (world, 1.0)
 
         # Flight segmentation by IMM mode posterior.
         min_flight = int(tracker_cfg.get("min_flight_frames", 6))
@@ -595,6 +671,45 @@ class BallStage(BaseStage):
                 )
             )
 
+        if forced_flight:
+            already_flight = set(flight_membership)
+            new_frames = forced_flight - already_flight
+            if new_frames:
+                runs: list[tuple[int, int]] = []
+                run_start: int | None = None
+                last: int | None = None
+                for fi in sorted(new_frames):
+                    if run_start is None:
+                        run_start = fi; last = fi
+                    elif fi == last + 1:
+                        last = fi
+                    else:
+                        runs.append((run_start, last))
+                        run_start = fi; last = fi
+                if run_start is not None:
+                    runs.append((run_start, last))
+                next_segment_id_forced = (max(flight_membership.values()) + 1) if flight_membership else 0
+                for (a, b) in runs:
+                    sid_new = next_segment_id_forced
+                    next_segment_id_forced += 1
+                    for fi in range(a, b + 1):
+                        flight_membership[fi] = sid_new
+                    flight_segments.append(
+                        FlightSegment(
+                            id=sid_new,
+                            frame_range=(a, b),
+                            parabola={
+                                "p0": [0.0, 0.0, 0.0],
+                                "v0": [0.0, 0.0, 0.0],
+                                "g": -9.81,
+                                "spin_axis_world": None,
+                                "spin_omega_rad_s": None,
+                                "spin_confidence": None,
+                            },
+                            fit_residual_px=0.0,
+                        )
+                    )
+
         per_frame_out: list[BallFrame] = []
         for fi in range(n_frames):
             if fi in per_frame_world:
@@ -610,14 +725,25 @@ class BallStage(BaseStage):
                     )
                 )
             else:
-                per_frame_out.append(
-                    BallFrame(
-                        frame=fi,
-                        world_xyz=None,
-                        state="missing",
-                        confidence=0.0,
+                if fi in flight_membership:
+                    per_frame_out.append(
+                        BallFrame(
+                            frame=fi,
+                            world_xyz=None,
+                            state="flight",
+                            confidence=0.0,
+                            flight_segment_id=flight_membership.get(fi),
+                        )
                     )
-                )
+                else:
+                    per_frame_out.append(
+                        BallFrame(
+                            frame=fi,
+                            world_xyz=None,
+                            state="missing",
+                            confidence=0.0,
+                        )
+                    )
 
         track = BallTrack(
             clip_id=camera.clip_id,

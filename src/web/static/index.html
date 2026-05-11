@@ -3730,6 +3730,18 @@ function renderBallShot(panel, data, shotId) {
   sumBody.appendChild(summary);
   panel.appendChild(sumWrap);
 
+  // ── Editor link ──
+  const editorLink = document.createElement("div");
+  editorLink.style.cssText = "padding:0 16px 12px;";
+  const shotParam = shotId ? `?shot=${encodeURIComponent(shotId)}` : "";
+  editorLink.innerHTML = `
+    <a href="/ball-anchor-editor${shotParam}" target="_blank"
+       style="color:#60a5fa;text-decoration:none;font-size:12px;">
+      Open ball anchor editor for ${shotId || "this clip"} →
+    </a>
+  `;
+  panel.appendChild(editorLink);
+
   // ── Flight segments table (if any) ──
   if (segs.length > 0) {
     const { wrap: tWrap, body: tBody } = makePanel("Flight segments");

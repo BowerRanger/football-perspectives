@@ -48,12 +48,19 @@
   .panel-body { flex: 1; overflow-y: auto; padding: 8px; }
 
   .tag-row {
-    display: flex; align-items: center; gap: 6px;
-    padding: 5px 8px; cursor: pointer; border-radius: 3px;
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; cursor: pointer; border-radius: 3px;
     font-size: 12px; color: #cbd5e1; user-select: none;
+    line-height: 1.3;
   }
   .tag-row:hover { background: #252840; }
   .tag-row.selected { background: #3730a3; color: #fff; }
+  .tag-row .tag-range {
+    font-size: 10px;
+    color: #64748b;
+    font-family: "SF Mono", "Fira Code", ui-monospace, monospace;
+  }
+  .tag-row.selected .tag-range { color: #c7d2fe; }
 
   .anchor-row {
     padding: 6px 8px; cursor: pointer; border-radius: 3px;
@@ -115,14 +122,46 @@
 </main>
 <script>
 const TAGS = [
-  { id: "grounded",          label: "Grounded",         color: "#34d399" },
-  { id: "airborne_low",      label: "Airborne — low",   color: "#fbbf24" },
-  { id: "airborne_mid",      label: "Airborne — mid",   color: "#fb923c" },
-  { id: "airborne_high",     label: "Airborne — high",  color: "#f87171" },
-  { id: "off_screen_flight", label: "Off-screen flight",color: "#64748b" },
-  { id: "kick",              label: "Kick (foot)",      color: "#60a5fa" },
-  { id: "catch",             label: "Catch",            color: "#a78bfa" },
-  { id: "bounce",            label: "Bounce",           color: "#f472b6" },
+  {
+    id: "grounded", label: "Grounded", color: "#34d399",
+    range: "z = 0.11 m",
+    description: "Ball on the pitch (rolling, stationary, at feet). Hard knot — the parabola fit will pass exactly through the anchor's pixel ray-cast at ground level.",
+  },
+  {
+    id: "airborne_low", label: "Airborne — low", color: "#fbbf24",
+    range: "0 – 2 m",
+    description: "Ball in the air, ankle-to-waist height. A low pass or rebound. Acts as a soft height hint (bucket midpoint 1 m) — the fit is biased but not pinned exactly, because the bucket is coarse.",
+  },
+  {
+    id: "airborne_mid", label: "Airborne — mid", color: "#fb923c",
+    range: "2 – 10 m",
+    description: "Ball in the air, head-to-rooftop height. The most common aerial pass. Bucket midpoint 6 m, soft constraint.",
+  },
+  {
+    id: "airborne_high", label: "Airborne — high", color: "#f87171",
+    range: "10 m +",
+    description: "Ball high in the air — goal kick, long clearance, lobbed shot. Bucket midpoint 15 m, soft constraint.",
+  },
+  {
+    id: "off_screen_flight", label: "Off-screen flight", color: "#64748b",
+    range: "no pixel",
+    description: "Ball is airborne but not visible in this frame (occluded, off-screen, motion-blurred beyond recognition). No pixel position; tells the pipeline 'keep treating this frame as flight even though WASB missed it'. Use the dedicated button below the seek bar.",
+  },
+  {
+    id: "kick", label: "Kick (foot)", color: "#60a5fa",
+    range: "z = 0.11 m, event",
+    description: "Ball leaves a player's foot. Hard knot at ground level; splits the flight run — a new flight segment starts at the kick frame. Place the crosshair at the ball, not the foot.",
+  },
+  {
+    id: "catch", label: "Catch", color: "#a78bfa",
+    range: "z = 1.5 m, event",
+    description: "Ball stops in a player's hands (goalkeeper catch, throw-in catch). Hard knot at chest height; ends the current flight run.",
+  },
+  {
+    id: "bounce", label: "Bounce", color: "#f472b6",
+    range: "z = 0.11 m, event",
+    description: "Ball touches the ground briefly. Hard knot at ground level; splits the flight run — the segment before and after the bounce are fit separately, with the bounce frame excluded from both.",
+  },
 ];
 let selectedTag = "grounded";
 let shotId = new URLSearchParams(location.search).get("shot") || "";
@@ -151,7 +190,14 @@ function renderTags() {
   for (const tag of TAGS) {
     const row = document.createElement("div");
     row.className = "tag-row" + (tag.id === selectedTag ? " selected" : "");
-    row.innerHTML = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${tag.color};flex-shrink:0;"></span> ${tag.label}`;
+    row.title = tag.description;
+    row.innerHTML = `
+      <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${tag.color};flex-shrink:0;"></span>
+      <div style="display:flex;flex-direction:column;min-width:0;flex:1;">
+        <span>${tag.label}</span>
+        <span class="tag-range">${tag.range}</span>
+      </div>
+    `;
     row.onclick = () => { selectedTag = tag.id; renderTags(); };
     tagList.appendChild(row);
   }

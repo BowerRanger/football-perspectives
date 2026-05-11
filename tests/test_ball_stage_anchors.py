@@ -456,3 +456,97 @@ def test_isolated_airborne_anchor_no_placeholder_segment(tmp_path: Path):
         if s.parabola.get("p0") == [0.0, 0.0, 0.0]
     ]
     assert not junk, f"expected no zero-parabola placeholder segments, got {junk}"
+
+
+@pytest.mark.integration
+def test_consecutive_airborne_anchors_interpolate_flight_span(tmp_path: Path):
+    """Two consecutive airborne anchors with no grounded anchor between
+    them should mark all in-between frames as state=flight and
+    linearly-interpolate the world XYZ between the two anchor ray-casts
+    at their respective state heights."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 20
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
+    a_uv = (640.0, 360.0)
+    b_uv = (720.0, 300.0)
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720),
+        anchors=(
+            BallAnchor(frame=5,  image_xy=a_uv, state="airborne_low"),
+            BallAnchor(frame=10, image_xy=b_uv, state="airborne_mid"),
+        ),
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    from src.utils.ball_anchor_heights import state_to_height
+    from src.utils.foot_anchor import ankle_ray_to_pitch
+    pa = ankle_ray_to_pitch(a_uv, K=K, R=R, t=t, plane_z=state_to_height("airborne_low"))
+    pb = ankle_ray_to_pitch(b_uv, K=K, R=R, t=t, plane_z=state_to_height("airborne_mid"))
+
+    # All frames 5..10 should be state="flight" (5 and 10 are anchored,
+    # 6..9 are span-interpolated and forced into the flight set).
+    for fi in range(5, 11):
+        f = next(x for x in track.frames if x.frame == fi)
+        assert f.state == "flight", f"frame {fi} expected flight, got {f.state}"
+
+    # Frame 5 (anchor): world position equals airborne_low ray-cast.
+    f5 = next(f for f in track.frames if f.frame == 5)
+    assert f5.world_xyz is not None
+    assert np.allclose(f5.world_xyz, pa, atol=0.05), (
+        f"airborne anchor should ray-cast at its STATE height, not z=0.11; "
+        f"expected {pa}, got {list(f5.world_xyz)}"
+    )
+
+    # Frame 7 (midway through interpolation).
+    f7 = next(f for f in track.frames if f.frame == 7)
+    t7 = (7 - 5) / (10 - 5)
+    expected_7 = pa * (1 - t7) + pb * t7
+    assert f7.world_xyz is not None
+    assert np.allclose(f7.world_xyz, expected_7, atol=0.05), (
+        f"expected airborne-span interp at frame 7 = {expected_7}, got {list(f7.world_xyz)}"
+    )
+
+
+@pytest.mark.integration
+def test_grounded_then_airborne_does_not_interpolate_world(tmp_path: Path):
+    """A grounded anchor adjacent to an airborne anchor must NOT
+    span-interpolate (state boundary). The in-between frames go through
+    WASB as usual."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 20
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720),
+        anchors=(
+            BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="grounded"),
+            BallAnchor(frame=10, image_xy=(700.0, 300.0), state="airborne_mid"),
+        ),
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    # Frame 7: NOT in any flight (no airborne→airborne or grounded→grounded
+    # contiguous pair covering it). Should be state=grounded from WASB.
+    f7 = next(f for f in track.frames if f.frame == 7)
+    assert f7.state == "grounded", (
+        f"grounded→airborne boundary should leave in-between frames alone, got {f7.state}"
+    )

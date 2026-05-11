@@ -411,16 +411,24 @@ class BallStage(BaseStage):
         # Override world position for anchored frames: project the exact
         # anchor pixel rather than the Kalman-smoothed tracker output so
         # that the user-supplied position is reproduced exactly.
+        # Use the anchor STATE's height plane — airborne_high at z=0.11
+        # would project the airborne ball's pixel onto the ground, which
+        # lands far past the ball's true XY.
         for fi, uv_anchor in anchor_pixels.items():
             if fi not in per_frame_K:
                 continue
+            anchor_state = anchor_by_frame[fi].state
+            try:
+                plane_z = state_to_height(anchor_state)
+            except ValueError:
+                plane_z = ball_radius
             try:
                 world = ankle_ray_to_pitch(
                     uv_anchor,
                     K=per_frame_K[fi],
                     R=per_frame_R[fi],
                     t=per_frame_t[fi],
-                    plane_z=ball_radius,
+                    plane_z=plane_z,
                     distortion=distortion,
                 )
             except Exception as exc:
@@ -773,6 +781,45 @@ class BallStage(BaseStage):
                     # Force out of any flight membership the WASB path
                     # might have assigned (rare but possible).
                     flight_membership.pop(fi, None)
+
+        # Layer 5: flight-span interpolation. When consecutive anchors
+        # are BOTH non-grounded (airborne_*, kick, catch, bounce,
+        # header) with no grounded anchor between them, treat the span
+        # as a flight: linearly interpolate world XYZ between the two
+        # anchor ray-casts (each at its own state height) and mark every
+        # intermediate frame as flight so the BallFrame assembly emits
+        # state="flight". off_screen_flight anchors have no pixel so
+        # they don't contribute to the world interpolation, but they
+        # still extend the forced_flight span.
+        if anchor_by_frame:
+            ordered = sorted(anchor_by_frame.items(), key=lambda kv: kv[0])
+            _NON_GROUNDED = AIRBORNE_STATES | EVENT_STATES
+            for (fa, anc_a), (fb, anc_b) in zip(ordered, ordered[1:]):
+                if anc_a.state == "grounded" or anc_b.state == "grounded":
+                    continue
+                if anc_a.state not in _NON_GROUNDED or anc_b.state not in _NON_GROUNDED:
+                    continue
+                if fb - fa <= 1:
+                    continue
+                # Mark every in-between frame as flight (state-only,
+                # no FlightSegment placeholder created later).
+                for fi in range(fa + 1, fb):
+                    forced_flight.add(fi)
+                    flight_membership.pop(fi, None)
+                # Interpolate world XYZ if both anchors have a pixel
+                # (off_screen_flight has none — skip the world interp
+                # but the forced_flight extension above still applies).
+                wa = per_frame_world.get(fa)
+                wb = per_frame_world.get(fb)
+                if wa is None or wb is None:
+                    continue
+                pa, _ = wa
+                pb, _ = wb
+                span = fb - fa
+                for fi in range(fa + 1, fb):
+                    t = (fi - fa) / span
+                    pos = pa * (1.0 - t) + pb * t
+                    per_frame_world[fi] = (pos, 0.85)
 
         per_frame_out: list[BallFrame] = []
         for fi in range(n_frames):

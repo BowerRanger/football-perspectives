@@ -797,9 +797,26 @@ class BallStage(BaseStage):
             ordered_for_spans = sorted(anchor_by_frame.items(), key=lambda kv: kv[0])
             _NON_GROUNDED = AIRBORNE_STATES | EVENT_STATES
             spans: list[list[tuple[int, BallAnchor]]] = []
+            # Span boundary rules:
+            #   grounded  → close current span (state change).
+            #   kick      → close current AND start a new span (kick is
+            #               the start of a fresh flight).
+            #   bounce    → close current including the bounce (flight
+            #   catch       ends here; subsequent flight needs a fresh kick).
+            #   header    → continues current (mid-flight deflection).
+            #   airborne_*, off_screen_flight → continues current.
             current_span: list[tuple[int, BallAnchor]] = []
             for fi, anc in ordered_for_spans:
                 if anc.state == "grounded":
+                    if len(current_span) >= 2:
+                        spans.append(current_span)
+                    current_span = []
+                elif anc.state == "kick":
+                    if len(current_span) >= 2:
+                        spans.append(current_span)
+                    current_span = [(fi, anc)]
+                elif anc.state in ("bounce", "catch"):
+                    current_span.append((fi, anc))
                     if len(current_span) >= 2:
                         spans.append(current_span)
                     current_span = []

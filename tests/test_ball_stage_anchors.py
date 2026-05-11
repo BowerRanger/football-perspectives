@@ -680,3 +680,59 @@ def test_phase2_fallback_to_linear_when_too_few_obs(tmp_path: Path):
     for fi in range(5, 11):
         f = next(x for x in track.frames if x.frame == fi)
         assert f.state == "flight", f"frame {fi} expected flight, got {f.state}"
+
+
+@pytest.mark.integration
+def test_phase2_splits_span_at_kick_and_bounce(tmp_path: Path):
+    """A run of non-grounded anchors that contains multiple kicks and
+    a bounce must split into separate flights, not lump into one giant
+    parabola fit covering all events."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 80
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
+    # Anchor pattern mirrors the user's real clip shape:
+    #   kick → airborne → kick → bounce → kick → airborne → bounce
+    # Phase 2 should build THREE spans: (k1..before_k2), (k2..bounce1),
+    # (k3..bounce2). NOT one merged 5-event span.
+    anchors = (
+        BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="kick"),
+        BallAnchor(frame=10, image_xy=(650.0, 320.0), state="airborne_low"),
+        BallAnchor(frame=15, image_xy=(660.0, 300.0), state="airborne_mid"),
+        BallAnchor(frame=20, image_xy=(670.0, 340.0), state="airborne_low"),
+        BallAnchor(frame=25, image_xy=(680.0, 360.0), state="kick"),
+        BallAnchor(frame=30, image_xy=(690.0, 360.0), state="bounce"),
+        BallAnchor(frame=40, image_xy=(700.0, 360.0), state="kick"),
+        BallAnchor(frame=45, image_xy=(710.0, 320.0), state="airborne_low"),
+        BallAnchor(frame=50, image_xy=(720.0, 360.0), state="bounce"),
+    )
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720), anchors=anchors,
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    seg_ranges = sorted(s.frame_range for s in track.flight_segments)
+    # We expect three distinct flight ranges, each covering ONE physical
+    # flight (kick to next event). At minimum: no single segment covering
+    # both kicks.
+    assert not any(
+        a <= 5 and b >= 40 for (a, b) in seg_ranges
+    ), (
+        f"a single FlightSegment must not span multiple kicks; got {seg_ranges}"
+    )
+    # Each kick frame should be the START of its own span (or absent if
+    # the fit was rejected by plausibility — but the test mainly asserts
+    # there's no monster span).
+    starts = {a for (a, b) in seg_ranges}
+    # If Phase 2 succeeded for any of the three, the start frames must
+    # be a subset of {5, 25, 40} — the kick frames.
+    assert starts <= {5, 25, 40, 457}, f"unexpected span start: {seg_ranges}"

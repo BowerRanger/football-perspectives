@@ -187,3 +187,93 @@ def test_ball_stage_emits_per_shot_track(tmp_path: Path):
 
     assert (tmp_path / "ball" / "alpha_ball_track.json").exists()
     assert (tmp_path / "ball" / "beta_ball_track.json").exists()
+
+
+@pytest.mark.integration
+def test_implausible_parabola_fit_is_rejected(tmp_path: Path, monkeypatch):
+    """Reproduces origi01 seg-3: a parabola fit lands at billion-metre
+    coordinates with tiny pixel residual. Layer 1 must drop it."""
+    import src.stages.ball as ball_mod
+
+    # Force fit_parabola_to_image_observations (as imported into ball.py) to
+    # return garbage with a microscopic residual so the existing
+    # flight_max_residual_px gate cannot save us.
+    def fake_parab(*args, **kwargs):
+        p0 = np.array([-5_690_504.0, 9_399_056.0, -2_218_511.0])
+        v0 = np.array([3_745_003.0, 3_366_928.0, -698_927.0])
+        return p0, v0, 0.11
+
+    monkeypatch.setattr(ball_mod, "fit_parabola_to_image_observations", fake_parab)
+
+    # Also stub _flight_runs so BallStage always reports one flight run
+    # (frames 10-25) regardless of what the IMM posterior says.  This
+    # isolates the test to the plausibility gate, not the tracker.
+    def forced_flight_runs(self_arg, steps, min_flight, max_flight):
+        return [(10, 25)]
+
+    monkeypatch.setattr(BallStage, "_flight_runs", forced_flight_runs)
+
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    clip = out / "shots" / "play.mp4"
+    n_frames = 40
+    _write_blank_clip(clip, n=n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    ShotsManifest(
+        source_file="fake.mp4",
+        fps=30.0,
+        total_frames=n_frames,
+        shots=[
+            Shot(
+                id="play",
+                clip_file="shots/play.mp4",
+                start_frame=0,
+                end_frame=n_frames - 1,
+                start_time=0.0,
+                end_time=(n_frames - 1) / 30.0,
+            )
+        ],
+    ).save(out / "shots" / "shots_manifest.json")
+
+    # Give every frame a detection so obs_pairs is never empty.
+    detections = [(640.0 + i * 0.5, 360.0 + i * 0.3, 0.9) for i in range(n_frames)]
+    stage = BallStage(
+        config={
+            "ball": {
+                "detector": "fake",
+                "ball_radius_m": 0.11,
+                "max_gap_frames": 6,
+                "flight_max_residual_px": 5.0,
+                "tracker": {
+                    "process_noise_grounded_px": 4.0,
+                    "process_noise_flight_px": 12.0,
+                    "measurement_noise_px": 2.0,
+                    "gating_sigma": 4.0,
+                    "min_flight_frames": 6,
+                    "max_flight_frames": 90,
+                },
+                "spin": {
+                    "enabled": False,
+                    "min_flight_seconds": 0.5,
+                    "min_residual_improvement": 0.2,
+                    "max_omega_rad_s": 200.0,
+                    "drag_k_over_m": 0.005,
+                },
+                "plausibility": {
+                    "z_max_m": 50.0,
+                    "horizontal_speed_max_m_s": 40.0,
+                    "pitch_margin_m": 5.0,
+                },
+            },
+            "pitch": {"length_m": 105.0, "width_m": 68.0},
+        },
+        output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    )
+    stage.run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    # No flight segment should have survived plausibility.
+    assert len(track.flight_segments) == 0, (
+        f"expected garbage segment to be rejected; got {track.flight_segments}"
+    )

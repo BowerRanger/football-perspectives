@@ -37,6 +37,11 @@ from src.schemas.camera_track import CameraTrack
 from src.schemas.shots import ShotsManifest
 from src.utils.ball_detector import BallDetector, YOLOBallDetector
 from src.utils.ball_tracker import BallTracker, TrackerStep
+from src.utils.ball_plausibility import (
+    PitchDims,
+    PlausibilityCfg,
+    is_plausible_trajectory,
+)
 from src.utils.bundle_adjust import (
     _integrate_magnus_positions,
     fit_magnus_trajectory,
@@ -163,6 +168,16 @@ class BallStage(BaseStage):
         tracker_cfg = cfg.get("tracker", {})
         spin_cfg = cfg.get("spin", {})
         max_residual = float(cfg.get("flight_max_residual_px", 5.0))
+        plaus_cfg = PlausibilityCfg(
+            z_max_m=float(cfg.get("plausibility", {}).get("z_max_m", 50.0)),
+            horizontal_speed_max_m_s=float(cfg.get("plausibility", {}).get("horizontal_speed_max_m_s", 40.0)),
+            pitch_margin_m=float(cfg.get("plausibility", {}).get("pitch_margin_m", 5.0)),
+        )
+        pitch_cfg = self.config.get("pitch", {})
+        pitch_dims = PitchDims(
+            length_m=float(pitch_cfg.get("length_m", 105.0)),
+            width_m=float(pitch_cfg.get("width_m", 68.0)),
+        )
 
         tracker = BallTracker(
             process_noise_grounded_px=float(tracker_cfg.get("process_noise_grounded_px", 4.0)),
@@ -264,6 +279,17 @@ class BallStage(BaseStage):
                 continue
             if parab_resid > max_residual:
                 continue
+            segment_duration_s = (b - a) / camera.fps
+            if not is_plausible_trajectory(
+                p0, v0, omega=None,
+                duration_s=segment_duration_s, fps=camera.fps,
+                cfg=plaus_cfg, pitch=pitch_dims,
+            ):
+                logger.info(
+                    "ball seg %d (%d-%d): parabola failed plausibility, dropping",
+                    sid, a, b,
+                )
+                continue
 
             spin_axis: list[float] | None = None
             spin_omega: float | None = None
@@ -290,10 +316,16 @@ class BallStage(BaseStage):
                         (parab_resid - magnus_resid) / parab_resid
                         if parab_resid > 0 else 0.0
                     )
+                    magnus_plausible = is_plausible_trajectory(
+                        mp0, mv0, omega=momega,
+                        duration_s=duration_s, fps=camera.fps,
+                        cfg=plaus_cfg, pitch=pitch_dims,
+                    )
                     if (
                         omega_mag > 0
                         and omega_mag <= spin_max_omega
                         and improvement >= spin_min_improve
+                        and magnus_plausible
                     ):
                         spin_axis = list((momega / omega_mag).astype(float))
                         spin_omega = omega_mag

@@ -722,3 +722,64 @@ def test_phase2_splits_span_at_kick_and_bounce(tmp_path: Path):
     # If Phase 2 succeeded for any of the three, the start frames must
     # be a subset of {5, 25, 40} — the kick frames.
     assert starts <= {5, 25, 40, 457}, f"unexpected span start: {seg_ranges}"
+
+
+@pytest.mark.integration
+def test_phase2_splits_at_header_and_pins_endpoint(tmp_path: Path):
+    """A header anchor mid-flight should split the span into two
+    parabolas. The pre-header parabola must END at the header's
+    z=2.5 ray-cast; the post-header parabola must START from it."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 60
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    # Anchor sequence: kick at 5, three airborne_low rising to header at
+    # 20, three airborne_low descending to bounce at 35. Header must be
+    # the boundary between the two sub-spans.
+    detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
+    anchors = (
+        BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="kick"),
+        BallAnchor(frame=10, image_xy=(650.0, 340.0), state="airborne_low"),
+        BallAnchor(frame=15, image_xy=(660.0, 320.0), state="airborne_low"),
+        BallAnchor(frame=20, image_xy=(670.0, 310.0), state="header"),
+        BallAnchor(frame=25, image_xy=(680.0, 320.0), state="airborne_low"),
+        BallAnchor(frame=30, image_xy=(690.0, 340.0), state="airborne_low"),
+        BallAnchor(frame=35, image_xy=(700.0, 360.0), state="bounce"),
+    )
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720), anchors=anchors,
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    seg_ranges = sorted(s.frame_range for s in track.flight_segments)
+
+    # Expect two segments: kick→header (5–20) and header→bounce (20–35).
+    # The header frame 20 is in BOTH spans.
+    pre = [s for s in track.flight_segments if s.frame_range == (5, 20)]
+    post = [s for s in track.flight_segments if s.frame_range == (20, 35)]
+    assert pre, f"expected pre-header segment 5-20, got {seg_ranges}"
+    assert post, f"expected post-header segment 20-35, got {seg_ranges}"
+
+    # The header anchor's frame should evaluate to z ≈ 2.5 m on BOTH
+    # parabolas (the hard-knot pin), and the world XY should be the
+    # ray-cast of the header pixel at z=2.5.
+    from src.utils.ball_anchor_heights import state_to_height
+    from src.utils.foot_anchor import ankle_ray_to_pitch
+    header_world = ankle_ray_to_pitch(
+        (670.0, 310.0), K=K, R=R, t=t,
+        plane_z=state_to_height("header"),
+    )
+    f20 = next(f for f in track.frames if f.frame == 20)
+    assert f20.world_xyz is not None
+    assert np.allclose(f20.world_xyz, header_world, atol=0.3), (
+        f"header anchor frame should pin world to ray-cast at z=2.5; "
+        f"expected {header_world}, got {list(f20.world_xyz)}"
+    )

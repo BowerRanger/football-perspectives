@@ -71,12 +71,14 @@ def test_hard_knot_states():
     assert "kick" in HARD_KNOT_STATES
     assert "catch" in HARD_KNOT_STATES
     assert "bounce" in HARD_KNOT_STATES
+    # Header bucket [1.5, 3.5] is tight enough that pinning at midpoint
+    # 2.5 m introduces only ~0.5 m of vertical error — much less than
+    # the depth ambiguity without any Z anchor at the header frame.
+    assert "header" in HARD_KNOT_STATES
     # Airborne buckets are coarse so do NOT pin world position exactly.
     assert "airborne_low" not in HARD_KNOT_STATES
     assert "airborne_mid" not in HARD_KNOT_STATES
     assert "airborne_high" not in HARD_KNOT_STATES
-    # Header height varies too much to pin exactly.
-    assert "header" not in HARD_KNOT_STATES
     # Off-screen has no pixel so cannot be a knot.
     assert "off_screen_flight" not in HARD_KNOT_STATES
 

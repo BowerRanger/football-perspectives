@@ -806,10 +806,15 @@ class BallStage(BaseStage):
             # Span boundary rules:
             #   grounded  → close current span (state change).
             #   kick      → close current AND start a new span (kick is
-            #               the start of a fresh flight).
+            #               the start of a fresh flight). kick is in the
+            #               new span only.
             #   bounce    → close current including the bounce (flight
-            #   catch       ends here; subsequent flight needs a fresh kick).
-            #   header    → continues current (mid-flight deflection).
+            #   catch       ends here; subsequent flight needs a fresh
+            #               kick). Event is in the old span only.
+            #   header    → close current including the header AND start
+            #               a new span starting with the header (head
+            #               contact ends one parabola and starts the
+            #               next). Header is in BOTH adjacent spans.
             #   airborne_*, off_screen_flight → continues current.
             current_span: list[tuple[int, BallAnchor]] = []
             for fi, anc in ordered_for_spans:
@@ -818,6 +823,11 @@ class BallStage(BaseStage):
                         spans.append(current_span)
                     current_span = []
                 elif anc.state == "kick":
+                    if len(current_span) >= 2:
+                        spans.append(current_span)
+                    current_span = [(fi, anc)]
+                elif anc.state == "header":
+                    current_span.append((fi, anc))
                     if len(current_span) >= 2:
                         spans.append(current_span)
                     current_span = [(fi, anc)]

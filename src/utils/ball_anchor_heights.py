@@ -19,12 +19,15 @@ _STATE_HEIGHT_M: dict[str, float] = {
     "header":        2.5,
 }
 
-# States whose pixel + height should be enforced exactly by the fit.
-# `header` height varies a lot (1.8 m standing to 3+ m jumping) so it
-# is intentionally NOT a hard knot — the soft-bucket midpoint is used
-# as a hint, not a pin.
+# States whose pixel + height pin the trajectory exactly. `header` is
+# included so it can act as the boundary of a flight sub-span: the
+# parabola before the header must land at the head, and the parabola
+# after the header must start from it. The 1.5–3.5 m header bucket is
+# tight enough that pinning at midpoint 2.5 m produces only ≈0.5 m of
+# vertical error — much smaller than the multi-metre depth ambiguity
+# we get when the header is a pixel-only observation.
 HARD_KNOT_STATES: frozenset[str] = frozenset({
-    "grounded", "kick", "catch", "bounce",
+    "grounded", "kick", "catch", "bounce", "header",
 })
 
 # States that force the IMM into the flight branch for that frame and

@@ -3695,7 +3695,13 @@ async function renderBall(panel) {
     const url = shotId ? `/ball/preview?shot=${encodeURIComponent(shotId)}` : "/ball/preview";
     const data = await fetchJsonOrNull(url);
     if (!data || !data.frames || data.frames.length === 0) {
-      emptyNote(body, "No ball track yet — run ball to detect ball positions.");
+      emptyNote(body, "No ball track yet — drop anchors below (optional) and run the Ball stage.");
+      // The editor only needs the clip + camera_track, so it works
+      // before the ball stage has produced any output.
+      const editorPanel = makePanel("Ball Anchor Editor");
+      const editor = buildBallAnchorEditor({ fps: 30 }, shotId);
+      editorPanel.body.appendChild(editor.element);
+      body.appendChild(editorPanel.wrap);
       return;
     }
     renderBallShot(body, data, shotId);

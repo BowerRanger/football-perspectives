@@ -32,6 +32,7 @@ def fit_parabola_to_image_observations(
     g: float = -9.81,
     max_iter: int = 100,
     distortion: tuple[float, float] = (0.0, 0.0),
+    p0_fixed: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Fit a 3D parabola to per-frame image observations.
 
@@ -53,6 +54,9 @@ def fit_parabola_to_image_observations(
         distortion: (k1, k2) radial distortion. Default ``(0, 0)``;
             non-zero values undistort each image observation before
             measuring reprojection residuals.
+        p0_fixed: when not ``None``, the world-space starting position is
+            pinned to this value and only ``v0`` (3 dof) is optimised,
+            reducing the ill-conditioned monocular-depth ambiguity.
 
     Returns:
         ``(p0, v0, mean_residual_px)`` where ``mean_residual_px`` is
@@ -115,15 +119,42 @@ def fit_parabola_to_image_observations(
     v0_seed = np.array([v_horiz[0], v_horiz[1], 0.5 * abs(g) * duration])
     p0_seed = p_start
 
-    result = least_squares(
-        _residuals,
-        np.concatenate([p0_seed, v0_seed]),
-        method="lm",
-        max_nfev=max_iter * 50,
-    )
+    if p0_fixed is None:
+        result = least_squares(
+            _residuals,
+            np.concatenate([p0_seed, v0_seed]),
+            method="lm",
+            max_nfev=max_iter * 50,
+        )
+    else:
+        p0_pin = np.asarray(p0_fixed, dtype=float).copy()
+
+        def _residuals_v0only(params: np.ndarray) -> np.ndarray:
+            v0 = params[:3]
+            pts = p0_pin + np.outer(dt, v0) + 0.5 * np.outer(dt ** 2, g_vec)
+            residuals = []
+            for i in range(n_obs):
+                cam = Rs[i] @ pts[i] + ts[i]
+                pix = Ks[i] @ cam
+                uv = pix[:2] / pix[2]
+                residuals.append(uv - obs_array[i])
+            return np.concatenate(residuals)
+
+        result = least_squares(
+            _residuals_v0only,
+            v0_seed,
+            method="lm",
+            max_nfev=max_iter * 50,
+        )
     n = len(observations)
     mean_residual = float(np.linalg.norm(result.fun) / np.sqrt(n))
-    return result.x[:3], result.x[3:6], mean_residual
+    if p0_fixed is None:
+        p0_opt = result.x[:3]
+        v0_opt = result.x[3:6]
+    else:
+        p0_opt = np.asarray(p0_fixed, dtype=float).copy()
+        v0_opt = result.x[:3]
+    return p0_opt, v0_opt, mean_residual
 
 
 def _integrate_magnus_positions(

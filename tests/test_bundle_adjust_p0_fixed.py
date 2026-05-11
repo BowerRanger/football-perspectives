@@ -86,3 +86,27 @@ def test_p0_fixed_with_noisy_observations_recovers_v0():
     )
     assert np.linalg.norm(v0_recovered - v0_true) < 1.0
     assert resid < 2.0
+
+
+from src.utils.bundle_adjust import fit_magnus_trajectory
+
+
+def test_magnus_p0_fixed_pins_p0_exactly():
+    K, R, t = _camera()
+    p0_true = np.array([0.0, 5.0, 0.11])
+    v0_true = np.array([3.0, 0.5, 12.0])
+    obs = _synthesise_observations(p0_true, v0_true, K, R, t, n=20)
+
+    mp0, mv0, momega, resid = fit_magnus_trajectory(
+        obs,
+        Ks=[K] * len(obs), Rs=[R] * len(obs), t_world=t,
+        fps=30.0,
+        drag_k_over_m=0.005,
+        p0_seed=p0_true,
+        v0_seed=v0_true,
+        p0_fixed=p0_true,
+    )
+    assert np.allclose(mp0, p0_true)
+    assert np.linalg.norm(mv0 - v0_true) < 1.0
+    # No real spin → ω should be tiny.
+    assert np.linalg.norm(momega) < 5.0

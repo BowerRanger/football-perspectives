@@ -215,6 +215,7 @@ def fit_magnus_trajectory(
     omega_seed: np.ndarray | None = None,
     max_iter: int = 100,
     distortion: tuple[float, float] = (0.0, 0.0),
+    p0_fixed: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """Fit a Magnus-augmented 3D trajectory to per-frame image observations.
 
@@ -291,11 +292,36 @@ def fit_magnus_trajectory(
             residuals.append(uv - obs_array[i])
         return np.concatenate(residuals)
 
-    result = least_squares(
-        _residuals,
-        np.concatenate([p0_seed, v0_seed, omega_seed]),
-        method="lm",
-        max_nfev=max_iter * 50,
-    )
+    if p0_fixed is None:
+        x0 = np.concatenate([p0_seed, v0_seed, omega_seed])
+        result = least_squares(_residuals, x0, method="lm",
+                               max_nfev=max_iter * 50)
+        p0_opt = result.x[:3]
+        v0_opt = result.x[3:6]
+        omega_opt = result.x[6:9]
+    else:
+        p0_pin = np.asarray(p0_fixed, dtype=float).copy()
+
+        def _residuals_anchored(params: np.ndarray) -> np.ndarray:
+            v0 = params[:3]
+            omega = params[3:6]
+            positions = _integrate_magnus_positions(
+                p0_pin, v0, omega, g_vec, drag_k_over_m, dt,
+            )
+            residuals = []
+            for i in range(n_obs):
+                cam = Rs[i] @ positions[i] + ts[i]
+                pix = Ks[i] @ cam
+                uv = pix[:2] / pix[2]
+                residuals.append(uv - obs_array[i])
+            return np.concatenate(residuals)
+
+        x0 = np.concatenate([v0_seed, omega_seed])
+        result = least_squares(_residuals_anchored, x0, method="lm",
+                               max_nfev=max_iter * 50)
+        p0_opt = p0_pin
+        v0_opt = result.x[:3]
+        omega_opt = result.x[3:6]
+
     mean_residual = float(np.linalg.norm(result.fun) / np.sqrt(n_obs))
-    return result.x[:3], result.x[3:6], result.x[6:9], mean_residual
+    return p0_opt, v0_opt, omega_opt, mean_residual

@@ -38,8 +38,11 @@ from src.schemas.shots import ShotsManifest
 from src.utils.ball_detector import BallDetector, YOLOBallDetector
 from src.utils.ball_tracker import BallTracker, TrackerStep
 from src.utils.ball_plausibility import (
+    GroundPromotionCfg,
+    GroundedRun,
     PitchDims,
     PlausibilityCfg,
+    find_implausible_grounded_runs,
     is_plausible_trajectory,
 )
 from src.utils.bundle_adjust import (
@@ -70,6 +73,16 @@ def _build_detector(cfg: dict) -> BallDetector:
             confidence=float(cfg.get("confidence_threshold", 0.3)),
         )
     raise ValueError(f"Unknown ball.detector backend: {backend!r}")
+
+
+def _demote_run_to_missing(
+    per_frame_world: dict[int, tuple[np.ndarray, float]],
+    a: int,
+    b: int,
+) -> None:
+    """Drop world positions for frames [a, b] so they emit state='missing'."""
+    for fi in range(a, b + 1):
+        per_frame_world.pop(fi, None)
 
 
 class BallStage(BaseStage):
@@ -373,6 +386,91 @@ class BallStage(BaseStage):
                         "spin_confidence": spin_confidence,
                     },
                     fit_residual_px=effective_resid,
+                )
+            )
+
+        promote_cfg = GroundPromotionCfg(
+            enabled=bool(cfg.get("flight_promotion", {}).get("enabled", False)),
+            min_run_frames=int(cfg.get("flight_promotion", {}).get("min_run_frames", 6)),
+            off_pitch_margin_m=float(cfg.get("flight_promotion", {}).get("off_pitch_margin_m", 5.0)),
+            max_ground_speed_m_s=float(cfg.get("flight_promotion", {}).get("max_ground_speed_m_s", 35.0)),
+        )
+
+        # Provisional state map matching what would be emitted below.
+        provisional_state: dict[int, str] = {}
+        for fi in range(n_frames):
+            if fi in per_frame_world:
+                provisional_state[fi] = "flight" if fi in flight_membership else "grounded"
+            else:
+                provisional_state[fi] = "missing"
+
+        runs_to_promote = find_implausible_grounded_runs(
+            per_frame_xyz=per_frame_world,
+            per_frame_state=provisional_state,
+            fps=camera.fps,
+            cfg=promote_cfg,
+            pitch=pitch_dims,
+        )
+
+        next_segment_id = (max(flight_membership.values()) + 1) if flight_membership else 0
+        min_flight_frames_for_refit = int(tracker_cfg.get("min_flight_frames", 6))
+        for run in runs_to_promote:
+            obs_pairs = [
+                (fi, steps[fi].uv) for fi in range(run.start, run.end + 1)
+                if 0 <= fi < len(steps) and steps[fi].uv is not None and fi in per_frame_K
+            ]
+            if len(obs_pairs) < min_flight_frames_for_refit:
+                continue
+            obs = [(o[0], (float(o[1][0]), float(o[1][1]))) for o in obs_pairs]
+            Ks_seg = [per_frame_K[o[0]] for o in obs]
+            Rs_seg = [per_frame_R[o[0]] for o in obs]
+            ts_seg = [per_frame_t[o[0]] for o in obs]
+            try:
+                p0, v0, parab_resid = fit_parabola_to_image_observations(
+                    obs, Ks=Ks_seg, Rs=Rs_seg, t_world=ts_seg,
+                    fps=camera.fps, distortion=distortion,
+                )
+            except Exception as exc:
+                logger.debug("promotion refit failed at run %d-%d: %s", run.start, run.end, exc)
+                _demote_run_to_missing(per_frame_world, run.start, run.end)
+                continue
+            seg_duration = (run.end - run.start) / camera.fps
+            if not is_plausible_trajectory(
+                p0, v0, omega=None,
+                duration_s=seg_duration, fps=camera.fps,
+                cfg=plaus_cfg, pitch=pitch_dims,
+            ):
+                logger.info(
+                    "ball: promotion refit for run %d-%d failed plausibility; "
+                    "marking frames missing",
+                    run.start, run.end,
+                )
+                _demote_run_to_missing(per_frame_world, run.start, run.end)
+                continue
+
+            sid_new = next_segment_id
+            next_segment_id += 1
+            for fi in range(run.start, run.end + 1):
+                if fi not in per_frame_K:
+                    continue
+                dt = (fi - run.start) / camera.fps
+                pos = p0 + v0 * dt + 0.5 * g_vec * dt ** 2
+                prev_conf = per_frame_world.get(fi, (None, 0.5))[1]
+                per_frame_world[fi] = (pos, prev_conf)
+                flight_membership[fi] = sid_new
+            flight_segments.append(
+                FlightSegment(
+                    id=sid_new,
+                    frame_range=(run.start, run.end),
+                    parabola={
+                        "p0": [float(x) for x in p0],
+                        "v0": [float(x) for x in v0],
+                        "g": g,
+                        "spin_axis_world": None,
+                        "spin_omega_rad_s": None,
+                        "spin_confidence": None,
+                    },
+                    fit_residual_px=parab_resid,
                 )
             )
 

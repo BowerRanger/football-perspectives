@@ -277,3 +277,81 @@ def test_implausible_parabola_fit_is_rejected(tmp_path: Path, monkeypatch):
     assert len(track.flight_segments) == 0, (
         f"expected garbage segment to be rejected; got {track.flight_segments}"
     )
+
+
+@pytest.mark.integration
+def test_aerial_arc_promotes_grounded_run_to_flight(tmp_path: Path):
+    """Reproduces origi01 frames 101-191: a long aerial pass where IMM
+    never trips flight mode. Layer 2 must detect the implausible ground
+    motion and either refit as flight or demote to missing."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    clip = out / "shots" / "play.mp4"
+    n_frames = 60
+    _write_blank_clip(clip, n=n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    # Use the same ShotsManifest call shape as test_implausible_parabola_fit_is_rejected
+    ShotsManifest(
+        source_file="fake.mp4",
+        fps=30.0,
+        total_frames=n_frames,
+        shots=[
+            Shot(
+                id="play",
+                clip_file="shots/play.mp4",
+                start_frame=0,
+                end_frame=n_frames - 1,
+                start_time=0.0,
+                end_time=(n_frames - 1) / 30.0,
+            )
+        ],
+    ).save(out / "shots" / "shots_manifest.json")
+
+    # Synthesise pixel detections that move in a clean line in pixel
+    # space (so the IMM stays in grounded mode), but at 18 px/frame —
+    # the ground-projection of this implies a very fast lateral roll.
+    detections: list[tuple[float, float, float] | None] = [None] * 5
+    for i in range(50):
+        u = 200.0 + 18.0 * i
+        v = 200.0 + 0.5 * i
+        detections.append((u, v, 0.85))
+    detections += [None] * (n_frames - len(detections))
+
+    stage = BallStage(
+        config={
+            "ball": {
+                "detector": "fake",
+                "ball_radius_m": 0.11,
+                "max_gap_frames": 6,
+                "flight_max_residual_px": 200.0,
+                "tracker": {
+                    "process_noise_grounded_px": 4.0,
+                    "process_noise_flight_px": 12.0,
+                    "measurement_noise_px": 2.0,
+                    "gating_sigma": 4.0,
+                    "min_flight_frames": 6,
+                    "max_flight_frames": 90,
+                },
+                "spin": {"enabled": False, "min_flight_seconds": 0.5, "min_residual_improvement": 0.2, "max_omega_rad_s": 200.0, "drag_k_over_m": 0.005},
+                "plausibility": {"z_max_m": 50.0, "horizontal_speed_max_m_s": 40.0, "pitch_margin_m": 5.0},
+                "flight_promotion": {"enabled": True, "min_run_frames": 6, "off_pitch_margin_m": 5.0, "max_ground_speed_m_s": 35.0},
+            },
+            "pitch": {"length_m": 105.0, "width_m": 68.0},
+        },
+        output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    )
+    stage.run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+
+    # Within the detection window we must NOT have a long pure-grounded
+    # run anymore: either it was promoted to flight or marked missing.
+    grounded_window = [
+        f for f in track.frames
+        if 5 <= f.frame < 55 and f.state == "grounded"
+    ]
+    assert len(grounded_window) < 30, (
+        f"expected promotion/demotion to break the long grounded run; "
+        f"got {len(grounded_window)} grounded frames in 5..55"
+    )

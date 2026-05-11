@@ -729,50 +729,57 @@ class BallStage(BaseStage):
                 )
             )
 
-        if forced_flight:
-            already_flight = set(flight_membership)
-            new_frames = forced_flight - already_flight
-            if new_frames:
-                runs: list[tuple[int, int]] = []
-                run_start: int | None = None
-                last: int | None = None
-                for fi in sorted(new_frames):
-                    if run_start is None:
-                        run_start = fi; last = fi
-                    elif fi == last + 1:
-                        last = fi
-                    else:
-                        runs.append((run_start, last))
-                        run_start = fi; last = fi
-                if run_start is not None:
-                    runs.append((run_start, last))
-                next_segment_id_forced = (max(flight_membership.values()) + 1) if flight_membership else 0
-                for (a, b) in runs:
-                    sid_new = next_segment_id_forced
-                    next_segment_id_forced += 1
-                    for fi in range(a, b + 1):
-                        flight_membership[fi] = sid_new
-                    flight_segments.append(
-                        FlightSegment(
-                            id=sid_new,
-                            frame_range=(a, b),
-                            parabola={
-                                "p0": [0.0, 0.0, 0.0],
-                                "v0": [0.0, 0.0, 0.0],
-                                "g": -9.81,
-                                "spin_axis_world": None,
-                                "spin_omega_rad_s": None,
-                                "spin_confidence": None,
-                            },
-                            fit_residual_px=0.0,
-                        )
-                    )
+        # Layer 5: forced-flight frames from airborne_* / off_screen_flight
+        # anchors. We do NOT create FlightSegment entries here — the user
+        # marked the frame airborne but we have no parabola data to fit
+        # (single-frame runs are not real flights). Instead the BallFrame
+        # assembly below uses the `forced_flight` set directly to classify
+        # those frames as state="flight". Avoids polluting the segments
+        # table with zero-parabola placeholders.
+
+        # Layer 5: linear interpolation between consecutive grounded
+        # anchors. When two grounded anchors are separated by frames
+        # with NO anchors of any kind in between, the world position at
+        # every intermediate frame is linearly interpolated from the
+        # two anchor ray-casts. This overrides WASB-driven positions
+        # which are noisy and frequently project off-pitch.
+        if anchor_by_frame:
+            grounded_anchor_frames = sorted(
+                fi for fi, a in anchor_by_frame.items()
+                if a.state == "grounded" and a.image_xy is not None
+            )
+            for i in range(len(grounded_anchor_frames) - 1):
+                fa = grounded_anchor_frames[i]
+                fb = grounded_anchor_frames[i + 1]
+                if fb - fa <= 1:
+                    continue
+                # Skip if any other anchor (of any kind) lies strictly
+                # between fa and fb — those would interrupt the smooth
+                # grounded path.
+                if any(fa < fi < fb for fi in anchor_by_frame.keys() if fi != fa and fi != fb):
+                    continue
+                wa = per_frame_world.get(fa)
+                wb = per_frame_world.get(fb)
+                if wa is None or wb is None:
+                    continue
+                pa, _ = wa
+                pb, _ = wb
+                span = fb - fa
+                for fi in range(fa + 1, fb):
+                    t = (fi - fa) / span
+                    pos = pa * (1.0 - t) + pb * t
+                    # Confidence reflects "interpolated", high but not 1.0.
+                    per_frame_world[fi] = (pos, 0.9)
+                    # Force out of any flight membership the WASB path
+                    # might have assigned (rare but possible).
+                    flight_membership.pop(fi, None)
 
         per_frame_out: list[BallFrame] = []
         for fi in range(n_frames):
+            in_flight = fi in flight_membership or fi in forced_flight
             if fi in per_frame_world:
                 world, conf = per_frame_world[fi]
-                state = "flight" if fi in flight_membership else "grounded"
+                state = "flight" if in_flight else "grounded"
                 per_frame_out.append(
                     BallFrame(
                         frame=fi,
@@ -783,7 +790,7 @@ class BallStage(BaseStage):
                     )
                 )
             else:
-                if fi in flight_membership:
+                if in_flight:
                     per_frame_out.append(
                         BallFrame(
                             frame=fi,

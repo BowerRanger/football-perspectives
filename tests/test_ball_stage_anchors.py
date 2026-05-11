@@ -316,3 +316,143 @@ def test_bounce_event_splits_flight_run(tmp_path: Path, monkeypatch):
     post_segs = [s for s in track.flight_segments if s.frame_range[0] > bounce_frame]
     assert pre_segs, f"expected a flight segment ending before frame {bounce_frame}"
     assert post_segs, f"expected a flight segment starting after frame {bounce_frame}"
+
+
+@pytest.mark.integration
+def test_consecutive_grounded_anchors_interpolate_world(tmp_path: Path):
+    """Frames between two grounded anchors (no anchors in between) are
+    overridden with linearly-interpolated world XY at z=ball_radius,
+    regardless of what WASB or the IMM produced."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 30
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    # Anchor at frame 5 and frame 15 with deliberately different pixel
+    # positions (so the world positions clearly differ). In between,
+    # WASB returns wildly different (off-pitch) pixels.
+    anchor_a_uv = (640.0, 360.0)
+    anchor_b_uv = (700.0, 380.0)
+    detections: list[tuple[float, float, float] | None] = []
+    for i in range(n_frames):
+        # Wild WASB pixels in the gap to make sure they get overridden.
+        detections.append((50.0, 50.0, 0.85))
+
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720),
+        anchors=(
+            BallAnchor(frame=5, image_xy=anchor_a_uv, state="grounded"),
+            BallAnchor(frame=15, image_xy=anchor_b_uv, state="grounded"),
+        ),
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    from src.utils.foot_anchor import ankle_ray_to_pitch
+    pa = ankle_ray_to_pitch(anchor_a_uv, K=K, R=R, t=t, plane_z=0.11)
+    pb = ankle_ray_to_pitch(anchor_b_uv, K=K, R=R, t=t, plane_z=0.11)
+
+    # Sample frame 10 — exactly halfway between anchors. Should equal
+    # the midpoint of (pa, pb).
+    f10 = next(f for f in track.frames if f.frame == 10)
+    expected_mid = (pa + pb) / 2.0
+    assert f10.state == "grounded"
+    assert f10.world_xyz is not None
+    assert np.allclose(f10.world_xyz, expected_mid, atol=0.05), (
+        f"expected linear-interp midpoint {expected_mid.tolist()}, got {list(f10.world_xyz)}"
+    )
+
+    # Sample frame 12 — 70% of the way from a to b.
+    f12 = next(f for f in track.frames if f.frame == 12)
+    t12 = (12 - 5) / (15 - 5)
+    expected_12 = pa * (1 - t12) + pb * t12
+    assert np.allclose(f12.world_xyz, expected_12, atol=0.05)
+
+
+@pytest.mark.integration
+def test_grounded_to_event_anchor_no_interpolation(tmp_path: Path):
+    """A grounded anchor followed by a non-grounded anchor (e.g. kick)
+    should NOT interpolate between them — the user marked a state change
+    so we leave WASB alone in the gap."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 30
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    detections: list[tuple[float, float, float] | None] = [
+        (640.0, 360.0, 0.85) for _ in range(n_frames)
+    ]
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720),
+        anchors=(
+            BallAnchor(frame=5, image_xy=(640.0, 360.0), state="grounded"),
+            BallAnchor(frame=15, image_xy=(700.0, 380.0), state="kick"),
+        ),
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    # Frames in (5, 15) should use the WASB-driven world position
+    # (which lands at the WASB pixel ground-projected), NOT a linear
+    # interpolation between the two anchors. The simplest check: the
+    # midpoint frame's world should NOT be near the linear midpoint.
+    from src.utils.foot_anchor import ankle_ray_to_pitch
+    pa = ankle_ray_to_pitch((640.0, 360.0), K=K, R=R, t=t, plane_z=0.11)
+    pb_kick = ankle_ray_to_pitch((700.0, 380.0), K=K, R=R, t=t, plane_z=0.11)
+    expected_interp_mid = (pa + pb_kick) / 2.0
+    f10 = next(f for f in track.frames if f.frame == 10)
+    # f10 should equal pa (since WASB returns (640, 360) every frame =
+    # the same as anchor A), not the interpolated midpoint.
+    assert f10.world_xyz is not None
+    actual = np.array(f10.world_xyz)
+    # Distinguish by checking against WASB pixel rather than interp.
+    wasb_world = pa  # WASB returns (640, 360) → same projection as anchor A
+    assert np.linalg.norm(actual - wasb_world) < 0.1, (
+        f"expected WASB-driven world {wasb_world}, got {actual}"
+    )
+
+
+@pytest.mark.integration
+def test_isolated_airborne_anchor_no_placeholder_segment(tmp_path: Path):
+    """A single airborne_mid anchor should mark the frame state=flight
+    but must NOT add a placeholder FlightSegment with zero p0/v0."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 20
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720),
+        anchors=(BallAnchor(frame=10, image_xy=(700.0, 200.0), state="airborne_mid"),),
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    f10 = next(f for f in track.frames if f.frame == 10)
+    assert f10.state == "flight", "airborne anchor should mark state=flight"
+    # No flight segment should have been created — segments table is
+    # for real parabola fits, not single-frame placeholders.
+    junk = [
+        s for s in track.flight_segments
+        if s.parabola.get("p0") == [0.0, 0.0, 0.0]
+    ]
+    assert not junk, f"expected no zero-parabola placeholder segments, got {junk}"

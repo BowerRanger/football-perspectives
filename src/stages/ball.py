@@ -390,7 +390,7 @@ class BallStage(BaseStage):
             )
 
         promote_cfg = GroundPromotionCfg(
-            enabled=bool(cfg.get("flight_promotion", {}).get("enabled", False)),
+            enabled=bool(cfg.get("flight_promotion", {}).get("enabled", True)),
             min_run_frames=int(cfg.get("flight_promotion", {}).get("min_run_frames", 6)),
             off_pitch_margin_m=float(cfg.get("flight_promotion", {}).get("off_pitch_margin_m", 5.0)),
             max_ground_speed_m_s=float(cfg.get("flight_promotion", {}).get("max_ground_speed_m_s", 35.0)),

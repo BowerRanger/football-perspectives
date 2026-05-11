@@ -107,7 +107,7 @@ ball:
     horizontal_speed_max_m_s: 40.0
     pitch_margin_m: 5.0
   flight_promotion:
-    enabled: false
+    enabled: true
     min_run_frames: 6
     off_pitch_margin_m: 5.0
     max_ground_speed_m_s: 35.0

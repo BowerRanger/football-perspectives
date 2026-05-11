@@ -84,13 +84,12 @@ def test_ball_stage_recovers_grounded_and_flight(tmp_path: Path):
     _save_camera_track(tmp_path / "camera" / "camera_track.json", K, R, t, n, fps=fps)
     _write_blank_clip(tmp_path / "shots" / "play.mp4", n, fps=fps)
 
+    # Grounded ball rolling at 6 m/s across the centre of the pitch.
+    # x stays in [30, 42] — well inside the FIFA 105×68 m pitch — so
+    # Layer 2 (flight_promotion) will not flag the run as implausible.
     detections: list[tuple[float, float, float] | None] = []
     for i in range(n):
-        if 20 <= i <= 40:
-            dt = (i - 20) / fps
-            p = np.array([50.0 + 8 * dt, 30.0, 0.5 * (max(0, 5 - 9.81 * dt) ** 2 / 9.81)])
-        else:
-            p = np.array([50.0 + 0.5 * i, 30.0, 0.11])
+        p = np.array([30.0 + 0.2 * i, 34.0, 0.11])
         u, v = _project(p, K, R, t)
         detections.append((u, v, 0.9))
 
@@ -126,7 +125,7 @@ def test_ball_stage_marks_missing_after_long_gap(tmp_path: Path):
             # Long missed-detection gap — far longer than max_gap_frames.
             detections.append(None)
         else:
-            p = np.array([50.0 + 0.5 * i, 30.0, 0.11])
+            p = np.array([30.0 + 0.2 * i, 34.0, 0.11])
             u, v = _project(p, K, R, t)
             detections.append((u, v, 0.9))
 
@@ -173,7 +172,7 @@ def test_ball_stage_emits_per_shot_track(tmp_path: Path):
 
     detections: list[tuple[float, float, float] | None] = []
     for i in range(n):
-        p = np.array([50.0 + 0.5 * i, 30.0, 0.11])
+        p = np.array([30.0 + 0.2 * i, 34.0, 0.11])
         u, v = _project(p, K, R, t)
         detections.append((u, v, 0.9))
     # FakeBallDetector cycles, so the same list serves both shots.

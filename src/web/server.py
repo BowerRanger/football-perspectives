@@ -2145,6 +2145,13 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="anchor_editor.html not found")
         return FileResponse(str(editor_path), headers=_NO_STORE)
 
+    @app.get("/ball-anchor-editor", include_in_schema=False)
+    def serve_ball_anchor_editor():
+        ball_editor_path = static_dir / "ball_anchor_editor.html"
+        if not ball_editor_path.exists():
+            raise HTTPException(status_code=404, detail="ball_anchor_editor.html not found")
+        return FileResponse(str(ball_editor_path), headers=_NO_STORE)
+
     return app
 
 

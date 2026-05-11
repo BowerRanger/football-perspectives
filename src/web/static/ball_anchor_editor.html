@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ball Anchor Editor — Football Perspectives</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f1117; color: #e2e8f0; height: 100vh;
+    display: flex; flex-direction: column; overflow: hidden; font-size: 13px;
+  }
+  header {
+    background: #1a1d27; border-bottom: 1px solid #2d3148;
+    padding: 10px 16px; display: flex; align-items: center;
+    gap: 12px; flex-shrink: 0;
+  }
+  header h1 { font-size: 15px; font-weight: 600; color: #f1f5f9; }
+  header select, header button {
+    background: #334155; color: #e2e8f0;
+    border: 1px solid #475569; border-radius: 4px;
+    padding: 4px 10px; font-size: 12px;
+    font-family: inherit; cursor: pointer;
+  }
+  header button.primary { background: #4f46e5; border-color: #6366f1; color: #fff; }
+  header button.primary:hover { background: #6366f1; }
+  header button:disabled { opacity: 0.5; cursor: not-allowed; }
+  header .spacer { flex: 1; }
+  header #status { font-size: 11px; color: #94a3b8; min-width: 200px; text-align: right; }
+
+  main {
+    flex: 1; display: grid;
+    grid-template-columns: 220px 1fr 240px;
+    overflow: hidden; min-height: 0;
+  }
+  .panel {
+    background: #181b25; border-right: 1px solid #2d3148;
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .panel:last-child { border-right: none; border-left: 1px solid #2d3148; }
+  .panel h2 {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+    text-transform: uppercase; color: #64748b;
+    padding: 10px 12px; border-bottom: 1px solid #2d3148;
+    flex-shrink: 0;
+  }
+  .panel-body { flex: 1; overflow-y: auto; padding: 8px; }
+
+  .tag-row {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 8px; cursor: pointer; border-radius: 3px;
+    font-size: 12px; color: #cbd5e1; user-select: none;
+  }
+  .tag-row:hover { background: #252840; }
+  .tag-row.selected { background: #3730a3; color: #fff; }
+
+  .anchor-row {
+    padding: 6px 8px; cursor: pointer; border-radius: 3px;
+    font-size: 12px; color: #cbd5e1;
+  }
+  .anchor-row:hover { background: #252840; }
+  .anchor-row.active { background: #1e293b; color: #fff; }
+
+  #stage {
+    position: relative; flex: 1; background: #000;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  #stage video { max-width: 100%; max-height: 100%; display: block; }
+  #stage canvas {
+    position: absolute; left: 0; top: 0;
+    width: 100%; height: 100%;
+    pointer-events: auto; cursor: crosshair;
+  }
+  .ctrl {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; background: #161924;
+    border-top: 1px solid #2d3148;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ball Anchor Editor</h1>
+  <label>Shot <select id="shotSelect"></select></label>
+  <button id="saveBtn" class="primary">Save</button>
+  <button id="previewBtn">Solve &amp; Preview</button>
+  <span class="spacer"></span>
+  <span id="status">Loading…</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>Tags</h2>
+    <div class="panel-body" id="tagList"></div>
+  </section>
+  <section class="panel" style="display:flex;flex-direction:column;">
+    <div id="stage">
+      <video id="video" preload="metadata" muted></video>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div class="ctrl">
+      <button id="play">&#9654;</button>
+      <button id="prev">&#9664;</button>
+      <button id="next">&#9654;</button>
+      <input id="seek" type="range" style="flex:1;" min="0" value="0">
+      <span id="frameLabel" style="color:#94a3b8;font-size:11px;min-width:90px;text-align:right;">Frame 0</span>
+    </div>
+  </section>
+  <section class="panel">
+    <h2>Anchors</h2>
+    <div class="panel-body" id="anchorList"></div>
+  </section>
+</main>
+<script>
+const TAGS = [
+  { id: "grounded",          label: "Grounded",         color: "#34d399" },
+  { id: "airborne_low",      label: "Airborne — low",   color: "#fbbf24" },
+  { id: "airborne_mid",      label: "Airborne — mid",   color: "#fb923c" },
+  { id: "airborne_high",     label: "Airborne — high",  color: "#f87171" },
+  { id: "off_screen_flight", label: "Off-screen flight",color: "#64748b" },
+  { id: "kick",              label: "Kick (foot)",      color: "#60a5fa" },
+  { id: "catch",             label: "Catch",            color: "#a78bfa" },
+  { id: "bounce",            label: "Bounce",           color: "#f472b6" },
+];
+let selectedTag = "grounded";
+let shotId = new URLSearchParams(location.search).get("shot") || "";
+let fps = 30;
+let anchors = [];
+let imageSize = [1280, 720];
+let dirty = false;
+
+const video = document.getElementById("video");
+const overlay = document.getElementById("overlay");
+const seek = document.getElementById("seek");
+const frameLabel = document.getElementById("frameLabel");
+const tagList = document.getElementById("tagList");
+const anchorList = document.getElementById("anchorList");
+const statusEl = document.getElementById("status");
+const shotSelect = document.getElementById("shotSelect");
+
+function setStatus(msg) { statusEl.textContent = msg; }
+function setDirty(d) {
+  dirty = d;
+  setStatus(d ? `${anchors.length} anchors • unsaved` : `${anchors.length} anchors`);
+}
+
+function renderTags() {
+  tagList.innerHTML = "";
+  for (const tag of TAGS) {
+    const row = document.createElement("div");
+    row.className = "tag-row" + (tag.id === selectedTag ? " selected" : "");
+    row.innerHTML = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${tag.color};flex-shrink:0;"></span> ${tag.label}`;
+    row.onclick = () => { selectedTag = tag.id; renderTags(); };
+    tagList.appendChild(row);
+  }
+}
+
+function renderAnchors() {
+  anchorList.innerHTML = "";
+  const sorted = [...anchors].sort((a, b) => a.frame - b.frame);
+  for (const a of sorted) {
+    const t = TAGS.find(x => x.id === a.state) || { color: "#94a3b8" };
+    const row = document.createElement("div");
+    row.className = "anchor-row";
+    row.innerHTML = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${t.color};flex-shrink:0;"></span> Frame ${a.frame} — ${a.state}`;
+    row.onclick = () => seekToFrame(a.frame);
+    anchorList.appendChild(row);
+  }
+}
+
+function currentFrame() { return Math.round(video.currentTime * fps); }
+function seekToFrame(fi) { video.currentTime = fi / fps; }
+
+function fitOverlay() {
+  if (!video.videoWidth) return;
+  overlay.width = video.videoWidth;
+  overlay.height = video.videoHeight;
+  overlay.style.width = video.offsetWidth + "px";
+  overlay.style.height = video.offsetHeight + "px";
+}
+
+function drawOverlay() {
+  if (!overlay.width) return;
+  const ctx = overlay.getContext("2d");
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  const fi = currentFrame();
+  frameLabel.textContent = `Frame ${fi}`;
+  seek.value = String(fi);
+  for (const a of anchors) {
+    if (a.frame !== fi || a.image_xy == null) continue;
+    const tag = TAGS.find(x => x.id === a.state) || { color: "#fff" };
+    ctx.strokeStyle = tag.color; ctx.fillStyle = tag.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(a.image_xy[0], a.image_xy[1], 10, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(a.image_xy[0], a.image_xy[1], 3, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+overlay.addEventListener("click", (e) => {
+  if (selectedTag === "off_screen_flight") {
+    // off_screen_flight has no image_xy — handled in Task 9 via dedicated button
+    return;
+  }
+  const rect = overlay.getBoundingClientRect();
+  const u = (e.clientX - rect.left) * (overlay.width / rect.width);
+  const v = (e.clientY - rect.top) * (overlay.height / rect.height);
+  const fi = currentFrame();
+  // One anchor per frame — replace any existing anchor at this frame.
+  anchors = anchors.filter(a => a.frame !== fi);
+  anchors.push({ frame: fi, image_xy: [u, v], state: selectedTag });
+  setDirty(true);
+  renderAnchors();
+  drawOverlay();
+});
+
+document.getElementById("play").onclick = () => { video.paused ? video.play() : video.pause(); };
+document.getElementById("prev").onclick = () => { video.pause(); seekToFrame(Math.max(0, currentFrame() - 1)); };
+document.getElementById("next").onclick = () => { video.pause(); seekToFrame(currentFrame() + 1); };
+seek.oninput = () => { video.pause(); video.currentTime = parseInt(seek.value, 10) / fps; };
+video.addEventListener("timeupdate", drawOverlay);
+video.addEventListener("loadedmetadata", () => {
+  seek.max = String(Math.round(video.duration * fps));
+  fitOverlay(); drawOverlay();
+});
+new ResizeObserver(fitOverlay).observe(video);
+
+document.getElementById("saveBtn").onclick = async () => {
+  const payload = { clip_id: shotId || "", image_size: imageSize, anchors };
+  const r = await fetch(`/ball-anchors/${encodeURIComponent(shotId)}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (r.ok) {
+    setStatus(`saved ${anchors.length}`);
+    dirty = false;
+  } else {
+    setStatus(`save failed: ${r.status}`);
+  }
+};
+
+document.getElementById("previewBtn").onclick = () => {
+  // Wired up in Task 9.
+  setStatus("preview not yet implemented");
+};
+
+async function loadShot() {
+  if (!shotId) {
+    setStatus("Pass ?shot=<id> in the URL");
+    return;
+  }
+
+  // Populate shot selector with just the current shot (no /api/shots list endpoint).
+  const opt = document.createElement("option");
+  opt.value = shotId; opt.textContent = shotId; opt.selected = true;
+  shotSelect.appendChild(opt);
+
+  video.src = `/api/video/${encodeURIComponent(shotId)}`;
+
+  // Try to read fps + image_size from camera track.
+  const cam = await fetch(`/camera/track?shot=${encodeURIComponent(shotId)}`)
+    .then(r => r.ok ? r.json() : null).catch(() => null);
+  if (cam && cam.fps) fps = cam.fps;
+  if (cam && cam.image_size) imageSize = cam.image_size;
+
+  // Load existing ball anchors.
+  const ar = await fetch(`/ball-anchors/${encodeURIComponent(shotId)}`)
+    .then(r => r.ok ? r.json() : null).catch(() => null);
+  anchors = (ar && ar.anchors) ? ar.anchors.map(a => ({
+    frame: a.frame,
+    image_xy: a.image_xy ?? null,
+    state: a.state,
+  })) : [];
+
+  renderTags();
+  renderAnchors();
+  setStatus(`${anchors.length} anchors`);
+}
+
+loadShot();
+</script>
+</body>
+</html>

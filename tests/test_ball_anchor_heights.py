@@ -5,11 +5,38 @@ from __future__ import annotations
 import pytest
 
 from src.utils.ball_anchor_heights import (
+    AIRBORNE_BUCKETS,
     AIRBORNE_STATES,
     EVENT_STATES,
     HARD_KNOT_STATES,
+    airborne_bucket_range,
     state_to_height,
 )
+
+
+def test_airborne_bucket_ranges():
+    assert airborne_bucket_range("airborne_low") == (0.0, 2.0)
+    assert airborne_bucket_range("airborne_mid") == (2.0, 10.0)
+    assert airborne_bucket_range("airborne_high") == (10.0, 25.0)
+
+
+def test_non_airborne_states_have_no_bucket_range():
+    assert airborne_bucket_range("grounded") is None
+    assert airborne_bucket_range("kick") is None
+    assert airborne_bucket_range("catch") is None
+    assert airborne_bucket_range("bounce") is None
+    assert airborne_bucket_range("header") is None
+    assert airborne_bucket_range("off_screen_flight") is None
+
+
+def test_bucket_midpoints_match_state_heights():
+    # Sanity: the existing state-height table should sit inside each
+    # airborne bucket's range.
+    for state, (z_min, z_max) in AIRBORNE_BUCKETS.items():
+        h = state_to_height(state)
+        assert z_min <= h <= z_max, (
+            f"state_to_height({state!r})={h} is outside bucket [{z_min}, {z_max}]"
+        )
 
 
 def test_grounded_height():

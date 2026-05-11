@@ -34,6 +34,8 @@ def fit_parabola_to_image_observations(
     distortion: tuple[float, float] = (0.0, 0.0),
     p0_fixed: np.ndarray | None = None,
     knot_frames: dict[int, np.ndarray] | None = None,
+    z_range_frames: dict[int, tuple[float, float]] | None = None,
+    z_range_weight: float = 200.0,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Fit a 3D parabola to per-frame image observations.
 
@@ -65,6 +67,16 @@ def fit_parabola_to_image_observations(
             Frame indices are relative to the first observation frame.
             Composes with ``p0_fixed``: ``p0_fixed`` pins frame 0 exactly
             while knot entries act as soft constraints at other frames.
+        z_range_frames: optional mapping of ``{rel_frame_index: (z_min, z_max)}``.
+            For each entry the fit's z at that frame is constrained to lie
+            in ``[z_min, z_max]`` via a one-sided hinge residual: zero
+            penalty inside the bucket, ``z_range_weight * deviation``
+            outside it. Used by Layer 5 to translate ``airborne_low/mid/high``
+            anchors into bucket-range Z constraints without committing to
+            a single bucket midpoint.
+        z_range_weight: per-metre weight for the ``z_range_frames`` hinge.
+            Defaults to 200 — strong enough to enforce typical bucket
+            widths against pixel reprojection noise.
 
     Returns:
         ``(p0, v0, mean_residual_px)`` where ``mean_residual_px`` is
@@ -108,6 +120,13 @@ def fit_parabola_to_image_observations(
                 pos_k = p0 + v0 * dt_k + 0.5 * (dt_k ** 2) * g_vec
                 target = np.asarray(target_world, dtype=float)
                 residuals.append(knot_weight * (pos_k - target))
+        if z_range_frames:
+            for rel_idx, (z_min, z_max) in z_range_frames.items():
+                dt_k = rel_idx / fps
+                z_k = p0[2] + v0[2] * dt_k + 0.5 * (dt_k ** 2) * g_vec[2]
+                below = max(0.0, z_min - z_k)
+                above = max(0.0, z_k - z_max)
+                residuals.append(np.array([z_range_weight * (below + above)]))
         return np.concatenate(residuals)
 
     # Seed from start/end image points -> ground projection (rough).
@@ -160,6 +179,13 @@ def fit_parabola_to_image_observations(
                     pos_k = p0_pin + v0 * dt_k + 0.5 * (dt_k ** 2) * g_vec
                     target = np.asarray(target_world, dtype=float)
                     residuals.append(knot_weight * (pos_k - target))
+            if z_range_frames:
+                for rel_idx, (z_min, z_max) in z_range_frames.items():
+                    dt_k = rel_idx / fps
+                    z_k = p0_pin[2] + v0[2] * dt_k + 0.5 * (dt_k ** 2) * g_vec[2]
+                    below = max(0.0, z_min - z_k)
+                    above = max(0.0, z_k - z_max)
+                    residuals.append(np.array([z_range_weight * (below + above)]))
             return np.concatenate(residuals)
 
         result = least_squares(

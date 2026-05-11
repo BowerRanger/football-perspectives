@@ -41,6 +41,17 @@ EVENT_STATES: frozenset[str] = frozenset({
     "kick", "catch", "bounce", "header",
 })
 
+# Z-range buckets for the airborne tags. Each entry is (z_min_m, z_max_m).
+# Used by the Phase 2 parabola fit as a one-sided hinge constraint: zero
+# penalty when the fitted z is inside the bucket, growing penalty outside.
+# Hard-knot states are omitted because their world position is pinned via
+# knot_frames at the exact state height.
+AIRBORNE_BUCKETS: dict[str, tuple[float, float]] = {
+    "airborne_low":  (0.0, 2.0),
+    "airborne_mid":  (2.0, 10.0),
+    "airborne_high": (10.0, 25.0),
+}
+
 
 def state_to_height(state: str) -> float:
     """Return the assumed ball height in metres for ``state``.
@@ -53,3 +64,11 @@ def state_to_height(state: str) -> float:
     if state not in _STATE_HEIGHT_M:
         raise ValueError(f"unknown ball anchor state: {state!r}")
     return _STATE_HEIGHT_M[state]
+
+
+def airborne_bucket_range(state: str) -> tuple[float, float] | None:
+    """Return ``(z_min, z_max)`` metres for an airborne anchor state,
+    or ``None`` for non-airborne states. Used as a one-sided hinge
+    constraint in the Phase 2 parabola fit.
+    """
+    return AIRBORNE_BUCKETS.get(state)

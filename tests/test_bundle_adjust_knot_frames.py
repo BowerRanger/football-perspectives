@@ -120,3 +120,47 @@ def test_knot_frames_with_p0_fixed():
     )
     assert np.allclose(p0_fit, p0_true)
     assert np.linalg.norm(v0_fit - v0_true) < 0.5
+
+
+def test_z_range_frames_enforces_bucket_when_pixels_underdetermine_depth():
+    """A monocular flight observed from far away has near-parallel
+    camera rays — pixel obs alone can't pin Z. A z_range_frames hinge
+    forces the fit's z into the requested bucket at each constrained
+    frame."""
+    K, R, t = _camera()
+    # True flight: low arc with apex at z=4 m.
+    p0_true = np.array([0.0, 5.0, 0.11])
+    v0_true = np.array([2.0, 0.0, 8.0])
+    obs = _synthesise_observations(p0_true, v0_true, K, R, t, n=15)
+
+    # Without any z constraints, the fit is well-determined here because
+    # the camera is at the origin and rays diverge. But we can verify
+    # the hinge mechanic: ask the fit to put z >= 10 m at frame 5.
+    # The fit should comply.
+    p0, v0, _ = fit_parabola_to_image_observations(
+        obs, Ks=[K] * len(obs), Rs=[R] * len(obs), t_world=t, fps=30.0,
+        z_range_frames={5: (10.0, 25.0)},
+    )
+    dt = 5 / 30.0
+    z_at_5 = p0[2] + v0[2] * dt + 0.5 * (dt ** 2) * (-9.81)
+    assert z_at_5 >= 9.5, f"hinge should force z >= 10 m at frame 5, got {z_at_5:.2f}"
+
+
+def test_z_range_frames_silent_when_z_inside_bucket():
+    """If the unconstrained fit already lies inside the bucket, the
+    hinge contributes zero residual and the fit is unchanged."""
+    K, R, t = _camera()
+    p0_true = np.array([0.0, 5.0, 0.11])
+    v0_true = np.array([2.0, 0.0, 8.0])
+    obs = _synthesise_observations(p0_true, v0_true, K, R, t, n=15)
+    # True z at frame 5 ≈ 0.11 + 8*(5/30) - 0.5*9.81*(5/30)² = 1.31 m.
+    # Bucket [0, 2] should not pull at all.
+    p0_a, v0_a, resid_a = fit_parabola_to_image_observations(
+        obs, Ks=[K] * len(obs), Rs=[R] * len(obs), t_world=t, fps=30.0,
+    )
+    p0_b, v0_b, resid_b = fit_parabola_to_image_observations(
+        obs, Ks=[K] * len(obs), Rs=[R] * len(obs), t_world=t, fps=30.0,
+        z_range_frames={5: (0.0, 2.0)},
+    )
+    assert np.allclose(p0_a, p0_b, atol=1e-3)
+    assert np.allclose(v0_a, v0_b, atol=1e-3)

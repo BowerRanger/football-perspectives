@@ -41,6 +41,7 @@ from src.utils.ball_anchor_heights import (
     AIRBORNE_STATES,
     EVENT_STATES,
     HARD_KNOT_STATES,
+    airborne_bucket_range,
     state_to_height,
 )
 from src.utils.ball_detector import BallDetector, YOLOBallDetector
@@ -827,6 +828,7 @@ class BallStage(BaseStage):
                 Rs_p2: list[np.ndarray] = []
                 ts_p2: list[np.ndarray] = []
                 knots: dict[int, np.ndarray] = {}
+                z_ranges: dict[int, tuple[float, float]] = {}
                 p0_pin: np.ndarray | None = None
                 for fi, anc in span:
                     if anc.image_xy is None or fi not in per_frame_K:
@@ -835,6 +837,7 @@ class BallStage(BaseStage):
                     Ks_p2.append(per_frame_K[fi])
                     Rs_p2.append(per_frame_R[fi])
                     ts_p2.append(per_frame_t[fi])
+                    rel = fi - fa_span
                     if anc.state in HARD_KNOT_STATES:
                         try:
                             world_at_anchor = ankle_ray_to_pitch(
@@ -845,8 +848,14 @@ class BallStage(BaseStage):
                             )
                         except Exception:
                             continue
-                        rel = fi - fa_span
                         knots[rel] = np.asarray(world_at_anchor, dtype=float)
+                    else:
+                        # airborne_low/mid/high → one-sided Z hinge that
+                        # forces z into the bucket range but lets the
+                        # pixel obs determine the exact value inside it.
+                        bucket = airborne_bucket_range(anc.state)
+                        if bucket is not None:
+                            z_ranges[rel] = bucket
                 # Need at least 3 obs to make a parabola fit meaningful.
                 if len(obs_p2) < 3:
                     continue
@@ -859,6 +868,7 @@ class BallStage(BaseStage):
                         obs_p2, Ks=Ks_p2, Rs=Rs_p2, t_world=ts_p2,
                         fps=camera.fps, distortion=distortion,
                         p0_fixed=p0_pin, knot_frames=knots or None,
+                        z_range_frames=z_ranges or None,
                     )
                 except Exception as exc:
                     logger.debug(

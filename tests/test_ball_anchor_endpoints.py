@@ -75,6 +75,35 @@ def test_post_missing_pixel_for_grounded_state_rejected(client):
     assert r.status_code == 400
 
 
+def test_delete_ball_stage_preserves_anchors(client):
+    """Clearing the ball stage (via Re-run Stage in the dashboard)
+    must remove generated ball_track files but leave user-supplied
+    *_ball_anchors.json intact — they're inputs, not outputs."""
+    c, tmp_path = client
+    ball_dir = tmp_path / "ball"
+    ball_dir.mkdir(parents=True, exist_ok=True)
+    # Output (should be wiped).
+    track_path = ball_dir / "origi01_ball_track.json"
+    track_path.write_text('{"frames": [], "flight_segments": []}')
+    legacy_track = ball_dir / "ball_track.json"
+    legacy_track.write_text('{"legacy": true}')
+    # User input (must survive).
+    anchors_path = ball_dir / "origi01_ball_anchors.json"
+    anchors_path.write_text(
+        '{"clip_id": "origi01", "image_size": [1280, 720], '
+        '"anchors": [{"frame": 5, "image_xy": [640.0, 360.0], "state": "grounded"}]}'
+    )
+
+    r = c.delete("/api/output/ball")
+    assert r.status_code == 200, r.text
+
+    assert not track_path.exists(), "ball_track must be wiped"
+    assert not legacy_track.exists(), "legacy ball_track must be wiped"
+    assert anchors_path.exists(), "anchors must NOT be wiped by re-run"
+    body = r.json()
+    assert any("ball_track" in p for p in body["removed"])
+
+
 def test_preview_endpoint_runs_ball_stage_with_payload(client):
     """Preview should run BallStage in a tmp output dir using the
     posted anchors, returning the resulting BallTrack JSON."""

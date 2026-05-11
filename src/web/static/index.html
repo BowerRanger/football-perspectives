@@ -3730,17 +3730,6 @@ function renderBallShot(panel, data, shotId) {
   sumBody.appendChild(summary);
   panel.appendChild(sumWrap);
 
-  // ── Editor link ──
-  const editorLink = document.createElement("div");
-  editorLink.style.cssText = "padding:0 16px 12px;";
-  const shotParam = shotId ? `?shot=${encodeURIComponent(shotId)}` : "";
-  editorLink.innerHTML = `
-    <a href="/ball-anchor-editor${shotParam}" target="_blank"
-       style="color:#60a5fa;text-decoration:none;font-size:12px;">
-      Open ball anchor editor for ${shotId || "this clip"} →
-    </a>
-  `;
-  panel.appendChild(editorLink);
 
   // ── Flight segments table (if any) ──
   if (segs.length > 0) {
@@ -3862,6 +3851,14 @@ function renderBallShot(panel, data, shotId) {
   const src = buildBallSourceOverlay(data, shotId);
   sourcePanel.body.appendChild(src.element);
   panel.appendChild(sourcePanel.wrap);
+
+  // Ball anchor editor: inline below the source overlay. Operator
+  // marks per-frame ball positions + state tags here; the next
+  // "Re-run Stage" picks up the saved anchors via Layer 5.
+  const editorPanel = makePanel("Ball Anchor Editor");
+  const editor = buildBallAnchorEditor(data, shotId);
+  editorPanel.body.appendChild(editor.element);
+  panel.appendChild(editorPanel.wrap);
 }
 
 // ── Source-view ball overlay ─────────────────────────────────────────
@@ -4065,6 +4062,346 @@ function buildBallSourceOverlay(data, shotId) {
   if (!shotId) {
     note.textContent = "Source overlay unavailable in legacy single-shot mode.";
   }
+
+  return { element: wrap };
+}
+
+// ── Inline ball anchor editor ───────────────────────────────────────
+// Three-column layout (tag palette | video+canvas | anchor list).
+// Mirrors src/web/static/ball_anchor_editor.html but embedded in the
+// Ball panel and stripped of the Solve & Preview button — re-running
+// the ball stage from the dashboard's "Re-run Stage" button picks up
+// saved anchors via Layer 5. Anchors survive the re-run because
+// `_STAGE_ARTIFACTS["ball"]` is scoped to `ball/*_ball_track.json`.
+function buildBallAnchorEditor(data, shotId) {
+  const TAGS = [
+    {
+      id: "grounded", label: "Grounded", color: "#34d399",
+      range: "z = 0.11 m",
+      description: "Ball on the pitch (rolling, stationary, at feet). Hard knot — the parabola fit will pass exactly through the anchor's pixel ray-cast at ground level.",
+    },
+    {
+      id: "airborne_low", label: "Airborne — low", color: "#fbbf24",
+      range: "0 – 2 m",
+      description: "Ball in the air, ankle-to-waist height. Soft height hint (bucket midpoint 1 m).",
+    },
+    {
+      id: "airborne_mid", label: "Airborne — mid", color: "#fb923c",
+      range: "2 – 10 m",
+      description: "Ball in the air, head-to-rooftop height. Soft hint at 6 m.",
+    },
+    {
+      id: "airborne_high", label: "Airborne — high", color: "#f87171",
+      range: "10 m +",
+      description: "Ball high in the air — goal kick, long clearance. Soft hint at 15 m.",
+    },
+    {
+      id: "off_screen_flight", label: "Off-screen flight", color: "#64748b",
+      range: "no pixel",
+      description: "Ball is airborne but not visible. Use the dedicated button below the seek bar.",
+    },
+    {
+      id: "kick", label: "Kick (foot)", color: "#60a5fa",
+      range: "z = 0.11 m, event",
+      description: "Ball leaves a foot into the air. Hard knot at ground level; starts a flight segment.",
+    },
+    {
+      id: "catch", label: "Catch", color: "#a78bfa",
+      range: "z = 1.5 m, event",
+      description: "Ball stops in a player's hands. Hard knot at chest height; ends a flight segment.",
+    },
+    {
+      id: "bounce", label: "Bounce", color: "#f472b6",
+      range: "z = 0.11 m, event",
+      description: "Ball touches the ground briefly. Hard knot; splits the flight run with the bounce frame excluded from both sides.",
+    },
+    {
+      id: "header", label: "Header", color: "#facc15",
+      range: "z ≈ 2.5 m, event",
+      description: "Ball contacts a player's head mid-flight. Soft 2.5 m hint (header heights vary 1.8–3+ m). Splits the flight run.",
+    },
+  ];
+
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "display:flex;flex-direction:column;gap:8px;padding:10px;";
+
+  if (!shotId) {
+    const note = document.createElement("div");
+    note.style.cssText = "color:#94a3b8;font-size:12px;padding:8px;";
+    note.textContent = "Ball anchor editor unavailable in legacy single-shot mode.";
+    wrap.appendChild(note);
+    return { element: wrap };
+  }
+
+  // Header row: save button + status text + dirty indicator.
+  const header = document.createElement("div");
+  header.style.cssText = "display:flex;align-items:center;gap:10px;font-size:12px;color:#94a3b8;";
+  const saveBtn = makeToolbarBtn("Save anchors", "#4f46e5");
+  const statusEl = document.createElement("span");
+  statusEl.style.cssText = "flex:1;";
+  statusEl.textContent = "Loading…";
+  const hint = document.createElement("span");
+  hint.style.cssText = "color:#64748b;font-size:11px;";
+  hint.textContent = "Left-click = place • Right-click = delete";
+  header.append(saveBtn, statusEl, hint);
+  wrap.appendChild(header);
+
+  // 3-column body.
+  const grid = document.createElement("div");
+  grid.style.cssText = "display:grid;grid-template-columns:210px 1fr 230px;gap:10px;align-items:start;";
+  wrap.appendChild(grid);
+
+  // ── Tag palette column.
+  const tagCol = document.createElement("div");
+  tagCol.style.cssText = "background:#181b25;border:1px solid #2d3148;border-radius:4px;padding:6px;max-height:560px;overflow-y:auto;";
+  const tagListEl = document.createElement("div");
+  tagCol.appendChild(tagListEl);
+  grid.appendChild(tagCol);
+
+  // ── Video + canvas column.
+  const videoCol = document.createElement("div");
+  videoCol.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+  const stage = document.createElement("div");
+  stage.style.cssText = "position:relative;background:#000;border-radius:4px;overflow:hidden;";
+  const video = document.createElement("video");
+  video.src = `/api/video/${encodeURIComponent(shotId)}`;
+  video.preload = "metadata";
+  video.muted = true;
+  video.style.cssText = "display:block;width:100%;height:auto;";
+  const overlay = document.createElement("canvas");
+  overlay.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:auto;cursor:crosshair;";
+  stage.appendChild(video);
+  stage.appendChild(overlay);
+  videoCol.appendChild(stage);
+
+  // Controls below the video.
+  const ctrl = document.createElement("div");
+  ctrl.style.cssText = "display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;";
+  const playBtn = makeToolbarBtn("▶", "#4f46e5"); playBtn.style.minWidth = "32px";
+  const prevBtn = makeToolbarBtn("◀", "#334155"); prevBtn.title = "Previous frame";
+  const nextBtn = makeToolbarBtn("▶", "#334155"); nextBtn.title = "Next frame";
+  const seek = document.createElement("input");
+  seek.type = "range"; seek.min = "0"; seek.max = "1000"; seek.value = "0";
+  seek.style.cssText = "flex:1;";
+  const offScreenBtn = makeToolbarBtn("Mark off-screen", "#475569");
+  offScreenBtn.style.display = "none";
+  offScreenBtn.title = "Mark current frame as off-screen flight";
+  const frameLabel = document.createElement("span");
+  frameLabel.style.cssText = "min-width:90px;text-align:right;font-variant-numeric:tabular-nums;";
+  frameLabel.textContent = "Frame 0";
+  ctrl.append(playBtn, prevBtn, nextBtn, seek, offScreenBtn, frameLabel);
+  videoCol.appendChild(ctrl);
+  grid.appendChild(videoCol);
+
+  // ── Anchor list column.
+  const anchorCol = document.createElement("div");
+  anchorCol.style.cssText = "background:#181b25;border:1px solid #2d3148;border-radius:4px;padding:6px;max-height:560px;overflow-y:auto;";
+  const anchorListEl = document.createElement("div");
+  anchorCol.appendChild(anchorListEl);
+  grid.appendChild(anchorCol);
+
+  // ── State.
+  let fps = data.fps || 30;
+  let imageSize = [1280, 720];
+  let anchors = [];
+  let selectedTag = "grounded";
+  let dirty = false;
+
+  function setStatus(msg) { statusEl.textContent = msg; }
+  function setDirty(d) {
+    dirty = d;
+    setStatus(d ? `${anchors.length} anchors • unsaved` : `${anchors.length} anchors`);
+  }
+
+  function renderTags() {
+    tagListEl.innerHTML = "";
+    for (const tag of TAGS) {
+      const row = document.createElement("div");
+      const selected = tag.id === selectedTag;
+      row.style.cssText = `
+        display:flex;align-items:center;gap:8px;padding:6px 8px;
+        cursor:pointer;border-radius:3px;font-size:12px;line-height:1.3;
+        color:${selected ? "#fff" : "#cbd5e1"};
+        background:${selected ? "#3730a3" : "transparent"};
+        user-select:none;
+      `;
+      row.title = tag.description;
+      row.innerHTML = `
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${tag.color};flex-shrink:0;"></span>
+        <div style="display:flex;flex-direction:column;min-width:0;flex:1;">
+          <span>${tag.label}</span>
+          <span style="font-size:10px;color:${selected ? "#c7d2fe" : "#64748b"};font-family:'SF Mono',ui-monospace,monospace;">${tag.range}</span>
+        </div>
+      `;
+      row.onclick = () => {
+        selectedTag = tag.id;
+        renderTags();
+        offScreenBtn.style.display = selectedTag === "off_screen_flight" ? "" : "none";
+      };
+      tagListEl.appendChild(row);
+    }
+  }
+
+  function renderAnchors() {
+    anchorListEl.innerHTML = "";
+    if (!anchors.length) {
+      const empty = document.createElement("div");
+      empty.style.cssText = "color:#64748b;font-size:11px;padding:8px;";
+      empty.textContent = "No anchors yet";
+      anchorListEl.appendChild(empty);
+      return;
+    }
+    const sorted = [...anchors].sort((a, b) => a.frame - b.frame);
+    for (const a of sorted) {
+      const tag = TAGS.find(x => x.id === a.state) || { color: "#94a3b8", label: a.state };
+      const row = document.createElement("div");
+      row.style.cssText = "padding:5px 8px;cursor:pointer;border-radius:3px;font-size:11px;color:#cbd5e1;display:flex;align-items:center;gap:6px;";
+      row.onmouseover = () => row.style.background = "#252840";
+      row.onmouseout = () => row.style.background = "";
+      row.innerHTML = `
+        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${tag.color};flex-shrink:0;"></span>
+        <span style="flex:1;">Frame ${a.frame}</span>
+        <span style="color:#64748b;font-size:10px;">${a.state}</span>
+      `;
+      row.onclick = () => { video.currentTime = a.frame / fps; };
+      anchorListEl.appendChild(row);
+    }
+  }
+
+  function currentFrame() { return Math.round(video.currentTime * fps); }
+
+  function fitOverlay() {
+    if (!video.videoWidth) return;
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+    overlay.style.width = video.offsetWidth + "px";
+    overlay.style.height = video.offsetHeight + "px";
+  }
+
+  function drawOverlay() {
+    if (!overlay.width) return;
+    const ctx = overlay.getContext("2d");
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    const fi = currentFrame();
+    frameLabel.textContent = `Frame ${fi}`;
+    seek.value = String(fi);
+    for (const a of anchors) {
+      if (a.frame !== fi || a.image_xy == null) continue;
+      const tag = TAGS.find(x => x.id === a.state) || { color: "#fff" };
+      ctx.strokeStyle = tag.color; ctx.fillStyle = tag.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(a.image_xy[0], a.image_xy[1], 12, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(a.image_xy[0], a.image_xy[1], 3, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  overlay.addEventListener("click", (e) => {
+    if (selectedTag === "off_screen_flight") return;
+    const rect = overlay.getBoundingClientRect();
+    const u = (e.clientX - rect.left) * (overlay.width / rect.width);
+    const v = (e.clientY - rect.top) * (overlay.height / rect.height);
+    const fi = currentFrame();
+    anchors = anchors.filter(a => a.frame !== fi);
+    anchors.push({ frame: fi, image_xy: [u, v], state: selectedTag });
+    setDirty(true);
+    renderAnchors();
+    drawOverlay();
+  });
+
+  overlay.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    const rect = overlay.getBoundingClientRect();
+    const u = (e.clientX - rect.left) * (overlay.width / rect.width);
+    const v = (e.clientY - rect.top) * (overlay.height / rect.height);
+    const fi = currentFrame();
+    const hit = anchors.findIndex(a =>
+      a.frame === fi && a.image_xy &&
+      (Math.hypot(a.image_xy[0] - u, a.image_xy[1] - v) < 16)
+    );
+    if (hit >= 0) {
+      anchors.splice(hit, 1);
+      setDirty(true);
+      renderAnchors();
+      drawOverlay();
+    }
+  });
+
+  offScreenBtn.onclick = () => {
+    const fi = currentFrame();
+    anchors = anchors.filter(a => a.frame !== fi);
+    anchors.push({ frame: fi, image_xy: null, state: "off_screen_flight" });
+    setDirty(true);
+    renderAnchors();
+    drawOverlay();
+  };
+
+  // Playback controls.
+  let rafId = null;
+  playBtn.onclick = () => {
+    if (video.paused) {
+      video.play();
+      playBtn.textContent = "⏸";
+      const loop = () => { rafId = requestAnimationFrame(loop); drawOverlay(); };
+      if (!rafId) loop();
+    } else {
+      video.pause();
+      playBtn.textContent = "▶";
+      cancelAnimationFrame(rafId); rafId = null;
+    }
+  };
+  prevBtn.onclick = () => { video.pause(); video.currentTime = Math.max(0, video.currentTime - 1 / fps); };
+  nextBtn.onclick = () => { video.pause(); video.currentTime = Math.min(video.duration || 0, video.currentTime + 1 / fps); };
+  seek.oninput = () => { video.pause(); video.currentTime = parseInt(seek.value, 10) / fps; };
+  video.addEventListener("timeupdate", drawOverlay);
+  video.addEventListener("pause", () => {
+    playBtn.textContent = "▶";
+    cancelAnimationFrame(rafId); rafId = null;
+    drawOverlay();
+  });
+  video.addEventListener("ended", () => { playBtn.textContent = "▶"; });
+  video.addEventListener("loadedmetadata", () => {
+    seek.max = String(Math.round(video.duration * fps));
+    fitOverlay(); drawOverlay();
+  });
+  new ResizeObserver(fitOverlay).observe(video);
+
+  // Save button — POST to /ball-anchors/{shot}.
+  saveBtn.onclick = async () => {
+    const payload = { clip_id: shotId, image_size: imageSize, anchors };
+    setStatus("Saving…");
+    try {
+      const r = await fetch(`/ball-anchors/${encodeURIComponent(shotId)}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (r.ok) {
+        const body = await r.json();
+        setStatus(`Saved ${body.count} anchors. Re-run Ball stage to apply.`);
+        dirty = false;
+      } else {
+        const txt = await r.text();
+        setStatus(`Save failed (${r.status}): ${txt.slice(0, 80)}`);
+      }
+    } catch (exc) {
+      setStatus(`Save error: ${exc}`);
+    }
+  };
+
+  // Load camera + existing anchors.
+  (async () => {
+    const cam = await fetchJsonOrNull(`/camera/track?shot=${encodeURIComponent(shotId)}`);
+    if (cam && cam.fps) fps = cam.fps;
+    if (cam && cam.image_size) imageSize = cam.image_size;
+    const ar = await fetchJsonOrNull(`/ball-anchors/${encodeURIComponent(shotId)}`);
+    anchors = (ar && ar.anchors) ? ar.anchors.map(a => ({
+      frame: a.frame,
+      image_xy: a.image_xy,
+      state: a.state,
+    })) : [];
+    renderTags();
+    renderAnchors();
+    setStatus(`${anchors.length} anchors loaded`);
+  })();
 
   return { element: wrap };
 }

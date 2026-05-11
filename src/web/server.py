@@ -193,15 +193,18 @@ _STAGE_COMPLETE = {
 }
 
 # Per-stage outputs that should be wiped on a "re-run" or "clear" action.
-# Paths are relative to ``output_dir`` and may name files or directories.
-# ``camera/anchors.json`` is deliberately omitted — it is user-supplied input
-# to the camera stage, not output, and must survive a stage re-run.
+# Paths are relative to ``output_dir``; entries may be files, directories,
+# or glob patterns (containing ``*``) — globs are matched against
+# ``output_dir`` at delete time and each match is unlinked.
+# ``camera/anchors.json`` and ``ball/*_ball_anchors.json`` are deliberately
+# omitted — they are user-supplied input (anchors), not outputs, and
+# must survive a stage re-run.
 _STAGE_ARTIFACTS: dict[str, list[str]] = {
     "prepare_shots": ["shots"],
     "tracking": ["tracks"],
     "camera": ["camera/camera_track.json", "camera/debug"],
     "hmr_world": ["hmr_world"],
-    "ball": ["ball"],
+    "ball": ["ball/*_ball_track.json", "ball/ball_track.json"],
     "refined_poses": ["refined_poses"],
     "export": ["export"],
 }
@@ -550,6 +553,15 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"Unknown stage: {stage}")
         removed = []
         for relpath in _STAGE_ARTIFACTS.get(stage, []):
+            if "*" in relpath:
+                # Glob pattern — match against output_dir and unlink each hit.
+                for match in output_dir.glob(relpath):
+                    if match.is_dir():
+                        shutil.rmtree(match)
+                    else:
+                        match.unlink()
+                    removed.append(str(match.relative_to(output_dir)))
+                continue
             target = output_dir / relpath
             if not target.exists():
                 continue

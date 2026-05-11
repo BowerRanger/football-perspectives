@@ -16,22 +16,29 @@ _STATE_HEIGHT_M: dict[str, float] = {
     "kick":          0.11,
     "catch":         1.5,
     "bounce":        0.11,
+    "header":        2.5,
 }
 
 # States whose pixel + height should be enforced exactly by the fit.
+# `header` height varies a lot (1.8 m standing to 3+ m jumping) so it
+# is intentionally NOT a hard knot — the soft-bucket midpoint is used
+# as a hint, not a pin.
 HARD_KNOT_STATES: frozenset[str] = frozenset({
     "grounded", "kick", "catch", "bounce",
 })
 
 # States that force the IMM into the flight branch for that frame and
-# extend / create a flight segment.
+# extend / create a flight segment. `header` is treated as airborne
+# even though it's a contact event — the ball IS in the air when the
+# head touches it.
 AIRBORNE_STATES: frozenset[str] = frozenset({
-    "airborne_low", "airborne_mid", "airborne_high", "off_screen_flight",
+    "airborne_low", "airborne_mid", "airborne_high",
+    "header", "off_screen_flight",
 })
 
 # States that mark a flight boundary (split flight runs at this frame).
 EVENT_STATES: frozenset[str] = frozenset({
-    "kick", "catch", "bounce",
+    "kick", "catch", "bounce", "header",
 })
 
 

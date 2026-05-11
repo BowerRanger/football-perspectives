@@ -26,6 +26,7 @@ def test_event_heights():
     assert state_to_height("kick") == 0.11
     assert state_to_height("bounce") == 0.11
     assert state_to_height("catch") == 1.5
+    assert state_to_height("header") == 2.5
 
 
 def test_off_screen_flight_has_no_height():
@@ -47,6 +48,8 @@ def test_hard_knot_states():
     assert "airborne_low" not in HARD_KNOT_STATES
     assert "airborne_mid" not in HARD_KNOT_STATES
     assert "airborne_high" not in HARD_KNOT_STATES
+    # Header height varies too much to pin exactly.
+    assert "header" not in HARD_KNOT_STATES
     # Off-screen has no pixel so cannot be a knot.
     assert "off_screen_flight" not in HARD_KNOT_STATES
 
@@ -55,10 +58,11 @@ def test_airborne_state_classification():
     assert "airborne_low" in AIRBORNE_STATES
     assert "airborne_mid" in AIRBORNE_STATES
     assert "airborne_high" in AIRBORNE_STATES
+    assert "header" in AIRBORNE_STATES
     assert "off_screen_flight" in AIRBORNE_STATES
     assert "grounded" not in AIRBORNE_STATES
     assert "kick" not in AIRBORNE_STATES
 
 
 def test_event_states():
-    assert EVENT_STATES == frozenset({"kick", "catch", "bounce"})
+    assert EVENT_STATES == frozenset({"kick", "catch", "bounce", "header"})

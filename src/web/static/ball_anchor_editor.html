@@ -162,6 +162,11 @@ const TAGS = [
     range: "z = 0.11 m, event",
     description: "Ball touches the ground briefly. Hard knot at ground level; splits the flight run — the segment before and after the bounce are fit separately, with the bounce frame excluded from both.",
   },
+  {
+    id: "header", label: "Header", color: "#facc15",
+    range: "z ≈ 2.5 m, event",
+    description: "Ball contacts a player's head mid-flight. Soft constraint at 2.5 m (typical jumping-header height) — the fit isn't pinned exactly because header heights vary (1.8 m standing to 3+ m leaping). Splits the flight run, so the trajectories before and after the header are fit separately. For unusually high headers, drop an airborne_mid/high anchor on the same frame for a stronger height hint.",
+  },
 ];
 let selectedTag = "grounded";
 let shotId = new URLSearchParams(location.search).get("shot") || "";

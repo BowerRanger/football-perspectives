@@ -931,3 +931,58 @@ def test_bounce_to_kick_interpolates_at_ground_level(tmp_path: Path):
     f10 = next(f for f in track.frames if f.frame == 10)
     assert f10.world_xyz is not None
     assert np.allclose(np.array(f10.world_xyz), expected_mid, atol=0.05)
+
+
+@pytest.mark.integration
+def test_bounce_to_volley_fits_rising_parabola(tmp_path: Path):
+    """A bounce followed by a volley represents a flight that rises
+    from the ground (z=0.11) to the volley apex (z=1.0). The span
+    [bounce, volley] should be built and Phase 2 should fit the
+    rising arc — frames between bounce and volley get parabola world
+    positions, not gaps."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 30
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
+    bounce_uv = (640.0, 360.0)
+    volley_uv = (680.0, 320.0)
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720),
+        anchors=(
+            BallAnchor(frame=5,  image_xy=bounce_uv, state="bounce"),
+            BallAnchor(frame=15, image_xy=volley_uv, state="volley"),
+        ),
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    segs = [s for s in track.flight_segments if s.frame_range == (5, 15)]
+    assert segs, (
+        f"expected one Phase 2 segment 5-15 (bounce→volley apex), "
+        f"got {[s.frame_range for s in track.flight_segments]}"
+    )
+
+    # Every frame in the bounce→volley span should be state=flight with a
+    # filled world position from the parabola — no gaps.
+    for fi in range(5, 16):
+        f = next(x for x in track.frames if x.frame == fi)
+        assert f.state == "flight", f"frame {fi}: expected flight, got {f.state}"
+        assert f.world_xyz is not None, (
+            f"frame {fi}: parabola should fill world_xyz; got None"
+        )
+
+    # Bounce frame's world position is at z=0.11 (its hard-knot height).
+    # Volley frame's world position is at z=1.0 (its hard-knot height).
+    # The midpoint should sit somewhere in between.
+    f5 = next(f for f in track.frames if f.frame == 5)
+    f15 = next(f for f in track.frames if f.frame == 15)
+    assert f5.world_xyz[2] < 0.5, f"bounce frame z should be ~0.11, got {f5.world_xyz[2]}"
+    assert 0.5 < f15.world_xyz[2] < 1.5, f"volley frame z should be ~1.0, got {f15.world_xyz[2]}"

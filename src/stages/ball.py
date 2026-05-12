@@ -832,15 +832,22 @@ class BallStage(BaseStage):
                     if len(current_span) >= 2:
                         spans.append(current_span)
                     current_span = [(fi, anc)]
-                elif anc.state in ("header", "volley", "chest"):
-                    # Body-part contact mid-flight: closes the incoming
-                    # parabola, opens an outgoing one. Contact frame is
-                    # in BOTH adjacent spans.
+                elif anc.state in ("header", "volley", "chest", "bounce"):
+                    # Contact events that may be both an end and a start
+                    # of a flight: header/volley/chest are body-part
+                    # contacts mid-flight; bounce is a ground contact
+                    # that may bounce the ball back up to a subsequent
+                    # airborne event (e.g. bounce → volley apex). The
+                    # event frame is in BOTH adjacent spans. If nothing
+                    # non-ground-level follows, the new [bounce] span
+                    # has length 1 and is dropped at the next state
+                    # change — so bounce → grounded/kick still falls
+                    # through to the ground-level interp pass.
                     current_span.append((fi, anc))
                     if len(current_span) >= 2:
                         spans.append(current_span)
                     current_span = [(fi, anc)]
-                elif anc.state in ("bounce", "catch"):
+                elif anc.state == "catch":
                     current_span.append((fi, anc))
                     if len(current_span) >= 2:
                         spans.append(current_span)

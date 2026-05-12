@@ -459,17 +459,13 @@ def test_isolated_airborne_anchor_no_placeholder_segment(tmp_path: Path):
 
 
 @pytest.mark.integration
-def test_consecutive_airborne_anchors_force_flight_but_no_bucket_interp(tmp_path: Path):
-    """Two consecutive airborne anchors with no grounded anchor between
-    them mark all in-between frames as state=flight, but with only TWO
-    anchor pixels Phase 2 cannot fit a parabola. The fallback used to
-    linearly interpolate bucket-midpoint ray-casts, which produced large
-    depth swings between airborne_low (z=1m midpoint) and airborne_mid
-    (z=6m midpoint) anchors on different camera rays — the classic
-    top-down zigzag. The fallback now emits world_xyz=None for both
-    airborne-anchored AND unanchored frames in the span. State is still
-    flight (so the operator knows the algorithm respected their intent);
-    the world position is honestly absent."""
+def test_consecutive_airborne_anchors_pin_p0_at_start(tmp_path: Path):
+    """Two airborne anchors (no kick, no hard-knot end) — Phase 2 pins
+    p0 to the first anchor's bucket-midpoint ray-cast (airborne-start
+    promotion) and fits v0 from the remaining pixel obs + bucket-range
+    hinge. The result is a smooth parabola filling every frame in the
+    span, not the old depth-zigzag from bucket-midpoint linear interp.
+    """
     K, R, t = _camera_pose()
     out = tmp_path / "out"
     n_frames = 20
@@ -492,15 +488,26 @@ def test_consecutive_airborne_anchors_force_flight_but_no_bucket_interp(tmp_path
     ).run()
 
     track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    segs = [s for s in track.flight_segments if s.frame_range == (5, 10)]
+    assert segs, f"expected one Phase 2 segment 5-10, got {[s.frame_range for s in track.flight_segments]}"
+    seg = segs[0]
 
+    # p0 should equal airborne_low ray-cast at z=1 m (bucket midpoint).
+    from src.utils.ball_anchor_heights import state_to_height
+    from src.utils.foot_anchor import ankle_ray_to_pitch
+    expected_p0 = ankle_ray_to_pitch(
+        (640.0, 360.0), K=K, R=R, t=t,
+        plane_z=state_to_height("airborne_low"),
+    )
+    p0 = np.array(seg.parabola["p0"])
+    assert np.allclose(p0, expected_p0, atol=0.05)
+
+    # All in-span frames are state=flight with a real world position
+    # (no more bucket-midpoint zigzag — the parabola fills every frame).
     for fi in range(5, 11):
         f = next(x for x in track.frames if x.frame == fi)
         assert f.state == "flight", f"frame {fi} expected flight, got {f.state}"
-        assert f.world_xyz is None, (
-            f"airborne anchors at coarse buckets must NOT emit bucket-midpoint "
-            f"world positions (would zigzag in depth); got world_xyz={f.world_xyz} "
-            f"at frame {fi}"
-        )
+        assert f.world_xyz is not None, f"frame {fi}: expected filled by parabola"
 
 
 @pytest.mark.integration
@@ -631,13 +638,15 @@ def test_phase2_parabola_fit_through_anchor_bracketed_flight(tmp_path: Path):
 
 
 @pytest.mark.integration
-def test_phase2_fallback_to_linear_when_too_few_obs(tmp_path: Path):
-    """A two-anchor airborne span has fewer than 3 obs — Phase 2 must
-    skip and the linear-interp fallback must still produce a sensible
-    interpolated path (state=flight, world between anchors)."""
+def test_phase2_fits_two_anchor_kick_to_bounce_span(tmp_path: Path):
+    """A 2-anchor span where both endpoints are hard knots (kick at
+    z=0.11 + bounce at z=0.11) fully determines v0 — Phase 2 should
+    accept it. Previously the >= 3 obs threshold rejected these short
+    flights, leaving the operator with state=flight gaps for short
+    kick→bounce sequences."""
     K, R, t = _camera_pose()
     out = tmp_path / "out"
-    n_frames = 20
+    n_frames = 30
     _write_blank_clip(out / "shots" / "play.mp4", n_frames)
     _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
     _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
@@ -645,8 +654,8 @@ def test_phase2_fallback_to_linear_when_too_few_obs(tmp_path: Path):
     BallAnchorSet(
         clip_id="play", image_size=(1280, 720),
         anchors=(
-            BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="airborne_low"),
-            BallAnchor(frame=10, image_xy=(720.0, 300.0), state="airborne_mid"),
+            BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="kick"),
+            BallAnchor(frame=15, image_xy=(700.0, 360.0), state="bounce"),
         ),
     ).save(out / "ball" / "play_ball_anchors.json")
 
@@ -656,16 +665,19 @@ def test_phase2_fallback_to_linear_when_too_few_obs(tmp_path: Path):
     ).run()
 
     track = BallTrack.load(out / "ball" / "play_ball_track.json")
-    # No FlightSegment created (Phase 2 skipped, linear fallback adds
-    # no segment by design).
-    assert not any(
-        s.frame_range[0] >= 5 and s.frame_range[1] <= 10
-        for s in track.flight_segments
-    ), "two-anchor span should fall back to linear interp without a parabola segment"
-    # Frames 5..10 should still be state=flight via forced_flight.
-    for fi in range(5, 11):
+    segs = [s for s in track.flight_segments if s.frame_range == (5, 15)]
+    assert segs, (
+        f"two-anchor kick→bounce span should produce a Phase 2 FlightSegment; "
+        f"got {[s.frame_range for s in track.flight_segments]}"
+    )
+    # Every frame in 5..15 should have a world position from the parabola
+    # (no gaps, no None values).
+    for fi in range(5, 16):
         f = next(x for x in track.frames if x.frame == fi)
         assert f.state == "flight", f"frame {fi} expected flight, got {f.state}"
+        assert f.world_xyz is not None, (
+            f"frame {fi}: 2-anchor span should fill world_xyz from parabola, got None"
+        )
 
 
 @pytest.mark.integration

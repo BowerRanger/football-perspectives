@@ -889,8 +889,12 @@ class BallStage(BaseStage):
                         bucket = airborne_bucket_range(anc.state)
                         if bucket is not None:
                             z_ranges[rel] = bucket
-                # Need at least 3 obs to make a parabola fit meaningful.
-                if len(obs_p2) < 3:
+                # Need at least 2 anchors. With p0 pinned to a hard-knot
+                # or airborne-start ray-cast, the fit only optimises v0
+                # (3 unknowns). One additional anchor (pixel obs or
+                # knot) gives 2-3 residuals — enough to determine v0
+                # exactly for a kick→bounce or kick→airborne pair.
+                if len(obs_p2) < 2:
                     continue
                 # Pin p0 to a known world position when possible:
                 #   - Hard-knot start (kick/header/etc.): use its exact

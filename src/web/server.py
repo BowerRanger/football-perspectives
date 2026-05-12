@@ -970,6 +970,9 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         frame: int
         image_xy: list[float] | None
         state: str
+        # Required only when state == "player_touch"; otherwise omitted.
+        player_id: str | None = None
+        bone: str | None = None
 
     class BallAnchorPayload(BaseModel):
         clip_id: str
@@ -1031,6 +1034,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     frame=int(a.frame),
                     image_xy=tuple(a.image_xy) if a.image_xy is not None else None,
                     state=a.state,
+                    player_id=a.player_id,
+                    bone=a.bone,
                 ))
             aset = BallAnchorSet(
                 clip_id=str(payload.clip_id),
@@ -1086,6 +1091,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                         frame=int(a.frame),
                         image_xy=tuple(a.image_xy) if a.image_xy is not None else None,
                         state=a.state,
+                        player_id=a.player_id,
+                        bone=a.bone,
                     ) for a in payload.anchors
                 )
                 aset = BallAnchorSet(

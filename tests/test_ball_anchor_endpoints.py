@@ -152,3 +152,32 @@ def test_preview_endpoint_runs_ball_stage_with_payload(client):
         body = r.json()
         assert "frames" in body
         assert "flight_segments" in body
+
+
+def test_post_player_touch_forwards_player_id_and_bone(client):
+    """The /ball-anchors POST endpoint must forward player_id + bone
+    fields to the saved BallAnchorSet. Earlier the Pydantic payload
+    model didn't declare those fields, so they got silently dropped
+    and the validation pass in BallAnchorSet.load raised 400."""
+    c, tmp_path = client
+    payload = {
+        "clip_id": "play",
+        "image_size": [1280, 720],
+        "anchors": [
+            {
+                "frame": 10, "image_xy": [640.0, 360.0],
+                "state": "player_touch",
+                "player_id": "P003", "bone": "r_foot",
+            },
+        ],
+    }
+    r = c.post("/ball-anchors/play", json=payload)
+    assert r.status_code == 200, r.text
+    # Verify the JSON written to disk has player_id + bone preserved.
+    saved = json.loads(
+        (tmp_path / "ball" / "play_ball_anchors.json").read_text()
+    )
+    a = saved["anchors"][0]
+    assert a["state"] == "player_touch"
+    assert a["player_id"] == "P003"
+    assert a["bone"] == "r_foot"

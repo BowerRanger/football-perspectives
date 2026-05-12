@@ -3816,6 +3816,10 @@ function renderBallShot(panel, data, shotId) {
   panel.appendChild(tl);
 
   let currentFrame = minFrame;
+  // editorRef is populated once the editor is built (a few lines below).
+  // setFrame is defined first because the editor's frame-change callback
+  // needs to call it.
+  let editorRef = null;
   function setFrame(fi) {
     currentFrame = Math.max(minFrame, Math.min(maxFrame, fi));
     seek.value = String(currentFrame);
@@ -3823,6 +3827,9 @@ function renderBallShot(panel, data, shotId) {
     frameLabel.textContent = `Frame ${currentFrame}  (${sec}s)`;
     td.setFrame(currentFrame);
     td3.setFrame(currentFrame);
+    if (editorRef && editorRef.setFrameExternal) {
+      editorRef.setFrameExternal(currentFrame);
+    }
   }
   setFrame(minFrame);
   seek.addEventListener("input", () => setFrame(Number(seek.value)));
@@ -3858,6 +3865,19 @@ function renderBallShot(panel, data, shotId) {
   const editor = buildBallAnchorEditor(data, shotId);
   editorPanel.body.appendChild(editor.element);
   panel.appendChild(editorPanel.wrap);
+
+  // Bind the editor's frame-change callback to setFrame so editor
+  // scrub/play/step updates flow back to the trajectory panels. The
+  // _expectedFrame guard inside setFrameExternal prevents the call
+  // round-tripping into a loop.
+  editorRef = editor;
+  if (editor.setOnFrameChanged) {
+    editor.setOnFrameChanged((fi) => setFrame(fi));
+  }
+  if (editor.setFrameExternal) {
+    // Push the initial frame to the editor so it starts in sync.
+    editor.setFrameExternal(currentFrame);
+  }
 }
 
 // ── Inline ball anchor editor ───────────────────────────────────────
@@ -4233,7 +4253,30 @@ function buildBallAnchorEditor(data, shotId) {
   prevBtn.onclick = () => { video.pause(); video.currentTime = Math.max(0, video.currentTime - 1 / fps); };
   nextBtn.onclick = () => { video.pause(); video.currentTime = Math.min(video.duration || 0, video.currentTime + 1 / fps); };
   seek.oninput = () => { video.pause(); video.currentTime = parseInt(seek.value, 10) / fps; };
-  video.addEventListener("timeupdate", drawOverlay);
+  // Frame-sync interface: the trajectory timeline (in renderBallShot)
+  // calls setFrameExternal to slave the editor video; the editor calls
+  // back to setOnFrameChanged when its own controls move the frame.
+  // Loop avoidance: setFrameExternal records the expected frame; when
+  // the timeupdate handler sees the same frame it skips the callback.
+  let _onFrameChangedCb = null;
+  let _expectedFrame = -1;
+  function setFrameExternal(fi) {
+    _expectedFrame = fi;
+    if (Math.abs(video.currentTime - fi / fps) > 0.5 / fps) {
+      video.currentTime = fi / fps;
+    }
+    drawOverlay();
+  }
+  function setOnFrameChanged(cb) { _onFrameChangedCb = cb; }
+
+  video.addEventListener("timeupdate", () => {
+    drawOverlay();
+    const fi = currentFrame();
+    if (fi !== _expectedFrame && _onFrameChangedCb) {
+      _onFrameChangedCb(fi);
+    }
+    _expectedFrame = fi;
+  });
   video.addEventListener("pause", () => {
     playBtn.textContent = "▶";
     cancelAnimationFrame(rafId); rafId = null;
@@ -4299,7 +4342,7 @@ function buildBallAnchorEditor(data, shotId) {
     drawOverlay();
   })();
 
-  return { element: wrap };
+  return { element: wrap, setFrameExternal, setOnFrameChanged };
 }
 
 // ── Top-down ball trajectory canvas ─────────────────────────────────

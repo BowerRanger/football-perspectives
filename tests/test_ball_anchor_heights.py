@@ -103,4 +103,5 @@ def test_airborne_state_classification():
 def test_event_states():
     assert EVENT_STATES == frozenset({
         "kick", "catch", "bounce", "header", "volley", "chest",
+        "player_touch",
     })

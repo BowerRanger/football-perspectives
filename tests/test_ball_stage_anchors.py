@@ -986,3 +986,131 @@ def test_bounce_to_volley_fits_rising_parabola(tmp_path: Path):
     f15 = next(f for f in track.frames if f.frame == 15)
     assert f5.world_xyz[2] < 0.5, f"bounce frame z should be ~0.11, got {f5.world_xyz[2]}"
     assert 0.5 < f15.world_xyz[2] < 1.5, f"volley frame z should be ~1.0, got {f15.world_xyz[2]}"
+
+
+@pytest.mark.integration
+def test_player_touch_drives_trajectory_through_bone_world(tmp_path: Path):
+    """A 'player_touch' anchor pins the parabola at the named bone's
+    actual world position (SMPL FK), not at a fixed state-height
+    bucket. The pixel ray-cast is ignored — the bone's XYZ wins."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 30
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    # Synthesise a player whose r_foot is at world (40, 30, 0.4) at the
+    # anchor frame. We achieve this by placing root_t such that the
+    # canonical-y-up r_foot offset transforms to that world position.
+    from src.utils.smpl_skeleton import (
+        SMPL_JOINT_NAMES, SMPL_REST_JOINTS_YUP, compute_joint_world,
+    )
+    from src.schemas.smpl_world import SmplWorldTrack
+    r_foot_idx = SMPL_JOINT_NAMES.index("r_foot")
+    # With thetas=0 and root_R=I, joint world = canonical_yup + root_t.
+    # We want r_foot world = (40, 30, 0.4) → root_t = (40, 30, 0.4) - rest.
+    rest_r_foot = SMPL_REST_JOINTS_YUP[r_foot_idx]
+    target_world = np.array([40.0, 30.0, 0.4])
+    root_t_one = target_world - rest_r_foot
+    smpl_dir = out / "hmr_world"
+    smpl_dir.mkdir(parents=True, exist_ok=True)
+    SmplWorldTrack(
+        player_id="P007",
+        frames=np.arange(n_frames, dtype=np.int64),
+        betas=np.zeros(10, dtype=np.float32),
+        thetas=np.zeros((n_frames, 24, 3), dtype=np.float32),
+        root_R=np.tile(np.eye(3, dtype=np.float32), (n_frames, 1, 1)),
+        root_t=np.tile(root_t_one.astype(np.float32), (n_frames, 1)),
+        confidence=np.ones(n_frames, dtype=np.float32),
+        shot_id="play",
+    ).save(smpl_dir / "play__P007_smpl_world.npz")
+
+    # Build anchors: kick at frame 5, player_touch at frame 15 (the volley
+    # apex via the player's r_foot), bounce at frame 25.
+    detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720),
+        anchors=(
+            BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="kick"),
+            # The image_xy here is deliberately wrong — the bone world
+            # should win, not the pixel ray-cast.
+            BallAnchor(
+                frame=15, image_xy=(50.0, 50.0),
+                state="player_touch", player_id="P007", bone="r_foot",
+            ),
+            BallAnchor(frame=25, image_xy=(700.0, 380.0), state="bounce"),
+        ),
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    # Frame 15 should be at the bone's world position, NOT the ray-cast
+    # of (50, 50).
+    expected = compute_joint_world(
+        np.zeros((24, 3)), np.eye(3), root_t_one, r_foot_idx,
+    )
+    f15 = next(f for f in track.frames if f.frame == 15)
+    assert f15.world_xyz is not None
+    assert np.allclose(f15.world_xyz, expected, atol=1e-3), (
+        f"player_touch should pin world to bone position {expected.tolist()}, "
+        f"got {list(f15.world_xyz)}"
+    )
+    assert f15.state == "flight"
+
+
+@pytest.mark.integration
+def test_player_touch_requires_player_and_bone(tmp_path: Path):
+    """Loading an anchors file with state='player_touch' but missing
+    player_id or bone raises ValueError at load time."""
+    out = tmp_path / "out"
+    (out / "ball").mkdir(parents=True)
+    (out / "ball" / "play_ball_anchors.json").write_text(
+        json.dumps({
+            "clip_id": "play", "image_size": [1280, 720],
+            "anchors": [
+                {"frame": 5, "image_xy": [640.0, 360.0], "state": "player_touch"},
+            ],
+        })
+    )
+    with pytest.raises(ValueError, match="player_id is required"):
+        BallAnchorSet.load(out / "ball" / "play_ball_anchors.json")
+
+
+@pytest.mark.integration
+def test_player_touch_falls_back_when_smpl_track_missing(tmp_path: Path):
+    """If the named player has no SmplWorldTrack on disk, the ball
+    stage falls back to ray-casting the anchor pixel at the
+    player_touch fallback height (1.0 m). Doesn't crash."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 20
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720),
+        anchors=(
+            BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="kick"),
+            BallAnchor(
+                frame=10, image_xy=(660.0, 360.0),
+                state="player_touch", player_id="P999_missing", bone="r_foot",
+            ),
+            BallAnchor(frame=15, image_xy=(680.0, 360.0), state="bounce"),
+        ),
+    ).save(out / "ball" / "play_ball_anchors.json")
+    # Stage runs without crashing — fallback ray-cast is used.
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    f10 = next(f for f in track.frames if f.frame == 10)
+    assert f10.world_xyz is not None  # something was emitted
+    assert f10.state == "flight"

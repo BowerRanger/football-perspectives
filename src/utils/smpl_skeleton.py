@@ -89,3 +89,70 @@ def axis_angle_to_quaternion(aa: np.ndarray) -> np.ndarray:
     s = float(np.sin(half))
     c = float(np.cos(half))
     return np.array([c, axis[0] * s, axis[1] * s, axis[2] * s])
+
+
+def axis_angle_to_matrix(aa: np.ndarray) -> np.ndarray:
+    """Convert a 3-vector axis-angle to a 3x3 rotation matrix.
+
+    Identity for near-zero magnitudes.
+    """
+    aa = np.asarray(aa, dtype=np.float64).reshape(3)
+    theta = float(np.linalg.norm(aa))
+    if theta < 1e-12:
+        return np.eye(3)
+    k = aa / theta
+    K = np.array([
+        [0.0, -k[2], k[1]],
+        [k[2], 0.0, -k[0]],
+        [-k[1], k[0], 0.0],
+    ])
+    return np.eye(3) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
+
+
+def compute_joint_world(
+    thetas: np.ndarray,
+    root_R: np.ndarray,
+    root_t: np.ndarray,
+    joint_idx: int,
+    rest_joints: np.ndarray | None = None,
+) -> np.ndarray:
+    """Forward-kinematics: return joint ``joint_idx``'s position in pitch
+    world frame for a single frame.
+
+    Inputs:
+        thetas: (24, 3) axis-angle, one row per joint (including pelvis
+            at index 0). ``thetas[0]`` is the body's intrinsic
+            orientation in canonical y-up; ``root_R`` carries the
+            canonical-y-up → pitch-world rotation on top of that.
+        root_R: (3, 3) rotation taking canonical-y-up coordinates to
+            pitch world.
+        root_t: (3,) translation of the pelvis in pitch world (metres).
+        joint_idx: index into ``SMPL_JOINT_NAMES`` (0–23).
+        rest_joints: optional (24, 3) override of the rest-pose joint
+            table. Defaults to :data:`SMPL_REST_JOINTS_YUP` (mean betas).
+
+    Pure numpy; no torch / no SMPL body model. Accurate to ~5 cm per
+    joint for typical players — beta-conditioned regression would
+    tighten this further but isn't needed for ball-anchor purposes.
+    """
+    rest = (
+        np.asarray(rest_joints, dtype=np.float64)
+        if rest_joints is not None else SMPL_REST_JOINTS_YUP
+    )
+    thetas = np.asarray(thetas, dtype=np.float64).reshape(24, 3)
+    # Local rotations per joint.
+    local_rot = np.empty((24, 3, 3))
+    for j in range(24):
+        local_rot[j] = axis_angle_to_matrix(thetas[j])
+    # Walk hierarchy.
+    global_rot = np.empty((24, 3, 3))
+    global_pos = np.empty((24, 3))
+    global_rot[0] = local_rot[0]
+    global_pos[0] = rest[0]  # canonical pelvis at origin
+    for j in range(1, 24):
+        p = SMPL_PARENTS[j]
+        global_rot[j] = global_rot[p] @ local_rot[j]
+        global_pos[j] = global_pos[p] + global_rot[p] @ (rest[j] - rest[p])
+    canonical = global_pos[int(joint_idx)]
+    # Canonical y-up → pitch world.
+    return np.asarray(root_R, dtype=np.float64) @ canonical + np.asarray(root_t, dtype=np.float64)

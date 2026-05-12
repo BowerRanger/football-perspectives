@@ -19,6 +19,11 @@ _STATE_HEIGHT_M: dict[str, float] = {
     "header":        2.5,
     "volley":        1.0,
     "chest":         1.3,
+    # player_touch has no fixed height — the ball stage runs SMPL FK on
+    # the named bone at the anchor frame and uses that as the exact
+    # world position. This entry is a fallback used only when the
+    # SmplWorldTrack is unavailable.
+    "player_touch":  1.0,
 }
 
 # States whose pixel + height pin the trajectory exactly. The body-part
@@ -29,20 +34,21 @@ _STATE_HEIGHT_M: dict[str, float] = {
 # smaller than the multi-metre depth ambiguity from pixel-only obs.
 HARD_KNOT_STATES: frozenset[str] = frozenset({
     "grounded", "kick", "catch", "bounce", "header", "volley", "chest",
+    "player_touch",
 })
 
 # States that force the IMM into the flight branch for that frame and
-# extend / create a flight segment. Body-part contacts (header, volley,
-# chest) are treated as airborne even though they're contact events —
-# the ball IS in the air when the body part touches it.
+# extend / create a flight segment. Body-part contacts and player_touch
+# are treated as airborne even though they're contact events — the
+# ball IS in the air when the body part touches it.
 AIRBORNE_STATES: frozenset[str] = frozenset({
     "airborne_low", "airborne_mid", "airborne_high",
-    "header", "volley", "chest", "off_screen_flight",
+    "header", "volley", "chest", "player_touch", "off_screen_flight",
 })
 
 # States that mark a flight boundary (split flight runs at this frame).
 EVENT_STATES: frozenset[str] = frozenset({
-    "kick", "catch", "bounce", "header", "volley", "chest",
+    "kick", "catch", "bounce", "header", "volley", "chest", "player_touch",
 })
 
 # States where the ball is physically at ground level (z = 0.11 m).
@@ -87,3 +93,23 @@ def airborne_bucket_range(state: str) -> tuple[float, float] | None:
     constraint in the Phase 2 parabola fit.
     """
     return AIRBORNE_BUCKETS.get(state)
+
+
+# Bone tags exposed in the Player-Touch UI, mapped to SMPL joint
+# indices (see ``src/utils/smpl_skeleton.py`` SMPL_JOINT_NAMES).
+# 'chest' uses spine2 (index 6), the upper-back joint that sits at
+# typical chest height in the canonical SMPL rest pose.
+BONE_TO_SMPL_INDEX: dict[str, int] = {
+    "l_foot":     10,  # left_foot
+    "r_foot":     11,  # right_foot
+    "l_knee":     4,   # left_knee
+    "r_knee":     5,   # right_knee
+    "chest":      6,   # spine2 (upper torso)
+    "head":       15,  # head
+    "l_shoulder": 16,  # left_shoulder
+    "r_shoulder": 17,  # right_shoulder
+    "l_hand":     22,  # left_hand
+    "r_hand":     23,  # right_hand
+}
+
+VALID_BONES: frozenset[str] = frozenset(BONE_TO_SMPL_INDEX)

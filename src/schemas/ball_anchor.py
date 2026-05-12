@@ -22,23 +22,33 @@ BallAnchorState = Literal[
     "header",
     "volley",
     "chest",
+    "player_touch",
     "off_screen_flight",
 ]
 
 _VALID_STATES: frozenset[str] = frozenset({
     "grounded", "airborne_low", "airborne_mid", "airborne_high",
     "kick", "catch", "bounce", "header", "volley", "chest",
-    "off_screen_flight",
+    "player_touch", "off_screen_flight",
 })
 
 
 @dataclass(frozen=True)
 class BallAnchor:
-    """One per-frame anchor."""
+    """One per-frame anchor.
+
+    ``player_id`` and ``bone`` are required when ``state == "player_touch"``;
+    they identify which player's body part the ball is contacting at this
+    frame so the ball stage can drive the trajectory through that bone's
+    actual world position (via SMPL forward kinematics on the player's
+    hmr_world track). Both are ``None`` for all other states.
+    """
     frame: int
     # None only when state == "off_screen_flight".
     image_xy: tuple[float, float] | None
     state: BallAnchorState
+    player_id: str | None = None
+    bone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +59,10 @@ class BallAnchorSet:
 
     @classmethod
     def load(cls, path: Path) -> "BallAnchorSet":
+        # Lazy import to avoid a cycle: ball_anchor_heights imports nothing
+        # from this module, but loaders for tests sometimes import both.
+        from src.utils.ball_anchor_heights import VALID_BONES
+
         with path.open() as fh:
             data = json.load(fh)
         anchors = []
@@ -66,10 +80,27 @@ class BallAnchorSet:
                 image_xy = None
             else:
                 image_xy = (float(raw_xy[0]), float(raw_xy[1]))
+            player_id = a.get("player_id")
+            bone = a.get("bone")
+            if state == "player_touch":
+                if not player_id:
+                    raise ValueError(
+                        "player_id is required for state 'player_touch'"
+                    )
+                if not bone:
+                    raise ValueError(
+                        "bone is required for state 'player_touch'"
+                    )
+                if bone not in VALID_BONES:
+                    raise ValueError(
+                        f"unknown bone {bone!r}; valid: {sorted(VALID_BONES)}"
+                    )
             anchors.append(BallAnchor(
                 frame=int(a["frame"]),
                 image_xy=image_xy,
                 state=state,  # type: ignore[arg-type]
+                player_id=str(player_id) if player_id else None,
+                bone=str(bone) if bone else None,
             ))
         return cls(
             clip_id=str(data["clip_id"]),

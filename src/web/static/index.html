@@ -3915,34 +3915,19 @@ function buildBallAnchorEditor(data, shotId) {
       description: "Ball is airborne but not visible. Use the dedicated button below the seek bar.",
     },
     {
-      id: "kick", label: "Kick (foot)", color: "#60a5fa",
-      range: "z = 0.11 m, event",
-      description: "Ball leaves a foot into the air. Hard knot at ground level; starts a flight segment.",
+      id: "player_touch", label: "Player touch", color: "#60a5fa",
+      range: "bone-driven, event",
+      description: "Ball contacts a specific player's body part (foot, knee, chest, head, shoulder, hand). The trajectory is pinned at the bone's actual world XYZ from the player's SMPL pose (hmr_world stage), giving precise contact alignment instead of a fixed-height bucket. Splits the flight run — incoming and outgoing parabolas are fit separately. Required: player + bone (selected in the dropdowns that appear when this tag is active).",
     },
     {
       id: "catch", label: "Catch", color: "#a78bfa",
       range: "z = 1.5 m, event",
-      description: "Ball stops in a player's hands. Hard knot at chest height; ends a flight segment.",
+      description: "Ball stops in a player's hands. Hard knot at chest height; ends a flight segment without starting a new one. (For mid-flight body-part contacts use 'Player touch' instead.)",
     },
     {
       id: "bounce", label: "Bounce", color: "#f472b6",
       range: "z = 0.11 m, event",
-      description: "Ball touches the ground briefly. Hard knot; splits the flight run with the bounce frame excluded from both sides.",
-    },
-    {
-      id: "header", label: "Header", color: "#facc15",
-      range: "z ≈ 2.5 m, event",
-      description: "Ball contacts a player's head mid-flight. Hard knot at 2.5 m (header heights vary 1.8–3+ m). Splits the flight run — incoming and outgoing parabolas are fit separately.",
-    },
-    {
-      id: "volley", label: "Volley", color: "#22d3ee",
-      range: "z ≈ 1.0 m, event",
-      description: "Foot strikes the ball while it's airborne (jumping volley, foot-control mid-air, half-volley). Hard knot at ≈1 m. Splits the flight run. For ground-level half-volleys use 'kick'; for high jumping volleys use 'header'.",
-    },
-    {
-      id: "chest", label: "Chest", color: "#fde047",
-      range: "z ≈ 1.3 m, event",
-      description: "Ball touches a player's chest. Hard knot at ≈1.3 m (typical adult chest height). Splits the flight run — useful for chest controls where the ball deflects down or to a teammate.",
+      description: "Ball touches the ground briefly. Hard knot at ground level; splits the flight run. The bounce frame can launch a new flight (e.g. bounce → player_touch apex) if a non-grounded anchor follows.",
     },
   ];
 
@@ -3994,6 +3979,31 @@ function buildBallAnchorEditor(data, shotId) {
   tagCol.style.cssText = "background:#181b25;border:1px solid #2d3148;border-radius:4px;padding:6px;max-height:560px;overflow-y:auto;";
   const tagListEl = document.createElement("div");
   tagCol.appendChild(tagListEl);
+  // Player + bone selectors shown only when "player_touch" tag is active.
+  const touchPicker = document.createElement("div");
+  touchPicker.style.cssText = "display:none;border-top:1px solid #2d3148;margin-top:8px;padding-top:8px;display:flex;flex-direction:column;gap:6px;font-size:11px;color:#94a3b8;";
+  const playerSel = document.createElement("select");
+  playerSel.style.cssText = "background:#252840;color:#e2e8f0;border:1px solid #2d3148;border-radius:3px;padding:3px 5px;font-size:11px;width:100%;";
+  const boneSel = document.createElement("select");
+  boneSel.style.cssText = "background:#252840;color:#e2e8f0;border:1px solid #2d3148;border-radius:3px;padding:3px 5px;font-size:11px;width:100%;";
+  for (const b of BONE_OPTIONS) {
+    const opt = document.createElement("option");
+    opt.value = b.id; opt.textContent = b.label;
+    if (b.id === selectedBone) opt.selected = true;
+    boneSel.appendChild(opt);
+  }
+  boneSel.onchange = () => { selectedBone = boneSel.value; };
+  playerSel.onchange = () => { selectedPlayer = playerSel.value; };
+  const playerLabel = document.createElement("div");
+  playerLabel.textContent = "Player";
+  const boneLabel = document.createElement("div");
+  boneLabel.textContent = "Bone";
+  touchPicker.append(playerLabel, playerSel, boneLabel, boneSel);
+  tagCol.appendChild(touchPicker);
+  function updateTouchPicker() {
+    touchPicker.style.display = selectedTag === "player_touch"
+      ? "flex" : "none";
+  }
   grid.appendChild(tagCol);
 
   // ── Video + canvas column.
@@ -4043,6 +4053,21 @@ function buildBallAnchorEditor(data, shotId) {
   let imageSize = [1280, 720];
   let anchors = [];
   let selectedTag = "grounded";
+  let selectedPlayer = "";   // for player_touch
+  let selectedBone = "r_foot";  // for player_touch
+  let availablePlayers = [];  // [{player_id, player_name?}, ...]
+  const BONE_OPTIONS = [
+    { id: "l_foot",     label: "Left foot" },
+    { id: "r_foot",     label: "Right foot" },
+    { id: "l_knee",     label: "Left knee" },
+    { id: "r_knee",     label: "Right knee" },
+    { id: "chest",      label: "Chest" },
+    { id: "head",       label: "Head" },
+    { id: "l_shoulder", label: "Left shoulder" },
+    { id: "r_shoulder", label: "Right shoulder" },
+    { id: "l_hand",     label: "Left hand" },
+    { id: "r_hand",     label: "Right hand" },
+  ];
   let dirty = false;
   // Per-frame predicted ball world position from /ball/preview (data.frames).
   // Projected back to pixels using the camera track after camera loads.
@@ -4085,6 +4110,7 @@ function buildBallAnchorEditor(data, shotId) {
         selectedTag = tag.id;
         renderTags();
         offScreenBtn.style.display = selectedTag === "off_screen_flight" ? "" : "none";
+        updateTouchPicker();
       };
       tagListEl.appendChild(row);
     }
@@ -4106,9 +4132,12 @@ function buildBallAnchorEditor(data, shotId) {
       row.style.cssText = "padding:5px 8px;cursor:pointer;border-radius:3px;font-size:11px;color:#cbd5e1;display:flex;align-items:center;gap:6px;";
       row.onmouseover = () => row.style.background = "#252840";
       row.onmouseout = () => row.style.background = "";
+      const extra = (a.state === "player_touch" && a.player_id)
+        ? ` <span style="color:#64748b;">(${a.player_id}/${a.bone || "?"})</span>`
+        : "";
       row.innerHTML = `
         <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${tag.color};flex-shrink:0;"></span>
-        <span style="flex:1;">Frame ${a.frame}</span>
+        <span style="flex:1;">Frame ${a.frame}${extra}</span>
         <span style="color:#64748b;font-size:10px;">${a.state}</span>
       `;
       row.onclick = () => { video.currentTime = a.frame / fps; };
@@ -4198,12 +4227,21 @@ function buildBallAnchorEditor(data, shotId) {
 
   overlay.addEventListener("click", (e) => {
     if (selectedTag === "off_screen_flight") return;
+    if (selectedTag === "player_touch" && !selectedPlayer) {
+      setStatus("Pick a player before placing a Player touch anchor");
+      return;
+    }
     const rect = overlay.getBoundingClientRect();
     const u = (e.clientX - rect.left) * (overlay.width / rect.width);
     const v = (e.clientY - rect.top) * (overlay.height / rect.height);
     const fi = currentFrame();
     anchors = anchors.filter(a => a.frame !== fi);
-    anchors.push({ frame: fi, image_xy: [u, v], state: selectedTag });
+    const newAnchor = { frame: fi, image_xy: [u, v], state: selectedTag };
+    if (selectedTag === "player_touch") {
+      newAnchor.player_id = selectedPlayer;
+      newAnchor.bone = selectedBone;
+    }
+    anchors.push(newAnchor);
     setDirty(true);
     renderAnchors();
     drawOverlay();
@@ -4330,9 +4368,36 @@ function buildBallAnchorEditor(data, shotId) {
       frame: a.frame,
       image_xy: a.image_xy,
       state: a.state,
+      player_id: a.player_id || null,
+      bone: a.bone || null,
     })) : [];
+    // Populate player dropdown from hmr_world tracks for this shot.
+    const playerList = await fetchJsonOrNull(
+      `/hmr_world/kp2d_players?shot=${encodeURIComponent(shotId)}`
+    );
+    availablePlayers = (playerList && playerList.players) || [];
+    playerSel.innerHTML = "";
+    if (availablePlayers.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = ""; opt.textContent = "(no players in hmr_world)";
+      opt.disabled = true;
+      playerSel.appendChild(opt);
+    } else {
+      const empty = document.createElement("option");
+      empty.value = ""; empty.textContent = "— pick a player —";
+      playerSel.appendChild(empty);
+      for (const p of availablePlayers) {
+        const opt = document.createElement("option");
+        opt.value = p.player_id;
+        opt.textContent = p.player_name
+          ? `${p.player_name} (${p.player_id})`
+          : p.player_id;
+        playerSel.appendChild(opt);
+      }
+    }
     renderTags();
     renderAnchors();
+    updateTouchPicker();
     const predCount = predictedPixelByFrame.size;
     setStatus(
       predCount > 0

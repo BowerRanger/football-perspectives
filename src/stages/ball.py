@@ -159,6 +159,84 @@ def _load_ball_anchors(
     return {a.frame: a for a in aset.anchors}
 
 
+class _BoneWorldLookup:
+    """Resolve ``player_touch`` anchors to bone world positions via SMPL FK.
+
+    Caches per-player SmplWorldTrack loads to avoid repeated NPZ reads.
+    Returns ``None`` when the player track, the requested frame, or the
+    bone name is unavailable — caller falls back to the pixel-only
+    behaviour for that anchor.
+    """
+
+    def __init__(self, output_dir: Path, shot_id: str) -> None:
+        from src.utils.ball_anchor_heights import BONE_TO_SMPL_INDEX
+
+        self._output_dir = output_dir
+        self._shot_id = shot_id
+        self._bone_map = BONE_TO_SMPL_INDEX
+        self._tracks: dict[str, object] = {}
+
+    def _load_track(self, player_id: str) -> object | None:
+        if player_id in self._tracks:
+            return self._tracks[player_id]
+        from src.schemas.smpl_world import SmplWorldTrack
+        candidates = []
+        if self._shot_id:
+            candidates.append(
+                self._output_dir / "hmr_world" / f"{self._shot_id}__{player_id}_smpl_world.npz"
+            )
+        candidates.append(
+            self._output_dir / "hmr_world" / f"{player_id}_smpl_world.npz"
+        )
+        for path in candidates:
+            if path.exists():
+                try:
+                    track = SmplWorldTrack.load(path)
+                except Exception as exc:
+                    logger.warning(
+                        "ball stage: failed to load SMPL track %s: %s", path, exc
+                    )
+                    self._tracks[player_id] = None  # type: ignore[assignment]
+                    return None
+                self._tracks[player_id] = track
+                return track
+        logger.warning(
+            "ball stage: no SmplWorldTrack found for player %r (shot=%r)",
+            player_id, self._shot_id,
+        )
+        self._tracks[player_id] = None  # type: ignore[assignment]
+        return None
+
+    def bone_world(self, anchor: BallAnchor) -> np.ndarray | None:
+        from src.utils.smpl_skeleton import compute_joint_world
+
+        if anchor.state != "player_touch":
+            return None
+        if not anchor.player_id or not anchor.bone:
+            return None
+        joint_idx = self._bone_map.get(anchor.bone)
+        if joint_idx is None:
+            return None
+        track = self._load_track(anchor.player_id)
+        if track is None:
+            return None
+        frames = np.asarray(track.frames)  # type: ignore[attr-defined]
+        match = np.where(frames == anchor.frame)[0]
+        if len(match) == 0:
+            logger.debug(
+                "ball stage: SMPL track for %s has no frame %d",
+                anchor.player_id, anchor.frame,
+            )
+            return None
+        i = int(match[0])
+        return compute_joint_world(
+            track.thetas[i],         # type: ignore[attr-defined]
+            track.root_R[i],         # type: ignore[attr-defined]
+            track.root_t[i],         # type: ignore[attr-defined]
+            joint_idx,
+        )
+
+
 class BallStage(BaseStage):
     name = "ball"
 
@@ -277,6 +355,7 @@ class BallStage(BaseStage):
 
         feet_pixel_by_frame = _load_foot_uvs_for_shot(self.output_dir, shot_id)
         anchor_by_frame = _load_ball_anchors(self.output_dir, shot_id)
+        bone_lookup = _BoneWorldLookup(self.output_dir, shot_id)
         if anchor_by_frame:
             logger.info(
                 "ball stage: loaded %d anchors for shot %s",
@@ -423,25 +502,34 @@ class BallStage(BaseStage):
         for fi, uv_anchor in anchor_pixels.items():
             if fi not in per_frame_K:
                 continue
-            anchor_state = anchor_by_frame[fi].state
+            anc = anchor_by_frame[fi]
+            anchor_state = anc.state
             if anchor_state not in HARD_KNOT_STATES:
                 continue
-            try:
-                plane_z = state_to_height(anchor_state)
-            except ValueError:
-                plane_z = ball_radius
-            try:
-                world = ankle_ray_to_pitch(
-                    uv_anchor,
-                    K=per_frame_K[fi],
-                    R=per_frame_R[fi],
-                    t=per_frame_t[fi],
-                    plane_z=plane_z,
-                    distortion=distortion,
-                )
-            except Exception as exc:
-                logger.debug("ball anchor projection failed at frame %d: %s", fi, exc)
-                continue
+            world: np.ndarray | None = None
+            if anchor_state == "player_touch":
+                # SMPL FK on the named bone is the authoritative world
+                # position — overrides the pixel ray-cast for both XY
+                # and Z. Falls back to ray-cast at the fallback height
+                # when the SMPL track is unavailable.
+                world = bone_lookup.bone_world(anc)
+            if world is None:
+                try:
+                    plane_z = state_to_height(anchor_state)
+                except ValueError:
+                    plane_z = ball_radius
+                try:
+                    world = ankle_ray_to_pitch(
+                        uv_anchor,
+                        K=per_frame_K[fi],
+                        R=per_frame_R[fi],
+                        t=per_frame_t[fi],
+                        plane_z=plane_z,
+                        distortion=distortion,
+                    )
+                except Exception as exc:
+                    logger.debug("ball anchor projection failed at frame %d: %s", fi, exc)
+                    continue
             per_frame_world[fi] = (world, 1.0)
 
         # Flight segmentation by IMM mode posterior.
@@ -832,17 +920,16 @@ class BallStage(BaseStage):
                     if len(current_span) >= 2:
                         spans.append(current_span)
                     current_span = [(fi, anc)]
-                elif anc.state in ("header", "volley", "chest", "bounce"):
-                    # Contact events that may be both an end and a start
-                    # of a flight: header/volley/chest are body-part
-                    # contacts mid-flight; bounce is a ground contact
-                    # that may bounce the ball back up to a subsequent
-                    # airborne event (e.g. bounce → volley apex). The
-                    # event frame is in BOTH adjacent spans. If nothing
-                    # non-ground-level follows, the new [bounce] span
+                elif anc.state in ("header", "volley", "chest", "bounce", "player_touch"):
+                    # Contact events that are both an end and a start of
+                    # a flight: header/volley/chest/player_touch are
+                    # body-part contacts mid-flight; bounce is a ground
+                    # contact that may launch the ball back up to a
+                    # subsequent airborne event (e.g. bounce → volley
+                    # apex). The event frame is in BOTH adjacent spans.
+                    # If nothing non-ground-level follows, the new span
                     # has length 1 and is dropped at the next state
-                    # change — so bounce → grounded/kick still falls
-                    # through to the ground-level interp pass.
+                    # change.
                     current_span.append((fi, anc))
                     if len(current_span) >= 2:
                         spans.append(current_span)
@@ -888,15 +975,19 @@ class BallStage(BaseStage):
                     ts_p2.append(per_frame_t[fi])
                     rel = fi - fa_span
                     if anc.state in HARD_KNOT_STATES:
-                        try:
-                            world_at_anchor = ankle_ray_to_pitch(
-                                anc.image_xy,
-                                K=per_frame_K[fi], R=per_frame_R[fi], t=per_frame_t[fi],
-                                plane_z=state_to_height(anc.state),
-                                distortion=distortion,
-                            )
-                        except Exception:
-                            continue
+                        world_at_anchor: np.ndarray | None = None
+                        if anc.state == "player_touch":
+                            world_at_anchor = bone_lookup.bone_world(anc)
+                        if world_at_anchor is None:
+                            try:
+                                world_at_anchor = ankle_ray_to_pitch(
+                                    anc.image_xy,
+                                    K=per_frame_K[fi], R=per_frame_R[fi], t=per_frame_t[fi],
+                                    plane_z=state_to_height(anc.state),
+                                    distortion=distortion,
+                                )
+                            except Exception:
+                                continue
                         knots[rel] = np.asarray(world_at_anchor, dtype=float)
                     else:
                         # airborne_low/mid/high → one-sided Z hinge that

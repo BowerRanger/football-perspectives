@@ -491,13 +491,26 @@ def main(argv: list[str]) -> int:
             )
             _export_fbx(fbx_dir / f"{fbx_name}.fbx")
 
-    # --- Ball FBX ----------------------------------------------------
+    # --- Ball FBX (per shot) -----------------------------------------
+    # Multi-shot layout writes ``ball/{shot_id}_ball_track.json`` and
+    # this script emits ``fbx/{shot_id}_ball.fbx`` for each one. The
+    # legacy unprefixed ``ball/ball_track.json`` is still picked up for
+    # back-compat with old single-shot runs.
 
-    ball_path = output_dir / "ball" / "ball_track.json"
-    if ball_path.exists():
-        ball = json.loads(ball_path.read_text())
-        ball_frames = [f for f in ball["frames"] if f.get("world_xyz")]
-        if ball_frames:
+    ball_dir = output_dir / "ball"
+    if ball_dir.exists():
+        ball_track_paths: list[tuple[str, Path]] = []
+        for path in sorted(ball_dir.glob("*_ball_track.json")):
+            shot_id = path.stem[: -len("_ball_track")]
+            ball_track_paths.append((shot_id, path))
+        legacy = ball_dir / "ball_track.json"
+        if legacy.exists():
+            ball_track_paths.append(("", legacy))
+        for shot_id, ball_path in ball_track_paths:
+            ball = json.loads(ball_path.read_text())
+            ball_frames = [f for f in ball["frames"] if f.get("world_xyz")]
+            if not ball_frames:
+                continue
             _reset_scene()
             _set_unit_scale_metres()
             scene = bpy.context.scene
@@ -510,16 +523,27 @@ def main(argv: list[str]) -> int:
                 obj.keyframe_insert(data_path="location", frame=int(f["frame"]))
             bpy.ops.object.select_all(action="DESELECT")
             obj.select_set(True)
-            _export_fbx(fbx_dir / "ball.fbx")
+            fbx_name = f"{shot_id}_ball.fbx" if shot_id else "ball.fbx"
+            _export_fbx(fbx_dir / fbx_name)
 
-    # --- Camera FBX --------------------------------------------------
+    # --- Camera FBX (per shot) ---------------------------------------
+    # Same per-shot pattern as ball above.
 
-    cam_path = output_dir / "camera" / "camera_track.json"
-    if cam_path.exists():
-        cam = json.loads(cam_path.read_text())
-        frames = cam.get("frames", [])
-        image_w, _ = cam.get("image_size", [1920, 1080])
-        if frames:
+    cam_dir = output_dir / "camera"
+    if cam_dir.exists():
+        cam_track_paths: list[tuple[str, Path]] = []
+        for path in sorted(cam_dir.glob("*_camera_track.json")):
+            shot_id = path.stem[: -len("_camera_track")]
+            cam_track_paths.append((shot_id, path))
+        legacy_cam = cam_dir / "camera_track.json"
+        if legacy_cam.exists():
+            cam_track_paths.append(("", legacy_cam))
+        for shot_id, cam_path in cam_track_paths:
+            cam = json.loads(cam_path.read_text())
+            frames = cam.get("frames", [])
+            image_w, _ = cam.get("image_size", [1920, 1080])
+            if not frames:
+                continue
             _reset_scene()
             _set_unit_scale_metres()
             scene = bpy.context.scene
@@ -537,7 +561,8 @@ def main(argv: list[str]) -> int:
                 cam_data.keyframe_insert(data_path="lens", frame=int(f["frame"]))
             bpy.ops.object.select_all(action="DESELECT")
             cam_obj.select_set(True)
-            _export_fbx(fbx_dir / "camera.fbx")
+            fbx_name = f"{shot_id}_camera.fbx" if shot_id else "camera.fbx"
+            _export_fbx(fbx_dir / fbx_name)
 
     return 0
 

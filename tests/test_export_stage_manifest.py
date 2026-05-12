@@ -201,3 +201,94 @@ def test_manifest_skipped_when_no_player_fbx(tmp_path: Path) -> None:
     stage.write_ue_manifest(clip_name="clip_demo")
     manifest_path = output_dir / "export" / "ue_manifest.json"
     assert not manifest_path.exists()
+
+
+def test_manifest_picks_up_per_shot_ball_and_camera_fbx(tmp_path: Path) -> None:
+    """When a shots_manifest names the clip's primary shot, the UE
+    manifest must reference per-shot FBX/JSON for ball and camera
+    ({shot_id}_ball.fbx, ball/{shot_id}_ball_track.json, etc.) — not
+    the legacy unprefixed paths."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    _write_min_inputs(output_dir)
+
+    # Re-save the hmr_world track with shot_id so per-shot filter accepts it.
+    SmplWorldTrack(
+        player_id="P001",
+        frames=np.arange(5, dtype=np.int64),
+        betas=np.zeros(10),
+        thetas=np.zeros((5, 24, 3)),
+        root_R=np.tile(np.eye(3), (5, 1, 1)),
+        root_t=np.zeros((5, 3)),
+        confidence=np.ones(5),
+        shot_id="origi01",
+    ).save(output_dir / "hmr_world" / "P001_smpl_world.npz")
+
+    shots_dir = output_dir / "shots"
+    shots_dir.mkdir(exist_ok=True)
+    (shots_dir / "shots_manifest.json").write_text(
+        json.dumps(
+            {
+                "source_file": "",
+                "fps": 30.0,
+                "total_frames": 5,
+                "shots": [
+                    {
+                        "id": "origi01",
+                        "start_frame": 0,
+                        "end_frame": 4,
+                        "start_time": 0.0,
+                        "end_time": 0.166,
+                        "clip_file": "shots/origi01.mp4",
+                        "speed_factor": 1.0,
+                    }
+                ],
+            }
+        )
+    )
+
+    # Per-shot camera_track + ball_track.
+    cam_dir = output_dir / "camera"
+    (cam_dir / "origi01_camera_track.json").write_text(
+        json.dumps(
+            {
+                "fps": 30.0,
+                "frames": [
+                    {"frame": 0, "K": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "R": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+                    {"frame": 4, "K": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "R": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+                ],
+                "image_size": [1920, 1080],
+            }
+        )
+    )
+    ball_dir = output_dir / "ball"
+    ball_dir.mkdir()
+    (ball_dir / "origi01_ball_track.json").write_text(
+        json.dumps({
+            "frames": [
+                {"frame": 0, "world_xyz": [10.0, 20.0, 0.11], "state": "grounded"},
+                {"frame": 3, "world_xyz": [12.0, 21.0, 0.11], "state": "grounded"},
+            ],
+        })
+    )
+
+    fbx_dir = output_dir / "export" / "fbx"
+    fbx_dir.mkdir(parents=True)
+    (fbx_dir / "origi01__P001.fbx").write_bytes(b"\x00")
+    (fbx_dir / "origi01_ball.fbx").write_bytes(b"\x00")
+    (fbx_dir / "origi01_camera.fbx").write_bytes(b"\x00")
+
+    cfg = {
+        "export": {"gltf_enabled": False, "fbx_enabled": False},
+        "pitch": {"length_m": 105.0, "width_m": 68.0},
+        "ball": {"ball_radius_m": 0.11},
+    }
+    stage = ExportStage(output_dir=output_dir, config=cfg)
+    stage.write_ue_manifest(clip_name="origi01")
+
+    m = UeManifest.load(output_dir / "export" / "ue_manifest.json")
+    assert m.ball is not None, "manifest should reference per-shot ball FBX"
+    assert m.ball.fbx == "fbx/origi01_ball.fbx"
+    assert m.ball.frame_range == (0, 3)
+    assert m.camera is not None, "manifest should reference per-shot camera FBX"
+    assert m.camera.fbx == "fbx/origi01_camera.fbx"

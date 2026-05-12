@@ -413,7 +413,16 @@ class ExportStage(BaseStage):
             logger.info("[export] no player FBX present, skipping manifest")
             return
 
-        camera_path = self.output_dir / "camera" / "camera_track.json"
+        # Multi-shot layout writes camera_track + ball_track + their FBXs
+        # with the {shot_id}_ prefix; legacy single-shot uses unprefixed
+        # paths. Pick whichever the primary shot resolved to and fall
+        # back to legacy.
+        if primary_shot:
+            camera_path = self.output_dir / "camera" / f"{primary_shot}_camera_track.json"
+            if not camera_path.exists():
+                camera_path = self.output_dir / "camera" / "camera_track.json"
+        else:
+            camera_path = self.output_dir / "camera" / "camera_track.json"
         if not camera_path.exists():
             logger.warning("[export] camera_track.json missing; using defaults")
             fps = 30.0
@@ -438,8 +447,14 @@ class ExportStage(BaseStage):
                 )
 
         ball_entry: BallEntry | None = None
-        ball_fbx = fbx_dir / "ball.fbx"
-        ball_track_path = self.output_dir / "ball" / "ball_track.json"
+        if primary_shot:
+            ball_fbx = fbx_dir / f"{primary_shot}_ball.fbx"
+            ball_track_path = self.output_dir / "ball" / f"{primary_shot}_ball_track.json"
+            ball_fbx_rel = f"fbx/{primary_shot}_ball.fbx"
+        else:
+            ball_fbx = fbx_dir / "ball.fbx"
+            ball_track_path = self.output_dir / "ball" / "ball_track.json"
+            ball_fbx_rel = "fbx/ball.fbx"
         if ball_fbx.exists() and ball_track_path.exists():
             ball_meta = json.loads(ball_track_path.read_text())
             ball_frames = [
@@ -449,18 +464,23 @@ class ExportStage(BaseStage):
             ]
             if ball_frames:
                 ball_entry = BallEntry(
-                    fbx="fbx/ball.fbx",
+                    fbx=ball_fbx_rel,
                     frame_range=(int(ball_frames[0]), int(ball_frames[-1])),
                 )
 
         camera_entry: CameraEntry | None = None
-        camera_fbx = fbx_dir / "camera.fbx"
+        if primary_shot:
+            camera_fbx = fbx_dir / f"{primary_shot}_camera.fbx"
+            camera_fbx_rel = f"fbx/{primary_shot}_camera.fbx"
+        else:
+            camera_fbx = fbx_dir / "camera.fbx"
+            camera_fbx_rel = "fbx/camera.fbx"
         if camera_fbx.exists() and cam_meta:
             cam_frames = cam_meta.get("frames", [])
             image_size = tuple(cam_meta.get("image_size", [1920, 1080]))
             if cam_frames:
                 camera_entry = CameraEntry(
-                    fbx="fbx/camera.fbx",
+                    fbx=camera_fbx_rel,
                     image_size=(int(image_size[0]), int(image_size[1])),
                     frame_range=(
                         int(cam_frames[0]["frame"]),

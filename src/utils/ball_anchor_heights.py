@@ -45,6 +45,17 @@ EVENT_STATES: frozenset[str] = frozenset({
     "kick", "catch", "bounce", "header", "volley", "chest",
 })
 
+# States where the ball is physically at ground level (z = 0.11 m).
+# Used by the Layer 5 grounded-anchor linear-interp pass to fill the
+# world XY of unanchored frames between e.g. a grounded marker and the
+# next kick — both endpoints are at the ground so XY interpolates
+# smoothly along the pitch. catch (1.5 m) is excluded because the ball
+# is in a player's hands; airborne/header/volley/chest are excluded
+# because the ball is in the air.
+GROUND_LEVEL_STATES: frozenset[str] = frozenset({
+    "grounded", "kick", "bounce",
+})
+
 # Z-range buckets for the airborne tags. Each entry is (z_min_m, z_max_m).
 # Used by the Phase 2 parabola fit as a one-sided hinge constraint: zero
 # penalty when the fitted z is inside the bucket, growing penalty outside.

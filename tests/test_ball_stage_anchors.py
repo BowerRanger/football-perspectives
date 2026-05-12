@@ -376,10 +376,11 @@ def test_consecutive_grounded_anchors_interpolate_world(tmp_path: Path):
 
 
 @pytest.mark.integration
-def test_grounded_to_event_anchor_no_interpolation(tmp_path: Path):
-    """A grounded anchor followed by a non-grounded anchor (e.g. kick)
-    should NOT interpolate between them — the user marked a state change
-    so we leave WASB alone in the gap."""
+def test_grounded_to_kick_interpolates_at_ground_level(tmp_path: Path):
+    """A grounded anchor followed by a kick anchor — both at z=0.11 m
+    — should linearly interpolate world XY between them. The ball is
+    on the pitch surface throughout (rolling toward the kicker), so
+    the smooth interp at ground level is correct."""
     K, R, t = _camera_pose()
     out = tmp_path / "out"
     n_frames = 30
@@ -387,8 +388,9 @@ def test_grounded_to_event_anchor_no_interpolation(tmp_path: Path):
     _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
     _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
 
+    # WASB returns wild off-pitch pixels to prove the interp overrides it.
     detections: list[tuple[float, float, float] | None] = [
-        (640.0, 360.0, 0.85) for _ in range(n_frames)
+        (50.0, 50.0, 0.85) for _ in range(n_frames)
     ]
     BallAnchorSet(
         clip_id="play", image_size=(1280, 720),
@@ -404,23 +406,15 @@ def test_grounded_to_event_anchor_no_interpolation(tmp_path: Path):
     ).run()
 
     track = BallTrack.load(out / "ball" / "play_ball_track.json")
-    # Frames in (5, 15) should use the WASB-driven world position
-    # (which lands at the WASB pixel ground-projected), NOT a linear
-    # interpolation between the two anchors. The simplest check: the
-    # midpoint frame's world should NOT be near the linear midpoint.
     from src.utils.foot_anchor import ankle_ray_to_pitch
     pa = ankle_ray_to_pitch((640.0, 360.0), K=K, R=R, t=t, plane_z=0.11)
     pb_kick = ankle_ray_to_pitch((700.0, 380.0), K=K, R=R, t=t, plane_z=0.11)
-    expected_interp_mid = (pa + pb_kick) / 2.0
+    expected_mid = (pa + pb_kick) / 2.0
     f10 = next(f for f in track.frames if f.frame == 10)
-    # f10 should equal pa (since WASB returns (640, 360) every frame =
-    # the same as anchor A), not the interpolated midpoint.
     assert f10.world_xyz is not None
     actual = np.array(f10.world_xyz)
-    # Distinguish by checking against WASB pixel rather than interp.
-    wasb_world = pa  # WASB returns (640, 360) → same projection as anchor A
-    assert np.linalg.norm(actual - wasb_world) < 0.1, (
-        f"expected WASB-driven world {wasb_world}, got {actual}"
+    assert np.allclose(actual, expected_mid, atol=0.05), (
+        f"expected ground-level interp midpoint {expected_mid}, got {actual}"
     )
 
 
@@ -903,3 +897,37 @@ def test_volley_and_chest_split_spans_and_pin_endpoint(tmp_path: Path, event_sta
         f"{event_state} should pin world to ray-cast at z={plane_z}; "
         f"expected {expected_world}, got {list(f20.world_xyz)}"
     )
+
+
+@pytest.mark.integration
+def test_bounce_to_kick_interpolates_at_ground_level(tmp_path: Path):
+    """A bounce → kick pair (both at z=0.11) should interpolate world
+    XY along the pitch surface — the ball rolled from the bounce to the
+    kicker."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 25
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    detections = [(50.0, 50.0, 0.85) for _ in range(n_frames)]
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720),
+        anchors=(
+            BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="bounce"),
+            BallAnchor(frame=15, image_xy=(700.0, 380.0), state="kick"),
+        ),
+    ).save(out / "ball" / "play_ball_anchors.json")
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    from src.utils.foot_anchor import ankle_ray_to_pitch
+    pa = ankle_ray_to_pitch((640.0, 360.0), K=K, R=R, t=t, plane_z=0.11)
+    pb = ankle_ray_to_pitch((700.0, 380.0), K=K, R=R, t=t, plane_z=0.11)
+    expected_mid = (pa + pb) / 2.0
+    f10 = next(f for f in track.frames if f.frame == 10)
+    assert f10.world_xyz is not None
+    assert np.allclose(np.array(f10.world_xyz), expected_mid, atol=0.05)

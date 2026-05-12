@@ -40,6 +40,7 @@ from src.schemas.ball_anchor import BallAnchor, BallAnchorSet
 from src.utils.ball_anchor_heights import (
     AIRBORNE_STATES,
     EVENT_STATES,
+    GROUND_LEVEL_STATES,
     HARD_KNOT_STATES,
     airborne_bucket_range,
     state_to_height,
@@ -752,26 +753,31 @@ class BallStage(BaseStage):
         # those frames as state="flight". Avoids polluting the segments
         # table with zero-parabola placeholders.
 
-        # Layer 5: linear interpolation between consecutive grounded
-        # anchors. When two grounded anchors are separated by frames
-        # with NO anchors of any kind in between, the world position at
-        # every intermediate frame is linearly interpolated from the
-        # two anchor ray-casts. This overrides WASB-driven positions
-        # which are noisy and frequently project off-pitch.
+        # Layer 5: linear interpolation between consecutive ground-level
+        # anchors. grounded / kick / bounce are all physically at
+        # z = 0.11 m, so XY interpolates smoothly between them along
+        # the pitch surface. catch is not in this set (z = 1.5 m); any
+        # airborne / header / volley / chest anchor between two
+        # ground-level anchors blocks the interp (the ball was airborne
+        # in between).
         if anchor_by_frame:
-            grounded_anchor_frames = sorted(
+            ground_level_frames = sorted(
                 fi for fi, a in anchor_by_frame.items()
-                if a.state == "grounded" and a.image_xy is not None
+                if a.state in GROUND_LEVEL_STATES and a.image_xy is not None
             )
-            for i in range(len(grounded_anchor_frames) - 1):
-                fa = grounded_anchor_frames[i]
-                fb = grounded_anchor_frames[i + 1]
+            for i in range(len(ground_level_frames) - 1):
+                fa = ground_level_frames[i]
+                fb = ground_level_frames[i + 1]
                 if fb - fa <= 1:
                     continue
-                # Skip if any other anchor (of any kind) lies strictly
-                # between fa and fb — those would interrupt the smooth
-                # grounded path.
-                if any(fa < fi < fb for fi in anchor_by_frame.keys() if fi != fa and fi != fb):
+                # Skip if any anchor that is NOT ground-level lies
+                # strictly between fa and fb. Other ground-level anchors
+                # are fine (they're at z=0.11 too).
+                if any(
+                    fa < fi < fb
+                    and anchor_by_frame[fi].state not in GROUND_LEVEL_STATES
+                    for fi in anchor_by_frame.keys()
+                ):
                     continue
                 wa = per_frame_world.get(fa)
                 wb = per_frame_world.get(fb)
@@ -1049,6 +1055,15 @@ class BallStage(BaseStage):
                 if anc_a.state == "grounded" or anc_b.state == "grounded":
                     continue
                 if anc_a.state not in _NON_GROUNDED or anc_b.state not in _NON_GROUNDED:
+                    continue
+                # If BOTH endpoints are ground-level (e.g. bounce→kick,
+                # kick→bounce), the ground-level linear-interp pass
+                # already filled the world XY at z=0.11. Don't clobber
+                # it — that pair represents the ball rolling, not flying.
+                if (
+                    anc_a.state in GROUND_LEVEL_STATES
+                    and anc_b.state in GROUND_LEVEL_STATES
+                ):
                     continue
                 if fb - fa <= 1:
                     continue

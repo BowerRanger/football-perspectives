@@ -3969,6 +3969,25 @@ function buildBallAnchorEditor(data, shotId) {
   header.append(saveBtn, anchorsToggle.element, predictionToggle.element, statusEl, hint);
   wrap.appendChild(header);
 
+  // Tag + player_touch UI state — declared before the tag-column setup
+  // so the dropdowns below can reference them at construction time.
+  let selectedTag = "grounded";
+  let selectedPlayer = "";
+  let selectedBone = "r_foot";
+  let availablePlayers = [];  // [{player_id, player_name?}, ...]
+  const BONE_OPTIONS = [
+    { id: "l_foot",     label: "Left foot" },
+    { id: "r_foot",     label: "Right foot" },
+    { id: "l_knee",     label: "Left knee" },
+    { id: "r_knee",     label: "Right knee" },
+    { id: "chest",      label: "Chest" },
+    { id: "head",       label: "Head" },
+    { id: "l_shoulder", label: "Left shoulder" },
+    { id: "r_shoulder", label: "Right shoulder" },
+    { id: "l_hand",     label: "Left hand" },
+    { id: "r_hand",     label: "Right hand" },
+  ];
+
   // 3-column body.
   const grid = document.createElement("div");
   grid.style.cssText = "display:grid;grid-template-columns:210px 1fr 230px;gap:10px;align-items:start;";
@@ -4052,22 +4071,6 @@ function buildBallAnchorEditor(data, shotId) {
   let fps = data.fps || 30;
   let imageSize = [1280, 720];
   let anchors = [];
-  let selectedTag = "grounded";
-  let selectedPlayer = "";   // for player_touch
-  let selectedBone = "r_foot";  // for player_touch
-  let availablePlayers = [];  // [{player_id, player_name?}, ...]
-  const BONE_OPTIONS = [
-    { id: "l_foot",     label: "Left foot" },
-    { id: "r_foot",     label: "Right foot" },
-    { id: "l_knee",     label: "Left knee" },
-    { id: "r_knee",     label: "Right knee" },
-    { id: "chest",      label: "Chest" },
-    { id: "head",       label: "Head" },
-    { id: "l_shoulder", label: "Left shoulder" },
-    { id: "r_shoulder", label: "Right shoulder" },
-    { id: "l_hand",     label: "Left hand" },
-    { id: "r_hand",     label: "Right hand" },
-  ];
   let dirty = false;
   // Per-frame predicted ball world position from /ball/preview (data.frames).
   // Projected back to pixels using the camera track after camera loads.

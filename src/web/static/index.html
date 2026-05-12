@@ -3912,7 +3912,17 @@ function buildBallAnchorEditor(data, shotId) {
     {
       id: "header", label: "Header", color: "#facc15",
       range: "z ≈ 2.5 m, event",
-      description: "Ball contacts a player's head mid-flight. Soft 2.5 m hint (header heights vary 1.8–3+ m). Splits the flight run.",
+      description: "Ball contacts a player's head mid-flight. Hard knot at 2.5 m (header heights vary 1.8–3+ m). Splits the flight run — incoming and outgoing parabolas are fit separately.",
+    },
+    {
+      id: "volley", label: "Volley", color: "#22d3ee",
+      range: "z ≈ 1.0 m, event",
+      description: "Foot strikes the ball while it's airborne (jumping volley, foot-control mid-air, half-volley). Hard knot at ≈1 m. Splits the flight run. For ground-level half-volleys use 'kick'; for high jumping volleys use 'header'.",
+    },
+    {
+      id: "chest", label: "Chest", color: "#fde047",
+      range: "z ≈ 1.3 m, event",
+      description: "Ball touches a player's chest. Hard knot at ≈1.3 m (typical adult chest height). Splits the flight run — useful for chest controls where the ball deflects down or to a teammate.",
     },
   ];
 

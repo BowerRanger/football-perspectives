@@ -17,31 +17,32 @@ _STATE_HEIGHT_M: dict[str, float] = {
     "catch":         1.5,
     "bounce":        0.11,
     "header":        2.5,
+    "volley":        1.0,
+    "chest":         1.3,
 }
 
-# States whose pixel + height pin the trajectory exactly. `header` is
-# included so it can act as the boundary of a flight sub-span: the
-# parabola before the header must land at the head, and the parabola
-# after the header must start from it. The 1.5–3.5 m header bucket is
-# tight enough that pinning at midpoint 2.5 m produces only ≈0.5 m of
-# vertical error — much smaller than the multi-metre depth ambiguity
-# we get when the header is a pixel-only observation.
+# States whose pixel + height pin the trajectory exactly. The body-part
+# contact events (header, volley, chest) are included so they can act
+# as the boundary of a flight sub-span — the parabola before the contact
+# must land at the body part, and the parabola after must start from it.
+# Each midpoint produces ≤1 m of vertical error against typical play —
+# smaller than the multi-metre depth ambiguity from pixel-only obs.
 HARD_KNOT_STATES: frozenset[str] = frozenset({
-    "grounded", "kick", "catch", "bounce", "header",
+    "grounded", "kick", "catch", "bounce", "header", "volley", "chest",
 })
 
 # States that force the IMM into the flight branch for that frame and
-# extend / create a flight segment. `header` is treated as airborne
-# even though it's a contact event — the ball IS in the air when the
-# head touches it.
+# extend / create a flight segment. Body-part contacts (header, volley,
+# chest) are treated as airborne even though they're contact events —
+# the ball IS in the air when the body part touches it.
 AIRBORNE_STATES: frozenset[str] = frozenset({
     "airborne_low", "airborne_mid", "airborne_high",
-    "header", "off_screen_flight",
+    "header", "volley", "chest", "off_screen_flight",
 })
 
 # States that mark a flight boundary (split flight runs at this frame).
 EVENT_STATES: frozenset[str] = frozenset({
-    "kick", "catch", "bounce", "header",
+    "kick", "catch", "bounce", "header", "volley", "chest",
 })
 
 # Z-range buckets for the airborne tags. Each entry is (z_min_m, z_max_m).

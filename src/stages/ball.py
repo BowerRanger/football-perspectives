@@ -826,7 +826,10 @@ class BallStage(BaseStage):
                     if len(current_span) >= 2:
                         spans.append(current_span)
                     current_span = [(fi, anc)]
-                elif anc.state == "header":
+                elif anc.state in ("header", "volley", "chest"):
+                    # Body-part contact mid-flight: closes the incoming
+                    # parabola, opens an outgoing one. Contact frame is
+                    # in BOTH adjacent spans.
                     current_span.append((fi, anc))
                     if len(current_span) >= 2:
                         spans.append(current_span)

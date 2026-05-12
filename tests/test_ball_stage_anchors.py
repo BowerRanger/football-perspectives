@@ -850,3 +850,56 @@ def test_phase2_pins_p0_at_airborne_start_when_no_kick_present(tmp_path: Path):
     f5 = next(f for f in track.frames if f.frame == 5)
     assert f5.world_xyz is not None
     assert np.allclose(f5.world_xyz, expected_p0, atol=0.05)
+
+
+@pytest.mark.parametrize("event_state,plane_z", [("volley", 1.0), ("chest", 1.3)])
+@pytest.mark.integration
+def test_volley_and_chest_split_spans_and_pin_endpoint(tmp_path: Path, event_state, plane_z):
+    """volley (z=1.0 m) and chest (z=1.3 m) split flight spans the same
+    way header does — incoming parabola lands at the contact, outgoing
+    parabola starts from it. The contact frame is in both sub-spans and
+    its world position is pinned via the state's height ray-cast."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 60
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
+    anchors = (
+        BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="kick"),
+        BallAnchor(frame=10, image_xy=(650.0, 340.0), state="airborne_low"),
+        BallAnchor(frame=15, image_xy=(660.0, 330.0), state="airborne_low"),
+        BallAnchor(frame=20, image_xy=(670.0, 340.0), state=event_state),
+        BallAnchor(frame=25, image_xy=(680.0, 340.0), state="airborne_low"),
+        BallAnchor(frame=30, image_xy=(690.0, 350.0), state="airborne_low"),
+        BallAnchor(frame=35, image_xy=(700.0, 360.0), state="bounce"),
+    )
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720), anchors=anchors,
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    pre = [s for s in track.flight_segments if s.frame_range == (5, 20)]
+    post = [s for s in track.flight_segments if s.frame_range == (20, 35)]
+    assert pre, f"expected pre-event segment 5-20, got {[s.frame_range for s in track.flight_segments]}"
+    assert post, f"expected post-event segment 20-35, got {[s.frame_range for s in track.flight_segments]}"
+
+    # The contact frame's world position should pin to the ray-cast of
+    # the anchor pixel at the state's height plane.
+    from src.utils.foot_anchor import ankle_ray_to_pitch
+    expected_world = ankle_ray_to_pitch(
+        (670.0, 340.0), K=K, R=R, t=t, plane_z=plane_z,
+    )
+    f20 = next(f for f in track.frames if f.frame == 20)
+    assert f20.world_xyz is not None
+    assert np.allclose(f20.world_xyz, expected_world, atol=0.3), (
+        f"{event_state} should pin world to ray-cast at z={plane_z}; "
+        f"expected {expected_world}, got {list(f20.world_xyz)}"
+    )

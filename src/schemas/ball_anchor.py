@@ -20,12 +20,15 @@ BallAnchorState = Literal[
     "catch",
     "bounce",
     "header",
+    "volley",
+    "chest",
     "off_screen_flight",
 ]
 
 _VALID_STATES: frozenset[str] = frozenset({
     "grounded", "airborne_low", "airborne_mid", "airborne_high",
-    "kick", "catch", "bounce", "header", "off_screen_flight",
+    "kick", "catch", "bounce", "header", "volley", "chest",
+    "off_screen_flight",
 })
 
 

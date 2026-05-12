@@ -54,6 +54,8 @@ def test_event_heights():
     assert state_to_height("bounce") == 0.11
     assert state_to_height("catch") == 1.5
     assert state_to_height("header") == 2.5
+    assert state_to_height("volley") == 1.0
+    assert state_to_height("chest") == 1.3
 
 
 def test_off_screen_flight_has_no_height():
@@ -71,10 +73,13 @@ def test_hard_knot_states():
     assert "kick" in HARD_KNOT_STATES
     assert "catch" in HARD_KNOT_STATES
     assert "bounce" in HARD_KNOT_STATES
-    # Header bucket [1.5, 3.5] is tight enough that pinning at midpoint
-    # 2.5 m introduces only ~0.5 m of vertical error — much less than
-    # the depth ambiguity without any Z anchor at the header frame.
+    # Body-part contact events pin the trajectory at the contact height
+    # (head 2.5 m, volley 1.0 m, chest 1.3 m). Heights vary by ~1 m
+    # per event but that's much less than the multi-metre depth slop
+    # we'd see treating them as pixel-only obs.
     assert "header" in HARD_KNOT_STATES
+    assert "volley" in HARD_KNOT_STATES
+    assert "chest" in HARD_KNOT_STATES
     # Airborne buckets are coarse so do NOT pin world position exactly.
     assert "airborne_low" not in HARD_KNOT_STATES
     assert "airborne_mid" not in HARD_KNOT_STATES
@@ -88,10 +93,14 @@ def test_airborne_state_classification():
     assert "airborne_mid" in AIRBORNE_STATES
     assert "airborne_high" in AIRBORNE_STATES
     assert "header" in AIRBORNE_STATES
+    assert "volley" in AIRBORNE_STATES
+    assert "chest" in AIRBORNE_STATES
     assert "off_screen_flight" in AIRBORNE_STATES
     assert "grounded" not in AIRBORNE_STATES
     assert "kick" not in AIRBORNE_STATES
 
 
 def test_event_states():
-    assert EVENT_STATES == frozenset({"kick", "catch", "bounce", "header"})
+    assert EVENT_STATES == frozenset({
+        "kick", "catch", "bounce", "header", "volley", "chest",
+    })

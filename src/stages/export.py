@@ -451,11 +451,18 @@ class ExportStage(BaseStage):
             ball_fbx = fbx_dir / f"{primary_shot}_ball.fbx"
             ball_track_path = self.output_dir / "ball" / f"{primary_shot}_ball_track.json"
             ball_fbx_rel = f"fbx/{primary_shot}_ball.fbx"
+            ball_track_rel = f"ball/{primary_shot}_ball_track.json"
         else:
             ball_fbx = fbx_dir / "ball.fbx"
             ball_track_path = self.output_dir / "ball" / "ball_track.json"
             ball_fbx_rel = "fbx/ball.fbx"
-        if ball_fbx.exists() and ball_track_path.exists():
+            ball_track_rel = "ball/ball_track.json"
+        # The UE side prefers ``track_json`` for ball animation — reads
+        # per-frame world_xyz directly into a MovieScene3DTransformTrack
+        # on the BP_BallActor binding (static mesh, not a skeletal
+        # asset). ``fbx`` is kept for backwards compatibility but unused
+        # by the current EUW load path.
+        if ball_track_path.exists():
             ball_meta = json.loads(ball_track_path.read_text())
             ball_frames = [
                 f["frame"]
@@ -464,28 +471,36 @@ class ExportStage(BaseStage):
             ]
             if ball_frames:
                 ball_entry = BallEntry(
-                    fbx=ball_fbx_rel,
+                    fbx=ball_fbx_rel if ball_fbx.exists() else "",
                     frame_range=(int(ball_frames[0]), int(ball_frames[-1])),
+                    track_json=ball_track_rel,
                 )
 
         camera_entry: CameraEntry | None = None
         if primary_shot:
             camera_fbx = fbx_dir / f"{primary_shot}_camera.fbx"
             camera_fbx_rel = f"fbx/{primary_shot}_camera.fbx"
+            camera_track_rel = f"camera/{primary_shot}_camera_track.json"
         else:
             camera_fbx = fbx_dir / "camera.fbx"
             camera_fbx_rel = "fbx/camera.fbx"
-        if camera_fbx.exists() and cam_meta:
+            camera_track_rel = "camera/camera_track.json"
+        # Same architectural choice as the ball: prefer ``track_json``
+        # for the camera (per-frame R/t/K on a CineCameraActor binding)
+        # over a skeletal-FBX round-trip. ``fbx`` is kept only when the
+        # file is present, for backwards compatibility.
+        if cam_meta:
             cam_frames = cam_meta.get("frames", [])
             image_size = tuple(cam_meta.get("image_size", [1920, 1080]))
             if cam_frames:
                 camera_entry = CameraEntry(
-                    fbx=camera_fbx_rel,
+                    fbx=camera_fbx_rel if camera_fbx.exists() else "",
                     image_size=(int(image_size[0]), int(image_size[1])),
                     frame_range=(
                         int(cam_frames[0]["frame"]),
                         int(cam_frames[-1]["frame"]),
                     ),
+                    track_json=camera_track_rel,
                 )
 
         pitch_cfg = self.config.get("pitch", {}) or {}

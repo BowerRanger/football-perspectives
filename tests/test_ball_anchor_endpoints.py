@@ -181,3 +181,117 @@ def test_post_player_touch_forwards_player_id_and_bone(client):
     assert a["state"] == "player_touch"
     assert a["player_id"] == "P003"
     assert a["bone"] == "r_foot"
+
+
+def test_post_goal_impact_forwards_goal_element(client):
+    """The /ball-anchors POST + GET must round-trip the goal_element
+    field for goal_impact anchors. Mirrors the player_touch
+    forwarding test."""
+    c, tmp_path = client
+    payload = {
+        "clip_id": "play",
+        "image_size": [1280, 720],
+        "anchors": [
+            {
+                "frame": 42, "image_xy": [640.0, 200.0],
+                "state": "goal_impact", "goal_element": "crossbar",
+            },
+        ],
+    }
+    r = c.post("/ball-anchors/play", json=payload)
+    assert r.status_code == 200, r.text
+    saved = json.loads(
+        (tmp_path / "ball" / "play_ball_anchors.json").read_text()
+    )
+    a = saved["anchors"][0]
+    assert a["state"] == "goal_impact"
+    assert a["goal_element"] == "crossbar"
+    # And GET round-trips it.
+    body = c.get("/ball-anchors/play").json()
+    assert body["anchors"][0]["goal_element"] == "crossbar"
+
+
+def test_post_goal_impact_missing_element_rejected(client):
+    """A goal_impact anchor with no goal_element must be rejected by
+    the server's schema validation pass (400)."""
+    c, _ = client
+    payload = {
+        "clip_id": "play",
+        "image_size": [1280, 720],
+        "anchors": [
+            {
+                "frame": 5, "image_xy": [100.0, 100.0],
+                "state": "goal_impact",
+            },
+        ],
+    }
+    r = c.post("/ball-anchors/play", json=payload)
+    assert r.status_code == 400, r.text
+
+
+def test_post_player_touch_with_touch_type_and_spin_round_trips(client):
+    """POST + GET must round-trip the new ``touch_type`` and ``spin``
+    fields on a player_touch anchor."""
+    c, tmp_path = client
+    payload = {
+        "clip_id": "play",
+        "image_size": [1280, 720],
+        "anchors": [
+            {
+                "frame": 5, "image_xy": [640.0, 360.0],
+                "state": "player_touch",
+                "player_id": "P003", "bone": "r_foot",
+                "touch_type": "shot", "spin": "instep_curl_right",
+            },
+        ],
+    }
+    r = c.post("/ball-anchors/play", json=payload)
+    assert r.status_code == 200, r.text
+    saved = json.loads(
+        (tmp_path / "ball" / "play_ball_anchors.json").read_text()
+    )
+    a = saved["anchors"][0]
+    assert a["state"] == "player_touch"
+    assert a["touch_type"] == "shot"
+    assert a["spin"] == "instep_curl_right"
+    # GET round-trips both fields.
+    body = c.get("/ball-anchors/play").json()
+    assert body["anchors"][0]["touch_type"] == "shot"
+    assert body["anchors"][0]["spin"] == "instep_curl_right"
+
+
+def test_post_spin_on_grounded_state_rejected(client):
+    """A spin preset attached to a non-player_touch state is rejected
+    by the server schema (400)."""
+    c, _ = client
+    payload = {
+        "clip_id": "play",
+        "image_size": [1280, 720],
+        "anchors": [
+            {
+                "frame": 5, "image_xy": [640.0, 360.0],
+                "state": "grounded", "spin": "topspin",
+            },
+        ],
+    }
+    r = c.post("/ball-anchors/play", json=payload)
+    assert r.status_code == 400, r.text
+
+
+def test_post_spin_without_touch_type_rejected(client):
+    """Spin requires touch_type='shot' or 'volley' on player_touch."""
+    c, _ = client
+    payload = {
+        "clip_id": "play",
+        "image_size": [1280, 720],
+        "anchors": [
+            {
+                "frame": 5, "image_xy": [640.0, 360.0],
+                "state": "player_touch",
+                "player_id": "P1", "bone": "r_foot",
+                "spin": "topspin",
+            },
+        ],
+    }
+    r = c.post("/ball-anchors/play", json=payload)
+    assert r.status_code == 400, r.text

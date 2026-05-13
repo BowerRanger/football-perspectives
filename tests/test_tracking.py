@@ -43,6 +43,16 @@ def _one_player_det() -> Detection:
     return Detection(bbox=(50.0, 30.0, 150.0, 200.0), confidence=0.9, class_name="player")
 
 
+def _test_cfg() -> dict:
+    """Load default config but pin the tracker to bytetrack so these
+    fast unit tests don't need BoxMOT installed or the OSNet ReID
+    checkpoint on disk. The production default (botsort) is exercised
+    end-to-end via the dispatch unit test in test_tracker_dispatch.py."""
+    cfg = load_config()
+    cfg.setdefault("tracking", {})["tracker"] = "bytetrack"
+    return cfg
+
+
 class _RequiresFitTeamClassifier:
     def __init__(self) -> None:
         self._fitted = False
@@ -61,7 +71,7 @@ class _RequiresFitTeamClassifier:
 
 
 def test_tracking_stage_writes_tracks_file(tiny_shot_dir):
-    cfg = load_config()
+    cfg = _test_cfg()
     stage = PlayerTrackingStage(
         config=cfg,
         output_dir=tiny_shot_dir,
@@ -73,7 +83,7 @@ def test_tracking_stage_writes_tracks_file(tiny_shot_dir):
 
 
 def test_tracking_stage_is_complete_after_run(tiny_shot_dir):
-    cfg = load_config()
+    cfg = _test_cfg()
     stage = PlayerTrackingStage(
         config=cfg,
         output_dir=tiny_shot_dir,
@@ -94,7 +104,7 @@ def test_tracking_stage_tracks_have_correct_schema(tiny_shot_dir):
 
 
 def test_tracking_stage_fits_team_classifier_before_classify(tiny_shot_dir):
-    cfg = load_config()
+    cfg = _test_cfg()
     classifier = _RequiresFitTeamClassifier()
     stage = PlayerTrackingStage(
         config=cfg,

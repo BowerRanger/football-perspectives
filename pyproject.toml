@@ -16,6 +16,10 @@ dependencies = [
     "ultralytics>=8.0",
     "tqdm>=4.66",
     "supervision>=0.20",
+    # 12.x is the last series that supports torch 2.1; 13.x+ requires
+    # torch>=2.3 and pip will backtrack through ~30 versions looking
+    # for a match if this is left unbounded.
+    "boxmot>=12.0.10,<13.0.0",
     "transformers>=4.40",
     "scikit-learn>=1.4",
     "torch==2.1.2",

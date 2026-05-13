@@ -55,6 +55,12 @@ class PlayerEntry:
 class BallEntry:
     fbx: str
     frame_range: tuple[int, int]
+    # Optional path to the per-frame translation source. The ball is a
+    # static mesh actor on the UE side; reading the JSON directly into
+    # a MovieScene3DTransformTrack avoids the SkeletalMesh + AnimSequence
+    # round-trip needed when binding to an FBX. Empty string when the
+    # legacy FBX path is the only source.
+    track_json: str = ""
 
 
 @dataclass
@@ -62,6 +68,11 @@ class CameraEntry:
     fbx: str
     image_size: tuple[int, int]
     frame_range: tuple[int, int]
+    # Pipeline-relative path to the camera_track.json with per-frame
+    # R/t/K data. Preferred over the FBX on the UE side — CineCameraActor
+    # is a regular actor, not a skeletal asset, so a transform + focal
+    # length track driven from JSON is the right semantic.
+    track_json: str = ""
 
 
 @dataclass
@@ -123,12 +134,16 @@ class UeManifest:
                 "fbx": self.ball.fbx,
                 "frame_range": list(self.ball.frame_range),
             }
+            if self.ball.track_json:
+                raw["ball"]["track_json"] = self.ball.track_json
         if self.camera is not None:
             raw["camera"] = {
                 "fbx": self.camera.fbx,
                 "image_size": list(self.camera.image_size),
                 "frame_range": list(self.camera.frame_range),
             }
+            if self.camera.track_json:
+                raw["camera"]["track_json"] = self.camera.track_json
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(raw, indent=2))
 
@@ -162,6 +177,7 @@ class UeManifest:
                 BallEntry(
                     fbx=raw["ball"]["fbx"],
                     frame_range=tuple(raw["ball"]["frame_range"]),
+                    track_json=raw["ball"].get("track_json", ""),
                 )
                 if "ball" in raw
                 else None
@@ -171,6 +187,7 @@ class UeManifest:
                     fbx=raw["camera"]["fbx"],
                     image_size=tuple(raw["camera"]["image_size"]),
                     frame_range=tuple(raw["camera"]["frame_range"]),
+                    track_json=raw["camera"].get("track_json", ""),
                 )
                 if "camera" in raw
                 else None

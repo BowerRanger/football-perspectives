@@ -298,14 +298,15 @@ def refine_with_shared_translation(
         fx_init = float(K_init[0, 0])
         rvec_init, _ = cv2.Rodrigues(R_init.astype(np.float64))
         rvec, fx = _solve_anchor_with_C_fixed(
-            anchor, C_locked, cx, cy, fx_init, rvec_init.reshape(3)
+            anchor, C_locked, cx, cy, fx_init, rvec_init.reshape(3),
+            distortion=sol.distortion,
         )
         R_new = _rvec_to_R(rvec)
         t_new = -R_new @ C_locked
         K_new = _make_K(fx, cx, cy)
         new_KRt[af] = (K_new, R_new, t_new)
         new_res[af] = reprojection_residual_for_anchor(
-            anchor, K_new, R_new, t_new
+            anchor, K_new, R_new, t_new, distortion=sol.distortion,
         )
 
     new_mean = float(np.mean(list(new_res.values())))
@@ -370,25 +371,34 @@ def relock_anchors_with_shared_t(
 
 
 def reprojection_residual_for_anchor(
-    anchor: Anchor, K: np.ndarray, R: np.ndarray, t: np.ndarray
+    anchor: Anchor,
+    K: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    distortion: tuple[float, float] = (0.0, 0.0),
 ) -> float:
     """Mean pixel reprojection residual across this anchor's point landmarks.
 
     Returns ``1e9`` (sentinel) if any landmark projects behind the camera.
     Lines are deliberately excluded — they constrain orientation but their
     absolute pixel residual depends on the user's chosen segment endpoints.
+
+    ``distortion`` is the (k1, k2) radial distortion applied during the
+    forward projection. Default ``(0, 0)`` matches the legacy pinhole
+    behaviour; pass the clip's recovered distortion to evaluate residuals
+    under the same lens model the solver fit.
     """
     if not anchor.landmarks:
         return 0.0
-    residuals: list[float] = []
     for lm in anchor.landmarks:
         cam = R @ np.array(lm.world_xyz) + t
         if cam[2] <= 0:
             return 1e9
-        pix = K @ cam
-        proj = pix[:2] / pix[2]
-        residuals.append(float(np.linalg.norm(np.array(lm.image_xy) - proj)))
-    return float(np.mean(residuals))
+    rvec, _ = cv2.Rodrigues(R.astype(np.float64))
+    residuals = _point_residuals_distorted(
+        list(anchor.landmarks), K, rvec, t.astype(np.float64), distortion,
+    ).reshape(-1, 2)
+    return float(np.mean(np.linalg.norm(residuals, axis=1)))
 
 
 # Internal helpers ------------------------------------------------------------
@@ -456,10 +466,16 @@ def _pick_seed_anchor(anchors: tuple[Anchor, ...]) -> Anchor:
 
 
 def _seed_anchor_pose(
-    anchor: Anchor, K: np.ndarray
+    anchor: Anchor,
+    K: np.ndarray,
+    distortion: tuple[float, float] = (0.0, 0.0),
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Run cv2.solvePnP on this anchor's point landmarks. Returns
     ``(rvec, tvec)`` or ``None`` if there are too few points or PnP fails.
+
+    ``distortion`` (k1, k2) is passed to ``cv2.solvePnP`` so the seed pose
+    is correct under the same lens model the solo LM will use. Default
+    ``(0, 0)`` keeps the legacy pinhole behaviour.
     """
     if len(anchor.landmarks) < 4:
         return None
@@ -469,7 +485,8 @@ def _seed_anchor_pose(
     img_pts = np.array(
         [lm.image_xy for lm in anchor.landmarks], dtype=np.float64
     ).reshape(-1, 1, 2)
-    dist_zero = np.zeros(5, dtype=np.float64)
+    k1, k2 = distortion
+    dist_coeffs = np.array([k1, k2, 0.0, 0.0, 0.0], dtype=np.float64)
     # SOLVEPNP_SQPNP (OpenCV ≥ 4.5) is the modern globally-optimal PnP that
     # handles ≥3 points including coplanar configurations more stably than
     # EPNP, which is highly sensitive to small fx perturbations on coplanar
@@ -477,7 +494,7 @@ def _seed_anchor_pose(
     # coplanar cases benefit from its iterative refinement).
     flag = cv2.SOLVEPNP_SQPNP if len(anchor.landmarks) < 6 else cv2.SOLVEPNP_ITERATIVE
     try:
-        ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, dist_zero, flags=flag)
+        ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, dist_coeffs, flags=flag)
     except cv2.error:
         # SQPNP raises a hard assertion on rank-deficient configurations
         # (e.g. all-collinear points). Treat that as a regular PnP failure
@@ -504,6 +521,7 @@ def _refine_seed_pose(
     cx: float,
     cy: float,
     fx_init: float,
+    distortion: tuple[float, float] = (0.0, 0.0),
 ) -> tuple[float, np.ndarray, np.ndarray]:
     """One-anchor LM that refines (fx, R, t) on the seed anchor.
 
@@ -512,6 +530,13 @@ def _refine_seed_pose(
     residual that escapes the down-weighting — the two protections compose:
     Huber handles outlier *clicks*, the down-weight handles the natural
     *scale* mismatch between point and line residuals on a wide-FOV pitch.
+
+    When ``distortion`` is non-zero the residual uses ``cv2.projectPoints``
+    so radial distortion is honoured; this lets a caller-supplied lens
+    prior bias each solo solve consistently across anchors. Lines are
+    treated as pinhole — radial distortion at line endpoints is a small
+    second-order effect and applying it would require per-endpoint
+    distortion handling that ``_line_residuals`` doesn't currently model.
 
     Returns ``(fx, rvec, tvec)`` — caller updates K and the seed pose.
     """
@@ -522,6 +547,7 @@ def _refine_seed_pose(
     n_pts = len(obj_pts)
     z_levels = len({round(z, 3) for _, _, z in obj_pts})
     use_lines_on_seed = anchor.lines and (n_pts < 6 or z_levels < 2)
+    distorted = distortion != (0.0, 0.0)
 
     def _residuals(p: np.ndarray) -> np.ndarray:
         fx = float(p[0])
@@ -529,11 +555,16 @@ def _refine_seed_pose(
         tvec = p[4:7]
         R, _ = cv2.Rodrigues(rvec)
         K = _make_K(fx, cx, cy)
-        cam = obj_pts @ R.T + tvec
-        safe_z = np.where(cam[:, 2] > 1e-3, cam[:, 2], 1e-3)
-        pix = cam @ K.T
-        proj = pix[:, :2] / safe_z[:, None]
-        parts: list[np.ndarray] = [(proj - img_pts).reshape(-1)]
+        if distorted:
+            parts: list[np.ndarray] = [_point_residuals_distorted(
+                list(anchor.landmarks), K, rvec, tvec, distortion,
+            )]
+        else:
+            cam = obj_pts @ R.T + tvec
+            safe_z = np.where(cam[:, 2] > 1e-3, cam[:, 2], 1e-3)
+            pix = cam @ K.T
+            proj = pix[:, :2] / safe_z[:, None]
+            parts = [(proj - img_pts).reshape(-1)]
         if use_lines_on_seed:
             parts.append(
                 _LINE_RESIDUAL_WEIGHT
@@ -564,6 +595,7 @@ def _solve_anchor_with_C_fixed(
     cy: float,
     fx_init: float,
     rvec_init: np.ndarray,
+    distortion: tuple[float, float] = (0.0, 0.0),
 ) -> tuple[np.ndarray, float]:
     """LM-refine (rvec, fx) for one anchor with the world-frame camera
     centre held constant. t per anchor is recomputed inside the
@@ -573,6 +605,10 @@ def _solve_anchor_with_C_fixed(
     This is the physical constraint for a static stadium-mounted camera
     (PTZ rig): the body doesn't move, only its pan/tilt and zoom. With
     only ``rvec`` and ``fx`` free this is a 4-DOF problem.
+
+    ``distortion`` honours the clip's recovered (k1, k2) when the static-
+    camera relock runs against an undistorted pinhole model; pass
+    ``(0, 0)`` for legacy callers.
     """
     obj_pts = (
         np.array([lm.world_xyz for lm in anchor.landmarks], dtype=np.float64)
@@ -584,6 +620,7 @@ def _solve_anchor_with_C_fixed(
     )
     if len(obj_pts) < 3 and not anchor.lines:
         return rvec_init.copy(), fx_init
+    distorted = distortion != (0.0, 0.0)
 
     def _residuals(p: np.ndarray) -> np.ndarray:
         fx = float(p[0])
@@ -593,11 +630,16 @@ def _solve_anchor_with_C_fixed(
         K = _make_K(fx, cx, cy)
         parts: list[np.ndarray] = []
         if len(obj_pts):
-            cam = obj_pts @ R.T + t
-            safe_z = np.where(cam[:, 2] > 1e-3, cam[:, 2], 1e-3)
-            pix = cam @ K.T
-            proj = pix[:, :2] / safe_z[:, None]
-            parts.append((proj - img_pts).reshape(-1))
+            if distorted:
+                parts.append(_point_residuals_distorted(
+                    list(anchor.landmarks), K, rvec, t, distortion,
+                ))
+            else:
+                cam = obj_pts @ R.T + t
+                safe_z = np.where(cam[:, 2] > 1e-3, cam[:, 2], 1e-3)
+                pix = cam @ K.T
+                proj = pix[:, :2] / safe_z[:, None]
+                parts.append((proj - img_pts).reshape(-1))
         if anchor.lines:
             # Down-weight lines (see _refine_seed_pose). Heavier weight when
             # there are no points (line-only anchors rely entirely on lines).
@@ -622,6 +664,7 @@ def _solve_anchor_with_t_fixed(
     cy: float,
     fx_init: float,
     rvec_init: np.ndarray,
+    distortion: tuple[float, float] = (0.0, 0.0),
 ) -> tuple[np.ndarray, float]:
     """LM-refine (rvec, fx) for one anchor with a shared t held constant.
 
@@ -640,6 +683,7 @@ def _solve_anchor_with_t_fixed(
     )
     if len(obj_pts) < 3 and not anchor.lines:
         return rvec_init.copy(), fx_init
+    distorted = distortion != (0.0, 0.0)
 
     def _residuals(p: np.ndarray) -> np.ndarray:
         fx = float(p[0])
@@ -648,11 +692,16 @@ def _solve_anchor_with_t_fixed(
         K = _make_K(fx, cx, cy)
         parts: list[np.ndarray] = []
         if len(obj_pts):
-            cam = obj_pts @ R.T + t_fixed
-            safe_z = np.where(cam[:, 2] > 1e-3, cam[:, 2], 1e-3)
-            pix = cam @ K.T
-            proj = pix[:, :2] / safe_z[:, None]
-            parts.append((proj - img_pts).reshape(-1))
+            if distorted:
+                parts.append(_point_residuals_distorted(
+                    list(anchor.landmarks), K, rvec, t_fixed, distortion,
+                ))
+            else:
+                cam = obj_pts @ R.T + t_fixed
+                safe_z = np.where(cam[:, 2] > 1e-3, cam[:, 2], 1e-3)
+                pix = cam @ K.T
+                proj = pix[:, :2] / safe_z[:, None]
+                parts.append((proj - img_pts).reshape(-1))
         if anchor.lines:
             weight = 1.0 if len(obj_pts) == 0 else _LINE_RESIDUAL_WEIGHT
             parts.append(
@@ -926,6 +975,7 @@ def _solve_one_anchor_full(
     fx_init: float,
     K_init: np.ndarray,
     fallback_seed: tuple[np.ndarray, np.ndarray] | None = None,
+    distortion: tuple[float, float] = (0.0, 0.0),
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float] | None:
     """Solo solve: cv2.solvePnP for a (R, t) seed, then LM-refine (fx, R, t)
     using both point landmarks and line annotations.
@@ -952,7 +1002,7 @@ def _solve_one_anchor_full(
     def _try(fx_seed: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, float] | None:
         K_seed = _make_K(fx_seed, cx, cy)
         if len(anchor.landmarks) >= 4:
-            seed = _seed_anchor_pose(anchor, K_seed)
+            seed = _seed_anchor_pose(anchor, K_seed, distortion=distortion)
             if seed is None:
                 return None
             rvec_init, tvec_init = seed
@@ -964,6 +1014,7 @@ def _solve_one_anchor_full(
             tvec_init = np.array([0.0, 0.0, 50.0])
         fx, rvec, tvec = _refine_seed_pose(
             anchor, rvec_init, tvec_init, cx, cy, fx_seed,
+            distortion=distortion,
         )
         K = _make_K(fx, cx, cy)
         R = _rvec_to_R(rvec)
@@ -977,7 +1028,9 @@ def _solve_one_anchor_full(
     # Primary attempt was degenerate (or failed). Try alternative priors.
     candidate_best = primary
     candidate_res = (
-        reprojection_residual_for_anchor(anchor, primary[0], primary[1], primary[2])
+        reprojection_residual_for_anchor(
+            anchor, primary[0], primary[1], primary[2], distortion=distortion,
+        )
         if primary is not None and not _is_degenerate_solo(primary[2], primary[3])
         else float("inf")
     )
@@ -987,11 +1040,209 @@ def _solve_one_anchor_full(
             continue
         if _is_degenerate_solo(alt[2], alt[3]):
             continue
-        res = reprojection_residual_for_anchor(anchor, alt[0], alt[1], alt[2])
+        res = reprojection_residual_for_anchor(
+            anchor, alt[0], alt[1], alt[2], distortion=distortion,
+        )
         if res < candidate_res:
             candidate_res = res
             candidate_best = alt
     return candidate_best
+
+
+def _anchor_image_coverage(
+    anchor: Anchor, image_size: tuple[int, int]
+) -> float:
+    """Fraction of the image area enclosed by an anchor's landmarks'
+    bounding box. Returns a value in [0, 1]; 0 if there are <2 landmarks.
+
+    Used by ``_estimate_lens_from_best_anchor`` to rank candidates —
+    distortion and principal-point offset only manifest at distance from
+    the optical centre, so a high-coverage anchor is the only one that
+    can disambiguate them.
+    """
+    if len(anchor.landmarks) < 2:
+        return 0.0
+    us = [lm.image_xy[0] for lm in anchor.landmarks]
+    vs = [lm.image_xy[1] for lm in anchor.landmarks]
+    w, h = image_size
+    return float(((max(us) - min(us)) / w) * ((max(vs) - min(vs)) / h))
+
+
+def _estimate_lens_from_best_anchor(
+    anchors: tuple[Anchor, ...],
+    image_size: tuple[int, int],
+    min_landmarks: int = 10,
+    min_coverage: float = 0.12,
+    min_residual_drop: float = 2.0,
+) -> tuple[float, float, float, float] | None:
+    """Recover (cx, cy, k1, k2) from the single highest-coverage anchor.
+
+    Runs a 9-DOF solo LM ``(rvec, tvec, fx, cx, cy, k1, k2)`` on whichever
+    anchor has the most landmarks and the widest image-area coverage.
+    Returns the recovered lens parameters only if the residual drops by
+    at least ``min_residual_drop``× over the no-distortion solo solve and
+    the recovered values stay within physically plausible bounds.
+
+    Returning ``None`` means: no anchor met the coverage gate, or the LM
+    didn't beat the no-distortion baseline by enough margin to trust the
+    estimate. The caller should fall back to the existing no-distortion
+    flow (pp pinned to image centre, (k1, k2) = (0, 0)).
+
+    The bounds — |k1|, |k2| ≤ 0.5 and pp within ±100 px of image centre —
+    cover typical broadcast lenses + camera-frame crops; values outside
+    that range are almost always overfitting noise rather than a real
+    optical signal.
+    """
+    w, h = image_size
+    candidates = [
+        a for a in anchors
+        if len(a.landmarks) >= min_landmarks
+        and _anchor_image_coverage(a, image_size) >= min_coverage
+    ]
+    if not candidates:
+        logger.info(
+            "lens-from-anchor: no anchor has ≥%d landmarks with ≥%.0f%% "
+            "image coverage; skipping (need wide spatial spread to "
+            "disambiguate pp/distortion from pose)",
+            min_landmarks, min_coverage * 100,
+        )
+        return None
+    best = max(
+        candidates,
+        key=lambda a: (
+            _anchor_image_coverage(a, image_size),
+            len(a.landmarks),
+        ),
+    )
+
+    # Baseline: no-distortion solo solve. Provides the residual we need to
+    # beat to accept the recovered lens params.
+    cx_seed, cy_seed = w / 2.0, h / 2.0
+    fx_seed = float(w)
+    K_seed = _make_K(fx_seed, cx_seed, cy_seed)
+    base = _solve_one_anchor_full(best, cx_seed, cy_seed, fx_seed, K_seed)
+    if base is None:
+        logger.warning(
+            "lens-from-anchor: baseline solo solve failed on frame %d",
+            best.frame,
+        )
+        return None
+    K_b, R_b, t_b, fx_b = base
+    base_res = reprojection_residual_for_anchor(best, K_b, R_b, t_b)
+
+    # 9-DOF LM: (rvec, tvec, fx, cx, cy, k1, k2). Seeded from the baseline
+    # solo solve so it starts in a sensible basin. Multi-seeded over a
+    # grid of (cx, cy) offsets: the cost surface around the no-distortion
+    # solve has a shallow basin near image centre (per-anchor pose has
+    # already absorbed the pp offset), so the LM gets stuck if we only
+    # start at the image-centre seed. Offsets of ±30 px on both axes
+    # cover broadcast crops without inflating the search excessively.
+    obj_pts = np.array(
+        [lm.world_xyz for lm in best.landmarks], dtype=np.float64
+    ).reshape(-1, 1, 3)
+    img_pts = np.array(
+        [lm.image_xy for lm in best.landmarks], dtype=np.float64
+    )
+    rvec_b, _ = cv2.Rodrigues(R_b.astype(np.float64))
+
+    def _residuals_for_seed(cx_s: float, cy_s: float, k1_s: float, k2_s: float):
+        p0 = np.concatenate([
+            rvec_b.reshape(3),
+            t_b.astype(np.float64),
+            [fx_b, cx_s, cy_s, k1_s, k2_s],
+        ])
+        lower = np.array([
+            -np.pi, -np.pi, -np.pi,
+            -300.0, -300.0, -300.0,
+            fx_b * 0.5, cx_seed - 100.0, cy_seed - 100.0,
+            -0.5, -0.5,
+        ])
+        upper = np.array([
+            np.pi, np.pi, np.pi,
+            300.0, 300.0, 300.0,
+            fx_b * 2.0, cx_seed + 100.0, cy_seed + 100.0,
+            0.5, 0.5,
+        ])
+
+        def _residuals(p: np.ndarray) -> np.ndarray:
+            rvec = p[0:3]
+            tvec = p[3:6]
+            fx = float(p[6])
+            cx = float(p[7])
+            cy = float(p[8])
+            k1 = float(p[9])
+            k2 = float(p[10])
+            K = _make_K(fx, cx, cy)
+            dist = np.array([k1, k2, 0.0, 0.0, 0.0], dtype=np.float64)
+            proj, _ = cv2.projectPoints(
+                obj_pts,
+                rvec.reshape(3, 1),
+                tvec.reshape(3, 1),
+                K,
+                dist,
+            )
+            return (proj.reshape(-1, 2) - img_pts).reshape(-1)
+
+        return least_squares(
+            _residuals, p0, bounds=(lower, upper),
+            method="trf", max_nfev=500,
+        )
+
+    best_result = None
+    best_cost = float("inf")
+    seed_grid = [
+        (cx_seed, cy_seed, 0.0, 0.0),
+        (cx_seed + 30, cy_seed, 0.0, 0.0),
+        (cx_seed - 30, cy_seed, 0.0, 0.0),
+        (cx_seed, cy_seed + 30, 0.0, 0.0),
+        (cx_seed, cy_seed - 30, 0.0, 0.0),
+        (cx_seed, cy_seed, -0.1, 0.0),
+        (cx_seed, cy_seed, 0.1, 0.0),
+    ]
+    for cx_s, cy_s, k1_s, k2_s in seed_grid:
+        try:
+            r = _residuals_for_seed(cx_s, cy_s, k1_s, k2_s)
+        except Exception as exc:
+            logger.debug("lens-from-anchor LM seed (%.0f, %.0f) failed: %s", cx_s, cy_s, exc)
+            continue
+        if r.cost < best_cost:
+            best_cost = r.cost
+            best_result = r
+
+    if best_result is None:
+        logger.warning("lens-from-anchor LM failed across all seeds")
+        return None
+    result = best_result
+
+    fx_est = float(result.x[6])
+    cx_est = float(result.x[7])
+    cy_est = float(result.x[8])
+    k1_est = float(result.x[9])
+    k2_est = float(result.x[10])
+    K_est = _make_K(fx_est, cx_est, cy_est)
+    R_est, _ = cv2.Rodrigues(result.x[0:3])
+    t_est = result.x[3:6]
+    est_res = reprojection_residual_for_anchor(
+        best, K_est, R_est, t_est, distortion=(k1_est, k2_est),
+    )
+
+    if est_res >= base_res / min_residual_drop:
+        logger.info(
+            "lens-from-anchor (frame %d): rejected — residual %.2f px did "
+            "not improve %.1f× over baseline %.2f px. Likely no real lens "
+            "structure to recover (or click noise dominates).",
+            best.frame, est_res, min_residual_drop, base_res,
+        )
+        return None
+
+    logger.info(
+        "lens-from-anchor (frame %d, %d landmarks, %.0f%% image coverage): "
+        "cx=%.1f, cy=%.1f, k1=%+.4f, k2=%+.4f — residual %.2f → %.2f px",
+        best.frame, len(best.landmarks),
+        _anchor_image_coverage(best, image_size) * 100,
+        cx_est, cy_est, k1_est, k2_est, base_res, est_res,
+    )
+    return cx_est, cy_est, k1_est, k2_est
 
 
 def _is_rich(anchor: Anchor, min_points: int = 6) -> bool:
@@ -1156,6 +1407,7 @@ def _point_residuals_distorted(
 def solve_anchors_jointly(
     anchors: tuple[Anchor, ...],
     image_size: tuple[int, int],
+    lens_prior: tuple[float, float, float, float] | None = None,
 ) -> JointSolution:
     """Hybrid per-anchor solve.
 
@@ -1168,6 +1420,16 @@ def solve_anchors_jointly(
     hold for steadicam / multi-camera-stitched clips). Camera position
     can vary smoothly between rich anchors; thin anchors trust the
     interpolated value.
+
+    ``lens_prior`` is an optional ``(cx, cy, k1, k2)`` tuple, typically
+    produced by ``_estimate_lens_from_best_anchor``. When set, the joint
+    solve uses (cx, cy) as the principal point (instead of image-centre)
+    and applies (k1, k2) radial distortion in every solo LM's residual.
+    The Pass 3 joint distortion refine is skipped — the prior is the
+    final lens model. This is the right path when the clip's anchors
+    include at least one high-coverage anchor that can disambiguate
+    pp/distortion from pose; without one, leave it ``None`` and the
+    legacy in-solve estimation runs.
     """
     if not anchors:
         raise AnchorSolveError("no anchors supplied")
@@ -1198,8 +1460,13 @@ def solve_anchors_jointly(
             )
 
     width, height = image_size
-    cx = width / 2.0
-    cy = height / 2.0
+    if lens_prior is not None:
+        cx, cy, k1_prior, k2_prior = lens_prior
+        prior_distortion: tuple[float, float] = (k1_prior, k2_prior)
+    else:
+        cx = width / 2.0
+        cy = height / 2.0
+        prior_distortion = (0.0, 0.0)
     fx_init = float(width)              # broadcast prior, refined per-anchor
     K_init = _make_K(fx_init, cx, cy)
 
@@ -1219,12 +1486,16 @@ def solve_anchors_jointly(
     rich_rvec: dict[int, np.ndarray] = {}
     rich_fx: dict[int, float] = {}
     for a in sorted(rich_anchors, key=lambda x: x.frame):
-        result = _solve_one_anchor_full(a, cx, cy, fx_init, K_init)
+        result = _solve_one_anchor_full(
+            a, cx, cy, fx_init, K_init, distortion=prior_distortion,
+        )
         if result is None:
             continue
         K, R, t, fx = result
         per_anchor_KRt[a.frame] = (K, R, t)
-        per_anchor_res[a.frame] = reprojection_residual_for_anchor(a, K, R, t)
+        per_anchor_res[a.frame] = reprojection_residual_for_anchor(
+            a, K, R, t, distortion=prior_distortion,
+        )
         rich_t[a.frame] = t
         rvec_arr, _ = cv2.Rodrigues(R)
         rich_rvec[a.frame] = rvec_arr.reshape(3)
@@ -1265,25 +1536,31 @@ def solve_anchors_jointly(
         solo_res = float("inf")
         solo_result = _solve_one_anchor_full(
             a, cx, cy, fx_prior, K_prior, fallback_seed=fallback_seed,
+            distortion=prior_distortion,
         )
         if solo_result is not None:
             K_s, R_s, t_s, _ = solo_result
-            solo_res = reprojection_residual_for_anchor(a, K_s, R_s, t_s)
+            solo_res = reprojection_residual_for_anchor(
+                a, K_s, R_s, t_s, distortion=prior_distortion,
+            )
             solo_KRt = (K_s, R_s, t_s)
 
         # Candidate B: t-fixed (inherited from interpolation).
         t_inherited = _interp_t(a.frame, rich_frames_sorted, rich_t)
         if len(a.landmarks) >= 4:
-            seed = _seed_anchor_pose(a, K_prior)
+            seed = _seed_anchor_pose(a, K_prior, distortion=prior_distortion)
             rvec_init = seed[0] if seed is not None else rich_rvec[nearest_frame].copy()
         else:
             rvec_init = rich_rvec[nearest_frame].copy()
         rvec, fx = _solve_anchor_with_t_fixed(
             a, t_inherited, cx, cy, fx_prior, rvec_init,
+            distortion=prior_distortion,
         )
         K_t = _make_K(fx, cx, cy)
         R_t = _rvec_to_R(rvec)
-        tfx_res = reprojection_residual_for_anchor(a, K_t, R_t, t_inherited)
+        tfx_res = reprojection_residual_for_anchor(
+            a, K_t, R_t, t_inherited, distortion=prior_distortion,
+        )
 
         if solo_KRt is not None and solo_res < tfx_res:
             per_anchor_KRt[a.frame] = solo_KRt
@@ -1308,38 +1585,45 @@ def solve_anchors_jointly(
     # Per-anchor t is freed so the LM can disambiguate distortion from pose;
     # cx/cy held at seed. This is where the broadcast lens's ~1–3% radial
     # bias gets removed when the anchors are mutually consistent.
-    pre_residuals = dict(per_anchor_res)
-    pre_mean = (
-        float(np.mean(list(pre_residuals.values())))
-        if pre_residuals else 0.0
-    )
-    refined_KRt, distortion, refined_res = _refine_joint_distortion(
-        qualifying, per_anchor_KRt, cx, cy,
-    )
-    refined_mean = (
-        float(np.mean(list(refined_res.values()))) if refined_res else 0.0
-    )
-    # Sanity guard: if the joint LM made things worse (typically because
-    # anchors disagree from click noise rather than distortion), keep the
-    # solo solves' (R, t, fx) and report distortion=(0, 0). Otherwise
-    # bounded distortion can compound user inconsistencies into a
-    # near-saturated k2 that bakes in further bias.
-    if refined_res and refined_mean <= pre_mean * 1.1:
-        per_anchor_KRt = refined_KRt
-        for af, res in refined_res.items():
-            per_anchor_res[af] = res
-        logger.info(
-            "joint distortion refine: k1=%+.4f, k2=%+.4f, mean residual %.2f → %.2f px",
-            distortion[0], distortion[1], pre_mean, refined_mean,
-        )
+    #
+    # Skipped when a ``lens_prior`` was supplied — the prior is the final
+    # lens model and re-estimating distortion here would risk overfitting
+    # to per-anchor click noise.
+    if lens_prior is not None:
+        distortion = prior_distortion
     else:
-        distortion = (0.0, 0.0)
-        logger.warning(
-            "joint distortion refine rejected: residual would worsen %.2f → %.2f px. "
-            "Anchors may be mutually inconsistent; review clicks before relying on "
-            "lens-distortion compensation.",
-            pre_mean, refined_mean,
+        pre_residuals = dict(per_anchor_res)
+        pre_mean = (
+            float(np.mean(list(pre_residuals.values())))
+            if pre_residuals else 0.0
         )
+        refined_KRt, distortion, refined_res = _refine_joint_distortion(
+            qualifying, per_anchor_KRt, cx, cy,
+        )
+        refined_mean = (
+            float(np.mean(list(refined_res.values()))) if refined_res else 0.0
+        )
+        # Sanity guard: if the joint LM made things worse (typically because
+        # anchors disagree from click noise rather than distortion), keep the
+        # solo solves' (R, t, fx) and report distortion=(0, 0). Otherwise
+        # bounded distortion can compound user inconsistencies into a
+        # near-saturated k2 that bakes in further bias.
+        if refined_res and refined_mean <= pre_mean * 1.1:
+            per_anchor_KRt = refined_KRt
+            for af, res in refined_res.items():
+                per_anchor_res[af] = res
+            logger.info(
+                "joint distortion refine: k1=%+.4f, k2=%+.4f, mean residual %.2f → %.2f px",
+                distortion[0], distortion[1], pre_mean, refined_mean,
+            )
+        else:
+            distortion = (0.0, 0.0)
+            logger.warning(
+                "joint distortion refine rejected: residual would worsen %.2f → %.2f px. "
+                "Anchors may be mutually inconsistent; review clicks before relying on "
+                "lens-distortion compensation.",
+                pre_mean, refined_mean,
+            )
 
     return JointSolution(
         t_world=t_world_median,

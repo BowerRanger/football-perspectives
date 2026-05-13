@@ -216,15 +216,17 @@ def main(argv: list[str]) -> int:
             pb.rotation_mode = "QUATERNION"
         return arm
 
-    def _add_placeholder_skinned_mesh(arm: object, name: str) -> object:
-        """Attach a minimal mesh skinned to ``pelvis`` so UE's Skeletal
-        Mesh importer accepts the FBX.
+    def _add_placeholder_skinned_mesh(
+        arm: object, name: str, bone_name: str = "pelvis"
+    ) -> object:
+        """Attach a minimal mesh skinned to ``bone_name`` so UE's
+        Skeletal Mesh importer accepts the FBX.
 
         UE5 has no "skeleton-only" import path; an armature-only FBX is
         rejected with "no data to import". A 3-vertex 1mm triangle bound
-        100% to pelvis is enough to satisfy the importer; the mesh
+        100% to one bone is enough to satisfy the importer; the mesh
         itself is incidental and can be ignored on the UE side — what
-        matters is the imported ``SK_SMPL`` skeleton asset.
+        matters is the imported skeleton asset and its animation.
         """
         mesh = bpy.data.meshes.new(f"{name}_placeholder_mesh")
         verts = [(0.001, 0.0, 0.0), (-0.001, 0.0, 0.0), (0.0, 0.001, 0.0)]
@@ -234,7 +236,7 @@ def main(argv: list[str]) -> int:
         obj = bpy.data.objects.new(f"{name}_placeholder", mesh)
         bpy.context.collection.objects.link(obj)
         obj.parent = arm
-        vg = obj.vertex_groups.new(name="pelvis")
+        vg = obj.vertex_groups.new(name=bone_name)
         vg.add([0, 1, 2], 1.0, "REPLACE")
         mod = obj.modifiers.new(name="Armature", type="ARMATURE")
         mod.object = arm
@@ -518,11 +520,19 @@ def main(argv: list[str]) -> int:
             scene.frame_end = int(ball_frames[-1]["frame"])
             scene.render.fps = int(round(fps))
             obj = _add_simple_armature("ball")
+            # UE rejects skeleton-only FBX imports — bind a tiny
+            # placeholder mesh to the armature's default bone ("Bone",
+            # from bpy.ops.object.armature_add) so the FBX is a valid
+            # SkeletalMesh+Anim asset on the UE side. The placeholder
+            # mesh is discarded; BP_BallActor provides the real sphere.
+            placeholder = _add_placeholder_skinned_mesh(obj, "ball", bone_name="Bone")
             for f in ball_frames:
                 obj.location = tuple(f["world_xyz"])
                 obj.keyframe_insert(data_path="location", frame=int(f["frame"]))
             bpy.ops.object.select_all(action="DESELECT")
             obj.select_set(True)
+            placeholder.select_set(True)
+            bpy.context.view_layer.objects.active = obj
             fbx_name = f"{shot_id}_ball.fbx" if shot_id else "ball.fbx"
             _export_fbx(fbx_dir / fbx_name)
 

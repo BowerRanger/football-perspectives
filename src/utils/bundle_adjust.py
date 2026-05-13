@@ -264,6 +264,10 @@ def fit_magnus_trajectory(
     max_iter: int = 100,
     distortion: tuple[float, float] = (0.0, 0.0),
     p0_fixed: np.ndarray | None = None,
+    omega_abs_bound: float | None = None,
+    omega_axis_fixed: np.ndarray | None = None,
+    omega_mag_bound: float | None = None,
+    v0_abs_bound: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """Fit a Magnus-augmented 3D trajectory to per-frame image observations.
 
@@ -340,14 +344,56 @@ def fit_magnus_trajectory(
             residuals.append(uv - obs_array[i])
         return np.concatenate(residuals)
 
-    if p0_fixed is None:
+    # Three parametrizations of the spin DOF, from most-to-least free:
+    #
+    # 1. omega_axis_fixed set → axis is locked to a unit vector and the
+    #    LM only adjusts the scalar magnitude (1 DOF for spin). Use this
+    #    when the caller has a strong directional prior, e.g. a user
+    #    spin preset on a kick anchor. Magnitude is non-negative and
+    #    optionally bounded above by ``omega_mag_bound``.
+    # 2. omega_abs_bound set → bounded TRF: caps each omega component
+    #    to ±bound. Still 3 DOF for spin but prevents the LM from
+    #    running to a degenerate high-spin local minimum.
+    # 3. Neither set → unbounded LM (the original behaviour). Fastest,
+    #    but produces |omega| > 700 rad/s on hard real-world data.
+    if omega_axis_fixed is not None:
+        axis_unit = np.asarray(omega_axis_fixed, dtype=float)
+        axis_norm = float(np.linalg.norm(axis_unit))
+        if axis_norm < 1e-9:
+            raise ValueError("omega_axis_fixed must be a non-zero vector")
+        axis_unit = axis_unit / axis_norm
+        # Magnitude seed: project the provided omega_seed onto the
+        # fixed axis. Defaults to ~zero if omega_seed itself was zero.
+        scalar_seed = float(np.dot(omega_seed, axis_unit))
+        if scalar_seed <= 0.0:
+            scalar_seed = max(scalar_seed, 0.0)
+        # When a magnitude bound is supplied, treat it as a one-sided
+        # upper bound (scalar ∈ [0, bound]). The lower bound stays at 0
+        # because the user already chose the axis direction; negative
+        # scalar would flip the spin direction and contradict the prior.
+        method = "trf"
+    elif omega_abs_bound is not None:
+        inf = np.inf
+        lo = np.array([-inf] * 6 + [-omega_abs_bound] * 3) if p0_fixed is None \
+            else np.array([-inf] * 3 + [-omega_abs_bound] * 3)
+        hi = -lo
+        method = "trf"
+    else:
+        lo = hi = None
+        method = "lm"
+
+    if p0_fixed is None and omega_axis_fixed is None:
         x0 = np.concatenate([p0_seed, v0_seed, omega_seed])
-        result = least_squares(_residuals, x0, method="lm",
-                               max_nfev=max_iter * 50)
+        if method == "trf":
+            result = least_squares(_residuals, x0, method="trf",
+                                   bounds=(lo, hi), max_nfev=max_iter * 50)
+        else:
+            result = least_squares(_residuals, x0, method="lm",
+                                   max_nfev=max_iter * 50)
         p0_opt = result.x[:3]
         v0_opt = result.x[3:6]
         omega_opt = result.x[6:9]
-    else:
+    elif p0_fixed is not None and omega_axis_fixed is None:
         p0_pin = np.asarray(p0_fixed, dtype=float).copy()
 
         def _residuals_anchored(params: np.ndarray) -> np.ndarray:
@@ -365,11 +411,72 @@ def fit_magnus_trajectory(
             return np.concatenate(residuals)
 
         x0 = np.concatenate([v0_seed, omega_seed])
-        result = least_squares(_residuals_anchored, x0, method="lm",
-                               max_nfev=max_iter * 50)
+        if method == "trf":
+            result = least_squares(_residuals_anchored, x0, method="trf",
+                                   bounds=(lo, hi), max_nfev=max_iter * 50)
+        else:
+            result = least_squares(_residuals_anchored, x0, method="lm",
+                                   max_nfev=max_iter * 50)
         p0_opt = p0_pin
         v0_opt = result.x[:3]
         omega_opt = result.x[3:6]
+    else:
+        # omega_axis_fixed: spin direction locked to the unit axis;
+        # only the scalar magnitude is optimised alongside (v0, p0?).
+        mag_hi = float(omega_mag_bound) if omega_mag_bound is not None else np.inf
+        if p0_fixed is None:
+            def _residuals_axis(params: np.ndarray) -> np.ndarray:
+                p0 = params[:3]
+                v0 = params[3:6]
+                omega = params[6] * axis_unit
+                pts = _integrate_magnus_positions(
+                    p0, v0, omega, g_vec, drag_k_over_m, dt,
+                )
+                residuals = []
+                for i in range(n_obs):
+                    cam = Rs[i] @ pts[i] + ts[i]
+                    pix = Ks[i] @ cam
+                    uv = pix[:2] / pix[2]
+                    residuals.append(uv - obs_array[i])
+                return np.concatenate(residuals)
+
+            x0 = np.concatenate([p0_seed, v0_seed, [scalar_seed]])
+            lo7 = np.array([-np.inf] * 6 + [0.0])
+            hi7 = np.array([np.inf] * 6 + [mag_hi])
+            result = least_squares(_residuals_axis, x0, method="trf",
+                                   bounds=(lo7, hi7), max_nfev=max_iter * 50)
+            p0_opt = result.x[:3]
+            v0_opt = result.x[3:6]
+            omega_opt = result.x[6] * axis_unit
+        else:
+            p0_pin = np.asarray(p0_fixed, dtype=float).copy()
+
+            def _residuals_axis_anchored(params: np.ndarray) -> np.ndarray:
+                v0 = params[:3]
+                omega = params[3] * axis_unit
+                pts = _integrate_magnus_positions(
+                    p0_pin, v0, omega, g_vec, drag_k_over_m, dt,
+                )
+                residuals = []
+                for i in range(n_obs):
+                    cam = Rs[i] @ pts[i] + ts[i]
+                    pix = Ks[i] @ cam
+                    uv = pix[:2] / pix[2]
+                    residuals.append(uv - obs_array[i])
+                return np.concatenate(residuals)
+
+            x0 = np.concatenate([v0_seed, [scalar_seed]])
+            v0_hi = float(v0_abs_bound) if v0_abs_bound is not None else np.inf
+            lo4 = np.array([-v0_hi] * 3 + [0.0])
+            hi4 = np.array([v0_hi] * 3 + [mag_hi])
+            # Clip the seed into the new bounds so the TRF initial point
+            # is feasible (scipy raises 'x0 infeasible' otherwise).
+            x0 = np.clip(x0, lo4, hi4)
+            result = least_squares(_residuals_axis_anchored, x0, method="trf",
+                                   bounds=(lo4, hi4), max_nfev=max_iter * 50)
+            p0_opt = p0_pin
+            v0_opt = result.x[:3]
+            omega_opt = result.x[3] * axis_unit
 
     mean_residual = float(np.linalg.norm(result.fun) / np.sqrt(n_obs))
     return p0_opt, v0_opt, omega_opt, mean_residual

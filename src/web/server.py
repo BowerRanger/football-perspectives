@@ -39,6 +39,7 @@ Track annotation (manual edits to tracking output)
     POST   /api/tracks/merge-by-name           (group every track sharing a name)
     POST   /api/tracks/ignore-unknown/{shot_id}(mark unnamed tracks 'ignore')
     POST   /api/tracks/delete-ignored          (drop tracks named 'ignore')
+    POST   /api/tracks/{shot_id}/interpolate-gaps (fill short bbox gaps)
 
 Static / export
     GET    /                          (dashboard)
@@ -202,7 +203,11 @@ _STAGE_COMPLETE = {
 _STAGE_ARTIFACTS: dict[str, list[str]] = {
     "prepare_shots": ["shots"],
     "tracking": ["tracks"],
-    "camera": ["camera/camera_track.json", "camera/debug"],
+    "camera": [
+        "camera/*_camera_track.json",
+        "camera/camera_track.json",
+        "camera/debug",
+    ],
     "hmr_world": ["hmr_world"],
     "ball": ["ball/*_ball_track.json", "ball/ball_track.json"],
     "refined_poses": ["refined_poses"],
@@ -973,6 +978,16 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         # Required only when state == "player_touch"; otherwise omitted.
         player_id: str | None = None
         bone: str | None = None
+        # Required only when state == "goal_impact"; one of
+        # "post" | "crossbar" | "back_net" | "side_net".
+        goal_element: str | None = None
+        # Optional on state == "player_touch"; "shot" | "volley" | None.
+        # Selecting shot/volley enables the spin sub-tag below.
+        touch_type: str | None = None
+        # Optional on state == "player_touch" with touch_type set to
+        # "shot" or "volley"; categorical spin preset consumed by the
+        # Magnus seed in the ball stage.
+        spin: str | None = None
 
     class BallAnchorPayload(BaseModel):
         clip_id: str
@@ -1036,6 +1051,9 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     state=a.state,
                     player_id=a.player_id,
                     bone=a.bone,
+                    goal_element=a.goal_element,
+                    touch_type=a.touch_type,
+                    spin=a.spin,
                 ))
             aset = BallAnchorSet(
                 clip_id=str(payload.clip_id),
@@ -1093,6 +1111,9 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                         state=a.state,
                         player_id=a.player_id,
                         bone=a.bone,
+                        goal_element=a.goal_element,
+                        touch_type=a.touch_type,
+                        spin=a.spin,
                     ) for a in payload.anchors
                 )
                 aset = BallAnchorSet(
@@ -1839,6 +1860,23 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid shot ID")
         return _tracks_dir() / f"{shot_id}_tracks.json"
 
+    # Per-shot write lock. FastAPI runs sync handlers in a thread pool,
+    # so parallel DELETE / PATCH requests for the same tracks file can
+    # interleave their load-modify-save and lose updates (or, before
+    # atomic save was added, produce a corrupt JSON document).
+    # Wrapping every write in a per-shot lock serialises the
+    # load-modify-save cycle for that file.
+    _tracks_file_locks: dict[str, Lock] = {}
+    _tracks_file_locks_mu = Lock()
+
+    def _tracks_lock(shot_id: str) -> Lock:
+        with _tracks_file_locks_mu:
+            lock = _tracks_file_locks.get(shot_id)
+            if lock is None:
+                lock = Lock()
+                _tracks_file_locks[shot_id] = lock
+            return lock
+
     def _all_used_player_ids() -> set[str]:
         used: set[str] = set()
         if not _tracks_dir().exists():
@@ -1865,13 +1903,109 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         track_path = _tracks_path(shot_id)
         if not track_path.exists():
             raise HTTPException(status_code=404, detail=f"Tracks not found for {shot_id}")
-        tr = TracksResult.load(track_path)
-        before = len(tr.tracks)
-        tr.tracks = [t for t in tr.tracks if t.track_id != track_id]
-        if len(tr.tracks) == before:
-            raise HTTPException(status_code=404, detail=f"Track {track_id} not found in {shot_id}")
-        tr.save(track_path)
+        with _tracks_lock(shot_id):
+            tr = TracksResult.load(track_path)
+            before = len(tr.tracks)
+            tr.tracks = [t for t in tr.tracks if t.track_id != track_id]
+            if len(tr.tracks) == before:
+                raise HTTPException(status_code=404, detail=f"Track {track_id} not found in {shot_id}")
+            tr.save(track_path)
         return {"shot_id": shot_id, "track_id": track_id, "deleted": True}
+
+    @app.post("/api/tracks/{shot_id}/delete-bulk")
+    async def delete_tracks_bulk(shot_id: str, request: Request):
+        """Drop several tracks from one shot in a single load-modify-save.
+
+        The frontend's "Delete Selected" toolbar action used to fire N
+        parallel ``DELETE /api/tracks/{shot}/{tid}`` calls — those raced
+        on the same JSON file and could corrupt it. This endpoint
+        accepts ``{"track_ids": [...]}`` and applies them atomically.
+        """
+        track_path = _tracks_path(shot_id)
+        if not track_path.exists():
+            raise HTTPException(status_code=404, detail=f"Tracks not found for {shot_id}")
+        body = await request.json()
+        ids = body.get("track_ids") or []
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            raise HTTPException(status_code=400, detail="track_ids must be a list of strings")
+        wanted = set(ids)
+        with _tracks_lock(shot_id):
+            tr = TracksResult.load(track_path)
+            existing = {t.track_id for t in tr.tracks}
+            missing = sorted(wanted - existing)
+            tr.tracks = [t for t in tr.tracks if t.track_id not in wanted]
+            tr.save(track_path)
+        return {
+            "shot_id": shot_id,
+            "deleted": sorted(wanted & existing),
+            "missing": missing,
+        }
+
+    @app.post("/api/tracks/{shot_id}/interpolate-gaps")
+    async def interpolate_track_gaps_endpoint(shot_id: str, request: Request):
+        """Linearly interpolate missing frames inside the selected tracks.
+
+        Request body::
+
+            {"track_ids": ["T001", ...], "max_gap": 8}
+
+        ``max_gap`` falls back to ``tracking.interpolate_max_gap_frames``
+        from the active config when absent. Returns per-track frame
+        counts plus the total frames added across the selection.
+        """
+        from src.utils.track_interpolation import interpolate_track_gaps
+
+        track_path = _tracks_path(shot_id)
+        if not track_path.exists():
+            raise HTTPException(status_code=404, detail=f"Tracks not found for {shot_id}")
+        body = await request.json()
+        ids = body.get("track_ids") or []
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            raise HTTPException(status_code=400, detail="track_ids must be a list of strings")
+        if not ids:
+            raise HTTPException(status_code=400, detail="track_ids must be non-empty")
+
+        if "max_gap" in body:
+            try:
+                max_gap = int(body["max_gap"])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="max_gap must be an integer")
+        else:
+            cfg = load_config(app.state.config_path)
+            max_gap = int(
+                (cfg.get("tracking", {}) or {}).get("interpolate_max_gap_frames", 8)
+            )
+        if max_gap < 0:
+            raise HTTPException(status_code=400, detail="max_gap must be >= 0")
+
+        wanted = set(ids)
+        results: list[dict[str, Any]] = []
+        total_added = 0
+        with _tracks_lock(shot_id):
+            tr = TracksResult.load(track_path)
+            existing = {t.track_id for t in tr.tracks}
+            missing = sorted(wanted - existing)
+            for track in tr.tracks:
+                if track.track_id not in wanted:
+                    continue
+                before = len(track.frames)
+                _, added = interpolate_track_gaps(track, max_gap=max_gap)
+                total_added += added
+                results.append({
+                    "track_id": track.track_id,
+                    "frames_before": before,
+                    "frames_added": added,
+                    "frames_after": len(track.frames),
+                })
+            if total_added > 0:
+                tr.save(track_path)
+        return {
+            "shot_id": shot_id,
+            "max_gap": max_gap,
+            "results": results,
+            "missing": missing,
+            "total_frames_added": total_added,
+        }
 
     @app.patch("/api/tracks/{shot_id}/{track_id}")
     async def patch_track(shot_id: str, track_id: str, request: Request):
@@ -1879,24 +2013,25 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         if not track_path.exists():
             raise HTTPException(status_code=404, detail=f"Tracks not found for {shot_id}")
         body = await request.json()
-        tr = TracksResult.load(track_path)
-        target = next((t for t in tr.tracks if t.track_id == track_id), None)
-        if target is None:
-            raise HTTPException(status_code=404, detail=f"Track {track_id} not found in {shot_id}")
-        if "player_id" in body:
-            target.player_id = str(body["player_id"])
-        if "player_name" in body:
-            target.player_name = str(body["player_name"])
-        if "team" in body:
-            target.team = str(body["team"])
-        tr.save(track_path)
-        return {
-            "shot_id": shot_id,
-            "track_id": track_id,
-            "player_id": target.player_id,
-            "player_name": target.player_name,
-            "team": target.team,
-        }
+        with _tracks_lock(shot_id):
+            tr = TracksResult.load(track_path)
+            target = next((t for t in tr.tracks if t.track_id == track_id), None)
+            if target is None:
+                raise HTTPException(status_code=404, detail=f"Track {track_id} not found in {shot_id}")
+            if "player_id" in body:
+                target.player_id = str(body["player_id"])
+            if "player_name" in body:
+                target.player_name = str(body["player_name"])
+            if "team" in body:
+                target.team = str(body["team"])
+            tr.save(track_path)
+            return {
+                "shot_id": shot_id,
+                "track_id": track_id,
+                "player_id": target.player_id,
+                "player_name": target.player_name,
+                "team": target.team,
+            }
 
     @app.post("/api/tracks/split")
     async def split_track(request: Request):

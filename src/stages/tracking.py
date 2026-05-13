@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -16,12 +17,146 @@ logger = logging.getLogger(__name__)
 
 
 _ID_TO_CLASS = {0: "player", 1: "goalkeeper", 2: "referee", 3: "ball"}
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _foot_centre(bbox: tuple[float, float, float, float]) -> tuple[float, float]:
     """Return the bottom-centre pixel of a bounding box (approximate foot position)."""
     x1, y1, x2, y2 = bbox
     return ((x1 + x2) / 2.0, y2)
+
+
+def _resolve_device(spec: str) -> str:
+    """Pick a torch device string. ``auto`` -> CUDA > MPS > CPU."""
+    requested = (spec or "auto").strip().lower()
+    if requested != "auto":
+        return "cuda:0" if requested == "cuda" else requested
+    try:
+        import torch
+    except ImportError:
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda:0"
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend is not None and mps_backend.is_available():
+        return "mps"
+    return "cpu"
+
+
+class _ByteTrackAdapter:
+    """Motion-only tracker (supervision's ByteTrack). Fast; swaps IDs
+    when bboxes overlap because there's no appearance signal."""
+
+    name = "bytetrack"
+
+    def __init__(self) -> None:
+        import supervision as sv
+
+        self._tracker = sv.ByteTrack()
+
+    def update(self, sv_dets, frame):  # noqa: ARG002 (frame unused)
+        return self._tracker.update_with_detections(sv_dets)
+
+
+class _BotSortAdapter:
+    """BoxMOT BoT-SORT with OSNet ReID embeddings. Holds IDs through
+    occlusions by adding appearance similarity to the association
+    cost — the practical fix for the swap problem when two players in
+    clashing kits cross."""
+
+    name = "botsort"
+
+    def __init__(
+        self,
+        reid_weights_path: Path,
+        device: str,
+        params: dict[str, Any],
+    ) -> None:
+        try:
+            from boxmot import BotSort
+        except ImportError as exc:
+            raise ImportError(
+                "boxmot is required when tracking.tracker = botsort. "
+                "Install with `pip install boxmot`."
+            ) from exc
+        if not reid_weights_path.exists():
+            raise FileNotFoundError(
+                f"ReID weights not found at {reid_weights_path}. "
+                "Run scripts/setup_boxmot.sh to download them, or set "
+                "tracking.reid_weights to an absolute path."
+            )
+        # Half-precision is unsafe on MPS / CPU; only enable for CUDA.
+        half = device.startswith("cuda")
+        self._tracker = BotSort(
+            reid_weights=reid_weights_path,
+            device=device,
+            half=half,
+            track_high_thresh=float(params.get("track_high_thresh", 0.5)),
+            track_low_thresh=float(params.get("track_low_thresh", 0.1)),
+            new_track_thresh=float(params.get("new_track_thresh", 0.6)),
+            match_thresh=float(params.get("match_thresh", 0.8)),
+            proximity_thresh=float(params.get("proximity_thresh", 0.5)),
+            appearance_thresh=float(params.get("appearance_thresh", 0.25)),
+            cmc_method=str(params.get("cmc_method", "ecc")),
+            frame_rate=int(params.get("frame_rate", 30)),
+            fuse_first_associate=bool(params.get("fuse_first_associate", False)),
+            with_reid=bool(params.get("with_reid", True)),
+        )
+
+    def update(self, sv_dets, frame):
+        import supervision as sv
+
+        n = len(sv_dets)
+        if n == 0:
+            return sv.Detections.empty()
+        # BoxMOT expects (N, 6) ndarray: [x1, y1, x2, y2, conf, cls].
+        dets = np.zeros((n, 6), dtype=np.float32)
+        dets[:, :4] = sv_dets.xyxy
+        if sv_dets.confidence is not None:
+            dets[:, 4] = sv_dets.confidence
+        else:
+            dets[:, 4] = 0.5
+        if sv_dets.class_id is not None:
+            dets[:, 5] = sv_dets.class_id
+        output = self._tracker.update(dets, frame)
+        if output is None or len(output) == 0:
+            return sv.Detections.empty()
+        # BoxMOT returns (M, 8): [x1, y1, x2, y2, track_id, conf, cls, det_idx].
+        return sv.Detections(
+            xyxy=output[:, :4].astype(np.float32),
+            confidence=output[:, 5].astype(np.float32),
+            class_id=output[:, 6].astype(int),
+            tracker_id=output[:, 4].astype(int),
+        )
+
+
+def _build_tracker(cfg: dict) -> _ByteTrackAdapter | _BotSortAdapter:
+    """Construct a per-shot tracker driven by ``tracking.tracker``.
+
+    Per-shot construction is intentional: each shot is independent, so
+    track histories must reset at clip boundaries. The BoT-SORT
+    constructor reloads the OSNet weights each time — that costs a
+    second or two but keeps shot isolation simple.
+    """
+    track_cfg = cfg.get("tracking", {}) or {}
+    name = str(track_cfg.get("tracker", "botsort")).strip().lower()
+    if name == "bytetrack":
+        return _ByteTrackAdapter()
+    if name == "botsort":
+        weights = Path(track_cfg.get(
+            "reid_weights",
+            "third_party/boxmot/osnet_x0_25_msmt17.pt",
+        ))
+        if not weights.is_absolute():
+            weights = _REPO_ROOT / weights
+        return _BotSortAdapter(
+            reid_weights_path=weights,
+            device=_resolve_device(str(track_cfg.get("tracker_device", "auto"))),
+            params=track_cfg.get("botsort", {}) or {},
+        )
+    raise ValueError(
+        f"Unknown tracker: {name!r} (expected 'bytetrack' or 'botsort')"
+    )
 
 
 class PlayerTrackingStage(BaseStage):
@@ -58,13 +193,32 @@ class PlayerTrackingStage(BaseStage):
         tracks_dir.mkdir(parents=True, exist_ok=True)
         cfg = self.config.get("tracking", {})
         confidence = cfg.get("confidence_threshold", 0.3)
+        iou_threshold = float(cfg.get("iou_threshold", 0.85))
+        imgsz = int(cfg.get("imgsz", 1280))
+        sahi_cfg = cfg.get("sahi", {}) or {}
+        sahi_enabled = bool(sahi_cfg.get("enabled", False))
+        sahi_tile_size = int(sahi_cfg.get("tile_size", 960))
+        sahi_overlap_ratio = float(sahi_cfg.get("overlap_ratio", 0.25))
+        sahi_nms_iou_threshold = float(sahi_cfg.get("nms_iou_threshold", 0.5))
         model_name = cfg.get("player_model", "yolov8x.pt")
         team_classifier_mode = str(cfg.get("team_classifier", "none")).strip().lower()
         default_team_label = str(cfg.get("default_team_label", "unknown")).strip() or "unknown"
 
         detector = self.player_detector or YOLOPlayerDetector(
-            model_name=model_name, confidence=confidence
+            model_name=model_name,
+            confidence=confidence,
+            iou_threshold=iou_threshold,
+            imgsz=imgsz,
+            sahi_enabled=sahi_enabled,
+            sahi_tile_size=sahi_tile_size,
+            sahi_overlap_ratio=sahi_overlap_ratio,
+            sahi_nms_iou_threshold=sahi_nms_iou_threshold,
         )
+        if sahi_enabled:
+            print(
+                f"  -> SAHI tiled inference: "
+                f"tile={sahi_tile_size}px, overlap={sahi_overlap_ratio}"
+            )
         if self.team_classifier is not None:
             team_classifier = self.team_classifier
         elif team_classifier_mode == "clip":
@@ -106,7 +260,8 @@ class PlayerTrackingStage(BaseStage):
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open clip: {clip_path}")
 
-        byte_tracker = sv.ByteTrack()
+        tracker = _build_tracker(self.config)
+        print(f"  -> tracker: {tracker.name} (shot={shot_id})")
 
         cal_map = {f.frame: f for f in calibration.frames} if calibration else {}
         last_cal = (
@@ -132,10 +287,11 @@ class PlayerTrackingStage(BaseStage):
                     print(f"     processed {frame_idx} frames...")
 
                 detections = detector.detect(frame)
-                # Ball-class detections continue to flow through ByteTrack
-                # so the dashboard's class_name=="ball" checks still work
-                # against <shot>_tracks.json. BallStage owns its own
-                # detection pass and does not consume them.
+                # Ball-class detections continue to flow through the
+                # active tracker so the dashboard's class_name=="ball"
+                # checks still work against <shot>_tracks.json.
+                # BallStage owns its own detection pass and does not
+                # consume them.
                 player_dets = list(detections)
 
                 if player_dets:
@@ -148,7 +304,7 @@ class PlayerTrackingStage(BaseStage):
                     sv_dets = sv.Detections(
                         xyxy=xyxy, confidence=confs, class_id=class_ids
                     )
-                    tracked = byte_tracker.update_with_detections(sv_dets)
+                    tracked = tracker.update(sv_dets, frame)
 
                     crops = []
                     for i in range(len(tracked)):

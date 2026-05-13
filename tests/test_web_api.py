@@ -81,6 +81,46 @@ def test_get_ball_preview_empty(client) -> None:
 
 
 @pytest.mark.integration
+def test_delete_camera_stage_wipes_per_shot_tracks_keeps_anchors(client) -> None:
+    """Clearing the camera stage (Re-run Stage button) must remove
+    every per-shot ``{shot}_camera_track.json`` and the debug dir but
+    leave user-placed ``{shot}_anchors.json`` files intact — they're
+    inputs to the solver, not outputs."""
+    c, tmp_path = client
+    cam_dir = tmp_path / "camera"
+    cam_dir.mkdir(parents=True, exist_ok=True)
+    # Per-shot solver outputs (must be wiped).
+    track_a = cam_dir / "origi01_camera_track.json"
+    track_a.write_text('{"frames": []}')
+    track_b = cam_dir / "gberch_camera_track.json"
+    track_b.write_text('{"frames": []}')
+    # Legacy single-shot path — also wiped if present.
+    legacy_track = cam_dir / "camera_track.json"
+    legacy_track.write_text('{"legacy": true}')
+    # Debug subdir (must be wiped).
+    debug = cam_dir / "debug"
+    debug.mkdir()
+    (debug / "frame_0.png").write_bytes(b"\x89PNG\r\n")
+    # User-placed anchors (must survive).
+    anchors_a = cam_dir / "origi01_anchors.json"
+    anchors_a.write_text('{"anchors": []}')
+    anchors_b = cam_dir / "gberch_anchors.json"
+    anchors_b.write_text('{"anchors": []}')
+
+    r = c.delete("/api/output/camera")
+    assert r.status_code == 200, r.text
+
+    assert not track_a.exists(), "per-shot camera_track must be wiped"
+    assert not track_b.exists(), "per-shot camera_track must be wiped"
+    assert not legacy_track.exists(), "legacy camera_track must be wiped"
+    assert not debug.exists(), "debug dir must be wiped"
+    assert anchors_a.exists(), "anchors must NOT be wiped by re-run"
+    assert anchors_b.exists(), "anchors must NOT be wiped by re-run"
+    removed = r.json()["removed"]
+    assert any("camera_track" in p for p in removed)
+
+
+@pytest.mark.integration
 def test_get_pitch_lines_returns_catalogue(client) -> None:
     c, _ = client
     resp = c.get("/pitch_lines")
@@ -366,6 +406,95 @@ def test_merge_by_name_consolidates_tracks(client) -> None:
     assert [f.frame for f in salah.frames] == [0, 1, 2, 3]
     # Both Salah tracks share the same canonical player_id.
     assert salah.player_id.startswith("P")
+
+
+@pytest.mark.integration
+def test_interpolate_gaps_fills_short_gaps_and_tags_new_frames(client) -> None:
+    c, tmp = client
+    # Track has one fillable gap (0→3, 2 missing) and one too-wide gap
+    # (5→20). With max_gap=4, only the short gap is filled.
+    _seed_tracks(
+        tmp,
+        ("T001", [(0, 0.9), (3, 0.9), (5, 0.9), (20, 0.9)]),
+    )
+    resp = c.post(
+        "/api/tracks/play/interpolate-gaps",
+        json={"track_ids": ["T001"], "max_gap": 4},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["total_frames_added"] == 3  # 2 between 0–3, 1 between 3–5
+    assert body["results"][0]["frames_after"] == 7
+    tr = _load_tracks(tmp)
+    kept = tr.tracks[0]
+    frame_idxs = [f.frame for f in kept.frames]
+    assert frame_idxs == [0, 1, 2, 3, 4, 5, 20]
+    # New frames carry the interpolated flag; originals do not.
+    by_frame = {f.frame: f for f in kept.frames}
+    assert by_frame[1].interpolated is True
+    assert by_frame[2].interpolated is True
+    assert by_frame[4].interpolated is True
+    assert by_frame[0].interpolated is False
+    assert by_frame[20].interpolated is False
+
+
+@pytest.mark.integration
+def test_interpolate_gaps_uses_config_default_when_max_gap_omitted(client) -> None:
+    c, tmp = client
+    _seed_tracks(
+        tmp,
+        ("T001", [(0, 0.9), (5, 0.9)]),  # 4-frame gap — fits default (8)
+    )
+    resp = c.post(
+        "/api/tracks/play/interpolate-gaps",
+        json={"track_ids": ["T001"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["max_gap"] == 8
+    assert body["total_frames_added"] == 4
+
+
+@pytest.mark.integration
+def test_interpolate_gaps_rejects_empty_track_ids(client) -> None:
+    c, tmp = client
+    _seed_tracks(tmp, ("T001", [(0, 0.9), (5, 0.9)]))
+    resp = c.post(
+        "/api/tracks/play/interpolate-gaps",
+        json={"track_ids": []},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.integration
+def test_interpolate_gaps_reports_missing_track_ids(client) -> None:
+    c, tmp = client
+    _seed_tracks(tmp, ("T001", [(0, 0.9), (5, 0.9)]))
+    resp = c.post(
+        "/api/tracks/play/interpolate-gaps",
+        json={"track_ids": ["T001", "T999"], "max_gap": 4},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["missing"] == ["T999"]
+    # T001 was still processed.
+    assert any(r["track_id"] == "T001" for r in body["results"])
+
+
+@pytest.mark.integration
+def test_interpolate_gaps_skips_write_when_nothing_added(client) -> None:
+    c, tmp = client
+    _seed_tracks(tmp, ("T001", [(0, 0.9), (1, 0.9), (2, 0.9)]))
+    track_path = tmp / "tracks" / "play_tracks.json"
+    mtime_before = track_path.stat().st_mtime_ns
+    resp = c.post(
+        "/api/tracks/play/interpolate-gaps",
+        json={"track_ids": ["T001"], "max_gap": 4},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["total_frames_added"] == 0
+    # File untouched — no spurious resaves on no-op.
+    assert track_path.stat().st_mtime_ns == mtime_before
 
 
 @pytest.mark.unit

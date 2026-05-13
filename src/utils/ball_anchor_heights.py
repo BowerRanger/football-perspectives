@@ -24,6 +24,13 @@ _STATE_HEIGHT_M: dict[str, float] = {
     # world position. This entry is a fallback used only when the
     # SmplWorldTrack is unavailable.
     "player_touch":  1.0,
+    # goal_impact has no fixed height — the ball stage intersects the
+    # pixel ray with the goal-element geometry (post/crossbar/back_net/
+    # side_net) at the anchor frame and uses that as the exact world
+    # position. This entry is a fallback used only when the geometry
+    # resolver fails (e.g. ray parallel to the surface). 2.44 matches
+    # FIFA crossbar height so the fallback plane sits at the goal mouth.
+    "goal_impact":   2.44,
 }
 
 # States whose pixel + height pin the trajectory exactly. The body-part
@@ -34,21 +41,24 @@ _STATE_HEIGHT_M: dict[str, float] = {
 # smaller than the multi-metre depth ambiguity from pixel-only obs.
 HARD_KNOT_STATES: frozenset[str] = frozenset({
     "grounded", "kick", "catch", "bounce", "header", "volley", "chest",
-    "player_touch",
+    "player_touch", "goal_impact",
 })
 
 # States that force the IMM into the flight branch for that frame and
 # extend / create a flight segment. Body-part contacts and player_touch
 # are treated as airborne even though they're contact events — the
-# ball IS in the air when the body part touches it.
+# ball IS in the air when the body part touches it. goal_impact is
+# always mid-flight (the ball cannot strike the goal frame at rest).
 AIRBORNE_STATES: frozenset[str] = frozenset({
     "airborne_low", "airborne_mid", "airborne_high",
-    "header", "volley", "chest", "player_touch", "off_screen_flight",
+    "header", "volley", "chest", "player_touch", "goal_impact",
+    "off_screen_flight",
 })
 
 # States that mark a flight boundary (split flight runs at this frame).
 EVENT_STATES: frozenset[str] = frozenset({
     "kick", "catch", "bounce", "header", "volley", "chest", "player_touch",
+    "goal_impact",
 })
 
 # States where the ball is physically at ground level (z = 0.11 m).
@@ -113,3 +123,15 @@ BONE_TO_SMPL_INDEX: dict[str, int] = {
 }
 
 VALID_BONES: frozenset[str] = frozenset(BONE_TO_SMPL_INDEX)
+
+
+# Goal-element tags exposed in the Goal-Impact UI. Each names a primitive
+# of the goal frame or net used by ``src.utils.goal_geometry`` to
+# intersect the camera pixel ray with a known 3D surface or line:
+#  - post: vertical line (one of the two posts at the relevant goal)
+#  - crossbar: horizontal line between the posts at z = goal_height_m
+#  - back_net: vertical plane goal_depth_m behind the goal line
+#  - side_net: vertical plane through one post, extending back to back_net
+VALID_GOAL_ELEMENTS: frozenset[str] = frozenset({
+    "post", "crossbar", "back_net", "side_net",
+})

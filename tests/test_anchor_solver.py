@@ -797,3 +797,152 @@ def test_shared_C_LM_recovers_truth_better_than_median():
         f"Joint-LM C ({C_opt}, err {opt_err:.2f} m) should be at least as "
         f"close to truth as median-of-solos ({C_median}, err {median_err:.2f} m)"
     )
+
+
+# ── Lens-from-anchor tests (Phase 3) ────────────────────────────────────────
+
+
+def _wide_coverage_landmarks() -> tuple[tuple[str, tuple[float, float, float]], ...]:
+    """14 landmarks that span both halves of the pitch and multiple z-levels.
+
+    Used by ``test_lens_from_anchor_recovers_pp_and_distortion`` — the
+    estimator needs a single anchor with enough spatial coverage to
+    disambiguate principal-point offset from radial distortion.
+    """
+    return (
+        ("near_left_corner",           (0.0,    0.0,   0.0)),
+        ("near_right_corner",          (105.0,  0.0,   0.0)),
+        ("far_left_corner",            (0.0,    68.0,  0.0)),
+        ("far_right_corner",           (105.0,  68.0,  0.0)),
+        ("halfway_near",               (52.5,   0.0,   0.0)),
+        ("halfway_far",                (52.5,   68.0,  0.0)),
+        ("near_left_corner_flag_top",  (0.0,    0.0,   1.5)),
+        ("near_right_corner_flag_top", (105.0,  0.0,   1.5)),
+        ("far_left_corner_flag_top",   (0.0,    68.0,  1.5)),
+        ("far_right_corner_flag_top",  (105.0,  68.0,  1.5)),
+        ("left_goal_crossbar_left",    (0.0,    30.34, 2.44)),
+        ("left_goal_crossbar_right",   (0.0,    37.66, 2.44)),
+        ("right_goal_crossbar_left",   (105.0,  30.34, 2.44)),
+        ("right_goal_crossbar_right",  (105.0,  37.66, 2.44)),
+    )
+
+
+def _distorted_anchor(
+    frame: int,
+    yaw_deg: float,
+    fx: float,
+    cx: float,
+    cy: float,
+    C: np.ndarray,
+    distortion: tuple[float, float],
+) -> Anchor:
+    """Project _wide_coverage_landmarks through (fx, cx, cy, k1, k2) with the
+    static-camera centre ``C`` and the given yaw. Returns an Anchor whose
+    clicks match what a user would mark on the distorted image.
+    """
+    from src.utils.camera_projection import project_world_to_image
+
+    R = _yaw(yaw_deg)
+    t = -R @ C
+    K = np.array([[fx, 0.0, cx], [0.0, fx, cy], [0.0, 0.0, 1.0]])
+    pts = np.array([w for _, w in _wide_coverage_landmarks()], dtype=np.float64)
+    proj = project_world_to_image(K, R, t, distortion, pts)
+    landmarks = tuple(
+        LandmarkObservation(
+            name=name, image_xy=(float(proj[i, 0]), float(proj[i, 1])), world_xyz=w,
+        )
+        for i, (name, w) in enumerate(_wide_coverage_landmarks())
+    )
+    return Anchor(frame=frame, landmarks=landmarks)
+
+
+@pytest.mark.unit
+def test_lens_from_anchor_recovers_pp_and_distortion():
+    """Given a clip with off-centre principal point and radial distortion,
+    estimating the lens prior from the highest-coverage anchor should recover
+    (cx, cy) and (k1, k2) within tight tolerance.
+    """
+    from src.utils.anchor_solver import _estimate_lens_from_best_anchor
+
+    C_true = np.array([52.5, -30.0, 18.0])
+    fxs = (2200.0, 2400.0, 2300.0)
+    cx_true, cy_true = 990.0, 580.0
+    k1_true, k2_true = -0.12, 0.02
+
+    anchors = tuple(
+        _distorted_anchor(
+            frame=fr, yaw_deg=yaw, fx=fx,
+            cx=cx_true, cy=cy_true, C=C_true,
+            distortion=(k1_true, k2_true),
+        )
+        for fr, yaw, fx in ((0, 0.0, fxs[0]), (60, 6.0, fxs[1]), (120, -6.0, fxs[2]))
+    )
+
+    prior = _estimate_lens_from_best_anchor(anchors, image_size=IMAGE_SIZE)
+    assert prior is not None, "lens estimator returned None on a clean synthetic clip"
+    cx_est, cy_est, k1_est, k2_est = prior
+    assert abs(cx_est - cx_true) < 5.0, f"cx: got {cx_est}, want {cx_true}"
+    assert abs(cy_est - cy_true) < 5.0, f"cy: got {cy_est}, want {cy_true}"
+    assert abs(k1_est - k1_true) < 0.02, f"k1: got {k1_est}, want {k1_true}"
+    assert abs(k2_est - k2_true) < 0.02, f"k2: got {k2_est}, want {k2_true}"
+
+
+@pytest.mark.unit
+def test_lens_prior_tightens_solo_C_spread_on_distorted_clip():
+    """Real broadcast lenses bias each anchor's solo solve in a yaw-dependent
+    way: with un-modelled distortion the recovered camera centres disagree
+    by metres even though the body is static. Passing a lens prior should
+    cut that spread to <30 cm and drop mean residuals below 1 px.
+    """
+    from src.utils.anchor_solver import _estimate_lens_from_best_anchor
+
+    C_true = np.array([52.5, -30.0, 18.0])
+    cx_true, cy_true = 990.0, 580.0
+    k1_true, k2_true = -0.12, 0.02
+    anchors = tuple(
+        _distorted_anchor(
+            frame=fr, yaw_deg=yaw, fx=fx,
+            cx=cx_true, cy=cy_true, C=C_true,
+            distortion=(k1_true, k2_true),
+        )
+        for fr, yaw, fx in ((0, 0.0, 2200.0), (60, 6.0, 2400.0), (120, -6.0, 2300.0))
+    )
+
+    # Baseline: no lens prior. Solo Cs should disagree.
+    sol_base = solve_anchors_jointly(anchors, image_size=IMAGE_SIZE)
+    Cs_base = np.stack([
+        -R.T @ t for (_K, R, t) in sol_base.per_anchor_KRt.values()
+    ])
+    base_spread = float(np.linalg.norm(Cs_base.max(axis=0) - Cs_base.min(axis=0)))
+
+    # With lens prior: solo Cs should cluster.
+    prior = _estimate_lens_from_best_anchor(anchors, image_size=IMAGE_SIZE)
+    assert prior is not None
+    sol_prior = solve_anchors_jointly(
+        anchors, image_size=IMAGE_SIZE, lens_prior=prior,
+    )
+    Cs_prior = np.stack([
+        -R.T @ t for (_K, R, t) in sol_prior.per_anchor_KRt.values()
+    ])
+    prior_spread = float(np.linalg.norm(Cs_prior.max(axis=0) - Cs_prior.min(axis=0)))
+
+    assert base_spread > 0.5, (
+        f"baseline solo-C spread is {base_spread:.3f} m — distorted synthetic "
+        "clip should exhibit metres of disagreement without distortion modelling"
+    )
+    assert prior_spread < 0.3, (
+        f"lens-prior solo-C spread is {prior_spread:.3f} m — should be <0.3 m "
+        f"(baseline was {base_spread:.3f} m)"
+    )
+
+    mean_res_prior = float(np.mean(list(sol_prior.per_anchor_residual_px.values())))
+    assert mean_res_prior < 1.0, (
+        f"with lens prior, mean residual is {mean_res_prior:.2f} px — should "
+        "be sub-pixel on a noise-free synthetic clip"
+    )
+    assert sol_prior.distortion == prior[2:], (
+        "JointSolution.distortion should match the lens prior's (k1, k2)"
+    )
+    assert sol_prior.principal_point == (prior[0], prior[1]), (
+        "JointSolution.principal_point should match the lens prior's (cx, cy)"
+    )

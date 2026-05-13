@@ -3,6 +3,13 @@ pitch:
   length_m: 105.0
   width_m: 68.0
   goal_height_m: 2.44
+  # FIFA inside post-to-post; used by goal_impact ball anchor to locate
+  # the posts at y = width_m/2 ± goal_width_m/2 along each goal line.
+  goal_width_m: 7.32
+  # Approximate goal depth — used to model the back_net and side_net
+  # as flat vertical planes behind / beside the goal frame for the
+  # goal_impact pixel-ray intersection.
+  goal_depth_m: 1.5
   corner_flag_height_m: 1.5
 
 prepare_shots:
@@ -13,9 +20,88 @@ tracking:
   player_model: yolov8x.pt
   ball_model: yolov8n.pt
   confidence_threshold: 0.3
+  # YOLO NMS IoU threshold. Raised from the ultralytics default of 0.7
+  # because two footballers running close together overlap at IoU
+  # 0.5-0.8 and the default silently drops one — the tracker then sees
+  # one bbox covering two players, which is the dominant cause of ID
+  # swaps during occlusions. 0.85 lets both detections survive while
+  # still suppressing duplicate proposals for a single player.
+  iou_threshold: 0.85
+  # YOLO inference resolution (longest-side). With sahi.enabled this is
+  # the per-tile resolution; with sahi disabled it's the whole-frame
+  # resolution. 1280 on a 960-px tile is a 1.33x bilinear upscale,
+  # which is the sweet spot for anchor density without huge cost.
+  imgsz: 1280
+
+  # SAHI-style tiled inference. Each frame is split into overlapping
+  # 960-px tiles and YOLO runs on each one separately. Detections are
+  # then NMS-merged back into full-frame coordinates. On 1920x1080
+  # broadcast footage this gives a 3x2 tile grid with 240 px of
+  # overlap, so any player straddling a tile seam is fully detected in
+  # at least one neighbouring tile. The point isn't more pixels — it's
+  # giving each region of the frame its own fresh anchor lattice,
+  # which is what separates two close players that single-pass
+  # inference at any imgsz still collapses into one bbox.
+  sahi:
+    enabled: true
+    tile_size: 960
+    overlap_ratio: 0.25
+    # NMS IoU at which two detections from neighbouring tiles are
+    # considered duplicates of the same player and the lower-confidence
+    # one is dropped during merge.
+    nms_iou_threshold: 0.5
   team_classifier: none
   default_team_label: unknown
   progress_every_frames: 150
+  # Default max gap (in missing frames) the dashboard's "Interp Missing
+  # Frames" button will linear-interpolate between two known bboxes
+  # inside a track. Picked so the operator can fill brief detector
+  # dropouts (≈0.25 s at 30 fps) without straying into gaps long enough
+  # for direction changes to make linear interp give wrong crops.
+  # Set to 0 to disable the button by default (it can still be overridden
+  # per-request).
+  interpolate_max_gap_frames: 8
+  # Tracker selection: `bytetrack` (motion/IoU only — supervision's
+  # default) or `botsort` (BoxMOT BoT-SORT with OSNet ReID embeddings).
+  # botsort holds IDs through occlusions when players cross because it
+  # weighs appearance alongside IoU; bytetrack is faster but swaps IDs
+  # at collisions, especially between players in clashing kits.
+  tracker: botsort
+  # Path to the OSNet ReID checkpoint. Fetch with scripts/setup_boxmot.sh.
+  # Only used when tracker == botsort.
+  # OSNet-AIN (Adaptive Instance Normalisation) at x1.0 capacity. Far
+  # more robust on football broadcast footage than osnet_x0_25 — AIN
+  # handles the domain shift from the surveillance dataset OSNet was
+  # trained on (MSMT17) to broadcast sport, and x1.0 is 4x the capacity
+  # of x0.25 so embedding distance between visually different players
+  # is much sharper. Fetch with scripts/setup_boxmot.sh.
+  reid_weights: third_party/boxmot/osnet_ain_x1_0_msmt17.pt
+  # Device for the ReID network. `auto` picks CUDA if available, else
+  # MPS (Apple Silicon), else CPU. Pin explicitly with cuda / mps / cpu
+  # when you want predictable performance.
+  tracker_device: auto
+  # BoT-SORT tuning knobs. Defaults follow BoxMOT's recommended values
+  # for sports tracking; the appearance weight (proximity_thresh /
+  # appearance_thresh) is what actually disambiguates a collision.
+  botsort:
+    track_high_thresh: 0.5      # detections above this start new tracks
+    track_low_thresh: 0.1       # below this they're discarded
+    new_track_thresh: 0.6       # confidence required to mint a new ID
+    match_thresh: 0.8           # max cost for IoU re-association
+    proximity_thresh: 0.5       # max IoU distance before ReID kicks in
+    # Tightened from 0.25 -> 0.15: only accept genuinely-close appearance
+    # matches. Players in clashing kits should sit well above 0.15 cosine
+    # distance, so this rejects swap candidates while keeping legitimate
+    # re-acquisitions of the same player.
+    appearance_thresh: 0.15
+    # sof (sparse optical flow) is more robust than ECC on panning
+    # broadcast cameras where the pitch dominates the frame — ECC's
+    # whole-frame correlation gets confused by the uniform pitch
+    # texture. Options: ecc | orb | sift | sof.
+    cmc_method: sof
+    frame_rate: 30
+    fuse_first_associate: false
+    with_reid: true
 
 camera:
   first_anchor_min_landmarks: 6
@@ -29,6 +115,19 @@ camera:
   # reproject anchors well but jump the camera body around in pitch
   # metres between anchors. Set false for moving rigs (steadicam, dolly).
   static_camera: true
+  # Lens model: when true, the camera stage runs a 9-DOF LM (rvec, tvec,
+  # fx, cx, cy, k1, k2) on the highest-coverage anchor (≥10 landmarks,
+  # ≥12% image-area span) to recover principal point and radial
+  # distortion before the joint solve. Without this, principal point is
+  # pinned to image centre and distortion is estimated jointly across
+  # anchors — which gets rejected on real clips because click noise
+  # outweighs the distortion signal. With this enabled, the lens prior
+  # is recovered from the one anchor that has enough spatial coverage
+  # to disambiguate it from pose, and every other anchor inherits it.
+  # The estimator self-gates (returns None if it can't beat the no-
+  # distortion baseline by 2×), so leaving this on is safe when no
+  # qualifying anchor exists — the legacy flow runs instead.
+  lens_from_anchor: true
   # ORB is the only detector currently implemented in feature_propagator.
   # SuperPoint is a future enhancement (better repeatability under zoom).
   feature_detector: orb
@@ -65,6 +164,30 @@ hmr_world:
   # degrees toward the camera. 0 disables; 5 is a good empirical starting
   # point on broadcast clips.
   lean_correction_deg: 5.0
+  # Per-player runner. ``local`` (default) keeps the existing in-process
+  # sequential loop. ``batch`` fans each (shot, player) out to AWS Batch
+  # on GPU Spot instances — wires through src/cloud/batch_runner.py.
+  runner: local
+  batch:
+    region: us-east-1
+    # Terraform outputs (s3_bucket, batch_job_queue, batch_job_definition)
+    # flow in via shell env. ``source scripts/terraform_env.sh`` exports
+    # them before ``recon.py run``.
+    s3_bucket: ${HMR_WORLD_S3_BUCKET}
+    s3_prefix: runs
+    job_queue: ${HMR_WORLD_BATCH_JOB_QUEUE}
+    job_definition: ${HMR_WORLD_BATCH_JOB_DEFINITION}
+    # DescribeJobs polling interval in seconds. 15s × ~10 min worst case
+    # = ~40 API calls per run, well below the 50 TPS default quota.
+    poll_seconds: 15
+    # Per-attempt timeout (seconds) at the Batch level too — see Terraform.
+    job_timeout_seconds: 600
+    # Client-side fan-out cap. Should not exceed maxvCpus / 4.
+    max_concurrent_jobs: 24
+    # ``continue``: log failed tracks, still run ball/export with
+    # successes (mirrors the local "too_short skipped" behaviour).
+    # ``abort``: any failed track fails the whole hmr_world stage.
+    failure_policy: continue
 
 ball:
   # Detector backend used by the in-stage detection pass. wasb is the
@@ -96,6 +219,10 @@ ball:
     # Magnus fit is only accepted if RMS pixel residual improves by at
     # least this fraction over the pure-parabola fit on the same segment.
     min_residual_improvement: 0.20
+    # Relaxed acceptance threshold when the segment's start anchor
+    # (kick/volley) carries an explicit spin preset — the user has
+    # asserted there is spin, so we don't require the same 20 % beat.
+    min_residual_improvement_with_hint: 0.05
     # Sanity bound on recovered angular speed (rad/s). Pro footballers
     # rarely exceed ~50 rad/s on a kick; we cap conservatively at 200.
     max_omega_rad_s: 200.0

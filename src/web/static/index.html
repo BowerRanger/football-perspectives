@@ -1566,14 +1566,19 @@ async function buildTrackEditor(container, shotId, preview) {
   mergeByNameBtn.title = "Across every shot, unify all tracks that share a player name under one player_id.";
   const ignoreBtn = makeToolbarBtn("Ignore Unknown", "#334155");
   ignoreBtn.title = "Mark every unnamed player/goalkeeper in this shot as 'ignore'.";
-  const deleteBtn = makeToolbarBtn("Delete Ignored", "#7f1d1d");
-  deleteBtn.title = "Drop every track currently named 'ignore' across all shots.";
+  const deleteBtn = makeToolbarBtn("Delete Selected", "#7f1d1d");
+  deleteBtn.title = "Delete every track whose checkbox is currently ticked.";
+  deleteBtn.disabled = true;
+  const interpBtn = makeToolbarBtn("Interp Missing Frames", "#0f766e");
+  interpBtn.title = "Linearly interpolate bboxes for short detector dropouts inside the selected tracks.";
+  interpBtn.disabled = true;
   const status = document.createElement("span");
   status.style.cssText = "color:#94a3b8;font-size:12px;margin-left:8px;";
   toolbar.appendChild(mergeBtn);
   toolbar.appendChild(mergeByNameBtn);
   toolbar.appendChild(ignoreBtn);
   toolbar.appendChild(deleteBtn);
+  toolbar.appendChild(interpBtn);
   toolbar.appendChild(status);
   container.appendChild(toolbar);
 
@@ -1667,12 +1672,21 @@ async function buildTrackEditor(container, shotId, preview) {
   // selectedRows stores rowKey (player_id or fallback). drawTrackOverlay
   // expands these into the underlying track_ids on each draw.
   const selectedRows = new Set();
+  // Row whose name input currently has keyboard focus — its tracks
+  // also light up orange in the overlay so the operator can see which
+  // bbox the row they're editing corresponds to, without needing to
+  // tick the checkbox first.
+  let focusedRowKey = null;
   const rowsByTrackId = new Map(); // track_id → row controls (shared across members)
 
   function selectedTrackIdSet() {
     const out = new Set();
     for (const key of selectedRows) {
       const g = playerGroups.get(key);
+      if (g) for (const t of g.tracks) out.add(t.track_id);
+    }
+    if (focusedRowKey) {
+      const g = playerGroups.get(focusedRowKey);
       if (g) for (const t of g.tracks) out.add(t.track_id);
     }
     return out;
@@ -1683,6 +1697,14 @@ async function buildTrackEditor(container, shotId, preview) {
     mergeBtn.textContent = selectedRows.size < 2
       ? "Merge Selected"
       : `Merge Selected (${selectedRows.size})`;
+    deleteBtn.disabled = selectedRows.size === 0;
+    deleteBtn.textContent = selectedRows.size === 0
+      ? "Delete Selected"
+      : `Delete Selected (${selectedRows.size})`;
+    interpBtn.disabled = selectedRows.size === 0;
+    interpBtn.textContent = selectedRows.size === 0
+      ? "Interp Missing Frames"
+      : `Interp Missing Frames (${selectedRows.size})`;
   }
 
   for (const g of playerGroups.values()) {
@@ -1741,6 +1763,19 @@ async function buildTrackEditor(container, shotId, preview) {
     nameInput.placeholder = "Name…";
     nameInput.setAttribute("list", datalistId);
     nameInput.style.cssText = "flex:1;min-width:0;background:#0f1117;color:#e2e8f0;border:1px solid #334155;padding:3px 6px;border-radius:3px;font-size:12px;";
+    // Light up this row's bbox in orange while its name field has
+    // focus, so the operator can see which player on the pitch they
+    // are about to rename.
+    nameInput.addEventListener("focus", () => {
+      focusedRowKey = g.key;
+      lastFrame = -1;
+      drawCurrent();
+    });
+    nameInput.addEventListener("blur", () => {
+      if (focusedRowKey === g.key) focusedRowKey = null;
+      lastFrame = -1;
+      drawCurrent();
+    });
     nameInput.addEventListener("change", async () => {
       const newName = nameInput.value.trim();
       // PATCH every member track in parallel.
@@ -1919,13 +1954,111 @@ async function buildTrackEditor(container, shotId, preview) {
   });
 
   deleteBtn.addEventListener("click", async () => {
-    if (!confirm("Delete every track named 'ignore'? This cannot be undone.")) return;
+    if (selectedRows.size === 0) {
+      status.textContent = "No rows checked";
+      return;
+    }
+    // Snapshot the checked rows and the tracks they expand to before
+    // we mutate anything — the per-row checkbox listeners may fire
+    // during the animation as rows are removed from the DOM.
+    const selectedKeys = Array.from(selectedRows);
+    const trackIds = Array.from(selectedTrackIdSet());
+    if (trackIds.length === 0) return;
+    const plural = selectedKeys.length === 1 ? "row" : "rows";
+    if (!confirm(`Delete ${selectedKeys.length} selected ${plural} (${trackIds.length} track${trackIds.length === 1 ? "" : "s"})? This cannot be undone.`)) return;
     deleteBtn.disabled = true;
-    const res = await fetch("/api/tracks/delete-ignored", { method: "POST" });
+
+    // Collect the DOM rows for the animation. Each playerGroups row
+    // shares a single ``item`` across its member tracks, so grabbing
+    // the first member's entry in rowsByTrackId is sufficient.
+    const rowsToAnimate = [];
+    for (const key of selectedKeys) {
+      const g = playerGroups.get(key);
+      if (!g || !g.tracks.length) continue;
+      const ref = rowsByTrackId.get(g.tracks[0].track_id);
+      if (ref && ref.item) rowsToAnimate.push(ref.item);
+    }
+
+    // Fade + collapse animation. Pin max-height so the transition
+    // can shrink it; transition all four properties together so the
+    // row vacates its space in the list smoothly.
+    const ANIM_MS = 260;
+    for (const row of rowsToAnimate) {
+      row.style.maxHeight = row.offsetHeight + "px";
+      row.style.overflow = "hidden";
+      row.style.transition = `opacity ${ANIM_MS}ms ease, max-height ${ANIM_MS}ms ease, padding ${ANIM_MS}ms ease, margin ${ANIM_MS}ms ease`;
+    }
+    // Force layout, then trigger the transition on the next frame.
+    void rowsToAnimate[0]?.offsetHeight;
+    requestAnimationFrame(() => {
+      for (const row of rowsToAnimate) {
+        row.style.opacity = "0";
+        row.style.maxHeight = "0px";
+        row.style.paddingTop = "0px";
+        row.style.paddingBottom = "0px";
+        row.style.marginTop = "0px";
+        row.style.marginBottom = "0px";
+        row.style.borderBottomWidth = "0px";
+      }
+    });
+
+    // One bulk request — the server applies all removals in a single
+    // load-modify-save under a per-shot lock. Parallel DELETEs used
+    // to race on the JSON file and corrupt it.
+    const deletePromise = fetch(
+      `/api/tracks/${encodeURIComponent(shotId)}/delete-bulk`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ track_ids: trackIds }),
+      },
+    );
+    const [res] = await Promise.all([
+      deletePromise,
+      new Promise((resolve) => setTimeout(resolve, ANIM_MS)),
+    ]);
     deleteBtn.disabled = false;
-    if (!res.ok) { status.textContent = "Delete failed"; return; }
+    if (!res.ok) {
+      status.textContent = "Delete failed";
+      return;
+    }
+    status.textContent = `Deleted ${trackIds.length} track${trackIds.length === 1 ? "" : "s"} — reloading…`;
+    const fresh = await fetchJsonOrNull(`/tracking/preview?shot_id=${encodeURIComponent(shotId)}`);
+    container.innerHTML = "";
+    if (fresh && fresh.tracks) buildTrackEditor(container, shotId, fresh);
+  });
+
+  interpBtn.addEventListener("click", async () => {
+    if (selectedRows.size === 0) {
+      status.textContent = "No rows checked";
+      return;
+    }
+    const trackIds = Array.from(selectedTrackIdSet());
+    if (trackIds.length === 0) return;
+    interpBtn.disabled = true;
+    const prev = interpBtn.textContent;
+    interpBtn.textContent = "Interpolating…";
+    const res = await fetch(
+      `/api/tracks/${encodeURIComponent(shotId)}/interpolate-gaps`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ track_ids: trackIds }),
+      },
+    );
+    interpBtn.disabled = false;
+    interpBtn.textContent = prev;
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      status.textContent = `Interp failed: ${err.detail || res.statusText}`;
+      return;
+    }
     const out = await res.json();
-    status.textContent = `Deleted ${out.deleted} tracks — reloading…`;
+    if (out.total_frames_added === 0) {
+      status.textContent = "No gaps to fill within max_gap.";
+      return;
+    }
+    status.textContent = `Filled ${out.total_frames_added} frame${out.total_frames_added === 1 ? "" : "s"} across ${out.results.length} track${out.results.length === 1 ? "" : "s"} — reloading…`;
     const fresh = await fetchJsonOrNull(`/tracking/preview?shot_id=${encodeURIComponent(shotId)}`);
     container.innerHTML = "";
     if (fresh && fresh.tracks) buildTrackEditor(container, shotId, fresh);
@@ -3920,6 +4053,11 @@ function buildBallAnchorEditor(data, shotId) {
       description: "Ball contacts a specific player's body part (foot, knee, chest, head, shoulder, hand). The trajectory is pinned at the bone's actual world XYZ from the player's SMPL pose (hmr_world stage), giving precise contact alignment instead of a fixed-height bucket. Splits the flight run — incoming and outgoing parabolas are fit separately. Required: player + bone (selected in the dropdowns that appear when this tag is active).",
     },
     {
+      id: "goal_impact", label: "Goal impact", color: "#f59e0b",
+      range: "goal-frame, event",
+      description: "Ball strikes part of the goal (post, crossbar, back net, or side net). The trajectory is pinned at the geometrically-known contact point — the pixel ray is intersected with the chosen element using FIFA goal dimensions. Splits the flight run so the post-impact direction is fit independently from observed pixels. Required: goal element (selected in the dropdown that appears when this tag is active).",
+    },
+    {
       id: "catch", label: "Catch", color: "#a78bfa",
       range: "z = 1.5 m, event",
       description: "Ball stops in a player's hands. Hard knot at chest height; ends a flight segment without starting a new one. (For mid-flight body-part contacts use 'Player touch' instead.)",
@@ -3974,6 +4112,9 @@ function buildBallAnchorEditor(data, shotId) {
   let selectedTag = "grounded";
   let selectedPlayer = "";
   let selectedBone = "r_foot";
+  let selectedGoalElement = "post";
+  let selectedTouchType = "";   // "" | "shot" | "volley"
+  let selectedSpin = "none";
   let availablePlayers = [];  // [{player_id, player_name?}, ...]
   const BONE_OPTIONS = [
     { id: "l_foot",     label: "Left foot" },
@@ -3986,6 +4127,27 @@ function buildBallAnchorEditor(data, shotId) {
     { id: "r_shoulder", label: "Right shoulder" },
     { id: "l_hand",     label: "Left hand" },
     { id: "r_hand",     label: "Right hand" },
+  ];
+  const GOAL_ELEMENT_OPTIONS = [
+    { id: "post",     label: "Post" },
+    { id: "crossbar", label: "Crossbar" },
+    { id: "back_net", label: "Back net" },
+    { id: "side_net", label: "Side net" },
+  ];
+  const SPIN_OPTIONS = [
+    { id: "none",                 label: "None / unknown" },
+    { id: "instep_curl_right",    label: "Instep curl (R-foot, R→L)" },
+    { id: "instep_curl_left",     label: "Instep curl (L-foot, L→R)" },
+    { id: "outside_curl_right",   label: "Outside curl (R-foot, L→R)" },
+    { id: "outside_curl_left",    label: "Outside curl (L-foot, R→L)" },
+    { id: "topspin",              label: "Top-spin (dipping)" },
+    { id: "backspin",             label: "Back-spin (floating)" },
+    { id: "knuckle",              label: "Knuckle (no spin)" },
+  ];
+  const TOUCH_TYPE_OPTIONS = [
+    { id: "",       label: "(none)" },
+    { id: "shot",   label: "Shot" },
+    { id: "volley", label: "Volley" },
   ];
 
   // 3-column body.
@@ -4017,11 +4179,73 @@ function buildBallAnchorEditor(data, shotId) {
   playerLabel.textContent = "Player";
   const boneLabel = document.createElement("div");
   boneLabel.textContent = "Bone";
-  touchPicker.append(playerLabel, playerSel, boneLabel, boneSel);
+  // Touch-type sub-selector for player_touch — "shot" / "volley" enable
+  // the spin sub-row below; "" leaves the anchor as a plain contact.
+  const touchTypeLabel = document.createElement("div");
+  touchTypeLabel.textContent = "Type";
+  const touchTypeSel = document.createElement("select");
+  touchTypeSel.style.cssText = "background:#252840;color:#e2e8f0;border:1px solid #2d3148;border-radius:3px;padding:3px 5px;font-size:11px;width:100%;";
+  for (const tt of TOUCH_TYPE_OPTIONS) {
+    const opt = document.createElement("option");
+    opt.value = tt.id; opt.textContent = tt.label;
+    if (tt.id === selectedTouchType) opt.selected = true;
+    touchTypeSel.appendChild(opt);
+  }
+  // Spin row, nested under touch-type and revealed only when
+  // touch_type is "shot" or "volley".
+  const spinRow = document.createElement("div");
+  spinRow.style.cssText = "display:none;flex-direction:column;gap:4px;";
+  const spinLabel = document.createElement("div");
+  spinLabel.textContent = "Spin";
+  const spinSel = document.createElement("select");
+  spinSel.style.cssText = "background:#252840;color:#e2e8f0;border:1px solid #2d3148;border-radius:3px;padding:3px 5px;font-size:11px;width:100%;";
+  for (const s of SPIN_OPTIONS) {
+    const opt = document.createElement("option");
+    opt.value = s.id; opt.textContent = s.label;
+    if (s.id === selectedSpin) opt.selected = true;
+    spinSel.appendChild(opt);
+  }
+  spinSel.onchange = () => { selectedSpin = spinSel.value; };
+  spinRow.append(spinLabel, spinSel);
+  function updateSpinRow() {
+    spinRow.style.display = (selectedTouchType === "shot" || selectedTouchType === "volley")
+      ? "flex" : "none";
+  }
+  touchTypeSel.onchange = () => {
+    selectedTouchType = touchTypeSel.value;
+    updateSpinRow();
+  };
+  touchPicker.append(
+    playerLabel, playerSel,
+    boneLabel, boneSel,
+    touchTypeLabel, touchTypeSel,
+    spinRow,
+  );
   tagCol.appendChild(touchPicker);
+
+  // Goal element selector shown only when "goal_impact" tag is active.
+  const goalPicker = document.createElement("div");
+  goalPicker.style.cssText = "display:none;border-top:1px solid #2d3148;margin-top:8px;padding-top:8px;display:flex;flex-direction:column;gap:6px;font-size:11px;color:#94a3b8;";
+  const goalElementSel = document.createElement("select");
+  goalElementSel.style.cssText = "background:#252840;color:#e2e8f0;border:1px solid #2d3148;border-radius:3px;padding:3px 5px;font-size:11px;width:100%;";
+  for (const g of GOAL_ELEMENT_OPTIONS) {
+    const opt = document.createElement("option");
+    opt.value = g.id; opt.textContent = g.label;
+    if (g.id === selectedGoalElement) opt.selected = true;
+    goalElementSel.appendChild(opt);
+  }
+  goalElementSel.onchange = () => { selectedGoalElement = goalElementSel.value; };
+  const goalElementLabel = document.createElement("div");
+  goalElementLabel.textContent = "Goal element";
+  goalPicker.append(goalElementLabel, goalElementSel);
+  tagCol.appendChild(goalPicker);
+
   function updateTouchPicker() {
     touchPicker.style.display = selectedTag === "player_touch"
       ? "flex" : "none";
+    goalPicker.style.display = selectedTag === "goal_impact"
+      ? "flex" : "none";
+    updateSpinRow();
   }
   grid.appendChild(tagCol);
 
@@ -4135,9 +4359,17 @@ function buildBallAnchorEditor(data, shotId) {
       row.style.cssText = "padding:5px 8px;cursor:pointer;border-radius:3px;font-size:11px;color:#cbd5e1;display:flex;align-items:center;gap:6px;";
       row.onmouseover = () => row.style.background = "#252840";
       row.onmouseout = () => row.style.background = "";
-      const extra = (a.state === "player_touch" && a.player_id)
-        ? ` <span style="color:#64748b;">(${a.player_id}/${a.bone || "?"})</span>`
-        : "";
+      let extra = "";
+      if (a.state === "player_touch" && a.player_id) {
+        let sub = `${a.player_id}/${a.bone || "?"}`;
+        if (a.touch_type) {
+          sub += `, ${a.touch_type}`;
+          if (a.spin && a.spin !== "none") sub += `: ${a.spin}`;
+        }
+        extra = ` <span style="color:#64748b;">(${sub})</span>`;
+      } else if (a.state === "goal_impact" && a.goal_element) {
+        extra = ` <span style="color:#64748b;">(${a.goal_element})</span>`;
+      }
       row.innerHTML = `
         <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${tag.color};flex-shrink:0;"></span>
         <span style="flex:1;">Frame ${a.frame}${extra}</span>
@@ -4234,6 +4466,10 @@ function buildBallAnchorEditor(data, shotId) {
       setStatus("Pick a player before placing a Player touch anchor");
       return;
     }
+    if (selectedTag === "goal_impact" && !selectedGoalElement) {
+      setStatus("Pick a goal element before placing a Goal impact anchor");
+      return;
+    }
     const rect = overlay.getBoundingClientRect();
     const u = (e.clientX - rect.left) * (overlay.width / rect.width);
     const v = (e.clientY - rect.top) * (overlay.height / rect.height);
@@ -4243,6 +4479,15 @@ function buildBallAnchorEditor(data, shotId) {
     if (selectedTag === "player_touch") {
       newAnchor.player_id = selectedPlayer;
       newAnchor.bone = selectedBone;
+      if (selectedTouchType) {
+        newAnchor.touch_type = selectedTouchType;
+        if ((selectedTouchType === "shot" || selectedTouchType === "volley")
+            && selectedSpin && selectedSpin !== "none") {
+          newAnchor.spin = selectedSpin;
+        }
+      }
+    } else if (selectedTag === "goal_impact") {
+      newAnchor.goal_element = selectedGoalElement;
     }
     anchors.push(newAnchor);
     setDirty(true);
@@ -4373,6 +4618,9 @@ function buildBallAnchorEditor(data, shotId) {
       state: a.state,
       player_id: a.player_id || null,
       bone: a.bone || null,
+      goal_element: a.goal_element || null,
+      touch_type: a.touch_type || null,
+      spin: a.spin || null,
     })) : [];
     // Populate player dropdown from hmr_world tracks for this shot.
     const playerList = await fetchJsonOrNull(

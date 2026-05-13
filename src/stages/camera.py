@@ -13,6 +13,7 @@ from src.schemas.anchor import Anchor, AnchorSet
 from src.schemas.camera_track import CameraFrame, CameraTrack
 from src.utils.anchor_solver import (
     AnchorSolveError,
+    _estimate_lens_from_best_anchor,
     refine_with_shared_translation,
     reprojection_residual_for_anchor,
     solve_anchors_jointly,
@@ -125,9 +126,23 @@ class CameraStage(BaseStage):
                 "web editor"
             )
 
+        lens_prior = None
+        if bool(cfg.get("lens_from_anchor", True)):
+            lens_prior = _estimate_lens_from_best_anchor(
+                tuple(qualifying), image_size=anchors.image_size,
+            )
+            if lens_prior is not None:
+                logger.info(
+                    "lens-from-anchor: prior recovered for shot %s — "
+                    "cx=%.1f, cy=%.1f, k1=%+.4f, k2=%+.4f",
+                    shot_id, *lens_prior,
+                )
+
         try:
             sol = solve_anchors_jointly(
-                tuple(qualifying), image_size=anchors.image_size,
+                tuple(qualifying),
+                image_size=anchors.image_size,
+                lens_prior=lens_prior,
             )
         except AnchorSolveError as exc:
             raise RuntimeError(f"camera stage failed: {exc}") from exc

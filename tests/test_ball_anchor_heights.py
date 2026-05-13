@@ -103,5 +103,31 @@ def test_airborne_state_classification():
 def test_event_states():
     assert EVENT_STATES == frozenset({
         "kick", "catch", "bounce", "header", "volley", "chest",
-        "player_touch",
+        "player_touch", "goal_impact",
+    })
+
+
+def test_goal_impact_classification():
+    """goal_impact pins the trajectory at the geometric contact point
+    (hard knot), forces the IMM into the flight branch (airborne), and
+    splits flight runs (event). It is NOT a ground-level state."""
+    from src.utils.ball_anchor_heights import GROUND_LEVEL_STATES
+
+    assert "goal_impact" in HARD_KNOT_STATES
+    assert "goal_impact" in AIRBORNE_STATES
+    assert "goal_impact" in EVENT_STATES
+    assert "goal_impact" not in GROUND_LEVEL_STATES
+
+
+def test_goal_impact_fallback_height():
+    """The fallback height for goal_impact is the crossbar — matches
+    FIFA goal height. Used only when the geometry resolver fails."""
+    assert state_to_height("goal_impact") == 2.44
+
+
+def test_valid_goal_elements():
+    from src.utils.ball_anchor_heights import VALID_GOAL_ELEMENTS
+
+    assert VALID_GOAL_ELEMENTS == frozenset({
+        "post", "crossbar", "back_net", "side_net",
     })

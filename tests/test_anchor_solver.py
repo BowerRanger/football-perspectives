@@ -946,3 +946,52 @@ def test_lens_prior_tightens_solo_C_spread_on_distorted_clip():
     assert sol_prior.principal_point == (prior[0], prior[1]), (
         "JointSolution.principal_point should match the lens prior's (cx, cy)"
     )
+
+
+@pytest.mark.unit
+def test_joint_lens_estimator_recovers_pp_and_distortion():
+    """The joint estimator should be at least as good as single-anchor on a
+    well-conditioned synthetic clip — and on real clips, where single-anchor
+    fails to clear its 2× drop gate, the joint version's looser 1.3× gate
+    (with much better-determined fit) succeeds.
+    """
+    from src.utils.anchor_solver import _estimate_lens_jointly
+
+    C_true = np.array([52.5, -30.0, 18.0])
+    cx_true, cy_true = 990.0, 580.0
+    k1_true, k2_true = -0.12, 0.02
+
+    anchors = tuple(
+        _distorted_anchor(
+            frame=fr, yaw_deg=yaw, fx=fx,
+            cx=cx_true, cy=cy_true, C=C_true,
+            distortion=(k1_true, k2_true),
+        )
+        for fr, yaw, fx in (
+            (0, 0.0, 2200.0), (60, 6.0, 2400.0), (120, -6.0, 2300.0),
+            (180, 4.0, 2350.0),
+        )
+    )
+
+    prior = _estimate_lens_jointly(anchors, image_size=IMAGE_SIZE)
+    assert prior is not None, "joint estimator returned None on clean synthetic clip"
+    cx_est, cy_est, k1_est, k2_est = prior
+    assert abs(cx_est - cx_true) < 5.0, f"cx: got {cx_est}, want {cx_true}"
+    assert abs(cy_est - cy_true) < 5.0, f"cy: got {cy_est}, want {cy_true}"
+    assert abs(k1_est - k1_true) < 0.02, f"k1: got {k1_est}, want {k1_true}"
+    assert abs(k2_est - k2_true) < 0.02, f"k2: got {k2_est}, want {k2_true}"
+
+
+@pytest.mark.unit
+def test_joint_lens_estimator_returns_none_on_single_anchor():
+    """The joint estimator needs ≥2 rich anchors; with fewer, it falls
+    through to None so the camera stage can use the single-anchor estimator
+    instead."""
+    from src.utils.anchor_solver import _estimate_lens_jointly
+
+    anchors = (_distorted_anchor(
+        frame=0, yaw_deg=0.0, fx=2200.0,
+        cx=990.0, cy=580.0, C=np.array([52.5, -30.0, 18.0]),
+        distortion=(-0.12, 0.02),
+    ),)
+    assert _estimate_lens_jointly(anchors, image_size=IMAGE_SIZE) is None

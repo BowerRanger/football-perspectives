@@ -14,6 +14,7 @@ from src.schemas.camera_track import CameraFrame, CameraTrack
 from src.utils.anchor_solver import (
     AnchorSolveError,
     _estimate_lens_from_best_anchor,
+    _estimate_lens_jointly,
     refine_with_shared_translation,
     reprojection_residual_for_anchor,
     solve_anchors_jointly,
@@ -128,9 +129,19 @@ class CameraStage(BaseStage):
 
         lens_prior = None
         if bool(cfg.get("lens_from_anchor", True)):
-            lens_prior = _estimate_lens_from_best_anchor(
+            # Joint estimator first — fits across every rich anchor with
+            # shared (cx, cy, k1, k2) and per-anchor (rvec, tvec, fx).
+            # Far better-determined than the single-anchor estimator on
+            # real broadcast clips (≥2 rich anchors required). The single-
+            # anchor fallback only fires when the joint LM rejects or
+            # there's fewer than 2 rich anchors.
+            lens_prior = _estimate_lens_jointly(
                 tuple(qualifying), image_size=anchors.image_size,
             )
+            if lens_prior is None:
+                lens_prior = _estimate_lens_from_best_anchor(
+                    tuple(qualifying), image_size=anchors.image_size,
+                )
             if lens_prior is not None:
                 logger.info(
                     "lens-from-anchor: prior recovered for shot %s — "

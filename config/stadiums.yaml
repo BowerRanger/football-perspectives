@@ -43,3 +43,21 @@ stadiums:
       stripe_width_m: 6.0
       origin_x_m: 0.0
       origin_y_m: 0.0
+
+  anfield:
+    display_name: "Anfield (Liverpool FC)"
+    # Liverpool report Anfield's pitch as 101 m x 68 m (shorter than the
+    # FIFA reference 105 m). The goal-line landmarks and 18-yd box are
+    # standard FIFA-spec (centred on each goal-line midpoint at y=34) so
+    # the camera-stage residuals are insensitive to length on left-half
+    # broadcast angles. The length feeds the web pitch viewer and the
+    # ball stage's flight-segment x-bounds.
+    pitch_length_m: 101.0
+    pitch_width_m: 68.0
+    # Mow pattern at Anfield varies by match — leave the stripe width as
+    # the league default. Per-clip mow-stripe overrides should go in the
+    # anchor JSON if needed.
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0

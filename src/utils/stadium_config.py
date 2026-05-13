@@ -55,6 +55,16 @@ class StadiumConfig:
     id: str
     display_name: str
     mowing: MowingPattern | None = None
+    pitch_length_m: float | None = None
+    pitch_width_m: float | None = None
+    """Real-world pitch dimensions in metres. ``None`` falls back to the
+    FIFA-default 105 × 68 used throughout the codebase. Anfield is
+    101 × 68 — the 18-yd box and goal area stay standard (geometry
+    centred on each goal line) but touchline length and halfway-line
+    x-coordinate scale with pitch length. Currently consumed by the
+    web pitch viewer + ball stage; not yet by the camera-stage solver
+    (whose landmarks for this clip are all goal-relative and don't
+    depend on pitch length)."""
 
 
 class StadiumConfigError(ValueError):
@@ -99,7 +109,25 @@ def _parse_one(sid: str, body: dict, src: Path) -> StadiumConfig:
     display_name = body.get("display_name", sid)
     mowing_raw = body.get("mowing")
     mowing = _parse_mowing(sid, mowing_raw, src) if mowing_raw else None
-    return StadiumConfig(id=sid, display_name=display_name, mowing=mowing)
+    length = body.get("pitch_length_m")
+    width = body.get("pitch_width_m")
+    if length is not None and (not isinstance(length, (int, float)) or length <= 0):
+        raise StadiumConfigError(
+            f"{src}: stadium '{sid}': pitch_length_m must be a positive "
+            f"number, got {length!r}"
+        )
+    if width is not None and (not isinstance(width, (int, float)) or width <= 0):
+        raise StadiumConfigError(
+            f"{src}: stadium '{sid}': pitch_width_m must be a positive "
+            f"number, got {width!r}"
+        )
+    return StadiumConfig(
+        id=sid,
+        display_name=display_name,
+        mowing=mowing,
+        pitch_length_m=float(length) if length is not None else None,
+        pitch_width_m=float(width) if width is not None else None,
+    )
 
 
 def _parse_mowing(sid: str, body: dict, src: Path) -> MowingPattern:

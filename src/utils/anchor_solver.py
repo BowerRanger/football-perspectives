@@ -358,6 +358,198 @@ def refine_with_shared_translation(
     )
 
 
+def refine_with_bounded_motion(
+    anchors: tuple[Anchor, ...],
+    sol: JointSolution,
+    max_motion_m: float,
+) -> JointSolution:
+    """Static-camera-like relock that allows each anchor's camera centre
+    to drift up to ``max_motion_m`` metres from a shared reference.
+
+    Designed for clips where the camera body is approximately fixed but
+    not pixel-perfect — e.g. a stadium gantry mount with operator pan/tilt
+    induced vibration. ``refine_with_shared_translation`` forces every
+    anchor to share C exactly, which on real broadcast data inflates
+    per-anchor residuals when solo Cs disagree by 1–3 m (typically driven
+    by click noise + un-modelled lens, not real body motion).
+
+    Parameter layout: ``[Cx, Cy, Cz, {rvec_i(3), dC_i(3), fx_i}...]``.
+    Each anchor's t is reconstructed inside the residual as
+    ``t = -R @ (C + dC)`` with ``|dC|_∞ ≤ max_motion_m``. Distortion
+    and principal point are held fixed at the input solution's values.
+
+    Returns a fresh JointSolution. The reported ``camera_centre`` is the
+    shared reference C; per-anchor centres are not constant. If the
+    optimisation makes residuals worse than the input by more than 10×,
+    the input is returned untouched (same fail-safe as the strict relock).
+    """
+    if max_motion_m <= 0:
+        return refine_with_shared_translation(anchors, sol)
+    if not sol.per_anchor_KRt:
+        return sol
+
+    by_frame = {a.frame: a for a in anchors}
+    qualifying = [
+        by_frame[af] for af in sol.per_anchor_KRt.keys() if af in by_frame
+    ]
+    if not qualifying:
+        return sol
+
+    cx, cy = sol.principal_point
+    distortion = sol.distortion
+
+    # Seed C as the mean of solo Cs across rich anchors (so dC starts ≈ 0
+    # for the dominant cluster).
+    rich_Cs: list[np.ndarray] = []
+    for af, (_K, R, t) in sol.per_anchor_KRt.items():
+        a = by_frame.get(af)
+        if a is None or not _is_rich(a):
+            continue
+        rich_Cs.append(-R.astype(np.float64).T @ t.astype(np.float64))
+    if rich_Cs:
+        C_seed = np.mean(np.stack(rich_Cs), axis=0)
+    else:
+        C_seed = -sol.per_anchor_KRt[next(iter(sol.per_anchor_KRt))][1].T @ \
+                 sol.per_anchor_KRt[next(iter(sol.per_anchor_KRt))][2]
+
+    PER = 7  # rvec(3), dC(3), fx
+    n = len(qualifying)
+    p0 = np.empty(3 + PER * n, dtype=np.float64)
+    p0[:3] = C_seed
+    lower = np.empty_like(p0)
+    upper = np.empty_like(p0)
+    lower[:3] = C_seed - 5.0
+    upper[:3] = C_seed + 5.0
+    # Box bound per dC component such that the worst-case L2 stays at
+    # the budget. The LM optimizes inside [-c, c]^3 where c = R/√3 so
+    # |dC|_2 ≤ R. Conservative vs an L2-constrained NLP but it's cheap
+    # and the LM rarely sits at the corner.
+    c_bound = max_motion_m / float(np.sqrt(3.0))
+    for i, anchor in enumerate(qualifying):
+        K_i, R_i, t_i = sol.per_anchor_KRt[anchor.frame]
+        C_i = -R_i.astype(np.float64).T @ t_i.astype(np.float64)
+        dC_init = np.clip(C_i - C_seed, -c_bound, c_bound)
+        rv_i, _ = cv2.Rodrigues(R_i.astype(np.float64))
+        base = 3 + i * PER
+        p0[base : base + 3] = rv_i.reshape(3)
+        p0[base + 3 : base + 6] = dC_init
+        p0[base + 6] = float(K_i[0, 0])
+        lower[base : base + 3] = -np.pi
+        upper[base : base + 3] = np.pi
+        lower[base + 3 : base + 6] = -c_bound
+        upper[base + 3 : base + 6] = c_bound
+        lower[base + 6] = float(K_i[0, 0]) * 0.5
+        upper[base + 6] = float(K_i[0, 0]) * 2.0
+
+    obj_pts_per: list[np.ndarray] = []
+    img_pts_per: list[np.ndarray] = []
+    lines_per: list = []
+    for anchor in qualifying:
+        if anchor.landmarks:
+            obj_pts_per.append(
+                np.array([lm.world_xyz for lm in anchor.landmarks],
+                         dtype=np.float64).reshape(-1, 1, 3)
+            )
+            img_pts_per.append(
+                np.array([lm.image_xy for lm in anchor.landmarks],
+                         dtype=np.float64)
+            )
+        else:
+            obj_pts_per.append(None)
+            img_pts_per.append(None)
+        lines_per.append(list(anchor.lines))
+
+    dist = np.array([distortion[0], distortion[1], 0.0, 0.0, 0.0],
+                    dtype=np.float64)
+
+    def _residuals(p: np.ndarray) -> np.ndarray:
+        C = p[:3]
+        parts: list[np.ndarray] = []
+        for i, anchor in enumerate(qualifying):
+            base = 3 + i * PER
+            rv = p[base : base + 3]
+            dC = p[base + 3 : base + 6]
+            fx = float(np.clip(p[base + 6], 50.0, 1e5))
+            R_i, _ = cv2.Rodrigues(rv)
+            t_i = -R_i @ (C + dC)
+            K_i = _make_K(fx, cx, cy)
+            if obj_pts_per[i] is not None:
+                proj, _ = cv2.projectPoints(
+                    obj_pts_per[i], rv.reshape(3, 1), t_i.reshape(3, 1),
+                    K_i, dist,
+                )
+                parts.append((proj.reshape(-1, 2) - img_pts_per[i]).reshape(-1))
+            if lines_per[i]:
+                parts.append(
+                    _LINE_RESIDUAL_WEIGHT
+                    * _line_residuals(lines_per[i], K_i, R_i, t_i)
+                )
+        return np.concatenate(parts) if parts else np.empty(0)
+
+    try:
+        result = least_squares(
+            _residuals, p0, bounds=(lower, upper),
+            method="trf", loss="huber", f_scale=2.0, max_nfev=1000,
+        )
+    except Exception as exc:
+        logger.warning("bounded-motion relock failed: %s; falling back to "
+                       "strict static-camera relock", exc)
+        return refine_with_shared_translation(anchors, sol)
+
+    C_locked = np.asarray(result.x[:3], dtype=np.float64)
+    new_KRt: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    new_res: dict[int, float] = {}
+    motions: list[float] = []
+    for i, anchor in enumerate(qualifying):
+        base = 3 + i * PER
+        rv = result.x[base : base + 3]
+        dC = result.x[base + 3 : base + 6]
+        fx = float(result.x[base + 6])
+        R_new, _ = cv2.Rodrigues(rv)
+        t_new = -R_new @ (C_locked + dC)
+        K_new = _make_K(fx, cx, cy)
+        new_KRt[anchor.frame] = (K_new, R_new, t_new)
+        new_res[anchor.frame] = reprojection_residual_for_anchor(
+            anchor, K_new, R_new, t_new, distortion=distortion,
+        )
+        motions.append(float(np.linalg.norm(dC)))
+
+    # Anchors that were in sol.per_anchor_KRt but not in `qualifying`
+    # (e.g. degenerate solves with no anchor record) keep their K/R and
+    # get a recomputed t against the shared C.
+    for af, (K_init, R_init, _t_init) in sol.per_anchor_KRt.items():
+        if af in new_KRt:
+            continue
+        R_new = R_init.astype(np.float64)
+        t_new = -R_new @ C_locked
+        new_KRt[af] = (K_init.copy(), R_new, t_new)
+        new_res[af] = float("inf")
+
+    new_mean = float(np.mean([
+        r for r in new_res.values() if np.isfinite(r)
+    ])) if new_res else 0.0
+    old_mean = float(np.mean(list(sol.per_anchor_residual_px.values())))
+    logger.info(
+        "bounded-motion relock: C=(%.2f, %.2f, %.2f), max anchor motion "
+        "%.2f m (budget %.1f m), mean residual %.2f → %.2f px",
+        *C_locked, max(motions) if motions else 0.0, max_motion_m,
+        old_mean, new_mean,
+    )
+
+    # t_world: use the first qualifying anchor's t as a representative
+    # value. Downstream consumers should prefer ``camera_centre`` + the
+    # per-anchor R; t_world is just a legacy fallback.
+    rep_t = next(iter(new_KRt.values()))[2].copy()
+    return JointSolution(
+        t_world=rep_t,
+        principal_point=(cx, cy),
+        per_anchor_KRt=new_KRt,
+        per_anchor_residual_px=new_res,
+        camera_centre=C_locked.copy(),
+        distortion=distortion,
+    )
+
+
 # Backwards-compat thin wrapper for any external caller that imports the
 # old name. Returns just the per_anchor_KRt dict like the previous API.
 def relock_anchors_with_shared_t(
@@ -1243,6 +1435,188 @@ def _estimate_lens_from_best_anchor(
         cx_est, cy_est, k1_est, k2_est, base_res, est_res,
     )
     return cx_est, cy_est, k1_est, k2_est
+
+
+def _estimate_lens_jointly(
+    anchors: tuple[Anchor, ...],
+    image_size: tuple[int, int],
+    min_residual_drop: float = 1.3,
+) -> tuple[float, float, float, float] | None:
+    """Recover shared (cx, cy, k1, k2) by joint LM across every rich anchor.
+
+    Where ``_estimate_lens_from_best_anchor`` runs a single-anchor 9-DOF
+    LM (and gets stuck in click-noise basins on real broadcast data),
+    this fits all rich anchors simultaneously with **shared**
+    (cx, cy, k1, k2) and **per-anchor** (rvec, tvec, fx). For 5 rich
+    anchors with ~18 landmarks each that's ~180 residuals against
+    4 shared + 35 per-anchor = 39 parameters — well-determined, and
+    click noise on any one anchor can't capture the joint fit.
+
+    Acceptance gate is intentionally looser (``min_residual_drop=1.3``)
+    than the single-anchor estimator's 2×: on real broadcast clips the
+    distortion magnitude is small enough that 30 % drop is the right
+    bar. Higher would reject every real-world clip; lower starts
+    accepting noise-fitting.
+
+    Returns ``(cx, cy, k1, k2)`` or ``None`` if no rich anchor exists,
+    the LM fails, or the joint residual doesn't improve enough over the
+    no-distortion baseline.
+    """
+    rich = [a for a in anchors if _is_rich(a)]
+    if len(rich) < 2:
+        logger.info(
+            "joint lens estimation: <2 rich anchors; falling back to "
+            "single-anchor estimator",
+        )
+        return None
+    w, h = image_size
+    cx_seed, cy_seed = w / 2.0, h / 2.0
+    fx_init = float(w)
+    K_init = _make_K(fx_init, cx_seed, cy_seed)
+
+    # Baseline solo solves provide initial pose + reference residual.
+    seeds: list[tuple[np.ndarray, np.ndarray, float, float]] = []
+    base_res_total = 0.0
+    n_pts_total = 0
+    for a in rich:
+        result = _solve_one_anchor_full(a, cx_seed, cy_seed, fx_init, K_init)
+        if result is None:
+            logger.warning(
+                "joint lens estimation: baseline solo solve failed on frame %d",
+                a.frame,
+            )
+            return None
+        K_b, R_b, t_b, fx_b = result
+        rv, _ = cv2.Rodrigues(R_b.astype(np.float64))
+        seeds.append((rv.reshape(3).copy(), t_b.astype(np.float64), float(fx_b), 0.0))
+        res = reprojection_residual_for_anchor(a, K_b, R_b, t_b)
+        base_res_total += res * len(a.landmarks)
+        n_pts_total += len(a.landmarks)
+    base_res = base_res_total / max(n_pts_total, 1)
+
+    # Param layout: [cx, cy, k1, k2, rvec_0(3), tvec_0(3), fx_0, ...]
+    SHARED = 4
+    PER = 7
+    n = len(rich)
+    lower = np.empty(SHARED + PER * n, dtype=np.float64)
+    upper = np.empty_like(lower)
+    lower[0] = cx_seed - 100.0; upper[0] = cx_seed + 100.0
+    lower[1] = cy_seed - 100.0; upper[1] = cy_seed + 100.0
+    lower[2:4] = -0.5; upper[2:4] = 0.5
+    for i, (rv, t_a, fx_a, _k0) in enumerate(seeds):
+        base = SHARED + i * PER
+        lower[base : base + 3] = -np.pi
+        upper[base : base + 3] = np.pi
+        lower[base + 3 : base + 6] = -300.0
+        upper[base + 3 : base + 6] = 300.0
+        lower[base + 6] = fx_a * 0.5
+        upper[base + 6] = fx_a * 2.0
+
+    obj_pts_per: list[np.ndarray] = []
+    img_pts_per: list[np.ndarray] = []
+    for a in rich:
+        obj_pts_per.append(
+            np.array([lm.world_xyz for lm in a.landmarks], dtype=np.float64).reshape(-1, 1, 3)
+        )
+        img_pts_per.append(
+            np.array([lm.image_xy for lm in a.landmarks], dtype=np.float64)
+        )
+
+    def _residuals(p: np.ndarray) -> np.ndarray:
+        cx = float(p[0]); cy = float(p[1])
+        k1 = float(p[2]); k2 = float(p[3])
+        dist = np.array([k1, k2, 0.0, 0.0, 0.0], dtype=np.float64)
+        parts: list[np.ndarray] = []
+        for i, _a in enumerate(rich):
+            base = SHARED + i * PER
+            rv = p[base : base + 3]
+            tv = p[base + 3 : base + 6]
+            fx = float(np.clip(p[base + 6], 50.0, 1e5))
+            K = _make_K(fx, cx, cy)
+            proj, _ = cv2.projectPoints(
+                obj_pts_per[i],
+                rv.reshape(3, 1),
+                tv.reshape(3, 1),
+                K,
+                dist,
+            )
+            parts.append((proj.reshape(-1, 2) - img_pts_per[i]).reshape(-1))
+        return np.concatenate(parts)
+
+    # Multi-seed (cx, cy, k1) grid — same reasoning as the single-anchor
+    # estimator: the cost surface near image-centre + no-distortion has a
+    # shallow basin that the LM gets stuck in. Offsets of ±30 px and a
+    # ±0.1 k1 seed cover broadcast crops and typical distortion magnitudes.
+    seed_grid = [
+        (cx_seed, cy_seed, 0.0),
+        (cx_seed + 30, cy_seed, 0.0),
+        (cx_seed - 30, cy_seed, 0.0),
+        (cx_seed, cy_seed + 30, 0.0),
+        (cx_seed, cy_seed - 30, 0.0),
+        (cx_seed + 30, cy_seed + 30, 0.0),
+        (cx_seed - 30, cy_seed - 30, 0.0),
+        (cx_seed, cy_seed, -0.1),
+        (cx_seed, cy_seed, 0.1),
+    ]
+    best_result = None
+    best_cost = float("inf")
+    for cx_s, cy_s, k1_s in seed_grid:
+        p0 = np.empty(SHARED + PER * n, dtype=np.float64)
+        p0[0] = cx_s; p0[1] = cy_s
+        p0[2] = k1_s; p0[3] = 0.0
+        for i, (rv, t_a, fx_a, _k0) in enumerate(seeds):
+            base = SHARED + i * PER
+            p0[base : base + 3] = rv
+            p0[base + 3 : base + 6] = t_a
+            p0[base + 6] = fx_a
+        try:
+            r = least_squares(
+                _residuals, p0, bounds=(lower, upper),
+                method="trf", loss="huber", f_scale=2.0, max_nfev=1000,
+            )
+        except Exception as exc:
+            logger.debug("joint lens LM seed (%.0f, %.0f) failed: %s", cx_s, cy_s, exc)
+            continue
+        if r.cost < best_cost:
+            best_cost = r.cost
+            best_result = r
+    if best_result is None:
+        logger.warning("joint lens estimation: every seed failed")
+        return None
+    result = best_result
+
+    cx = float(result.x[0]); cy = float(result.x[1])
+    k1 = float(result.x[2]); k2 = float(result.x[3])
+
+    # Total residual across rich anchors under the new lens model.
+    new_res_total = 0.0
+    new_n_total = 0
+    for i, a in enumerate(rich):
+        base = SHARED + i * PER
+        rv = result.x[base : base + 3]
+        tv = result.x[base + 3 : base + 6]
+        fx = float(result.x[base + 6])
+        K = _make_K(fx, cx, cy)
+        R, _ = cv2.Rodrigues(rv)
+        r = reprojection_residual_for_anchor(a, K, R, tv, distortion=(k1, k2))
+        new_res_total += r * len(a.landmarks)
+        new_n_total += len(a.landmarks)
+    new_res = new_res_total / max(new_n_total, 1)
+
+    if new_res >= base_res / min_residual_drop:
+        logger.info(
+            "joint lens estimation: rejected — residual %.2f px did not "
+            "improve %.2f× over no-distortion baseline %.2f px",
+            new_res, min_residual_drop, base_res,
+        )
+        return None
+
+    logger.info(
+        "joint lens estimation (%d rich anchors, %d landmarks total): "
+        "cx=%.1f, cy=%.1f, k1=%+.4f, k2=%+.4f — residual %.2f → %.2f px",
+        len(rich), n_pts_total, cx, cy, k1, k2, base_res, new_res,
+    )
+    return cx, cy, k1, k2
 
 
 def _is_rich(anchor: Anchor, min_points: int = 6) -> bool:

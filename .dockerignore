@@ -1,0 +1,55 @@
+# Start by excluding everything; allow-list back the precise paths the
+# Dockerfile COPYs. This keeps build context tiny on a repo with lots
+# of submodules, test fixtures, and the local ``output/`` artefact tree.
+
+*
+
+# Source kept in the image.
+!src/
+!config/
+!recon.py
+!pyproject.toml
+!Dockerfile
+!.dockerignore
+
+# GVHMR submodule — only what gets COPY'd at runtime.
+!third_party/gvhmr/hmr4d/
+!third_party/gvhmr/inputs/checkpoints/gvhmr/
+!third_party/gvhmr/inputs/checkpoints/vitpose/
+!third_party/gvhmr/inputs/checkpoints/hmr2/
+!third_party/gvhmr/inputs/checkpoints/body_models/smpl/
+!third_party/gvhmr/inputs/checkpoints/body_models/smplx/SMPLX_NEUTRAL.pkl
+!third_party/gvhmr/inputs/checkpoints/body_models/smplx/SMPLX_NEUTRAL.npz
+!third_party/gvhmr/inputs/checkpoints/body_models/smplx/models/
+!third_party/gvhmr_shims/
+
+# Re-exclude noise inside the kept directories.
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.ipynb_checkpoints/
+**/.DS_Store
+src/web/static/**
+tests/
+
+# Belt-and-braces: explicitly drop the giant SMPLX source archive.
+third_party/gvhmr/inputs/checkpoints/body_models/smplx/models_smplx_v1_1.zip
+
+# Build/dev artefacts.
+.git/
+.gitignore
+.gitattributes
+.gitmodules
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+node_modules/
+output/
+output-origi/
+test-media/
+docs/
+README.md
+LICENSE

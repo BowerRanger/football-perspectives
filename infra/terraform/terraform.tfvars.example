@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+
+region   = "us-east-1"
+env_name = "prod"
+
+# S3 bucket names are global. Convention:
+#   football-perspectives-hmr-{env_name}-{aws-account-id}
+s3_bucket_name = "football-perspectives-hmr-prod-123456789012"
+
+# Tighten or relax to match your peak concurrency budget. 96 = 24
+# concurrent jobs × 4 vCPU each (g4dn.xlarge has 4 vCPU + 1 T4 GPU).
+max_vcpus = 96
+
+# Diversify Spot capacity if g4dn.xlarge interruption rate climbs:
+# instance_types = ["g4dn.xlarge", "g4dn.2xlarge", "g5.xlarge"]
+instance_types = ["g4dn.xlarge"]
+
+# CI sets this to the git SHA on push. Leave as "latest" for the
+# initial bring-up.
+image_tag = "latest"

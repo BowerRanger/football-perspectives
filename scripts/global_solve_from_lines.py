@@ -20,6 +20,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# Allow `python scripts/global_solve_from_lines.py ...` from anywhere —
+# the editable install exposes `football_perspectives`, not `src`.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from src.schemas.anchor import AnchorSet, LineObservation
 from src.schemas.camera_track import CameraFrame, CameraTrack
 from src.utils.anchor_solver import _is_rich

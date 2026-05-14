@@ -16,6 +16,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# Allow `python scripts/iterative_global_solve.py ...` from anywhere —
+# the editable install exposes `football_perspectives`, not `src`.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from src.schemas.anchor import AnchorSet
 from src.utils.anchor_solver import _is_rich
 from src.utils.camera_projection import project_world_to_image

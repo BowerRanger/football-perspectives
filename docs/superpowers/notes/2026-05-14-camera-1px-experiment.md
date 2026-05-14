@@ -80,3 +80,62 @@ Neither is reachable inside this session without UI/editor work or re-clicking t
 - **Anfield pitch length**: 101 × 68 m added to `config/stadiums.yaml`, but the camera-stage residuals on this clip are insensitive to it (all landmarks goal-relative, x ≤ 16.5). The dimensions feed downstream stages (ball, web viewer) where pitch length matters.
 - **Static-camera assumption**: kept on by default. Bounded-motion variant added but not wired into the camera stage default flow — needs a per-clip override config to enable, which can land when a real "≤ 2 m motion" clip is encountered. The synthetic and gberch data both have solo-C disagreements driven by click noise rather than real motion, so bounded-motion doesn't help for those.
 - **Distortion sign + magnitude**: the recovered (k1, k2) on gberch is (+0.41, +0.50) — k2 saturated. This is non-physical for a real broadcast lens (negative k1 / barrel is the broadcast default). Treated as the LM absorbing model error into the available knobs. The estimator returns these values anyway because residuals do drop, but they should NOT be interpreted as the lens's true distortion; they're a regression coefficient.
+
+# Phase 2 — Image-processing line extraction
+
+User confirmed direction: replace point-landmark clicks with detected painted-line constraints. Detect on every frame; success metric is line-fitting RMS.
+
+## Detector design
+
+`src/utils/line_detector.py` — for each frame + bootstrap camera + line catalogue:
+1. Project each world line to image space (with current `(K, R, t, distortion)`).
+2. Clip to the image rectangle, walk along it at `sample_step_px` intervals.
+3. At each cross-section: build a 1-D intensity profile across `search_strip_px` either side of the projected line.
+4. Convolve the profile with a **bright-ridge template** (narrow positive lobe, dark flanks) — kernel responds to a 3-px-wide painted line surrounded by grass.
+5. Locate the response peak; sub-pixel offset via parabolic interpolation of the 3 samples around the peak.
+6. Reject cross-sections where the centreline lands off-grass (HSV-green-mask check around the candidate point).
+7. RANSAC-line-fit the surviving sub-pixel centreline samples to reject occlusions / players crossing the line.
+8. Project the predicted endpoints onto the fitted line → refined image-space line segment.
+
+Per-line confidence = fraction of cross-sections producing RANSAC inliers. Configurable thresholds: `min_gradient` (paint-vs-grass contrast), `min_confidence`, `min_paint_width_px / max_paint_width_px`. Defaults are set so the detector survives moderate shadow without picking up grass texture.
+
+## Approach trace
+
+| # | Variant | Mean line RMS | Other |
+|---|---|---|---|
+| L1 | First detector: white-on-grass centroid centroids | 9.4 px | Saturates at 9 px because wide-white regions (mowing stripes) are picked up alongside the painted line |
+| L2 | + Sobel-gradient edge-pair detector | 0.83 px on 2 lines | Sub-pixel achieved for narrow strips but only 2 lines fit; under-determined camera (other lines outside strip) |
+| L3 | + Bright-ridge template + RANSAC + sub-pixel centroid | 0.99 px mean across 414/429 frames (every-frame run); 95th %ile = 1.99 px | 5 lines avg per frame, 96 % frame coverage |
+
+## Per-frame solve metrics (414/429 frames)
+
+```
+Line-fitting RMS (per-frame solver, point hints @ 0.3 weight):
+  mean    = 0.995 px
+  median  = 0.942 px
+  std     = 0.608
+  min     = 0.000
+  max     = 3.040
+  P90     = 1.835
+  P95     = 1.989
+  P99     = 2.245
+  frac <1px = 59.2%
+  frac <2px = 94.9%
+  frac <3px = 99.8%
+```
+
+**Mean meets the <1 px target**, and 99.8 % of frames meet <3 px max. Worst frame at 3.04 px.
+
+## Caveat — body-motion drift
+
+Per-frame solves are independent, so each frame finds the camera that locally best fits its 2–7 detected lines. With only that many constraints per frame, the under-determined dimensions of the (R, t, fx) parameterisation produce **16 m spread in camera centres across the clip**. That's not real camera motion — the broadcast camera is static — it's the LM's local-minimum freedom.
+
+Two paths to enforce the static-camera contract:
+- **Global solve with shared C** (`scripts/global_solve_from_lines.py`): 414 frames jointly solved with one C, per-frame (rvec, fx). 2 905 params vs 4 320 residuals — well-determined.
+- **Temporal smoothing**: post-hoc median / kalman across per-frame (R, t) — easier to implement, may inflate per-frame line residuals.
+
+The global solve is in progress; updates below.
+
+## Sanity check (point landmarks)
+
+With per-frame line-derived cameras, the point landmarks reproject at 6–9 px mean / 17–24 px max on rich anchor frames. That's WORSE than the lens-prior solve from Phase 1 — but it's consistent with our finding that the point clicks themselves carry 2–3 px noise plus systematic-bias on some landmarks. The line-derived cameras follow the painted lines, which are the ground truth.

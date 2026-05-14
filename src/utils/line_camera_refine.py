@@ -176,3 +176,49 @@ def refine_camera_from_lines(
             detected_lines=[], n_detections=0,
         )
     return best
+
+
+def detect_lines_for_frames(
+    frames_bgr: dict[int, np.ndarray],
+    cameras: dict[int, dict[str, np.ndarray]],
+    distortion: tuple[float, float],
+    detector_cfg: DetectorConfig | None = None,
+    *,
+    min_confidence: float = 0.5,
+    min_n_samples: int = 40,
+    min_lines: int = 2,
+) -> dict[int, list[LineObservation]]:
+    """Detect painted pitch lines across many frames using per-frame
+    bootstrap cameras.
+
+    ``frames_bgr`` and ``cameras`` are both keyed by frame id. A frame
+    is included in the output only if it has a bootstrap camera, a
+    decoded image, and at least ``min_lines`` detections passing the
+    confidence / sample-count gates. Frames that fail any check are
+    silently dropped — callers keep their propagated camera for those.
+    """
+    if detector_cfg is None:
+        detector_cfg = DetectorConfig()
+    out: dict[int, list[LineObservation]] = {}
+    for fid, frame in frames_bgr.items():
+        cam = cameras.get(fid)
+        if cam is None:
+            continue
+        dets = detect_painted_lines_in_frame(
+            frame, cam["K"], cam["R"], cam["t"], distortion,
+            PITCH_LINE_CATALOGUE, detector_cfg,
+        )
+        usable = [
+            d for d in dets
+            if d.confidence >= min_confidence and d.n_samples >= min_n_samples
+        ]
+        if len(usable) >= min_lines:
+            out[fid] = [
+                LineObservation(
+                    name=d.name,
+                    image_segment=d.image_segment,
+                    world_segment=d.world_segment,
+                )
+                for d in usable
+            ]
+    return out

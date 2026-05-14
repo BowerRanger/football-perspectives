@@ -609,6 +609,50 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             cap.release()
         return Response(content=buf.tobytes(), media_type="image/jpeg")
 
+    @app.post("/api/anchor/snap")
+    def snap_anchor_click(payload: dict):
+        """Sub-pixel refinement for an anchor click.
+
+        Body: ``{"shot_id": str, "frame": int, "click": [x, y], "mode": str}``
+        where ``mode`` is one of ``"auto" | "line_intersection" |
+        "line_endpoint" | "off"``.
+
+        Returns ``{"xy": [x, y], "snapped": bool, "mode_used": str,
+        "confidence": float}``. The UI should display the snapped point
+        when ``snapped`` is true; users can override low-confidence
+        snaps.
+        """
+        shot_id = payload.get("shot_id")
+        frame_idx = payload.get("frame")
+        click = payload.get("click")
+        mode = payload.get("mode", "auto")
+        if not shot_id or not re.fullmatch(r"[A-Za-z0-9_-]+", str(shot_id)):
+            raise HTTPException(status_code=400, detail="Invalid shot ID")
+        if not isinstance(frame_idx, int) or frame_idx < 0:
+            raise HTTPException(status_code=400, detail="Invalid frame index")
+        if not isinstance(click, (list, tuple)) or len(click) != 2:
+            raise HTTPException(status_code=400, detail="Invalid click coords")
+        clip_path = (output_dir / "shots" / f"{shot_id}.mp4").resolve()
+        if not clip_path.exists():
+            raise HTTPException(status_code=404, detail=f"Video not found: {shot_id}")
+        import cv2
+        from src.utils.click_snap import snap_click
+        cap = cv2.VideoCapture(str(clip_path))
+        try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ok, frame = cap.read()
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"Frame {frame_idx} not found")
+            result = snap_click(frame, (float(click[0]), float(click[1])), mode=mode)
+        finally:
+            cap.release()
+        return {
+            "xy": [result.xy[0], result.xy[1]],
+            "snapped": bool(result.snapped),
+            "mode_used": result.mode_used,
+            "confidence": float(result.confidence),
+        }
+
     @app.get("/viewer")
     def viewer_page():
         viewer_path = static_dir / "viewer.html"

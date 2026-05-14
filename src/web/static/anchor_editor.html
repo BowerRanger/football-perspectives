@@ -261,6 +261,10 @@
       <input type="number" id="frame-input" min="0" value="0">
       <span class="frame-info" id="frame-info">0 / 0</span>
       <button id="add-anchor-btn" title="Mark current frame as an anchor">+ Anchor here</button>
+      <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;cursor:pointer;"
+             title="When enabled, every click is sub-pixel-refined to the nearest painted feature via image processing.">
+        <input type="checkbox" id="snap-toggle" checked> snap to lines
+      </label>
       <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;cursor:pointer;">
         <input type="checkbox" id="show-pitch" checked> projected pitch
       </label>
@@ -304,6 +308,7 @@ const state = {
   frame: 0,
   totalFrames: 0,
   mode: "points",
+  snapEnabled: true,        // sub-pixel snap on each click via /api/anchor/snap
 };
 
 const els = {
@@ -328,6 +333,7 @@ const els = {
   frameInput: document.getElementById("frame-input"),
   frameInfo: document.getElementById("frame-info"),
   addAnchorBtn: document.getElementById("add-anchor-btn"),
+  snapToggle: document.getElementById("snap-toggle"),
   anchorList: document.getElementById("anchor-list"),
   confStrip: document.getElementById("conf-strip"),
   confCanvas: document.getElementById("conf-canvas"),
@@ -912,13 +918,41 @@ function ensureAnchor(frame) {
   return cur;
 }
 
-els.overlay.addEventListener("click", (ev) => {
-  const [x, y] = videoEventToImageXY(ev);
+async function snapClick(frame, click, mode) {
+  // Ask the server to refine the click to sub-pixel via /api/anchor/snap.
+  // Falls back to the raw click if the request fails or snap is disabled.
+  if (!state.snapEnabled) return { xy: click, snapped: false, mode_used: "off", confidence: 0 };
+  try {
+    const res = await fetch("/api/anchor/snap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        shot_id: state.clipId, frame, click, mode,
+      }),
+    });
+    if (!res.ok) return { xy: click, snapped: false, mode_used: "off", confidence: 0 };
+    return await res.json();
+  } catch (e) {
+    return { xy: click, snapped: false, mode_used: "off", confidence: 0 };
+  }
+}
+
+els.overlay.addEventListener("click", async (ev) => {
+  const [rawX, rawY] = videoEventToImageXY(ev);
 
   if (state.mode === "points") {
     if (!state.selectedLandmark) return;
     const lm = state.landmarks.find((l) => l.name === state.selectedLandmark);
     if (!lm) return;
+    // Sub-pixel refinement: snap to line intersection (most landmarks) or
+    // single-line projection (corner-flag-top, penalty-spot). The server's
+    // /api/anchor/snap heuristic picks the right mode based on what's
+    // detected in the local image patch.
+    const snap = await snapClick(state.frame, [rawX, rawY], "auto");
+    const [x, y] = snap.xy;
+    if (snap.snapped) {
+      setStatus(`Snapped to ${snap.mode_used} (conf ${snap.confidence.toFixed(2)})`, "#22c55e");
+    }
     const obs = { name: lm.name, image_xy: [x, y], world_xyz: lm.world_xyz };
     const cur = ensureAnchor(state.frame);
     const idx = cur.points.findIndex((o) => o.name === obs.name);
@@ -935,23 +969,22 @@ els.overlay.addEventListener("click", (ev) => {
   if (!ln) return;
 
   if (state.pendingLineStart === null) {
-    state.pendingLineStart = [x, y];
+    // Snap line-endpoint clicks too: project onto the nearest painted line.
+    const snap = await snapClick(state.frame, [rawX, rawY], "line_endpoint");
+    state.pendingLineStart = snap.xy;
     setStatus(`Now click the OTHER end of "${ln.name}"`, "#facc15");
     redrawOverlay();
     return;
   }
-  // Second click — complete the segment
+  // Second click — complete the segment (also snap)
+  const snap = await snapClick(state.frame, [rawX, rawY], "line_endpoint");
   const obs = {
     name: ln.name,
-    image_segment: [state.pendingLineStart, [x, y]],
+    image_segment: [state.pendingLineStart, snap.xy],
     world_segment: ln.world_segment || null,
     world_direction: ln.world_direction || null,
   };
   const cur = ensureAnchor(state.frame);
-  // For position-known lines, replace by name (only one near_touchline per
-  // anchor). For direction-only lines (e.g. vertical_separator), allow
-  // multiple copies — each separator is an independent VP residual, so
-  // disambiguate by index.
   if (obs.world_direction !== null) {
     cur.lines.push(obs);
   } else {
@@ -963,6 +996,12 @@ els.overlay.addEventListener("click", (ev) => {
   redrawOverlay();
   renderAnchorList();
 });
+
+if (els.snapToggle) {
+  els.snapToggle.addEventListener("change", (ev) => {
+    state.snapEnabled = !!ev.target.checked;
+  });
+}
 
 els.addAnchorBtn.addEventListener("click", () => {
   if (!state.anchors.has(state.frame)) {

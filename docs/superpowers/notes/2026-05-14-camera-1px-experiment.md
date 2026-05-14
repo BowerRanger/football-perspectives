@@ -139,3 +139,101 @@ The global solve is in progress; updates below.
 ## Sanity check (point landmarks)
 
 With per-frame line-derived cameras, the point landmarks reproject at 6–9 px mean / 17–24 px max on rich anchor frames. That's WORSE than the lens-prior solve from Phase 1 — but it's consistent with our finding that the point clicks themselves carry 2–3 px noise plus systematic-bias on some landmarks. The line-derived cameras follow the painted lines, which are the ground truth.
+
+## Global static-C solve attempts
+
+Goal: enforce body motion <2 m while keeping line RMS sub-pixel.
+
+| Variant | Lens seed | C seed | Line RMS mean | <1px frac | Body motion |
+|---|---|---|---|---|---|
+| Static-C, lens free, 800 nfev | (0,0,0,0) | rich median | 4.49 | 5.6 % | 0 (locked) |
+| Static-C, lens free, point hint @ 0.2 | (0,0,0,0) | rich median | 4.49 | 5.6 % | 0 |
+| Static-C, lens **fixed** to Phase-1 prior | (958, 543, +0.41, +0.50) | rich median | 4.22 | 15.9 % | 0 |
+| Per-frame independent line solve | n/a | n/a | **0.99** | **59.2 %** | 16.3 m ❌ |
+
+The pattern across all static-C variants: line RMS plateaus around 4 px, with the cost surface preferring **zero distortion** (k1, k2 → 0) when free, even though the per-frame solves prefer **saturated distortion** (k1=+0.41, k2=+0.50). The two LM regimes find different optima because per-frame fits are locally over-determined within their own clicks but globally under-determined across frames.
+
+## What this means
+
+- The image-processing line detector is **sub-pixel per frame** (median 0.94, P95 1.99). The detector itself meets the gate.
+- The remaining residual is not detector noise — it's structural inconsistency between per-frame line observations under a single static-camera + radial-distortion model.
+- Per-frame line-derived camera centres span 11 × 11 × 3 m. That's not real body motion (the broadcast camera is static); it's the local-minimum freedom of an under-determined per-frame solve. With only 2–7 detected lines per frame, a 1-D dimension of the camera-pose manifold is unconstrained, and the LM can slide along it freely.
+- Forcing static C exposes the per-frame line biases. Either:
+  - The lens model is insufficient (tangential distortion p1/p2 or higher-order radial k3 needed)
+  - The detector has frame-dependent systematic bias (lighting, shadow, near-vs-far-side line width)
+  - The world-line catalogue has tiny inaccuracies
+
+Neither of those is solvable by changing the line detector. Image-processing line extraction has plateaued.
+
+## Decisions / wrap-up
+
+- Per-frame line-derived cameras in `output/camera/gberch_detected_lines.json` give **0.99 px mean line RMS across 414/429 frames** — the line-fitting gate the user defined.
+- Static-C enforcement under the current model breaks the gate (~4 px mean RMS) — the body-motion constraint cannot be enforced without a richer model.
+- Honest recommendation: keep both outputs. Use per-frame line-derived cameras for downstream stages that benefit from sub-pixel per-frame accuracy (hmr_world's foot anchoring, ball ground projection). Use the strict static-C for downstream code that demands a single camera body (3D viewer pitch overlay).
+
+# Phase 3 — Sub-pixel click placement (recommended next step)
+
+Status: per the user's instruction ("If you exhaust image-processing and don't achieve within 1 px results, then move on to sub-pixel click placement features"), this is the next thing to build. Sketch only — not implemented in this session.
+
+## Why it's the right next step
+
+The point landmarks have 2–3 px placement noise per click plus systematic bias on certain landmarks (`left_6yd_goal_near` consistently -6.83 px in du across anchors). That's the **floor** that no camera model can fit below.
+
+Sub-pixel click placement attacks that floor directly: the user clicks approximately, and the editor refines the click to sub-pixel using local image processing. This combines well with the existing line detector — both share the ridge-filter + edge-pair sub-pixel math.
+
+## Implementation sketch
+
+1. **New endpoint** `POST /anchor/snap` in `src/web/server.py`: takes `{frame, click_xy, hint: "line_endpoint" | "point_landmark", landmark_name}` and returns refined `xy`.
+2. **Snap logic**:
+   - `line_endpoint`: use the existing `line_detector` ridge-filter logic in a small local window. Find the painted line nearest the click; project the click onto it. (Reuses `_sample_centreline_offset`.)
+   - `point_landmark` for line intersections (e.g. `left_6yd_goal_near`): detect the two lines that pass through this landmark, compute their intersection. The two lines come from the catalogue per landmark name (e.g. for `left_6yd_goal_near` they're `left_goal_line` and `left_6yd_near_edge`).
+   - `point_landmark` for non-intersection points (corner-flag-top, penalty-spot): fall back to local corner detection (Harris / cv2.goodFeaturesToTrack).
+3. **Editor UX** in `src/web/static/anchor_editor.html`:
+   - On click, immediately call `/anchor/snap`. Show a small loading spinner.
+   - Display the refined position with a small confidence indicator.
+   - Let the user override if the snap is obviously wrong.
+4. **Bulk re-snap pass** for existing clicks: a "Refine all clicks on this anchor" button that runs every click through `/anchor/snap` and updates the JSON. Lets users upgrade legacy hand-placed anchors without re-clicking each one.
+
+Expected impact: should drop click noise from 2–3 px to ≤0.5 px, lifting the noise floor enough for the existing lens-prior + bounded-motion solver to reach <1 px point residuals.
+
+## Phase 3 — sub-pixel click placement (built)
+
+### What landed
+
+- `src/utils/click_snap.py` — local feature snap. Given a click, scans 18 orientations through a 60×60 px window for bright-ridge responses, then picks the best snap mode based on what's detected:
+  - 2 roughly-perpendicular lines → snap to intersection.
+  - 1 line → project click onto it.
+  - 0 lines → return click unchanged.
+- `POST /api/anchor/snap` endpoint in `src/web/server.py` — body `{shot_id, frame, click: [x, y], mode}`, returns `{xy, snapped, mode_used, confidence}`.
+- Anchor editor (`src/web/static/anchor_editor.html`) calls `/api/anchor/snap` on every landmark or line-endpoint click. New "snap to lines" toggle in the toolbar (on by default).
+- 2 integration tests in `tests/test_web_api.py` covering input validation and the no-feature fallback path.
+
+### Empirical impact on gberch
+
+Snapping all 87 point clicks across the 5 rich anchors moved 66 of them by **mean 2.30 px** — confirming the diagnosed 2–3 px click-noise floor.
+
+Re-running the camera solve with snapped clicks:
+
+| Anchor | Before snap (mean / max) | After snap (mean / max) |
+|---|---|---|
+| f0   | 4.31 / 9.79 | 2.33 / 5.91 |
+| f45  | 4.09 / 7.85 | 2.84 / 5.64 |
+| f205 | 13.34 / 32.12 | 14.90 / 33.02 |
+| f282 | 5.40 / 9.27 | 3.06 / 6.73 |
+| f371 | 8.83 / 18.71 | 8.22 / 17.04 |
+
+Most anchors improved (f0, f45, f282 by ~40 %). **f205 didn't improve** — its issue is structural (the static-camera relock forces a shared C that doesn't fit f205's clicks regardless of how accurately they're placed). f205's see-saw needs the bounded-motion approach or richer lens model, not sub-pixel snap.
+
+### Floor we're now at
+
+- Click-noise floor: 2–3 px → ~1 px after snap (snap reduces but doesn't eliminate; detector itself has ~1 px bias).
+- Lens-model floor: ~1–2 px (k1, k2 saturate at ±0.5 absorbing non-radial residuals — likely tangential + zoom-dependent distortion).
+- Static-camera floor on f205-style frames: ~12 px (when the rich-anchor solo Cs disagree by 2–3 m, locking C to a single value forces one anchor to absorb a large residual).
+
+The fundamental gate of <1 px max deviance across all anchor frames is **not reachable** without either:
+
+1. A richer lens model (CALIB_RATIONAL_MODEL with k1..k6 + p1, p2, possibly per-zoom-level coefficients), OR
+2. Allowing the camera body to truly move (relaxing static-C), OR
+3. Both.
+
+The sub-pixel snap is the right plumbing to support whatever direction comes next — it lowers the click-noise contribution so the remaining residual is model error, not data noise.

@@ -1036,3 +1036,59 @@ def test_refined_poses_summary_endpoint(client) -> None:
     r = c.get("/refined_poses/summary")
     assert r.status_code == 200
     assert r.json()["players_refined"] == 3
+
+
+# ── Sub-pixel click snap endpoint ───────────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_snap_endpoint_validates_inputs(client) -> None:
+    """POST /api/anchor/snap rejects malformed payloads with 4xx errors."""
+    c, _ = client
+    # Missing shot_id
+    r = c.post("/api/anchor/snap", json={"frame": 0, "click": [100, 100]})
+    assert r.status_code == 400
+    # Invalid shot_id (path-traversal characters)
+    r = c.post("/api/anchor/snap", json={
+        "shot_id": "../etc/passwd", "frame": 0, "click": [100, 100],
+    })
+    assert r.status_code == 400
+    # Missing click
+    r = c.post("/api/anchor/snap", json={"shot_id": "x", "frame": 0})
+    assert r.status_code == 400
+    # Bad click shape
+    r = c.post("/api/anchor/snap", json={
+        "shot_id": "x", "frame": 0, "click": [100],
+    })
+    assert r.status_code == 400
+
+
+@pytest.mark.integration
+def test_snap_endpoint_returns_click_unchanged_on_blank_frame(client) -> None:
+    """When the clip patch is featureless, snap returns the input
+    coords with ``snapped=False``. Validates the no-feature fallback
+    behaviour without needing a real broadcast frame."""
+    import cv2
+    import numpy as np
+
+    c, tmp = client
+    shot_dir = tmp / "shots"
+    shot_dir.mkdir()
+    # Write a 100×100 mid-grey clip (no painted lines)
+    clip_path = shot_dir / "blankshot.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(clip_path), fourcc, 30.0, (100, 100))
+    grey = np.full((100, 100, 3), 128, dtype=np.uint8)
+    for _ in range(5):
+        writer.write(grey)
+    writer.release()
+    assert clip_path.exists()
+
+    r = c.post("/api/anchor/snap", json={
+        "shot_id": "blankshot", "frame": 0, "click": [50.0, 50.0], "mode": "auto",
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["snapped"] is False
+    assert body["xy"] == [50.0, 50.0]
+    assert body["confidence"] == 0.0

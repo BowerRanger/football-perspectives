@@ -114,3 +114,19 @@ def test_profile_subsamples_grid_but_seeds_every_frame():
     # but per_frame_seeds covers ALL 40 frames (the BA needs every seed).
     assert set(result.per_frame_seeds.keys()) == set(per_frame_lines.keys())
     assert len(result.per_frame_seeds) == 40
+
+
+@pytest.mark.unit
+def test_profile_cost_is_grid_order_independent():
+    """Each grid cell's cost must depend only on its C, not on the sweep
+    order — i.e. inner solves seed from the stable bootstrap, never from a
+    drifting cell-to-cell warm-start."""
+    per_frame_lines, bootstrap = _synthetic_clip([-6.0, 0.0, 6.0])
+    grid = make_c_grid(C_TRUE, extent_m=3.0, n_steps=3)
+    common = dict(lens_seed=(CX, CY, 0.0, 0.0), per_frame_bootstrap=bootstrap)
+    fwd = profile_camera_centre(per_frame_lines, IMAGE_SIZE, c_grid=grid, **common)
+    rev = profile_camera_centre(
+        per_frame_lines, IMAGE_SIZE, c_grid=grid[::-1], **common
+    )
+    # Same grid points, reversed order → identical per-point costs.
+    np.testing.assert_allclose(fwd.mean_rms, rev.mean_rms[::-1], atol=1e-9)

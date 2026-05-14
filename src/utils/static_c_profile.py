@@ -131,17 +131,21 @@ def profile_camera_centre(
     p95_rms = np.full(m, np.inf)
     max_rms = np.full(m, np.inf)
 
-    # Warm-start each grid cell from the previous cell's solution so the
-    # inner LMs converge fast; first cell uses the bootstrap.
-    warm = {f: per_frame_bootstrap[f] for f in grid_fids}
+    # Every cell's inner solves seed from the *stable* per-frame bootstrap
+    # (the propagated per-frame camera — already a ~1 px fit). Warm-starting
+    # each cell from the previous cell instead lets the seed state drift as
+    # the meshgrid sweep crosses bad-C corners, and the bounded-nfev inner
+    # LM cannot recover — which silently inflates the cost of good cells.
     best = 0
     best_mean = np.inf
-    best_cell_seeds: dict[int, tuple[np.ndarray, float]] = dict(warm)
+    best_cell_seeds: dict[int, tuple[np.ndarray, float]] = {
+        f: per_frame_bootstrap[f] for f in grid_fids
+    }
     for gi, C in enumerate(c_grid):
         rms_vals = []
         cell_seeds: dict[int, tuple[np.ndarray, float]] = {}
         for fid in grid_fids:
-            rvec_seed, fx_seed = warm[fid]
+            rvec_seed, fx_seed = per_frame_bootstrap[fid]
             rvec, fx, rms = _solve_frame_at_fixed_c(
                 per_frame_lines[fid], cx, cy, dist5, np.asarray(C, float),
                 rvec_seed, fx_seed,
@@ -158,7 +162,6 @@ def profile_camera_centre(
             best_mean = mean_rms[gi]
             best = gi
             best_cell_seeds = cell_seeds
-        warm = cell_seeds  # warm-start the next cell
 
     argmin_c = np.asarray(c_grid[best], dtype=np.float64).copy()
 

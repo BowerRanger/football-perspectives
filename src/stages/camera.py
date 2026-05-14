@@ -542,7 +542,11 @@ class CameraStage(BaseStage):
         c_center = np.median(np.stack(seed_cs), axis=0)
         cx0 = float(per_frame_K[covered[0]][0, 2])
         cy0 = float(per_frame_K[covered[0]][1, 2])
-        lens_seed = (cx0, cy0, dist2[0], dist2[1])
+        # Seed the lens with zero distortion: the anchor-solve distortion
+        # on real clips is often a saturated, non-physical value (the LM
+        # absorbing click noise). The C-profile holds the lens fixed and
+        # the static-C bundle adjustment refines distortion from here.
+        lens_seed = (cx0, cy0, 0.0, 0.0)
 
         # Step 1 — C-profile: coarse grid then a fine grid around its argmin.
         # profile_camera_centre subsamples frames for the grid sweep, so the

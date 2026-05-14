@@ -23,6 +23,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# Allow `python scripts/profile_static_c.py ...` from anywhere — the
+# editable install exposes `football_perspectives`, not `src`.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from src.schemas.anchor import AnchorSet, LineObservation
 from src.schemas.camera_track import CameraTrack
 from src.utils.anchor_solver import _is_rich
@@ -90,8 +94,12 @@ def main() -> int:
     cx, cy = (track.principal_point
               if track.principal_point is not None
               else (image_size[0] / 2.0, image_size[1] / 2.0))
-    k1, k2 = track.distortion
-    lens_seed = (float(cx), float(cy), float(k1), float(k2))
+    # The bootstrap track's distortion is usually the lens-from-anchor
+    # estimate, which saturates to non-physical values on real clips (the
+    # LM absorbing click noise — see the experiment note). The profile
+    # holds the lens fixed, so seed it with zero distortion; the
+    # static-camera bundle adjustment refines the real distortion.
+    lens_seed = (float(cx), float(cy), 0.0, 0.0)
 
     print(f"loaded {len(per_frame_lines)} frames; C seed = {np.round(c_center, 3)}")
     print(f"lens seed (cx, cy, k1, k2) = {np.round(lens_seed, 4)}")

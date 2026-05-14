@@ -545,9 +545,11 @@ class CameraStage(BaseStage):
         lens_seed = (cx0, cy0, dist2[0], dist2[1])
 
         # Step 1 — C-profile: coarse grid then a fine grid around its argmin.
+        # profile_camera_centre subsamples frames for the grid sweep, so the
+        # cost scales with the grid size, not the (often hundreds of) frames.
         coarse = profile_camera_centre(
             per_frame_lines, anchors.image_size,
-            c_grid=make_c_grid(c_center, extent_m=7.5, n_steps=7),
+            c_grid=make_c_grid(c_center, extent_m=7.5, n_steps=5),
             lens_seed=lens_seed, per_frame_bootstrap=bootstrap,
         )
         fine = profile_camera_centre(

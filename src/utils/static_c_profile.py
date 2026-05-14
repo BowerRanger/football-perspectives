@@ -79,7 +79,7 @@ def _solve_frame_at_fixed_c(
     upper = np.array([np.pi, np.pi, np.pi, fx_seed * 2.0])
     result = least_squares(
         res, p0, bounds=(lower, upper),
-        method="trf", loss="huber", f_scale=2.0, max_nfev=300,
+        method="trf", loss="huber", f_scale=2.0, max_nfev=80,
     )
     rvec = result.x[0:3]
     fx = float(result.x[3])
@@ -98,6 +98,7 @@ def profile_camera_centre(
     c_grid: np.ndarray,
     lens_seed: tuple[float, float, float, float],
     per_frame_bootstrap: dict[int, tuple[np.ndarray, float]],
+    max_grid_frames: int = 80,
 ) -> CProfileResult:
     """Profile line-fitting RMS as a function of the static camera
     centre over ``c_grid``.
@@ -106,24 +107,40 @@ def profile_camera_centre(
     profile (the profile answers "where is C", not "what is the lens").
     ``per_frame_bootstrap`` provides the per-frame ``(rvec, fx)`` seeds
     for the inner solves.
+
+    The grid sweep runs on an evenly-spaced subsample of at most
+    ``max_grid_frames`` frames — the line-RMS-vs-C surface is smooth, so
+    a representative pan/tilt spread locates the argmin just as well as
+    the full set at a fraction of the cost. Once the argmin is found, a
+    final pass re-solves *every* input frame at it, so the returned
+    ``per_frame_seeds`` covers all frames (the bundle adjustment needs a
+    seed per frame).
     """
     cx, cy, k1, k2 = lens_seed
     dist5 = _dist5((k1, k2))
     fids = sorted(per_frame_lines.keys())
 
+    if len(fids) > max_grid_frames:
+        idx = np.linspace(0, len(fids) - 1, max_grid_frames).round().astype(int)
+        grid_fids = sorted({fids[i] for i in idx})
+    else:
+        grid_fids = fids
+
     m = len(c_grid)
     mean_rms = np.full(m, np.inf)
     p95_rms = np.full(m, np.inf)
     max_rms = np.full(m, np.inf)
-    seeds_per_grid: list[dict[int, tuple[np.ndarray, float]]] = []
 
     # Warm-start each grid cell from the previous cell's solution so the
     # inner LMs converge fast; first cell uses the bootstrap.
-    warm = {f: per_frame_bootstrap[f] for f in fids}
+    warm = {f: per_frame_bootstrap[f] for f in grid_fids}
+    best = 0
+    best_mean = np.inf
+    best_cell_seeds: dict[int, tuple[np.ndarray, float]] = dict(warm)
     for gi, C in enumerate(c_grid):
         rms_vals = []
         cell_seeds: dict[int, tuple[np.ndarray, float]] = {}
-        for fid in fids:
+        for fid in grid_fids:
             rvec_seed, fx_seed = warm[fid]
             rvec, fx, rms = _solve_frame_at_fixed_c(
                 per_frame_lines[fid], cx, cy, dist5, np.asarray(C, float),
@@ -137,15 +154,32 @@ def profile_camera_centre(
             mean_rms[gi] = float(finite.mean())
             p95_rms[gi] = float(np.percentile(finite, 95))
             max_rms[gi] = float(finite.max())
-        seeds_per_grid.append(cell_seeds)
+        if mean_rms[gi] < best_mean:
+            best_mean = mean_rms[gi]
+            best = gi
+            best_cell_seeds = cell_seeds
         warm = cell_seeds  # warm-start the next cell
 
-    best = int(np.argmin(mean_rms))
+    argmin_c = np.asarray(c_grid[best], dtype=np.float64).copy()
+
+    # Re-seed over ALL frames at the argmin C. Subsample frames reuse the
+    # (rvec, fx) already solved at the best grid cell; the remaining
+    # frames are solved now from their bootstrap.
+    per_frame_seeds: dict[int, tuple[np.ndarray, float]] = dict(best_cell_seeds)
+    for fid in fids:
+        if fid in per_frame_seeds:
+            continue
+        rvec_seed, fx_seed = per_frame_bootstrap[fid]
+        rvec, fx, _rms = _solve_frame_at_fixed_c(
+            per_frame_lines[fid], cx, cy, dist5, argmin_c, rvec_seed, fx_seed,
+        )
+        per_frame_seeds[fid] = (rvec, fx)
+
     return CProfileResult(
         grid_points=np.asarray(c_grid, dtype=np.float64),
         mean_rms=mean_rms,
         p95_rms=p95_rms,
         max_rms=max_rms,
-        argmin_c=np.asarray(c_grid[best], dtype=np.float64).copy(),
-        per_frame_seeds=seeds_per_grid[best],
+        argmin_c=argmin_c,
+        per_frame_seeds=per_frame_seeds,
     )

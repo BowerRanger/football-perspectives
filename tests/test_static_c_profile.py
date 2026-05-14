@@ -94,3 +94,23 @@ def test_profile_argmin_lands_on_true_centre():
     assert result.mean_rms[best_idx] < 0.1
     # Per-frame seeds at the argmin are returned for every frame.
     assert set(result.per_frame_seeds.keys()) == set(per_frame_lines.keys())
+
+
+@pytest.mark.unit
+def test_profile_subsamples_grid_but_seeds_every_frame():
+    """With more frames than ``max_grid_frames``, the grid sweep runs on
+    a subsample but ``per_frame_seeds`` still covers every input frame
+    and the argmin still lands on the true centre."""
+    yaws = np.linspace(-7.0, 7.0, 40)
+    per_frame_lines, bootstrap = _synthetic_clip(yaws)
+    grid = make_c_grid(C_TRUE, extent_m=4.0, n_steps=5)
+    result = profile_camera_centre(
+        per_frame_lines, IMAGE_SIZE,
+        c_grid=grid, lens_seed=(CX, CY, 0.0, 0.0),
+        per_frame_bootstrap=bootstrap, max_grid_frames=10,
+    )
+    # argmin still recovered from the 10-frame subsample.
+    assert np.linalg.norm(result.argmin_c - C_TRUE) < 1.1
+    # but per_frame_seeds covers ALL 40 frames (the BA needs every seed).
+    assert set(result.per_frame_seeds.keys()) == set(per_frame_lines.keys())
+    assert len(result.per_frame_seeds) == 40

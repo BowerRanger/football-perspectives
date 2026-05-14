@@ -22,6 +22,7 @@ from src.utils.anchor_solver import (
 from src.utils.bidirectional_smoother import smooth_between_anchors
 from src.utils.camera_confidence import FrameSignals, confidence_from_signals
 from src.utils.feature_propagator import propagate_one_frame
+from src.utils.static_line_solver import StaticCameraSolution
 
 logger = logging.getLogger(__name__)
 
@@ -258,10 +259,10 @@ class CameraStage(BaseStage):
         # tractable: the detector only searches a strip around the
         # projected line, so it needs a roughly-right camera to start.
         detected_lines_by_frame: dict[int, list] = {}
-        static_line_centre: np.ndarray | None = None
+        static_line_sol: StaticCameraSolution | None = None
         if bool(cfg.get("line_extraction", False)):
             if static_camera:
-                static_line_centre = self._refine_with_static_line_solve(
+                static_line_sol = self._refine_with_static_line_solve(
                     cap, shot_id, anchors, cfg,
                     per_frame_K, per_frame_R, per_frame_t, per_frame_conf,
                     is_anchor, tuple(sol.distortion),
@@ -310,23 +311,40 @@ class CameraStage(BaseStage):
                 )
             )
 
+        # When the static-camera line solve ran, its refined lens + locked
+        # centre supersede the anchor solve's: the per-frame (K, R, t) in
+        # the track were produced by that solve, so the track's stated
+        # principal point / distortion / camera centre must match it.
+        # ``distortion`` is truncated to (k1, k2) for the CameraTrack schema
+        # — under brown_conrady the tangential / k3 terms are not persisted.
+        if static_line_sol is not None:
+            camera_centre_out: tuple[float, float, float] | None = tuple(
+                float(x) for x in static_line_sol.camera_centre
+            )
+            principal_point_out = static_line_sol.principal_point
+            distortion_out = tuple(
+                float(x) for x in static_line_sol.distortion[:2]
+            )
+        else:
+            camera_centre_out = (
+                tuple(float(x) for x in sol.camera_centre)
+                if sol.camera_centre is not None
+                else None
+            )
+            principal_point_out = principal_point
+            distortion_out = tuple(float(x) for x in sol.distortion)
+
         track = CameraTrack(
             clip_id=anchors.clip_id,
             fps=float(fps),
             image_size=(w, h),
             t_world=list(t_world_median),
             frames=tuple(frames_out),
-            principal_point=(float(principal_point[0]), float(principal_point[1])),
-            camera_centre=(
-                tuple(float(x) for x in static_line_centre)
-                if static_line_centre is not None
-                else (
-                    tuple(float(x) for x in sol.camera_centre)
-                    if sol.camera_centre is not None
-                    else None
-                )
+            principal_point=(
+                float(principal_point_out[0]), float(principal_point_out[1])
             ),
-            distortion=tuple(float(x) for x in sol.distortion),
+            camera_centre=camera_centre_out,
+            distortion=distortion_out,
         )
         track.save(self.output_dir / "camera" / f"{shot_id}_camera_track.json")
 
@@ -472,13 +490,15 @@ class CameraStage(BaseStage):
         is_anchor: list,
         distortion: tuple[float, float],
         detected_lines_by_frame: dict[int, list],
-    ) -> np.ndarray | None:
+    ) -> StaticCameraSolution | None:
         """Static-camera line solve: detect painted lines on every
         propagated frame, profile the camera centre, bundle-adjust one
         shared centre, then iteratively re-detect under the coherent
         cameras. Writes per-frame ``(K, R, t)`` back in place and returns
-        the single locked camera centre (or ``None`` if it bailed and
-        left the propagated cameras untouched).
+        the :class:`StaticCameraSolution` (whose ``camera_centre``,
+        ``principal_point`` and ``distortion`` the caller writes into the
+        track), or ``None`` if it bailed and left the propagated cameras
+        untouched.
         """
         from src.utils.anchor_solver import _is_rich
         from src.utils.line_detector import DetectorConfig
@@ -573,14 +593,36 @@ class CameraStage(BaseStage):
         }
         c_seed = fine.argmin_c
         seeds = fine.per_frame_seeds
-        sol = None
-        for round_idx in range(max(1, n_rounds)):
+        # Re-detecting under the static-C cameras (a per-frame compromise)
+        # is not guaranteed to improve every round, so keep the best round
+        # by mean line RMS rather than blindly taking the last.
+        best_sol: StaticCameraSolution | None = None
+        best_mean = float("inf")
+        best_lines = per_frame_lines
+        n_rounds = max(1, n_rounds)
+        for round_idx in range(n_rounds):
             sol = solve_static_camera_from_lines(
                 per_frame_lines, anchors.image_size,
                 c_seed=c_seed, lens_seed=lens_seed,
                 per_frame_seeds=seeds, point_hints=anchor_landmarks,
                 lens_model=lens_model, point_hint_weight=point_hint_weight,
             )
+            round_rms = np.array(
+                [v for v in sol.per_frame_line_rms.values() if np.isfinite(v)]
+            )
+            round_mean = float(round_rms.mean()) if round_rms.size else float("inf")
+            logger.info(
+                "static line solve: round %d/%d — line RMS mean=%.3f "
+                "median=%.3f max=%.3f frac<1px=%.2f (%d frames, %d lines)",
+                round_idx + 1, n_rounds, round_mean,
+                float(np.median(round_rms)) if round_rms.size else float("nan"),
+                float(round_rms.max()) if round_rms.size else float("nan"),
+                float((round_rms < 1.0).mean()) if round_rms.size else 0.0,
+                len(sol.per_frame_KRt),
+                sum(len(v) for v in per_frame_lines.values()),
+            )
+            if round_mean < best_mean:
+                best_sol, best_mean, best_lines = sol, round_mean, per_frame_lines
             if round_idx < n_rounds - 1:
                 cams = {
                     fid: {"K": K, "R": R, "t": t}
@@ -597,7 +639,9 @@ class CameraStage(BaseStage):
                     for fid, (K, R, _t) in sol.per_frame_KRt.items()
                 }
 
-        assert sol is not None
+        assert best_sol is not None
+        sol = best_sol
+        per_frame_lines = best_lines
         C = sol.camera_centre
 
         # Write the solved cameras back in place.
@@ -635,7 +679,7 @@ class CameraStage(BaseStage):
                 float(rms_arr.mean()), float(np.median(rms_arr)),
                 float(rms_arr.max()), float((rms_arr < 1.0).mean()),
             )
-        return C
+        return sol
 
     def _propagate_pair(
         self,

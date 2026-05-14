@@ -129,21 +129,30 @@ camera:
   # qualifying anchor exists — the legacy flow runs instead.
   lens_from_anchor: true
   # Line extraction (experimental): when true, the camera stage adds a
-  # post-propagation pass that re-fits every per-frame camera against
+  # post-propagation pass that re-fits the per-frame cameras against
   # painted pitch lines detected directly in the video frame. Each
   # propagated camera is the detection bootstrap; the detector searches
   # a strip around each projected catalogue line, locates the painted
   # line's sub-pixel centreline (bright-ridge convolution + parabolic
-  # peak), and an LM re-solves (rvec, tvec, fx) against those lines.
-  # Achieves ~1 px mean line-fitting RMS per frame, but per-frame solves
-  # are locally under-determined so the camera body can wander several
-  # metres across the clip — this is NOT yet a static-camera-consistent
-  # solution. Off by default; see
-  # docs/superpowers/notes/2026-05-14-camera-1px-experiment.md.
-  line_extraction: false
+  # peak), and an LM re-solves against those lines.
+  # With static_camera=true the camera stage runs the static-camera line
+  # solve: detect -> C-profile -> bundle-adjust one shared camera centre
+  # -> iteratively re-detect. The output track has a single fixed
+  # camera_centre (zero body motion). With static_camera=false it runs
+  # the legacy independent per-frame line refinement instead (per-frame
+  # solves are locally under-determined and the body can wander).
+  # See docs/superpowers/notes/2026-05-14-camera-1px-experiment.md.
+  line_extraction: true
   line_extraction_strip_px: 25       # search-strip half-width (px) around projected line
   line_extraction_min_gradient: 10.0 # min bright-ridge contrast (grey levels) to accept a line
-  line_extraction_max_iters: 4       # detect↔solve iterations per frame
+  line_extraction_max_iters: 4       # detect↔solve iterations per frame (static_camera=false path)
+  # Lens model for the static-camera line solve (only used when
+  # static_camera + line_extraction are both true). pinhole_k1k2 shares
+  # (cx, cy, k1, k2); brown_conrady additionally frees tangential
+  # (p1, p2) and k3. Start with pinhole_k1k2 — the C-profile diagnostic
+  # (scripts/profile_static_c.py) tells you whether the richer model is
+  # needed. See docs/superpowers/notes/2026-05-14-camera-1px-experiment.md.
+  line_extraction_lens_model: pinhole_k1k2
   # ORB is the only detector currently implemented in feature_propagator.
   # SuperPoint is a future enhancement (better repeatability under zoom).
   feature_detector: orb

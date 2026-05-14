@@ -203,6 +203,14 @@ def _sample_centreline_offset(
     return np.array([cx_sub, cy_sub]), float(contrast)
 
 
+# A world point just in front of the camera (cam_z above the behind-camera
+# threshold) but far off-axis still perspective-divides to a coordinate
+# millions of pixels out — a "grazing-incidence endpoint at the horizon".
+# No real broadcast frame is anywhere near this large, so a projection past
+# this bound means the segment can't be meaningfully strip-searched.
+_MAX_PROJ_COORD_PX = 1e5
+
+
 def _project_endpoints(
     K: np.ndarray,
     R: np.ndarray,
@@ -212,13 +220,24 @@ def _project_endpoints(
     world_b: tuple[float, float, float],
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Project the world endpoints under the given camera + distortion.
-    Returns ``None`` if either endpoint lies behind the camera."""
+
+    Returns ``None`` if either endpoint lies behind the camera *or* at
+    grazing incidence to it. The behind-camera check (``cam_z`` near zero)
+    alone is not enough: a point with ``cam_z`` comfortably positive but
+    far off-axis — a world line crossing the camera's horizon, e.g. the
+    far end of a full-length touchline in a tight penalty-box shot — still
+    projects to millions of pixels. That degenerate "line" then gets
+    strip-searched and the detector locks onto whatever spurious feature
+    happens to fall in the meaningless strip, so we reject it here.
+    """
     pts = np.array([world_a, world_b], dtype=np.float64)
     cam_a = R @ pts[0] + t
     cam_b = R @ pts[1] + t
     if cam_a[2] <= 0.1 or cam_b[2] <= 0.1:
         return None
     proj = project_world_to_image(K, R, t, distortion, pts)
+    if not np.all(np.isfinite(proj)) or np.abs(proj).max() > _MAX_PROJ_COORD_PX:
+        return None
     return proj[0], proj[1]
 
 

@@ -137,7 +137,7 @@ def solve_static_camera_from_lines(
     point_hints: dict[int, list[LandmarkObservation]] | None = None,
     lens_model: LensModel = "pinhole_k1k2",
     point_hint_weight: float = 0.05,
-    max_nfev: int = 4000,
+    max_nfev: int = 600,
 ) -> StaticCameraSolution:
     """Solve one fixed camera centre across all frames in
     ``per_frame_lines``.
@@ -273,11 +273,19 @@ def solve_static_camera_from_lines(
         )
         return J.toarray() if hasattr(J, "toarray") else np.asarray(J)
 
+    # Tolerances are 1e-8, not 1e-12: residuals here are *pixels* and the
+    # target is sub-pixel, so chasing 1e-12 is chasing numerical noise. On
+    # data the model can't fully fit (a hard anchor set → noisy detected
+    # lines) the tighter stop condition is never satisfied and the LM
+    # grinds toward max_nfev — each step a dense SVD of a large Jacobian,
+    # so a non-convergent solve runs for hours. 1e-8 + a modest max_nfev
+    # let a hard solve bail in minutes with a usable result; a convergent
+    # solve (~60-90 nfev on validation clips) is unaffected.
     result = least_squares(
         residuals, p0, jac=jac, bounds=(lower, upper),
         method="trf", loss="huber", f_scale=2.0,
         tr_solver="exact", max_nfev=max_nfev,
-        xtol=1e-12, ftol=1e-12, gtol=1e-12,
+        xtol=1e-8, ftol=1e-8, gtol=1e-8,
     )
 
     cx, cy, dist, C = _unpack_shared(result.x)

@@ -31,6 +31,7 @@ from src.schemas.anchor import AnchorSet, LineObservation
 from src.schemas.camera_track import CameraTrack
 from src.utils.anchor_solver import _is_rich
 from src.utils.static_c_profile import make_c_grid, profile_camera_centre
+from src.utils.static_line_solver import solve_static_camera_from_lines
 
 
 def main() -> int:
@@ -67,9 +68,13 @@ def main() -> int:
     boot: dict[int, tuple[np.ndarray, float]] = {}
     seed_cs: list[np.ndarray] = []
     rich: set[int] = set()
+    anchor_landmarks: dict[int, list] = {}
     if args.anchors is not None:
         aset = AnchorSet.load(args.anchors)
         rich = {a.frame for a in aset.anchors if _is_rich(a)}
+        anchor_landmarks = {
+            a.frame: list(a.landmarks) for a in aset.anchors if a.landmarks
+        }
     for cf in track.frames:
         if cf.frame not in per_frame_lines or cf.t is None:
             continue
@@ -120,17 +125,37 @@ def main() -> int:
         lens_seed=lens_seed, per_frame_bootstrap=coarse.per_frame_seeds,
     )
     best = int(np.argmin(fine.mean_rms))
-    print(f"\nfine argmin C = {np.round(fine.argmin_c, 3)}")
-    print(f"  mean line RMS = {fine.mean_rms[best]:.3f} px")
-    print(f"  P95  line RMS = {fine.p95_rms[best]:.3f} px")
-    print(f"  max  line RMS = {fine.max_rms[best]:.3f} px")
+    print(f"\nfine argmin C = {np.round(fine.argmin_c, 3)}  "
+          f"(profile, lens fixed): mean={fine.mean_rms[best]:.3f} "
+          f"P95={fine.p95_rms[best]:.3f} max={fine.max_rms[best]:.3f} px")
+
+    # The profile holds the lens fixed, so its RMS is only an upper bound.
+    # Run the actual static-camera bundle adjustment (pinhole_k1k2, which
+    # frees cx/cy/k1/k2) from the profile seed for the definitive floor.
+    print("\nrunning the static-camera bundle adjustment (pinhole_k1k2) "
+          "for the definitive floor...")
+    sol = solve_static_camera_from_lines(
+        per_frame_lines, image_size,
+        c_seed=fine.argmin_c, lens_seed=lens_seed,
+        per_frame_seeds=fine.per_frame_seeds,
+        point_hints=anchor_landmarks or None,
+        lens_model="pinhole_k1k2",
+    )
+    rms = np.array(
+        [v for v in sol.per_frame_line_rms.values() if np.isfinite(v)]
+    )
+    print(f"  BA C = {np.round(sol.camera_centre, 3)}  "
+          f"distortion = {np.round(sol.distortion, 4)}")
+    print(f"  BA line RMS: mean={rms.mean():.3f} median={np.median(rms):.3f} "
+          f"max={rms.max():.3f} P95={np.percentile(rms, 95):.3f} px")
+    print(f"  frac <1px={(rms < 1.0).mean():.3f}  <2px={(rms < 2.0).mean():.3f}")
     print()
-    if fine.mean_rms[best] < 1.0:
-        print("VERDICT: sub-pixel static-C IS reachable under pinhole_k1k2 — "
-              "keep line_extraction_lens_model: pinhole_k1k2.")
+    if rms.mean() < 1.0:
+        print("VERDICT: pinhole_k1k2 reaches sub-pixel static-C — keep "
+              "line_extraction_lens_model: pinhole_k1k2.")
     else:
-        print("VERDICT: pinhole_k1k2 floor is above 1 px — try "
-              "line_extraction_lens_model: brown_conrady (Task 7).")
+        print("VERDICT: pinhole_k1k2 BA floor is above 1 px — try "
+              "line_extraction_lens_model: brown_conrady.")
     return 0
 
 

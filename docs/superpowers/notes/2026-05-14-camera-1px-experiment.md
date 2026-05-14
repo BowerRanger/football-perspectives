@@ -237,3 +237,56 @@ The fundamental gate of <1 px max deviance across all anchor frames is **not rea
 3. Both.
 
 The sub-pixel snap is the right plumbing to support whatever direction comes next — it lowers the click-noise contribution so the remaining residual is model error, not data noise.
+
+# Phase 4 — Static-camera solve from detected lines
+
+User direction: use the painted-line detector **and** produce a static-camera result. Acceptance gate (confirmed with the user): a single fixed camera centre — zero body motion — is non-negotiable; line RMS is driven as low as it goes under that lock and **reported, not gated**. Deliverable: a production camera-stage path, validated on gberch.
+
+Design: `docs/superpowers/specs/2026-05-14-static-camera-line-solve-design.md`. Plan: `docs/superpowers/plans/2026-05-14-static-camera-line-solve.md`.
+
+## What landed
+
+- **`src/utils/static_line_solver.py`** — static-camera bundle adjustment. Shared `(cx, cy, distortion, C)` + per-frame `(rvec, fx)`; `t = -R @ C`, no per-frame motion budget. `pinhole_k1k2` and `brown_conrady` lens models.
+- **`src/utils/static_c_profile.py`** — C-profile diagnostic: sweep candidate camera centres on a 3-D grid, solving each frame's `(rvec, fx)` with `C` pinned; the argmin `C` (and the per-frame seeds at it) seed the BA. Subsamples frames for the grid sweep — the line-RMS-vs-C surface is smooth.
+- **`src/utils/line_camera_refine.detect_lines_for_frames`** — detect-all-frames helper.
+- **`src/stages/camera.py` `_refine_with_static_line_solve`** — detect → C-profile → BA → iterative re-detect, behind `line_extraction` + `static_camera`. The legacy independent per-frame path stays for `static_camera: false`. Output track carries a single `camera_centre` and the line-solve's principal point / distortion.
+- `config/default.yaml`: `camera.line_extraction_lens_model` (one new key).
+- `scripts/global_solve_from_lines.py`, `iterative_global_solve.py` rewired onto the shared solver; new `scripts/profile_static_c.py` CLI.
+- Tests: `test_static_line_solver.py`, `test_static_c_profile.py`, `test_detect_lines_for_frames.py`, `test_camera_stage_static_line.py`. `test_anchor_solver.py` / `test_camera_stage.py` stay green.
+
+## Two optimisation findings
+
+**Sparse trust-region is broken for this problem structure.** scipy `least_squares` auto-selects the `lsmr` iterative trust-region solver whenever `jac_sparsity` is set, and it fails to converge on the block-arrow (shared + per-frame) structure — on *clean synthetic data* it hit `max_nfev` at multi-pixel error even at 30 frames. Fix: compute the grouped sparse finite-difference Jacobian via `approx_derivative(..., sparsity=spar)`, return it **dense**, and use `tr_solver='exact'`. Cheap Jacobian + working solver — 300 synthetic frames solve in 54 s to ~0 error.
+
+**C-profile warm-start drift.** The first gberch profile reported a 14 px static-C floor. Cause: the profile warm-started each grid cell's inner LMs from the *previous cell's* solution; the meshgrid sweep starts at a far corner, so by the time it reached good cells the seed state was corrupted garbage the bounded-`nfev` inner LM couldn't recover from. Each cell now seeds from the stable per-frame bootstrap. (Also fixed: the profile seeded its fixed lens from the anchor solve's saturated `k1=0.44, k2=0.5` — now seeds zero distortion, the BA refines it.)
+
+## Result on gberch (429 frames)
+
+Production camera stage, `static_camera + line_extraction`, `pinhole_k1k2`:
+
+| stage | mean | median | max | <1px | body motion |
+|---|---|---|---|---|---|
+| C-profile (lens fixed at 0 distortion) | 1.81 | — | — | — | 0 |
+| **static-C BA — round 1 (kept)** | **0.949** | 0.814 | 6.902 | 74 % | **6.4e-14 m** |
+| static-C BA — round 2 | 1.276 | 0.916 | 6.512 | 58 % | 0 |
+| static-C BA — round 3 | 1.289 | 0.922 | 6.564 | 58 % | 0 |
+
+**The static-camera gate is met:** one fixed camera centre `C ≈ (47.67, −29.24, 14.59)`, body motion `6.4e-14 m` — machine epsilon, i.e. zero by construction. Line RMS under that lock is **mean 0.949 px / median 0.814 px**, 74 % of frames sub-pixel — far below the ~4 px the Phase 3 "Global static-C solve attempts" table plateaued at.
+
+Why this beats Phase 3's ~4 px: Phase 3 seeded `C` from the median of a 16 m-spread point cloud (a meaningless centroid), ran ~800 nfev for ~2900 params on the broken `lsmr` solver, and never re-detected. Phase 4 seeds `C` from the C-profile argmin, uses the dense `tr_solver='exact'` path, and frees the lens. The 16 m per-frame `C` spread was depth ambiguity from clustered coplanar constraints — tying frames with differing pan/tilt under one shared `C` resolves it.
+
+Cross-check via `scripts/global_solve_from_lines.py` (seeds `C` from the rich-anchor median, no profile, single BA pass) reproduces the result exactly — mean 0.949 / median 0.814 / max 6.902 px, same locked `C`. On that solve the clicked point landmarks reproject at 4–12 px mean on the rich anchor frames — consistent with Phase 2's finding that the painted lines are ground truth and the manual clicks carry the noise.
+
+## Iterative re-detection regresses — round 1 wins
+
+The plan's iterative loop (re-detect lines under the coherent static-C cameras, re-solve, repeat) was expected to remove per-frame bootstrap bias. On gberch it does the opposite: round 1 (lines detected under the *propagated per-frame* cameras) is best at 0.949 px; rounds 2–3, re-detecting under the *shared static-C* camera, degrade to ~1.28 px. The shared camera is a per-frame compromise — it reprojects each frame's catalogue lines slightly off, so the detector searches strips slightly off and picks up *more* lines (2221 → 2489) but *noisier* ones. `_refine_with_static_line_solve` keeps the best round by mean RMS, so extra rounds are safe (never worse) but slower. `camera.line_extraction_static_rounds` (default 3) is a per-clip tunable — gberch would be just as good and ~3× faster at 1.
+
+## Lens model — brown_conrady not warranted
+
+The C-profile checkpoint suggested trying `brown_conrady` (its fixed-lens RMS read >1 px), but an actual BA pass shows `pinhole_k1k2` already reaches sub-pixel. On the Phase 2/3 detected-line set: `pinhole_k1k2` mean 0.765 px vs `brown_conrady` mean 0.693 px — a ~0.07 px gain, and `brown_conrady`'s `k3` saturates at the ±0.5 bound (the LM absorbing non-radial noise — exactly the overfitting Phase 1's FLOOR experiment flagged). Config default stays `line_extraction_lens_model: pinhole_k1k2`; `brown_conrady` remains available behind the key. Zoom-dependent distortion remains the documented, deferred next rung.
+
+## Caveats
+
+- The recovered lens still shows the saturated-distortion pattern from earlier phases: gberch's `pinhole_k1k2` BA lands `k2` at the +0.5 bound with the principal point pulled ~40–85 px off image centre. The line RMS is good (0.95 px) but, as in Phase 1–3, the lens parameters are a regression fit absorbing residual structure, not a recovered physical lens.
+- `max` line RMS is 6.9 px — a tail of badly-fit frames (occlusion, players on lines, motion blur). Median 0.81 px shows the bulk is clean; the tail surfaces in the per-frame confidence timeline.
+- The static-C camera stage run takes ~15 min on gberch (429 frames, 3 re-detect rounds). Dominated by line detection × rounds and the C-profile grid sweep; `line_extraction_static_rounds: 1` roughly thirds it.

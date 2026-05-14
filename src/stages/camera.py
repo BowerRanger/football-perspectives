@@ -258,13 +258,22 @@ class CameraStage(BaseStage):
         # tractable: the detector only searches a strip around the
         # projected line, so it needs a roughly-right camera to start.
         detected_lines_by_frame: dict[int, list] = {}
+        static_line_centre: np.ndarray | None = None
         if bool(cfg.get("line_extraction", False)):
-            self._refine_with_line_extraction(
-                cap, shot_id, anchors, cfg,
-                per_frame_K, per_frame_R, per_frame_t, per_frame_conf,
-                is_anchor, tuple(sol.distortion),
-                detected_lines_by_frame,
-            )
+            if static_camera:
+                static_line_centre = self._refine_with_static_line_solve(
+                    cap, shot_id, anchors, cfg,
+                    per_frame_K, per_frame_R, per_frame_t, per_frame_conf,
+                    is_anchor, tuple(sol.distortion),
+                    detected_lines_by_frame,
+                )
+            else:
+                self._refine_with_line_extraction(
+                    cap, shot_id, anchors, cfg,
+                    per_frame_K, per_frame_R, per_frame_t, per_frame_conf,
+                    is_anchor, tuple(sol.distortion),
+                    detected_lines_by_frame,
+                )
 
         cap.release()
 
@@ -309,9 +318,13 @@ class CameraStage(BaseStage):
             frames=tuple(frames_out),
             principal_point=(float(principal_point[0]), float(principal_point[1])),
             camera_centre=(
-                tuple(float(x) for x in sol.camera_centre)
-                if sol.camera_centre is not None
-                else None
+                tuple(float(x) for x in static_line_centre)
+                if static_line_centre is not None
+                else (
+                    tuple(float(x) for x in sol.camera_centre)
+                    if sol.camera_centre is not None
+                    else None
+                )
             ),
             distortion=tuple(float(x) for x in sol.distortion),
         )
@@ -331,8 +344,14 @@ class CameraStage(BaseStage):
                 "image_size": [w, h],
                 "fps": float(fps),
                 "frames": {
-                    str(k): {"lines": v}
+                    str(k): {
+                        "lines": v,
+                        "K": per_frame_K[k].tolist(),
+                        "R": per_frame_R[k].tolist(),
+                        "t": list(per_frame_t[k]),
+                    }
                     for k, v in sorted(detected_lines_by_frame.items())
+                    if per_frame_K[k] is not None
                 },
             }))
             logger.info(
@@ -439,6 +458,178 @@ class CameraStage(BaseStage):
                 "line_extraction: no frame produced usable line detections; "
                 "camera track unchanged from the propagated solution",
             )
+
+    def _refine_with_static_line_solve(
+        self,
+        cap: cv2.VideoCapture,
+        shot_id: str,
+        anchors: AnchorSet,
+        cfg: dict,
+        per_frame_K: list,
+        per_frame_R: list,
+        per_frame_t: list,
+        per_frame_conf: list,
+        is_anchor: list,
+        distortion: tuple[float, float],
+        detected_lines_by_frame: dict[int, list],
+    ) -> np.ndarray | None:
+        """Static-camera line solve: detect painted lines on every
+        propagated frame, profile the camera centre, bundle-adjust one
+        shared centre, then iteratively re-detect under the coherent
+        cameras. Writes per-frame ``(K, R, t)`` back in place and returns
+        the single locked camera centre (or ``None`` if it bailed and
+        left the propagated cameras untouched).
+        """
+        from src.utils.anchor_solver import _is_rich
+        from src.utils.line_detector import DetectorConfig
+        from src.utils.line_camera_refine import detect_lines_for_frames
+        from src.utils.static_c_profile import make_c_grid, profile_camera_centre
+        from src.utils.static_line_solver import solve_static_camera_from_lines
+
+        det_cfg = DetectorConfig(
+            search_strip_px=int(cfg.get("line_extraction_strip_px", 25)),
+            min_gradient=float(cfg.get("line_extraction_min_gradient", 10.0)),
+        )
+        lens_model = str(cfg.get("line_extraction_lens_model", "pinhole_k1k2"))
+        n_rounds = int(cfg.get("line_extraction_static_rounds", 3))
+        point_hint_weight = float(
+            cfg.get("line_extraction_point_hint_weight", 0.05)
+        )
+        dist2 = (float(distortion[0]), float(distortion[1]))
+
+        covered = [
+            i for i in range(len(per_frame_K)) if per_frame_K[i] is not None
+        ]
+        frames_bgr: dict[int, np.ndarray] = {}
+        for i in covered:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+            ok, frame = cap.read()
+            if ok:
+                frames_bgr[i] = frame
+
+        def _cameras_from_arrays() -> dict[int, dict]:
+            return {
+                i: {"K": per_frame_K[i], "R": per_frame_R[i], "t": per_frame_t[i]}
+                for i in frames_bgr
+            }
+
+        # Step 0 — detect under the propagated bootstrap cameras.
+        per_frame_lines = detect_lines_for_frames(
+            frames_bgr, _cameras_from_arrays(), dist2, det_cfg,
+        )
+        if len(per_frame_lines) < 2:
+            logger.warning(
+                "static line solve: only %d frame(s) yielded detected lines; "
+                "keeping the propagated cameras unchanged",
+                len(per_frame_lines),
+            )
+            return None
+
+        # Per-frame (rvec, fx) bootstrap seeds from the propagated cameras.
+        bootstrap: dict[int, tuple[np.ndarray, float]] = {}
+        for fid in per_frame_lines:
+            rv, _ = cv2.Rodrigues(per_frame_R[fid])
+            bootstrap[fid] = (rv.reshape(3), float(per_frame_K[fid][0, 0]))
+
+        # Seed C from the propagated centres (rich-anchor frames preferred).
+        rich = {a.frame for a in anchors.anchors if _is_rich(a)}
+        seed_cs = [
+            -per_frame_R[f].T @ per_frame_t[f]
+            for f in per_frame_lines if f in rich
+        ] or [
+            -per_frame_R[f].T @ per_frame_t[f] for f in per_frame_lines
+        ]
+        c_center = np.median(np.stack(seed_cs), axis=0)
+        cx0 = float(per_frame_K[covered[0]][0, 2])
+        cy0 = float(per_frame_K[covered[0]][1, 2])
+        lens_seed = (cx0, cy0, dist2[0], dist2[1])
+
+        # Step 1 — C-profile: coarse grid then a fine grid around its argmin.
+        coarse = profile_camera_centre(
+            per_frame_lines, anchors.image_size,
+            c_grid=make_c_grid(c_center, extent_m=7.5, n_steps=7),
+            lens_seed=lens_seed, per_frame_bootstrap=bootstrap,
+        )
+        fine = profile_camera_centre(
+            per_frame_lines, anchors.image_size,
+            c_grid=make_c_grid(coarse.argmin_c, extent_m=2.0, n_steps=5),
+            lens_seed=lens_seed, per_frame_bootstrap=coarse.per_frame_seeds,
+        )
+        logger.info(
+            "static line solve: C-profile argmin=%s mean line RMS=%.3f px",
+            np.round(fine.argmin_c, 3).tolist(),
+            float(np.min(fine.mean_rms)),
+        )
+
+        # Steps 2 + 3 — bundle adjustment + iterative re-detection.
+        anchor_landmarks = {
+            a.frame: list(a.landmarks) for a in anchors.anchors if a.landmarks
+        }
+        c_seed = fine.argmin_c
+        seeds = fine.per_frame_seeds
+        sol = None
+        for round_idx in range(max(1, n_rounds)):
+            sol = solve_static_camera_from_lines(
+                per_frame_lines, anchors.image_size,
+                c_seed=c_seed, lens_seed=lens_seed,
+                per_frame_seeds=seeds, point_hints=anchor_landmarks,
+                lens_model=lens_model, point_hint_weight=point_hint_weight,
+            )
+            if round_idx < n_rounds - 1:
+                cams = {
+                    fid: {"K": K, "R": R, "t": t}
+                    for fid, (K, R, t) in sol.per_frame_KRt.items()
+                }
+                redet = detect_lines_for_frames(
+                    frames_bgr, cams, tuple(sol.distortion[:2]), det_cfg,
+                )
+                if len(redet) >= 2:
+                    per_frame_lines = redet
+                c_seed = sol.camera_centre
+                seeds = {
+                    fid: (cv2.Rodrigues(R)[0].reshape(3), float(K[0, 0]))
+                    for fid, (K, R, _t) in sol.per_frame_KRt.items()
+                }
+
+        assert sol is not None
+        C = sol.camera_centre
+
+        # Write the solved cameras back in place.
+        for fid, (K, R, t) in sol.per_frame_KRt.items():
+            per_frame_K[fid] = K
+            per_frame_R[fid] = R
+            per_frame_t[fid] = t
+            rms = sol.per_frame_line_rms.get(fid, float("nan"))
+            if np.isfinite(rms):
+                per_frame_conf[fid] = max(0.3, min(1.0, 1.0 - rms / 6.0))
+            detected_lines_by_frame[fid] = [
+                {
+                    "name": ln.name,
+                    "image_segment": [list(ln.image_segment[0]),
+                                      list(ln.image_segment[1])],
+                    "world_segment": [list(ln.world_segment[0]),
+                                      list(ln.world_segment[1])],
+                }
+                for ln in per_frame_lines.get(fid, [])
+            ]
+
+        # One-C consistency: frames the solve skipped still share C.
+        for i in covered:
+            if i not in sol.per_frame_KRt and per_frame_R[i] is not None:
+                per_frame_t[i] = -per_frame_R[i] @ C
+
+        rms_arr = np.array(
+            [v for v in sol.per_frame_line_rms.values() if np.isfinite(v)]
+        )
+        if rms_arr.size:
+            logger.info(
+                "static line solve: locked C=%s across %d frames — line RMS "
+                "mean=%.3f median=%.3f max=%.3f frac<1px=%.2f",
+                np.round(C, 3).tolist(), len(sol.per_frame_KRt),
+                float(rms_arr.mean()), float(np.median(rms_arr)),
+                float(rms_arr.max()), float((rms_arr < 1.0).mean()),
+            )
+        return C
 
     def _propagate_pair(
         self,

@@ -248,6 +248,24 @@ class CameraStage(BaseStage):
                 # interpolation is well-behaved between trusted anchors.
                 per_frame_conf[idx] = 0.7
 
+        # Step 2.5 (optional): line-extraction refinement. When
+        # camera.line_extraction is enabled, every per-frame camera from
+        # the propagation above is treated as a bootstrap and re-fitted
+        # against painted pitch lines detected directly in the frame.
+        # This is the experimental sub-pixel path — see
+        # docs/superpowers/notes/2026-05-14-camera-1px-experiment.md.
+        # The bootstrap from Step 2 is what makes per-frame detection
+        # tractable: the detector only searches a strip around the
+        # projected line, so it needs a roughly-right camera to start.
+        detected_lines_by_frame: dict[int, list] = {}
+        if bool(cfg.get("line_extraction", False)):
+            self._refine_with_line_extraction(
+                cap, shot_id, anchors, cfg,
+                per_frame_K, per_frame_R, per_frame_t, per_frame_conf,
+                is_anchor, tuple(sol.distortion),
+                detected_lines_by_frame,
+            )
+
         cap.release()
 
         # Frames outside the [first_anchor, last_anchor] span are not currently
@@ -298,6 +316,129 @@ class CameraStage(BaseStage):
             distortion=tuple(float(x) for x in sol.distortion),
         )
         track.save(self.output_dir / "camera" / f"{shot_id}_camera_track.json")
+
+        # Persist detected lines as a debug side-output when line
+        # extraction ran. Lets the dashboard / anchor editor overlay the
+        # detected painted lines and compare against the projected
+        # catalogue lines.
+        if detected_lines_by_frame:
+            import json
+            debug_path = (
+                self.output_dir / "camera" / f"{shot_id}_detected_lines.json"
+            )
+            debug_path.write_text(json.dumps({
+                "shot_id": shot_id,
+                "image_size": [w, h],
+                "fps": float(fps),
+                "frames": {
+                    str(k): {"lines": v}
+                    for k, v in sorted(detected_lines_by_frame.items())
+                },
+            }))
+            logger.info(
+                "line_extraction: wrote %d frames of detected lines to %s",
+                len(detected_lines_by_frame), debug_path,
+            )
+
+    def _refine_with_line_extraction(
+        self,
+        cap: cv2.VideoCapture,
+        shot_id: str,
+        anchors: AnchorSet,
+        cfg: dict,
+        per_frame_K: list,
+        per_frame_R: list,
+        per_frame_t: list,
+        per_frame_conf: list,
+        is_anchor: list,
+        distortion: tuple[float, float],
+        detected_lines_by_frame: dict[int, list],
+    ) -> None:
+        """In-place per-frame camera refinement against detected painted
+        lines. Replaces ``per_frame_{K,R,t}`` entries with line-fitted
+        values where detection succeeds, and records the detected lines
+        in ``detected_lines_by_frame`` for the debug JSON.
+
+        Frames where line detection fails (occlusion, too few lines)
+        keep their propagated camera untouched.
+        """
+        from src.utils.line_detector import DetectorConfig
+        from src.utils.line_camera_refine import refine_camera_from_lines
+
+        det_cfg = DetectorConfig(
+            search_strip_px=int(cfg.get("line_extraction_strip_px", 25)),
+            min_gradient=float(cfg.get("line_extraction_min_gradient", 10.0)),
+        )
+        max_iters = int(cfg.get("line_extraction_max_iters", 4))
+        # Anchor-frame landmark clicks become low-weight point hints so
+        # the line solve doesn't slide into a geometrically wrong basin.
+        anchor_landmarks: dict[int, list] = {
+            a.frame: list(a.landmarks)
+            for a in anchors.anchors if a.landmarks
+        }
+
+        n_frames = len(per_frame_K)
+        n_refined = 0
+        n_failed = 0
+        # Can't use list.count(None) — the list holds numpy arrays and
+        # `array == None` is element-wise, raising on the truth test.
+        n_covered = sum(1 for k in per_frame_K if k is not None)
+        rms_values: list[float] = []
+        for idx in range(n_frames):
+            if per_frame_K[idx] is None:
+                continue
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            result = refine_camera_from_lines(
+                frame,
+                per_frame_K[idx], per_frame_R[idx], per_frame_t[idx],
+                distortion,
+                point_hint_landmarks=anchor_landmarks.get(idx),
+                detector_cfg=det_cfg,
+                max_iters=max_iters,
+            )
+            if result.n_detections == 0:
+                n_failed += 1
+                continue
+            per_frame_K[idx] = result.K
+            per_frame_R[idx] = result.R
+            per_frame_t[idx] = result.t
+            # Line-refined frames are high-confidence where the fit is
+            # tight; degrade smoothly with line RMS so the dashboard
+            # confidence timeline still surfaces poorly-fit spans.
+            per_frame_conf[idx] = max(
+                0.3, min(1.0, 1.0 - result.line_rms_px / 6.0)
+            )
+            rms_values.append(result.line_rms_px)
+            detected_lines_by_frame[idx] = [
+                {
+                    "name": ln.name,
+                    "image_segment": [list(ln.image_segment[0]),
+                                      list(ln.image_segment[1])],
+                    "world_segment": [list(ln.world_segment[0]),
+                                      list(ln.world_segment[1])],
+                }
+                for ln in result.detected_lines
+            ]
+            n_refined += 1
+
+        if rms_values:
+            arr = np.array(rms_values)
+            logger.info(
+                "line_extraction: refined %d/%d frames (%d had too few "
+                "detected lines, kept propagated camera). Line RMS: "
+                "mean=%.3f px, median=%.3f px, max=%.3f px, frac<1px=%.2f",
+                n_refined, n_covered, n_failed,
+                float(arr.mean()), float(np.median(arr)), float(arr.max()),
+                float((arr < 1.0).mean()),
+            )
+        else:
+            logger.warning(
+                "line_extraction: no frame produced usable line detections; "
+                "camera track unchanged from the propagated solution",
+            )
 
     def _propagate_pair(
         self,

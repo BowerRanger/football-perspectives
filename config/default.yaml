@@ -128,6 +128,22 @@ camera:
   # distortion baseline by 2×), so leaving this on is safe when no
   # qualifying anchor exists — the legacy flow runs instead.
   lens_from_anchor: true
+  # Line extraction (experimental): when true, the camera stage adds a
+  # post-propagation pass that re-fits every per-frame camera against
+  # painted pitch lines detected directly in the video frame. Each
+  # propagated camera is the detection bootstrap; the detector searches
+  # a strip around each projected catalogue line, locates the painted
+  # line's sub-pixel centreline (bright-ridge convolution + parabolic
+  # peak), and an LM re-solves (rvec, tvec, fx) against those lines.
+  # Achieves ~1 px mean line-fitting RMS per frame, but per-frame solves
+  # are locally under-determined so the camera body can wander several
+  # metres across the clip — this is NOT yet a static-camera-consistent
+  # solution. Off by default; see
+  # docs/superpowers/notes/2026-05-14-camera-1px-experiment.md.
+  line_extraction: false
+  line_extraction_strip_px: 25       # search-strip half-width (px) around projected line
+  line_extraction_min_gradient: 10.0 # min bright-ridge contrast (grey levels) to accept a line
+  line_extraction_max_iters: 4       # detect↔solve iterations per frame
   # ORB is the only detector currently implemented in feature_propagator.
   # SuperPoint is a future enhancement (better repeatability under zoom).
   feature_detector: orb

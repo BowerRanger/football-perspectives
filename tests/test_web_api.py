@@ -1092,3 +1092,43 @@ def test_snap_endpoint_returns_click_unchanged_on_blank_frame(client) -> None:
     assert body["snapped"] is False
     assert body["xy"] == [50.0, 50.0]
     assert body["confidence"] == 0.0
+
+
+@pytest.mark.integration
+def test_detected_lines_endpoint(client) -> None:
+    """``GET /camera/detected-lines`` returns the line_extraction debug
+    side-output; an empty ``frames`` map when the pass hasn't run."""
+    c, tmp = client
+    # No file yet → empty shape
+    r = c.get("/camera/detected-lines?shot=gberch")
+    assert r.status_code == 200
+    assert r.json()["frames"] == {}
+
+    cam_dir = tmp / "camera"
+    cam_dir.mkdir()
+    payload = {
+        "shot_id": "gberch",
+        "image_size": [1920, 1080],
+        "fps": 30.0,
+        "frames": {
+            "12": {
+                "lines": [
+                    {
+                        "name": "left_18yd_front",
+                        "image_segment": [[860.0, 580.0], [1729.0, 229.0]],
+                        "world_segment": [[16.5, 13.84, 0.0], [16.5, 54.16, 0.0]],
+                    }
+                ]
+            }
+        },
+    }
+    (cam_dir / "gberch_detected_lines.json").write_text(json.dumps(payload))
+    r = c.get("/camera/detected-lines?shot=gberch")
+    assert r.status_code == 200
+    body = r.json()
+    assert "12" in body["frames"]
+    assert body["frames"]["12"]["lines"][0]["name"] == "left_18yd_front"
+
+    # Invalid shot id rejected
+    r = c.get("/camera/detected-lines?shot=../etc")
+    assert r.status_code == 400

@@ -1462,6 +1462,38 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"Failed to load camera track: {exc}")
         return asdict(track)
 
+    @app.get("/camera/detected-lines")
+    def get_detected_lines(shot: str | None = None):
+        """Return the painted-line detections written by the camera
+        stage's ``line_extraction`` pass.
+
+        ``{shot}_detected_lines.json`` is a debug side-output: for each
+        frame, the sub-pixel painted-line segments the detector found
+        plus their world-segment correspondences. Returns an empty
+        ``{"frames": {}}`` shape when line extraction wasn't run.
+        """
+        if shot:
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
+                raise HTTPException(status_code=400, detail="Invalid shot id")
+            path = output_dir / "camera" / f"{shot}_detected_lines.json"
+        else:
+            first = _first_shot_id()
+            path = (
+                output_dir / "camera" / f"{first}_detected_lines.json"
+                if first is not None
+                else output_dir / "camera" / "detected_lines.json"
+            )
+        if not path.exists():
+            return {"shot_id": shot or "", "image_size": [0, 0],
+                    "fps": 0.0, "frames": {}}
+        try:
+            return json.loads(path.read_text())
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to load detected lines: {exc}",
+            )
+
     @app.get("/tracking/shots")
     def list_tracked_shots():
         tracks_dir = output_dir / "tracks"

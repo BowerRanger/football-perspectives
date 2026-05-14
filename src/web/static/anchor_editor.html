@@ -268,6 +268,10 @@
       <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;cursor:pointer;">
         <input type="checkbox" id="show-pitch" checked> projected pitch
       </label>
+      <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;cursor:pointer;"
+             title="Overlay the painted lines the camera-stage line_extraction pass detected in this frame (cyan), vs the catalogue projection (yellow).">
+        <input type="checkbox" id="show-detected-lines"> detected lines
+      </label>
       <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#94a3b8;cursor:pointer;">
         <input type="checkbox" id="show-landmark-labels"> landmark labels
       </label>
@@ -304,6 +308,7 @@ const state = {
   pendingLineStart: null, // first click of a 2-click line (image_xy)
   anchors: new Map(),     // frame -> {points: [...], lines: [...]}
   cameraTrack: null,      // {clip_id, fps, image_size, t_world, frames: [...]}
+  detectedLines: {},      // frame_idx (str) -> {lines: [{name, image_segment, world_segment}]}
   fps: 25,
   frame: 0,
   totalFrames: 0,
@@ -334,6 +339,7 @@ const els = {
   frameInfo: document.getElementById("frame-info"),
   addAnchorBtn: document.getElementById("add-anchor-btn"),
   snapToggle: document.getElementById("snap-toggle"),
+  showDetectedLines: document.getElementById("show-detected-lines"),
   anchorList: document.getElementById("anchor-list"),
   confStrip: document.getElementById("conf-strip"),
   confCanvas: document.getElementById("conf-canvas"),
@@ -468,7 +474,7 @@ async function loadClip(clipId) {
   resizeOverlay();
 
   // Load anchors + camera track concurrently
-  await Promise.all([loadAnchors(), loadCameraTrack()]);
+  await Promise.all([loadAnchors(), loadCameraTrack(), loadDetectedLines()]);
 
   await seekToFrame(0);
   setStatus(`Loaded ${clipId} (${vw}×${vh})`, "#86efac");
@@ -526,6 +532,19 @@ async function loadCameraTrack() {
     }
   } catch (_) { /* no camera track yet */ }
   renderConfStrip();
+}
+
+async function loadDetectedLines() {
+  // Optional debug side-output from the camera stage's line_extraction
+  // pass. Absent (empty frames) on clips that didn't run line extraction.
+  try {
+    const data = await fetchJson(
+      `/camera/detected-lines?shot=${encodeURIComponent(state.clipId)}`,
+    );
+    state.detectedLines = (data && data.frames) ? data.frames : {};
+  } catch (_) {
+    state.detectedLines = {};
+  }
 }
 
 // ── Palette ─────────────────────────────────────────────────────────
@@ -697,6 +716,13 @@ function redrawOverlay() {
     drawProjectedPitch(ctx);
   }
 
+  // Detected painted lines from the camera-stage line_extraction pass.
+  // Drawn in cyan so they contrast with the yellow catalogue projection
+  // — overlapping cyan/yellow means the line-fit is good for that frame.
+  if (els.showDetectedLines && els.showDetectedLines.checked) {
+    drawDetectedLines(ctx);
+  }
+
   // Catalogue landmark name labels — projected onto the frame using the
   // current camera, so the user can see which painted feature each
   // catalogue entry corresponds to (e.g. "centre_circle_top",
@@ -787,6 +813,28 @@ function redrawOverlay() {
       ctx.fillText(lm.name, x + ringR + 4 * scale, y - 4 * scale);
     }
   }
+}
+
+function drawDetectedLines(ctx) {
+  // Each detected line stores image_segment = [[u1,v1],[u2,v2]] directly
+  // in image-pixel coords, so no projection is needed — just stroke it.
+  const frameLines = state.detectedLines[String(state.frame)];
+  if (!frameLines || !frameLines.lines || frameLines.lines.length === 0) return;
+  const rect = els.overlay.getBoundingClientRect();
+  const scale = state.imageSize[0] > 0 && rect.width > 0
+    ? state.imageSize[0] / rect.width
+    : 1;
+  ctx.save();
+  ctx.lineWidth = 2 * scale;
+  ctx.strokeStyle = "rgba(34, 211, 238, 0.9)";  // cyan
+  ctx.font = `${10 * scale}px -apple-system, Segoe UI, sans-serif`;
+  for (const ln of frameLines.lines) {
+    const [[x1, y1], [x2, y2]] = ln.image_segment;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function drawProjectedPitch(ctx) {
@@ -1302,6 +1350,10 @@ if (els.showLandmarkLabels) {
 
 if (els.showAnchors) {
   els.showAnchors.addEventListener("change", () => redrawOverlay());
+}
+
+if (els.showDetectedLines) {
+  els.showDetectedLines.addEventListener("change", () => redrawOverlay());
 }
 
 if (els.modePoints) {

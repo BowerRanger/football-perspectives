@@ -511,7 +511,7 @@ class CameraStage(BaseStage):
             min_gradient=float(cfg.get("line_extraction_min_gradient", 10.0)),
         )
         lens_model = str(cfg.get("line_extraction_lens_model", "pinhole_k1k2"))
-        n_rounds = int(cfg.get("line_extraction_static_rounds", 3))
+        n_rounds = int(cfg.get("line_extraction_static_rounds", 1))
         point_hint_weight = float(
             cfg.get("line_extraction_point_hint_weight", 0.05)
         )

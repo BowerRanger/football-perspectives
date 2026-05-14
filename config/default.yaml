@@ -153,6 +153,13 @@ camera:
   # (scripts/profile_static_c.py) tells you whether the richer model is
   # needed. See docs/superpowers/notes/2026-05-14-camera-1px-experiment.md.
   line_extraction_lens_model: pinhole_k1k2
+  # Iterative rounds for the static-camera line solve: detect → solve →
+  # re-detect under the solved cameras → re-solve. Default 1 — on gberch
+  # the extra rounds regressed (re-detecting under the shared static-C
+  # camera finds more but noisier lines) and the solve keeps the best
+  # round anyway, so >1 only costs runtime. Raise per-clip if a clip's
+  # propagated bootstrap cameras are poor enough that re-detection helps.
+  line_extraction_static_rounds: 1
   # ORB is the only detector currently implemented in feature_propagator.
   # SuperPoint is a future enhancement (better repeatability under zoom).
   feature_detector: orb
@@ -189,30 +196,6 @@ hmr_world:
   # degrees toward the camera. 0 disables; 5 is a good empirical starting
   # point on broadcast clips.
   lean_correction_deg: 5.0
-  # Per-player runner. ``local`` (default) keeps the existing in-process
-  # sequential loop. ``batch`` fans each (shot, player) out to AWS Batch
-  # on GPU Spot instances — wires through src/cloud/batch_runner.py.
-  runner: local
-  batch:
-    region: us-east-1
-    # Terraform outputs (s3_bucket, batch_job_queue, batch_job_definition)
-    # flow in via shell env. ``source scripts/terraform_env.sh`` exports
-    # them before ``recon.py run``.
-    s3_bucket: ${HMR_WORLD_S3_BUCKET}
-    s3_prefix: runs
-    job_queue: ${HMR_WORLD_BATCH_JOB_QUEUE}
-    job_definition: ${HMR_WORLD_BATCH_JOB_DEFINITION}
-    # DescribeJobs polling interval in seconds. 15s × ~10 min worst case
-    # = ~40 API calls per run, well below the 50 TPS default quota.
-    poll_seconds: 15
-    # Per-attempt timeout (seconds) at the Batch level too — see Terraform.
-    job_timeout_seconds: 600
-    # Client-side fan-out cap. Should not exceed maxvCpus / 4.
-    max_concurrent_jobs: 24
-    # ``continue``: log failed tracks, still run ball/export with
-    # successes (mirrors the local "too_short skipped" behaviour).
-    # ``abort``: any failed track fails the whole hmr_world stage.
-    failure_policy: continue
 
 ball:
   # Detector backend used by the in-stage detection pass. wasb is the

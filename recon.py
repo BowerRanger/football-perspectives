@@ -114,40 +114,5 @@ def serve(output_dir: Path, host: str, port: int, config_path: Path | None) -> N
     uvicorn.run(app, host=host, port=port)
 
 
-@cli.command("batch-handler")
-@click.option(
-    "--manifest",
-    "manifest_path",
-    required=True,
-    type=click.Path(exists=True, path_type=Path),
-    help="Path to a local JobManifest JSON (the same schema the container reads from S3).",
-)
-@click.option(
-    "--output-dir",
-    "output_dir",
-    required=True,
-    type=click.Path(path_type=Path),
-    help="Local directory to write outputs to (plays the role of the S3 output prefix).",
-)
-def batch_handler(manifest_path: Path, output_dir: Path) -> None:
-    """Run the Batch handler in-process against a local manifest.
-
-    Same code path as ``python -m src.cloud.handler`` inside the
-    container, but with file:// URIs so it works without AWS. Use for
-    container-correctness debugging and CI smoke tests.
-    """
-    from src.cloud.handler import run_local
-
-    status = run_local(manifest_path=manifest_path, output_dir=output_dir)
-    click.echo(
-        f"[batch-handler] status={status.status} "
-        f"duration={status.duration_seconds:.1f}s frames={status.frames}"
-    )
-    if status.status not in ("ok", "too_short", "cached"):
-        raise click.ClickException(
-            f"handler reported {status.status}: {status.error_message}"
-        )
-
-
 if __name__ == "__main__":
     cli()

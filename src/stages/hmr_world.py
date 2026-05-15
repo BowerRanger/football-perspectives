@@ -250,22 +250,6 @@ class HmrWorldStage(BaseStage):
             f"{cached} cached on disk, {to_process} to process"
         )
 
-        # Dispatch on cfg["runner"]: ``batch`` fans out to AWS Batch via
-        # src/cloud/batch_runner.py; ``local`` (default) runs the
-        # existing in-process per-player loop. The two paths share
-        # ``process_player`` so output files are byte-comparable up to
-        # GVHMR's CPU↔GPU numerical differences.
-        runner_mode = str(cfg.get("runner", "local")).lower()
-        if runner_mode == "batch":
-            from src.cloud.batch_runner import BatchRunner
-
-            BatchRunner(cfg=cfg, output_dir=self.output_dir).run_tracks(
-                ordered=ordered,
-                camera_tracks_by_shot=camera_tracks_by_shot,
-                out_dir=out_dir,
-            )
-            return
-
         # Build one estimator for the whole stage. GVHMR + ViTPose-Huge +
         # HMR2.0 ViT-Huge + SMPLX load is 30-60s; without this, every
         # player paid that cost (the previous run_on_track constructed a
@@ -455,9 +439,7 @@ def process_player(
     - ``"ran"`` — GVHMR ran and a fresh SmplWorldTrack was written
 
     ``video_path`` is the absolute path to the shot's MP4 clip on local
-    disk. In stage mode this is ``output/shots/{shot_id}.mp4``; in
-    handler mode (AWS Batch container) it is a tmp-path the container
-    downloaded from S3 — the function is identical in both cases.
+    disk — ``output/shots/{shot_id}.mp4``.
     """
     if len(track_frames) < min_track_frames:
         return "too_short"

@@ -941,6 +941,29 @@ function projectPoint(p, K, R, t, distortion) {
   return distorted;
 }
 
+// Subdivide a polyline so every edge becomes ~1 m sample points. A long
+// line (e.g. a 105 m touchline) often has BOTH catalogue endpoints off
+// the frame — one off-screen, one past the camera horizon — so a 2-point
+// projection has nothing to draw even when the line's middle is plainly
+// in view. Sampling every metre means drawProjectedPitch projects points
+// along the line: the visible run draws, points past the horizon return
+// null and simply break the polyline there.
+function densifyPolyline(poly, stepM) {
+  if (poly.length < 2) return poly;
+  const out = [];
+  for (let i = 0; i < poly.length - 1; i++) {
+    const a = poly[i], b = poly[i + 1];
+    const dx = b[0]-a[0], dy = b[1]-a[1], dz = b[2]-a[2];
+    const segs = Math.max(1, Math.round(Math.hypot(dx, dy, dz) / stepM));
+    for (let k = 0; k < segs; k++) {
+      const s = k / segs;
+      out.push([a[0]+dx*s, a[1]+dy*s, a[2]+dz*s]);
+    }
+  }
+  out.push(poly[poly.length - 1]);
+  return out;
+}
+
 // FIFA pitch outline (subset — enough to verify camera registration).
 function pitchPolylines() {
   const L = 105.0, W = 68.0;
@@ -961,7 +984,7 @@ function pitchPolylines() {
     cc.push([L/2 + 9.15 * Math.cos(a), W/2 + 9.15 * Math.sin(a), 0]);
   }
   polys.push(cc);
-  return polys;
+  return polys.map((p) => densifyPolyline(p, 1.0));
 }
 
 // ── Click placement ─────────────────────────────────────────────────

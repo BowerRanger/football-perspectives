@@ -928,14 +928,17 @@ function projectPoint(p, K, R, t, distortion) {
   if (cz <= 0.05) return null;
   const u = (K[0][0]*cx + K[0][1]*cy + K[0][2]*cz) / cz;
   const v = (K[1][0]*cx + K[1][1]*cy + K[1][2]*cz) / cz;
+  const distorted = applyRadialDistortion([u, v], distortion, K);
   // Grazing incidence: cz > 0.05 passes the behind-camera guard above, but
-  // a far-off-axis point at small cz still projects to millions of px,
-  // which the canvas then draws as a wild line slashing across the frame
-  // (the "near_touchline going crazy" bug). No real frame is this large —
-  // treat such a point as un-projectable, exactly like behind-camera.
-  if (!Number.isFinite(u) || !Number.isFinite(v) ||
-      Math.abs(u) > 1e5 || Math.abs(v) > 1e5) return null;
-  return applyRadialDistortion([u, v], distortion, K);
+  // a far-off-axis point near the camera horizon projects to a moderately
+  // large pixel coord that radial distortion then amplifies to millions
+  // (the k2*r^4 term dominates and flips sign for large r) — the canvas
+  // would draw a wild line slashing across the frame (the "near_touchline
+  // going crazy" bug). Guard the FINAL post-distortion coordinate; the
+  // pre-distortion value can be small enough to slip a naive guard.
+  if (!Number.isFinite(distorted[0]) || !Number.isFinite(distorted[1]) ||
+      Math.abs(distorted[0]) > 1e5 || Math.abs(distorted[1]) > 1e5) return null;
+  return distorted;
 }
 
 // FIFA pitch outline (subset — enough to verify camera registration).

@@ -5,6 +5,7 @@ Endpoints exposed:
 Pipeline control
     GET    /api/stages
     GET    /api/config
+    GET    /api/smpl_model              (static SMPL neutral data for SkinnedMesh)
     POST   /api/run
     GET    /api/jobs/{job_id}/status
     GET    /api/jobs/{job_id}/logs
@@ -232,6 +233,23 @@ class Job:
 _jobs: dict[str, Job] = {}
 _jobs_lock = Lock()
 _MAX_CONCURRENT_JOBS = 5
+
+
+# Static SMPL neutral model bundled at repo-root ``data/models/`` (see
+# ``scripts/extract_smpl_neutral.py``). Defined at module scope so tests
+# can ``monkeypatch.setattr(server, "_SMPL_NEUTRAL_PATH", tmp_path / ...)``
+# without spinning up a real extracted asset.
+_SMPL_NEUTRAL_PATH: Path = (
+    Path(__file__).resolve().parents[2] / "data" / "models" / "smpl_neutral.npz"
+)
+
+# SMPL 24-joint kintree parents (root = -1). Kept as a server-side
+# constant so the browser doesn't have to also hard-code the same
+# table — the viewer reads ``parents`` from the endpoint response.
+_SMPL_PARENTS: list[int] = [
+    -1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9,
+    12, 13, 14, 16, 17, 18, 19, 20, 21,
+]
 
 
 class _LogQueueHandler(logging.Handler):
@@ -475,6 +493,87 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
     @app.get("/api/config")
     def get_config():
         return load_config(app.state.config_path)
+
+    @app.get("/api/smpl_model")
+    def get_smpl_model():
+        """Return the bundled SMPL neutral data the web viewer needs to
+        render a skinned mesh per player.
+
+        Payload (JSON, ~3-4 MB before gzip when shapedirs are present)::
+
+            v_template       (V, 3)       float       neutral mean vertices, y-up
+            faces            (F, 3)       int         triangulation
+            skin_index       (V, 4)       int         top-4 bone indices per vertex
+            skin_weight      (V, 4)       float       top-4 weights (row-normalised)
+            joint_positions  (24, 3)      float       neutral T-pose joints
+            parents          (24,)        int         SMPL kintree (root = -1)
+            shapedirs        (V, 3, 10)   float       optional shape basis (first 10 betas)
+            joint_shapedirs  (24, 3, 10)  float       optional J_regressor @ shapedirs
+
+        Skinning weights are sparsified to ``top-4`` here so the browser
+        can pour them straight into ``THREE.SkinnedMesh``'s skinIndex /
+        skinWeight buffer attributes (both fixed to 4 bones per vertex)
+        without a JS-side weight sort. Tails of the SMPL weight
+        distribution that fall outside the top-4 are dropped and the
+        remaining four weights renormalised to sum to 1.
+
+        ``shapedirs`` / ``joint_shapedirs`` are forwarded only when
+        present in the npz (added by the updated
+        ``extract_smpl_neutral.py``); without them the viewer renders
+        every player at the neutral mean shape.
+        """
+        path = _SMPL_NEUTRAL_PATH
+        if not path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"SMPL neutral model not found at {path}. "
+                    "Run scripts/extract_smpl_neutral.py to extract it "
+                    "from third_party/gvhmr/inputs/checkpoints/body_models/smpl/."
+                ),
+            )
+        try:
+            z = np.load(path, allow_pickle=False)
+            v_template = np.asarray(z["v_template"], dtype=np.float32)
+            faces = np.asarray(z["faces"], dtype=np.int32)
+            weights = np.asarray(z["weights"], dtype=np.float32)
+            joint_positions = np.asarray(z["joint_positions"], dtype=np.float32)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to load SMPL neutral npz: {exc}",
+            )
+
+        # Top-4 sparsification + row renormalisation. The full (V, 24)
+        # weight matrix is mostly zero for SMPL (each vertex is
+        # typically influenced by ≤4 bones), but a handful of vertices
+        # straddle joints with very small tail weights; renormalising
+        # avoids a perceptible "shrink" on those vertices when the tail
+        # is dropped.
+        idx_sorted = np.argsort(-weights, axis=1)[:, :4]
+        skin_index = idx_sorted.astype(np.int32)
+        skin_weight = np.take_along_axis(weights, idx_sorted, axis=1)
+        row_sums = skin_weight.sum(axis=1, keepdims=True)
+        row_sums[row_sums < 1e-6] = 1.0
+        skin_weight = (skin_weight / row_sums).astype(np.float32)
+
+        payload: dict[str, Any] = {
+            "v_template": v_template.tolist(),
+            "faces": faces.tolist(),
+            "skin_index": skin_index.tolist(),
+            "skin_weight": skin_weight.tolist(),
+            "joint_positions": joint_positions.tolist(),
+            "parents": list(_SMPL_PARENTS),
+        }
+        if "shapedirs" in z.files:
+            payload["shapedirs"] = (
+                np.asarray(z["shapedirs"], dtype=np.float32).tolist()
+            )
+        if "joint_shapedirs" in z.files:
+            payload["joint_shapedirs"] = (
+                np.asarray(z["joint_shapedirs"], dtype=np.float32).tolist()
+            )
+        return payload
 
     def _hmr_world_in_flight() -> Job | None:
         """Return the currently-running hmr_world job, if any.

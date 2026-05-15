@@ -26,7 +26,8 @@ from src.stages.hmr_world import HmrWorldStage
 
 
 def _identity_track(n_frames: int) -> CameraTrack:
-    """A camera oriented so an upright body in pitch yields root_z ≈ 1 m.
+    """A camera oriented so an upright body in pitch yields the SMPL
+    canonical pelvis height above the ankle-anchor plane.
 
     Convention reminders (post the Phase-2 simplification of
     ``smpl_pitch_transform``):
@@ -37,9 +38,11 @@ def _identity_track(n_frames: int) -> CameraTrack:
         (canonical y-up → cam y-down) — see the fake runner below for
         the actual matrix used.
 
-    With ``R_w2c = [[1,0,0],[0,0,-1],[0,1,0]]`` and ``root_R_cam = X_180``:
-    ``R_world @ (0,-0.95,0) = (0, 0, -0.95)`` — i.e. the foot offset maps
-    cleanly to pitch -z, so a foot at z=0.05 yields root z = 1.0.
+    With ``R_w2c = [[1,0,0],[0,0,-1],[0,1,0]]`` and ``root_R_cam = X_180``,
+    ``root_R_pitch @ (0, -0.882, -0.038) ≈ (0, 0.038, -0.882)`` — the
+    SMPL canonical ankle offset maps cleanly to pitch -z, so an ankle
+    anchored at z=0.05 yields root z ≈ 0.932 m (SMPL canonical pelvis
+    height).
     """
     R_world_to_cam = [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]]
     return CameraTrack(
@@ -165,9 +168,18 @@ def test_hmr_world_emits_track_in_pitch_frame(tmp_path: Path, fake_gvhmr) -> Non
     out = SmplWorldTrack.load(out_path)
     assert out.player_id == "P001"
     assert out.thetas.shape == (n_frames, 24, 3)
-    # Root z should be > 0.5 for at least some frames (foot at ground,
-    # root ~1m above pitch).
-    assert (out.root_t[:, 2] > 0.5).any()
+    # Root z should land at the SMPL canonical ankle-to-pelvis distance
+    # above the ankle-anchor plane (z=0.05): the ankle joint sits at
+    # y=-0.882 in the SMPL canonical y-up rest pose, so an upright body
+    # anchored with its ankle at z=0.05 has its pelvis at z ≈ 0.932 m,
+    # NOT z=1.0 m (the latter would correspond to a 0.95 m sole offset,
+    # which is the bug that left players floating ~7 cm above the pitch).
+    from src.utils.smpl_skeleton import SMPL_REST_JOINTS_YUP
+    expected_pelvis_z = 0.05 + (-SMPL_REST_JOINTS_YUP[7][1])  # 0.05 + 0.882
+    assert out.root_t[:, 2] == pytest.approx(expected_pelvis_z, abs=1e-3), (
+        f"pelvis z {out.root_t[0, 2]:.4f} m doesn't match SMPL canonical "
+        f"ankle anchor height {expected_pelvis_z:.4f} m — floating bug regressed"
+    )
 
     # 6. Verify kp2d side-output written for the dashboard overlay.
     kp2d_path = tmp_path / "hmr_world" / "play__P001_kp2d.json"

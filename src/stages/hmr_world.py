@@ -47,6 +47,7 @@ from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.tracks import TracksResult
 from src.utils.foot_anchor import ankle_ray_to_pitch, anchor_translation
 from src.utils.smpl_pitch_transform import smpl_root_in_pitch_frame
+from src.utils.smpl_skeleton import SMPL_REST_JOINTS_YUP
 from src.utils.temporal_smoothing import (
     ground_snap_z,
     savgol_axis,
@@ -61,20 +62,36 @@ _COCO_RIGHT_ANKLE = 16
 # do not anchor (matches the spec keypoint-confidence threshold).
 _ANKLE_CONF_MIN = 0.3
 
-# Foot offset relative to the SMPL root, in the body's local (SMPL
-# canonical, y-up) frame. ``root_R_pitch`` rotates the body from this
-# y-up local frame straight into pitch z-up world (see the docstring
-# in ``smpl_pitch_transform``), so foot-below-root is along the body's
-# local -y, not pitch -z.
+# Ankle-joint offset relative to the SMPL root (pelvis), in the body's
+# local (SMPL canonical, y-up) frame. ``root_R_pitch`` rotates the body
+# from this y-up local frame straight into pitch z-up world (see the
+# docstring in ``smpl_pitch_transform``), so ankle-below-root is along
+# the body's local -y, not pitch -z.
+#
+# Derived from the SMPL canonical rest-pose joint table (mean betas):
+# left/right ankle indices 7/8 are at y=-0.882 m, with a small forward
+# z offset and ±x lateral offset. Averaging the two and zeroing the
+# lateral component anchors the root over the foot-midpoint pixel that
+# we ray-cast (see ``_FOOT_PLANE_Z`` below).
 #
 # (Decision D9 in the implementation log called this offset
-# ``(0, 0, -0.95)`` because the previous transform had a misnamed bridge
-# matrix that left the body-local frame coincidentally z-up. With the
-# bridge fixed, the offset is now in correct SMPL canonical convention.)
-_FOOT_IN_ROOT = np.array([0.0, -0.95, 0.0], dtype=float)
+# ``(0, 0, -0.95)`` and a later revision used ``(0, -0.95, 0)``. Both
+# treated the constant as the root-to-*sole* distance, which left
+# players floating ~7 cm above the pitch because the anchored 2D
+# keypoint and the ray-cast plane both refer to the *ankle*, not the
+# sole. Using the SMPL canonical ankle position resolves the mismatch
+# without per-shape forward-kinematics, accurate to ~1-2 cm across
+# typical adult beta variation.)
+_ANKLE_IN_ROOT = 0.5 * (
+    SMPL_REST_JOINTS_YUP[7] + SMPL_REST_JOINTS_YUP[8]
+).astype(float)
+_ANKLE_IN_ROOT[0] = 0.0  # zero lateral: root sits over the foot midpoint
 
-# Pitch ground-plane offset for the foot ray-cast (foot rests slightly above
-# the turf surface so a vertical ray-from-camera doesn't grazing-intersect).
+# Pitch-frame z of the ankle keypoint when standing on the turf. ViTPose
+# annotates the lateral malleolus (the bony ankle bump), which sits a
+# few centimetres above the boot sole — the small positive offset both
+# matches that anatomy and keeps a near-vertical ray from grazing-
+# intersecting the ground plane.
 _FOOT_PLANE_Z = 0.05
 
 
@@ -602,7 +619,7 @@ def process_player(
                     )
                     root_R_pitch[i] = correction_R @ root_R_pitch[i]
         root_t[i] = anchor_translation(
-            foot_world, _FOOT_IN_ROOT, root_R_pitch[i]
+            foot_world, _ANKLE_IN_ROOT, root_R_pitch[i]
         )
         last_anchored = root_t[i]
         joint_conf_min = float(joint_conf[i].min()) if joint_conf.size else 0.0

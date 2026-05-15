@@ -52,7 +52,8 @@
     <option value="behind-goal">Behind Goal</option>
   </select>
   <button id="ball-btn">Ball: ON</button>
-  <button id="bones-btn" class="toggle-off">Bones: OFF</button>
+  <button id="skeleton-btn">Skeleton: ON</button>
+  <button id="mesh-btn" class="toggle-off">Mesh: OFF</button>
   <select id="shot-select" title="Switch which shot's reconstruction is loaded">
     <option value="">All shots…</option>
   </select>
@@ -171,14 +172,34 @@ let currentFrame = 0;
 let playing = false;
 let speed = 1;
 let showBall = true;
-// Bone-orientation overlay: per-joint name labels + small forward-direction
-// arrows. Off by default — diagnostic tool for verifying SMPL pose conversion.
-let showBones = false;
+// Per-player skeleton overlay (line-segment bones + joint dots). On by
+// default — the cheapest readable visualisation of the SMPL pose.
+let showSkeleton = true;
+// Per-player SMPL skinned mesh. Off by default because it depends on
+// the optional ``/api/smpl_model`` endpoint (extracted via
+// ``scripts/extract_smpl_neutral.py``) and the meshes add a few MB of
+// GPU memory once 20+ players are in the scene.
+let showMesh = false;
 let fps = 25;
 // When a player is selected from the sidebar, OrbitControls.target is
 // retargeted to that player's pelvis on every frame (camera follows
 // them as the timeline plays). null = back to pitch centre / preset.
 let selectedPlayerId = null;
+// Which camera preset is active. ``'tracked'`` locks the view to the
+// solved per-frame broadcast pose; orbit/zoom is disabled in that mode
+// because every frame's position+rotation+FOV come from camera_track.
+let cameraMode = 'broadcast';
+// Per-frame tracked-camera pose, keyed by frame index. Populated from
+// /camera/track once during loadScene; null when no track is available
+// (in which case the "Tracked" dropdown option is not added).
+let cameraTrackFrames = null;
+// {clip_id, image_size:[w,h]} captured alongside cameraTrackFrames so
+// applyTrackedCamera can derive vertical FOV from K[1][1] without
+// re-fetching the track.
+let cameraTrackMeta = null;
+// Default perspective FOV — restored when leaving tracked mode so the
+// orbit presets read at the same field-of-view they were authored for.
+const DEFAULT_FOV = 50;
 
 // Player skeletons, keyed by player_id. Each entry stores the per-frame
 // SMPL pose (thetas + root_R + root_t) plus the Three.js LineSegments
@@ -207,14 +228,6 @@ const SMPL_PARENTS = [
 const SMPL_BONES = SMPL_PARENTS
   .map((p, i) => [p, i])
   .filter((pair) => pair[0] >= 0);
-// SMPL joint names — used by the Bones overlay to label each joint.
-const SMPL_JOINT_NAMES = [
-  "pelvis", "l_hip", "r_hip", "spine1", "l_knee", "r_knee", "spine2",
-  "l_ankle", "r_ankle", "spine3", "l_foot", "r_foot", "neck", "l_collar",
-  "r_collar", "head", "l_shoulder", "r_shoulder", "l_elbow", "r_elbow",
-  "l_wrist", "r_wrist", "l_hand", "r_hand",
-];
-
 // SMPL T-pose joint positions in **standard SMPL canonical (y-up)**
 // space, neutral shape, pelvis at origin. ``root_R`` (computed by
 // hmr_world via the corrected bridge in ``smpl_pitch_transform.py``)
@@ -324,41 +337,192 @@ function smplFK(thetas, root_R, root_t) {
   return { pos, rot };
 }
 
-// ── Bones overlay helpers ──
-// A small canvas-rendered text sprite. Used to label SMPL joints in
-// the Bones overlay so the operator can identify which joint is which
-// without counting bones from the pelvis.
-function makeLabelSprite(text) {
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-  const fontPx = 36;
-  ctx.font = `${fontPx}px -apple-system, "Segoe UI", sans-serif`;
-  const padX = 8, padY = 4;
-  const metrics = ctx.measureText(text);
-  canvas.width = Math.ceil(metrics.width) + padX * 2;
-  canvas.height = fontPx + padY * 2;
-  // Re-set font after canvas resize (resize wipes ctx state).
-  ctx.font = `${fontPx}px -apple-system, "Segoe UI", sans-serif`;
-  ctx.textBaseline = 'top';
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#ffe28a';
-  ctx.fillText(text, padX, padY);
+// ── SMPL skinned-mesh assets ──
+// Static SMPL data (v_template, faces, top-4 sparsified skin
+// weights, joint_positions, optional shapedirs / joint_shapedirs)
+// fetched once from /api/smpl_model. Per-player meshes reuse the same
+// faces / skin attributes; only ``v_template`` is rebuilt per player
+// when ``shapedirs`` are present (so beta-fitted body shapes vary).
+//
+// Schema is described in the server-side endpoint docstring.
+let smplModel = null;        // { v_template:Float32Array (V*3),
+                             //   faces:Uint32Array (F*3),
+                             //   skin_index:Uint16Array (V*4),
+                             //   skin_weight:Float32Array (V*4),
+                             //   joint_positions:Float32Array (24*3),
+                             //   shapedirs?:Float32Array (V*3*K),
+                             //   joint_shapedirs?:Float32Array (24*3*K),
+                             //   parents:int[24], nVerts, nFaces, nBetas }
+let smplModelPending = null; // Promise that resolves once /api/smpl_model
+                             // is loaded (or rejects on 404/error). Per-
+                             // player addPlayerMarker awaits this before
+                             // building its SkinnedMesh.
 
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.minFilter = THREE.LinearFilter;
-  const mat = new THREE.SpriteMaterial({
-    map: tex, transparent: true, depthTest: false,
-  });
-  const sprite = new THREE.Sprite(mat);
-  // Scale so the sprite reads at typical orbit zoom — ~6 cm tall world units.
-  const aspect = canvas.width / canvas.height;
-  const heightWorld = 0.08;
-  sprite.scale.set(heightWorld * aspect, heightWorld, 1);
-  // Stay on top of bone lines so labels are readable when joints overlap.
-  sprite.renderOrder = 999;
-  return sprite;
+async function loadSmplModel() {
+  if (smplModelPending) return smplModelPending;
+  smplModelPending = (async () => {
+    const raw = await fetchJson('/api/smpl_model');
+    const V = raw.v_template.length;
+    const F = raw.faces.length;
+    const flat = (arr, depth) => {
+      // depth=1: arr is V*3 / V*4 nested; depth=2: arr is V*3*K nested.
+      if (depth === 1) {
+        const inner = arr[0].length;
+        const out = new Float32Array(V * inner);
+        for (let i = 0; i < V; i++) {
+          for (let j = 0; j < inner; j++) out[i * inner + j] = arr[i][j];
+        }
+        return out;
+      }
+      const D2 = arr[0].length, K = arr[0][0].length;
+      const N = arr.length;
+      const out = new Float32Array(N * D2 * K);
+      for (let i = 0; i < N; i++) {
+        for (let j = 0; j < D2; j++) {
+          for (let k = 0; k < K; k++) {
+            out[i * D2 * K + j * K + k] = arr[i][j][k];
+          }
+        }
+      }
+      return out;
+    };
+    const v_template = new Float32Array(V * 3);
+    for (let i = 0; i < V; i++) {
+      v_template[i*3+0] = raw.v_template[i][0];
+      v_template[i*3+1] = raw.v_template[i][1];
+      v_template[i*3+2] = raw.v_template[i][2];
+    }
+    const faces = new Uint32Array(F * 3);
+    for (let i = 0; i < F; i++) {
+      faces[i*3+0] = raw.faces[i][0];
+      faces[i*3+1] = raw.faces[i][1];
+      faces[i*3+2] = raw.faces[i][2];
+    }
+    const skin_index = new Uint16Array(V * 4);
+    const skin_weight = new Float32Array(V * 4);
+    for (let i = 0; i < V; i++) {
+      for (let j = 0; j < 4; j++) {
+        skin_index[i*4+j]  = raw.skin_index[i][j];
+        skin_weight[i*4+j] = raw.skin_weight[i][j];
+      }
+    }
+    const joint_positions = new Float32Array(24 * 3);
+    for (let i = 0; i < 24; i++) {
+      joint_positions[i*3+0] = raw.joint_positions[i][0];
+      joint_positions[i*3+1] = raw.joint_positions[i][1];
+      joint_positions[i*3+2] = raw.joint_positions[i][2];
+    }
+    const out = {
+      v_template, faces, skin_index, skin_weight, joint_positions,
+      parents: raw.parents, nVerts: V, nFaces: F, nBetas: 0,
+    };
+    if (raw.shapedirs) {
+      out.shapedirs = flat(raw.shapedirs, 2);
+      out.nBetas = raw.shapedirs[0][0].length;
+    }
+    if (raw.joint_shapedirs) {
+      out.joint_shapedirs = flat(raw.joint_shapedirs, 2);
+    }
+    smplModel = out;
+    return out;
+  })();
+  return smplModelPending;
 }
+
+// Compute beta-adjusted vertices + joint positions in SMPL canonical
+// space. With shapedirs absent (server didn't ship them, or betas
+// missing/empty) returns the neutral mean shape unchanged.
+function applyBetas(model, betas) {
+  const V = model.nVerts;
+  const v_shaped = new Float32Array(model.v_template);
+  const j_shaped = new Float32Array(model.joint_positions);
+  if (!betas || !model.shapedirs || model.nBetas === 0) {
+    return { v_shaped, j_shaped };
+  }
+  const K = Math.min(model.nBetas, betas.length);
+  const sd = model.shapedirs;
+  for (let v = 0; v < V; v++) {
+    for (let c = 0; c < 3; c++) {
+      let sum = 0;
+      const base = v * 3 * model.nBetas + c * model.nBetas;
+      for (let k = 0; k < K; k++) sum += sd[base + k] * betas[k];
+      v_shaped[v*3 + c] += sum;
+    }
+  }
+  if (model.joint_shapedirs) {
+    const jsd = model.joint_shapedirs;
+    for (let j = 0; j < 24; j++) {
+      for (let c = 0; c < 3; c++) {
+        let sum = 0;
+        const base = j * 3 * model.nBetas + c * model.nBetas;
+        for (let k = 0; k < K; k++) sum += jsd[base + k] * betas[k];
+        j_shaped[j*3 + c] += sum;
+      }
+    }
+  }
+  return { v_shaped, j_shaped };
+}
+
+// Build a SkinnedMesh + 24-bone Skeleton for one player, with their
+// beta-fitted body shape pre-applied to the rest geometry. Returns
+// ``null`` when the SMPL model failed to load — the viewer then falls
+// back to skeleton-only rendering for that player.
+function buildSmplSkinnedMesh(model, betas, color) {
+  const { v_shaped, j_shaped } = applyBetas(model, betas);
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(v_shaped, 3));
+  geom.setIndex(new THREE.BufferAttribute(model.faces, 1));
+  geom.setAttribute('skinIndex',
+    new THREE.BufferAttribute(new Uint16Array(model.skin_index), 4));
+  geom.setAttribute('skinWeight',
+    new THREE.BufferAttribute(new Float32Array(model.skin_weight), 4));
+  geom.computeVertexNormals();
+
+  const material = new THREE.MeshStandardMaterial({
+    color, roughness: 0.65, metalness: 0.0, side: THREE.DoubleSide,
+  });
+
+  // 24-bone hierarchy. Local rest position = beta-adjusted joint
+  // offset from parent (in SMPL canonical y-up). Three.js' SkinnedMesh
+  // computes ``boneInverses`` from these rest matrices at bind time.
+  const bones = new Array(24);
+  for (let i = 0; i < 24; i++) bones[i] = new THREE.Bone();
+  for (let i = 0; i < 24; i++) {
+    const p = model.parents[i];
+    if (p < 0) {
+      bones[i].position.set(j_shaped[i*3], j_shaped[i*3+1], j_shaped[i*3+2]);
+    } else {
+      bones[i].position.set(
+        j_shaped[i*3]   - j_shaped[p*3],
+        j_shaped[i*3+1] - j_shaped[p*3+1],
+        j_shaped[i*3+2] - j_shaped[p*3+2],
+      );
+      bones[p].add(bones[i]);
+    }
+  }
+
+  const mesh = new THREE.SkinnedMesh(geom, material);
+  mesh.add(bones[0]);
+  // Populate ``matrixWorld`` on each bone before constructing the
+  // Skeleton; ``new THREE.Skeleton`` calls ``calculateInverses()`` in
+  // its constructor and reads ``bone.matrixWorld`` of each bone — if
+  // those are still identity (the default) every inverse comes back as
+  // identity too and skinning collapses to ``T(root_t) * v_template``.
+  mesh.updateMatrixWorld(true);
+  const skeleton = new THREE.Skeleton(bones);
+  mesh.bind(skeleton);
+  mesh.frustumCulled = false;
+  mesh.visible = false;
+  return { mesh, bones };
+}
+
+// Pre-allocated scratch buffers shared across per-frame bone updates.
+// ``aaToMat`` is still used for the line-segment skeleton, but the
+// SkinnedMesh path stays in quaternion space (Three.js' Bone is
+// quaternion-backed) so we avoid a 3x3-matrix → quaternion round-trip
+// per joint per frame.
+const _tmpAxis = new THREE.Vector3();
+const _tmpMat4 = new THREE.Matrix4();
 
 // Ball
 let ballMesh = null;
@@ -418,7 +582,8 @@ async function loadScene() {
   const sidebar = document.getElementById('sidebar');
   sidebar.innerHTML = '<h4>Pitch-registered scene</h4>';
 
-  // 1. Camera track tells us fps + frame-count bounds
+  // 1. Camera track tells us fps + frame-count bounds, and seeds the
+  // per-frame pose used by the "Tracked" camera dropdown option below.
   let camTrack = null;
   try {
     camTrack = await fetchJson(`/camera/track${_shotQuery('?')}`);
@@ -426,6 +591,23 @@ async function loadScene() {
   if (camTrack && camTrack.fps > 0) fps = camTrack.fps;
   if (camTrack && camTrack.frames && camTrack.frames.length > 0) {
     totalFrames = Math.max(totalFrames, camTrack.frames.length);
+    cameraTrackFrames = new Map();
+    const tFallback = camTrack.t_world || [0, 0, 0];
+    for (const cf of camTrack.frames) {
+      cameraTrackFrames.set(cf.frame, {
+        K: cf.K,
+        R: cf.R,
+        t: cf.t || tFallback,
+      });
+    }
+    cameraTrackMeta = {
+      clip_id: camTrack.clip_id || (SHOT_FILTER || 'tracked'),
+      image_size: camTrack.image_size || [1920, 1080],
+    };
+    const trackedOpt = document.createElement('option');
+    trackedOpt.value = 'tracked';
+    trackedOpt.textContent = `Tracked: ${cameraTrackMeta.clip_id}`;
+    document.getElementById('camera-select').appendChild(trackedOpt);
   }
 
   // 2. List available HMR-world player tracks. The endpoint returns
@@ -482,7 +664,15 @@ async function loadScene() {
     }
   }
 
-  for (const p of playerEntries) addPlayerMarker(p, sidebar, playerNames);
+  // Kick off the SMPL static-data fetch in parallel with the per-player
+  // mesh construction — addPlayerMarker awaits ``smplModelPending`` so
+  // the bones it builds match the betas-adjusted joint positions.
+  loadSmplModel().catch((err) => {
+    console.warn('SMPL neutral model unavailable — mesh toggle will keep '
+      + 'players unrendered. Run scripts/extract_smpl_neutral.py.', err);
+  });
+
+  for (const p of playerEntries) await addPlayerMarker(p, sidebar, playerNames);
 
   // 4. Ball — radius from config (FIFA-spec 0.11 m by default).
   // Matches what the glTF/FBX exports use, so the on-pitch ball is
@@ -516,7 +706,7 @@ async function loadScene() {
   updateFrame(0);
 }
 
-function addPlayerMarker(p, sidebar, playerNames) {
+async function addPlayerMarker(p, sidebar, playerNames) {
   const team = (p.team || 'unknown');
   const color = TEAM_COLORS[team] || TEAM_COLORS.unknown;
   const displayName = (playerNames && playerNames.get(p.player_id)) || p.player_id;
@@ -548,42 +738,32 @@ function addPlayerMarker(p, sidebar, playerNames) {
   joints.frustumCulled = false;
   scene.add(joints);
 
-  // Bones overlay: per-joint name label + forward-direction arrow.
-  // Wrapped in a single THREE.Group so the toggle just flips visibility
-  // without bulk-iterating children. Hidden until ``showBones`` is on.
-  const bonesGroup = new THREE.Group();
-  bonesGroup.visible = false;
-  bonesGroup.frustumCulled = false;
-  const labelSprites = new Array(SMPL_J_REST.length);
-  const forwardArrows = new Array(SMPL_J_REST.length);
-  for (let i = 0; i < SMPL_J_REST.length; i++) {
-    const sprite = makeLabelSprite(SMPL_JOINT_NAMES[i]);
-    sprite.position.set(0, 0, 0);
-    bonesGroup.add(sprite);
-    labelSprites[i] = sprite;
-    // Forward arrow = joint's local +z mapped through accumulated rot.
-    // 0.15 m shaft so it reads at human scale without obscuring bones.
-    const arrow = new THREE.ArrowHelper(
-      new THREE.Vector3(0, 0, 1),  // initial direction (overwritten per frame)
-      new THREE.Vector3(0, 0, 0),  // initial origin
-      0.15,                         // length (m)
-      0x4488ff,                     // shaft colour (blue = z = forward)
-      0.05,                         // head length
-      0.04,                         // head width
-    );
-    bonesGroup.add(arrow);
-    forwardArrows[i] = arrow;
+  // SMPL SkinnedMesh — beta-fitted body geometry skinned by the same
+  // 24-joint hierarchy that drives the line-segment skeleton above.
+  // Built once the SMPL static data has loaded; left null on this
+  // player's record when the /api/smpl_model endpoint is unavailable
+  // (the skeleton overlay still works in that fallback path).
+  let smplMesh = null;
+  let smplBones = null;
+  if (smplModelPending) {
+    try {
+      const model = await smplModelPending;
+      const built = buildSmplSkinnedMesh(model, p.betas || [], color);
+      smplMesh = built.mesh;
+      smplBones = built.bones;
+      scene.add(smplMesh);
+    } catch (_) {
+      // loadSmplModel already logged the underlying error.
+    }
   }
-  scene.add(bonesGroup);
 
   playerObjects.set(p.player_id, {
     skel,
     joints,
     posBuf,
     jointBuf,
-    bonesGroup,
-    labelSprites,
-    forwardArrows,
+    smplMesh,
+    smplBones,
     frames: p.frames || [],
     root_t: p.root_t || [],
     root_R: p.root_R || [],
@@ -628,16 +808,85 @@ function selectPlayer(pid) {
 }
 
 function setCameraPreset(preset) {
+  cameraMode = preset;
   // Switching to a preset implicitly stops following any player.
   if (selectedPlayerId) {
     selectedPlayerId = null;
     document.querySelectorAll('.player-row.active').forEach((el) => el.classList.remove('active'));
+  }
+  if (preset === 'tracked') {
+    // Lock the view to the solved broadcast pose. OrbitControls is
+    // disabled (no orbit/zoom/pan input) and animate() skips
+    // controls.update() so the per-frame quaternion we set in
+    // applyTrackedCamera isn't clobbered.
+    controls.enabled = false;
+    applyTrackedCamera(currentFrame);
+    return;
+  }
+  controls.enabled = true;
+  if (camera.fov !== DEFAULT_FOV) {
+    camera.fov = DEFAULT_FOV;
+    camera.updateProjectionMatrix();
   }
   if (preset === 'broadcast') camera.position.set(52.5, 25, 50);
   else if (preset === 'tactical') camera.position.set(52.5, 80, -34);
   else if (preset === 'behind-goal') camera.position.set(-10, 10, -34);
   controls.target.set(52.5, 0, -34);
   controls.update();
+}
+
+// Scratch objects shared across per-frame tracked-camera updates so the
+// hot path doesn't allocate.
+const _camBasisM = new THREE.Matrix4();
+const _camRight = new THREE.Vector3();
+const _camUp = new THREE.Vector3();
+const _camBack = new THREE.Vector3();
+
+// Position+orient the three.js camera to match the solved broadcast
+// pose for ``fi``. Pose convention (from camera_track.json):
+//   X_cam = R @ X_world + t,  with camera-frame axes x=right, y=down,
+//   z=forward (standard CV). Camera centre in pitch-world:
+//   C = -R^T @ t. The rows of R are the camera's x/y/z axes expressed
+//   in pitch-world; we negate y and z to map to three.js' y-up /
+//   z-back convention, then route through pitchToThree to switch
+//   handedness. Vertical FOV is derived from K[1][1] and image height.
+function applyTrackedCamera(fi) {
+  if (!cameraTrackFrames) return;
+  const cf = cameraTrackFrames.get(fi);
+  if (!cf) return;  // No data on this frame — hold the previous pose.
+  const { K, R, t } = cf;
+  if (!K || !R || !t) return;
+  const cx = -(R[0][0] * t[0] + R[1][0] * t[1] + R[2][0] * t[2]);
+  const cy = -(R[0][1] * t[0] + R[1][1] * t[1] + R[2][1] * t[2]);
+  const cz = -(R[0][2] * t[0] + R[1][2] * t[1] + R[2][2] * t[2]);
+  if (!isFinite(cx) || !isFinite(cy) || !isFinite(cz)) return;
+  const C3 = pitchToThree([cx, cy, cz]);
+  camera.position.set(C3[0], C3[1], C3[2]);
+
+  // Basis vectors in pitch-world: rows of R (= columns of R^T).
+  const r3 = pitchToThree([ R[0][0],  R[0][1],  R[0][2]]);
+  const u3 = pitchToThree([-R[1][0], -R[1][1], -R[1][2]]);
+  const b3 = pitchToThree([-R[2][0], -R[2][1], -R[2][2]]);
+  _camRight.set(r3[0], r3[1], r3[2]);
+  _camUp.set(u3[0], u3[1], u3[2]);
+  _camBack.set(b3[0], b3[1], b3[2]);
+  _camBasisM.makeBasis(_camRight, _camUp, _camBack);
+  camera.quaternion.setFromRotationMatrix(_camBasisM);
+
+  // Vertical FOV from K[1][1] (focal length in pixels along y) and
+  // the source image height. Aspect stays at viewport aspect; the
+  // off-centre principal point is not modelled here — Three.js'
+  // PerspectiveCamera doesn't support it without a custom matrix.
+  const fy = K[1][1];
+  const h = (cameraTrackMeta && cameraTrackMeta.image_size
+    && cameraTrackMeta.image_size[1]) || 1080;
+  if (fy > 0) {
+    const fovDeg = 2 * Math.atan(h / (2 * fy)) * 180 / Math.PI;
+    if (Math.abs(camera.fov - fovDeg) > 1e-4) {
+      camera.fov = fovDeg;
+      camera.updateProjectionMatrix();
+    }
+  }
 }
 
 // ── Frame update ──
@@ -656,7 +905,7 @@ function updateFrame(fi) {
     if (!valid) {
       obj.skel.visible = false;
       obj.joints.visible = false;
-      obj.bonesGroup.visible = false;
+      if (obj.smplMesh) obj.smplMesh.visible = false;
       continue;
     }
     // Compute joint positions + accumulated rotations in pitch-world via
@@ -664,7 +913,6 @@ function updateFrame(fi) {
     // and joint vertex buffers in one pass.
     const fk = smplFK(theta, R, t);
     const positions = fk.pos;
-    const rotations = fk.rot;
     for (let b = 0; b < SMPL_BONES.length; b++) {
       const [pa, pb] = SMPL_BONES[b];
       const a3 = pitchToThree(positions[pa]);
@@ -684,31 +932,45 @@ function updateFrame(fi) {
     }
     obj.skel.geometry.attributes.position.needsUpdate = true;
     obj.joints.geometry.attributes.position.needsUpdate = true;
-    obj.skel.visible = true;
-    obj.joints.visible = true;
+    obj.skel.visible = showSkeleton;
+    obj.joints.visible = showSkeleton;
 
-    // Bones overlay: position the label sprite at each joint and orient
-    // the forward arrow along the joint's local +z mapped through its
-    // accumulated rotation. Skipped when the toggle is off — the
-    // group's visibility is the cheap path; we still avoid the per-joint
-    // inner loop when nothing is going to be drawn.
-    if (showBones) {
-      for (let i = 0; i < positions.length; i++) {
-        const v3 = pitchToThree(positions[i]);
-        obj.labelSprites[i].position.set(v3[0], v3[1] + 0.05, v3[2]);
-        // Joint's local +z direction in pitch-world = rotations[i] @ (0,0,1).
-        // That's the third column of the rotation matrix.
-        const Rmat = rotations[i];
-        const fwdPitch = [Rmat[0][2], Rmat[1][2], Rmat[2][2]];
-        const fwdThree = pitchToThree(fwdPitch);
-        obj.forwardArrows[i].position.set(v3[0], v3[1], v3[2]);
-        obj.forwardArrows[i].setDirection(
-          new THREE.Vector3(fwdThree[0], fwdThree[1], fwdThree[2]).normalize(),
-        );
+    // SMPL skinned mesh: drive the 24-bone Skeleton from the same
+    // ``root_R`` / ``root_t`` / ``thetas`` the line-segment skeleton
+    // uses. The mesh's bone[0] sits at ``pitchToThree(root_t)`` with
+    // rotation ``M_p2t @ root_R`` (SMPL canonical → three.js y-up);
+    // descendant bones inherit identity rest positions (set at build
+    // time) and the per-frame local rotation from ``thetas[i]``.
+    if (obj.smplMesh && showMesh) {
+      const b0 = obj.smplBones[0];
+      const t3 = pitchToThree(t);
+      b0.position.set(t3[0], t3[1], t3[2]);
+      // R_three = M_p2t @ R, where M_p2t rows are
+      //   [1, 0, 0], [0, 0, 1], [0, -1, 0].  Inline the product to
+      // avoid a temporary 3x3 allocation per frame per player.
+      _tmpMat4.set(
+         R[0][0],  R[0][1],  R[0][2], 0,
+         R[2][0],  R[2][1],  R[2][2], 0,
+        -R[1][0], -R[1][1], -R[1][2], 0,
+              0,        0,        0, 1,
+      );
+      b0.quaternion.setFromRotationMatrix(_tmpMat4);
+      for (let i = 1; i < 24; i++) {
+        const aa = theta[i];
+        const ax = aa ? aa[0] : 0;
+        const ay = aa ? aa[1] : 0;
+        const az = aa ? aa[2] : 0;
+        const ang = Math.hypot(ax, ay, az);
+        if (ang < 1e-9) {
+          obj.smplBones[i].quaternion.set(0, 0, 0, 1);
+        } else {
+          _tmpAxis.set(ax / ang, ay / ang, az / ang);
+          obj.smplBones[i].quaternion.setFromAxisAngle(_tmpAxis, ang);
+        }
       }
-      obj.bonesGroup.visible = true;
-    } else {
-      obj.bonesGroup.visible = false;
+      obj.smplMesh.visible = true;
+    } else if (obj.smplMesh) {
+      obj.smplMesh.visible = false;
     }
   }
 
@@ -721,6 +983,13 @@ function updateFrame(fi) {
     } else {
       ballMesh.visible = false;
     }
+  }
+
+  // Tracked broadcast camera: every frame's pose comes from the solver,
+  // so the orbit controls' target/zoom is bypassed entirely.
+  if (cameraMode === 'tracked') {
+    applyTrackedCamera(fi);
+    return;
   }
 
   // If the operator picked a player in the sidebar, retarget the
@@ -750,7 +1019,8 @@ const timeline = document.getElementById('timeline');
 const speedSelect = document.getElementById('speed-select');
 const cameraSelectEl = document.getElementById('camera-select');
 const ballBtn = document.getElementById('ball-btn');
-const bonesBtn = document.getElementById('bones-btn');
+const skeletonBtn = document.getElementById('skeleton-btn');
+const meshBtn = document.getElementById('mesh-btn');
 
 playBtn.addEventListener('click', () => {
   playing = !playing;
@@ -766,10 +1036,16 @@ ballBtn.addEventListener('click', () => {
   ballBtn.classList.toggle('toggle-off', !showBall);
   updateFrame(currentFrame);
 });
-bonesBtn.addEventListener('click', () => {
-  showBones = !showBones;
-  bonesBtn.textContent = `Bones: ${showBones ? 'ON' : 'OFF'}`;
-  bonesBtn.classList.toggle('toggle-off', !showBones);
+skeletonBtn.addEventListener('click', () => {
+  showSkeleton = !showSkeleton;
+  skeletonBtn.textContent = `Skeleton: ${showSkeleton ? 'ON' : 'OFF'}`;
+  skeletonBtn.classList.toggle('toggle-off', !showSkeleton);
+  updateFrame(currentFrame);
+});
+meshBtn.addEventListener('click', () => {
+  showMesh = !showMesh;
+  meshBtn.textContent = `Mesh: ${showMesh ? 'ON' : 'OFF'}`;
+  meshBtn.classList.toggle('toggle-off', !showMesh);
   updateFrame(currentFrame);
 });
 
@@ -792,7 +1068,10 @@ function animate(time) {
     updateFrame(currentFrame);
   }
 
-  controls.update();
+  // OrbitControls.update() would re-derive camera.position from the
+  // (target, spherical) state and overwrite the per-frame quaternion
+  // we set in applyTrackedCamera. Skip it while tracked is active.
+  if (cameraMode !== 'tracked') controls.update();
   renderer.render(scene, camera);
 }
 

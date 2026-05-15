@@ -11,16 +11,26 @@ Output: ``data/models/smpl_neutral.npz`` (gitignored — SMPL data is
 not redistributable).
 
 Contains:
-    v_template  (6890, 3)  float32   mean-shape vertex positions, y-up
-    faces       (~13776, 3) int32    mesh triangulation
-    weights     (6890, 24) float32   per-vertex skinning weights
+    v_template       (6890, 3)        float32   mean-shape vertices, y-up
+    faces            (~13776, 3)      int32     mesh triangulation
+    weights          (6890, 24)       float32   per-vertex skinning weights
+    joint_positions  (24, 3)          float32   neutral T-pose joints (J_regressor @ v_template)
+    shapedirs        (6890, 3, 10)    float32   first-10 SMPL shape blendshapes
+    joint_shapedirs  (24, 3, 10)      float32   J_regressor @ shapedirs (joint betas response)
+
+``shapedirs`` and ``joint_shapedirs`` carry the SMPL beta-space basis
+that the web viewer's SkinnedMesh uses to apply per-player body shape
+from HMR-fitted ``betas``. Only the first 10 components are kept (the
+SMPL ``betas`` vector); ``shapedirs[:, :, 10:]`` in the source pkl are
+DMPL/extension coefficients that HMR doesn't emit.
 
 Run::
 
     python scripts/extract_smpl_neutral.py
 
-Idempotent: skips re-extraction if the npz already exists and is newer
-than the pkl.
+Idempotent: skips re-extraction iff the npz already exists, is newer
+than the pkl, AND contains every expected key. Adding a new key to the
+output here invalidates the cached npz on the next run.
 """
 
 from __future__ import annotations
@@ -55,6 +65,20 @@ PKL_PATH = (
 )
 OUT_PATH = REPO_ROOT / "data" / "models" / "smpl_neutral.npz"
 
+# Number of SMPL shape blendshapes carried over from the source pkl. The
+# pkl ships 300 columns (10 SMPL betas + DMPL extensions); HMR's
+# ``betas`` is the first 10, so we slice and discard the rest to keep
+# the on-disk size and the JSON payload sent to the browser bounded.
+_N_BETAS = 10
+
+# Keys the consuming code (web server endpoint, blender FBX exporter)
+# expects in the npz. Adding a new key here forces re-extraction on
+# the next run even when the source pkl hasn't changed.
+_EXPECTED_KEYS = {
+    "v_template", "faces", "weights", "joint_positions",
+    "shapedirs", "joint_shapedirs",
+}
+
 
 def main() -> int:
     if not PKL_PATH.exists():
@@ -62,8 +86,18 @@ def main() -> int:
         return 1
 
     if OUT_PATH.exists() and OUT_PATH.stat().st_mtime >= PKL_PATH.stat().st_mtime:
-        print(f"[smpl-extract] {OUT_PATH} is up to date, skipping")
-        return 0
+        try:
+            existing_keys = set(np.load(OUT_PATH, allow_pickle=False).files)
+        except Exception:
+            existing_keys = set()
+        if _EXPECTED_KEYS.issubset(existing_keys):
+            print(f"[smpl-extract] {OUT_PATH} is up to date, skipping")
+            return 0
+        missing = _EXPECTED_KEYS - existing_keys
+        print(
+            f"[smpl-extract] {OUT_PATH} missing keys {sorted(missing)}; "
+            "re-extracting"
+        )
 
     with PKL_PATH.open("rb") as f:
         data = pickle.load(f, encoding="latin1")
@@ -85,6 +119,21 @@ def main() -> int:
     j_regressor = np.asarray(j_reg, dtype=np.float32)
     joint_positions = (j_regressor @ v_template).astype(np.float32)
 
+    # Shape blendshapes: SMPL's ``shapedirs`` is (V, 3, 300). The first
+    # ``_N_BETAS`` (= 10) columns are the SMPL body-shape basis that
+    # HMR fits. The remaining columns are DMPL/extension coefficients
+    # we don't use and don't ship to the browser.
+    shapedirs_full = np.asarray(data["shapedirs"], dtype=np.float32)
+    shapedirs = shapedirs_full[:, :, :_N_BETAS].copy()
+
+    # Pre-multiply the joint regressor through the shape basis. With
+    # this the browser can recover beta-adjusted joint positions
+    # without shipping the full (24, 6890) J_regressor: simply
+    # ``joint_positions_shaped = joint_positions + joint_shapedirs @ betas``.
+    joint_shapedirs = np.einsum(
+        "jv,vbk->jbk", j_regressor, shapedirs
+    ).astype(np.float32)
+
     expected_v = 6890
     expected_j = 24
     if v_template.shape != (expected_v, 3):
@@ -103,6 +152,14 @@ def main() -> int:
             f"unexpected joint_positions shape: {joint_positions.shape}\n"
         )
         return 2
+    if shapedirs.shape != (expected_v, 3, _N_BETAS):
+        sys.stderr.write(f"unexpected shapedirs shape: {shapedirs.shape}\n")
+        return 2
+    if joint_shapedirs.shape != (expected_j, 3, _N_BETAS):
+        sys.stderr.write(
+            f"unexpected joint_shapedirs shape: {joint_shapedirs.shape}\n"
+        )
+        return 2
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
@@ -111,11 +168,14 @@ def main() -> int:
         faces=faces,
         weights=weights,
         joint_positions=joint_positions,
+        shapedirs=shapedirs,
+        joint_shapedirs=joint_shapedirs,
     )
     print(
         f"[smpl-extract] wrote {OUT_PATH} "
         f"(v={v_template.shape[0]}, f={faces.shape[0]}, "
-        f"w={weights.shape}, j={joint_positions.shape})"
+        f"w={weights.shape}, j={joint_positions.shape}, "
+        f"shapedirs={shapedirs.shape})"
     )
     return 0
 

@@ -327,3 +327,36 @@ This was empirically confirmed by reverse-engineering `root_R_cam` from the save
   multi-shot refinement (re-fitting shape + pose across multiple
   appearances of the same player) is more likely to pay off than
   per-shot 2D refitting on top of an already-confident GVHMR.
+
+### D17: Foot-anchor constant matches SMPL canonical ankle, not the sole
+
+**Context.** Players rendered ~5–8 cm above the pitch surface after `hmr_world`. The viewer's GLB feet hovered consistently above z=0 across every player and every frame.
+
+**Root cause.** The constant `_FOOT_IN_ROOT = (0, −0.95, 0)` in `src/stages/hmr_world.py` was sized for the root-to-*sole* distance, but the foot-anchor pipeline anchors the *ankle*:
+
+1. ViTPose detects the **ankle keypoint** (COCO-17 indices 15/16).
+2. `ankle_ray_to_pitch` casts that pixel onto the **ankle plane** `_FOOT_PLANE_Z = 0.05 m` (the lateral malleolus height above the boot sole).
+3. `anchor_translation` subtracts the root-frame offset.
+
+Subtracting a sole-length offset (0.95 m) after anchoring the ankle places the pelvis at z ≈ 1.00 m instead of the SMPL canonical pelvis height of z ≈ 0.932 m — the visible 7 cm float.
+
+**Fix.** Replaced `_FOOT_IN_ROOT` with `_ANKLE_IN_ROOT`, derived directly from the SMPL canonical rest-pose table:
+
+```
+_ANKLE_IN_ROOT = 0.5 * (SMPL_REST_JOINTS_YUP[7] + SMPL_REST_JOINTS_YUP[8])
+_ANKLE_IN_ROOT[0] = 0.0           # zero lateral over the midpoint pixel
+# → (0, -0.882, -0.038) — the SMPL ankle joint, neutral betas
+```
+
+`_FOOT_PLANE_Z` stayed at 0.05 m (ankle height above the turf, matching what ViTPose annotates).
+
+The earlier D9 test fixture in `tests/test_foot_anchor.py::test_anchor_translation_subtracts_foot_offset` still passes — it tests `anchor_translation` as a pure math function with its own values (`foot_in_root = (0, 0, -0.95)`, `R_root_world = I`), and `anchor_translation`'s contract is unchanged.
+
+**Verification.** `tests/test_hmr_world_stage.py::test_hmr_world_emits_track_in_pitch_frame` now asserts `root_t[:, 2] ≈ 0.932 m` (the SMPL canonical pelvis height) instead of the loose `>0.5` check that masked the 7 cm offset.
+
+**Action required.** Existing `output/hmr_world/*_smpl_world.npz` files were written with the 0.95 m constant and need regeneration by re-running `hmr_world` (the dashboard's *Re-run Stage* button wipes the directory; the per-player cache would otherwise serve stale data).
+
+**Still deferred (future pose-refinement stage):**
+- Per-player betas-aware ankle offset via SMPL forward-kinematics on the actual posed body (Option B in the design discussion).
+- Mesh-vertex sole contact (anchor the foot mesh sole to z=0 directly, dropping the ankle-plane fiction; Option C).
+- Multi-shot consensus on per-player vertical offset — `docs/superpowers/specs/2026-05-09-refined-poses-design.md`.

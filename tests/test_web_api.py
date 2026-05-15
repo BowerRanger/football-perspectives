@@ -1132,3 +1132,117 @@ def test_detected_lines_endpoint(client) -> None:
     # Invalid shot id rejected
     r = c.get("/camera/detected-lines?shot=../etc")
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# SMPL neutral model endpoint — drives the web viewer's SkinnedMesh.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_smpl_model_returns_404_when_npz_missing(client, monkeypatch, tmp_path):
+    """``GET /api/smpl_model`` 404s with an actionable message pointing at
+    ``scripts/extract_smpl_neutral.py`` when the npz hasn't been
+    extracted. The viewer falls back to skeleton-only rendering in that
+    case, but the operator still needs to know how to enable mesh mode."""
+    from src.web import server as srv
+
+    c, _ = client
+    monkeypatch.setattr(srv, "_SMPL_NEUTRAL_PATH", tmp_path / "missing.npz")
+    r = c.get("/api/smpl_model")
+    assert r.status_code == 404
+    assert "extract_smpl_neutral" in r.json()["detail"]
+
+
+@pytest.mark.integration
+def test_smpl_model_returns_sparsified_skin_weights(client, monkeypatch, tmp_path):
+    """The endpoint sparsifies the SMPL skinning weights to top-4 per
+    vertex (the SkinnedMesh attribute format) and renormalizes so each
+    row sums to 1. Vertices whose total weight was already concentrated
+    in ≤4 joints come back unchanged; vertices whose weight was spread
+    over more joints lose the tail."""
+    import numpy as np
+    from src.web import server as srv
+
+    n_verts, n_faces, n_joints = 6, 4, 24
+    weights = np.zeros((n_verts, n_joints), dtype=np.float32)
+    weights[0, 0] = 1.0                              # single-joint vertex
+    weights[1, 0] = 0.5; weights[1, 1] = 0.5         # two-joint split
+    # Five-joint split: weight is sorted high→low and the top-4 should
+    # be picked (0.4, 0.3, 0.15, 0.1) with the 0.05 tail dropped, then
+    # renormalised so the row sums to 1.
+    weights[2, [0, 1, 2, 3, 4]] = [0.4, 0.3, 0.15, 0.1, 0.05]
+
+    npz = tmp_path / "smpl.npz"
+    np.savez(
+        npz,
+        v_template=np.zeros((n_verts, 3), dtype=np.float32),
+        faces=np.zeros((n_faces, 3), dtype=np.int32),
+        weights=weights,
+        joint_positions=np.zeros((n_joints, 3), dtype=np.float32),
+    )
+    monkeypatch.setattr(srv, "_SMPL_NEUTRAL_PATH", npz)
+    c, _ = client
+    r = c.get("/api/smpl_model")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert len(body["v_template"]) == n_verts
+    assert len(body["faces"]) == n_faces
+    assert len(body["skin_index"]) == n_verts
+    assert len(body["skin_index"][0]) == 4
+    assert len(body["skin_weight"][0]) == 4
+    assert len(body["parents"]) == 24
+
+    # Vertex 0: single-joint weight 1.0 maps to (joint 0, weight 1.0)
+    # with the other three slots zero-weighted.
+    assert body["skin_index"][0][0] == 0
+    assert body["skin_weight"][0][0] == pytest.approx(1.0)
+    assert sum(body["skin_weight"][0]) == pytest.approx(1.0)
+
+    # Vertex 1: two-joint split renormalises to (0.5, 0.5, 0, 0).
+    assert set(body["skin_index"][1][:2]) == {0, 1}
+    assert sum(body["skin_weight"][1]) == pytest.approx(1.0)
+
+    # Vertex 2: five-joint split — the 0.05 tail is dropped and the
+    # remaining four weights renormalise to sum to 1.
+    assert sum(body["skin_weight"][2]) == pytest.approx(1.0)
+    # Joint 4 (the 0.05 tail) should not appear in the top-4 indices.
+    assert 4 not in body["skin_index"][2]
+
+
+@pytest.mark.integration
+def test_smpl_model_includes_shapedirs_when_present(client, monkeypatch, tmp_path):
+    """When the npz carries the optional ``shapedirs`` / ``joint_shapedirs``
+    arrays (extracted with the updated ``extract_smpl_neutral.py``), the
+    endpoint forwards them so the viewer can apply per-player betas.
+    Without them the response simply omits the keys and the viewer
+    falls back to the neutral mean shape."""
+    import numpy as np
+    from src.web import server as srv
+
+    n_verts, n_faces, n_joints, n_betas = 4, 2, 24, 10
+    weights = np.zeros((n_verts, n_joints), dtype=np.float32)
+    weights[:, 0] = 1.0  # all weight on root
+
+    npz = tmp_path / "smpl.npz"
+    np.savez(
+        npz,
+        v_template=np.zeros((n_verts, 3), dtype=np.float32),
+        faces=np.zeros((n_faces, 3), dtype=np.int32),
+        weights=weights,
+        joint_positions=np.zeros((n_joints, 3), dtype=np.float32),
+        shapedirs=np.full((n_verts, 3, n_betas), 0.25, dtype=np.float32),
+        joint_shapedirs=np.full((n_joints, 3, n_betas), 0.5, dtype=np.float32),
+    )
+    monkeypatch.setattr(srv, "_SMPL_NEUTRAL_PATH", npz)
+    c, _ = client
+    r = c.get("/api/smpl_model")
+    assert r.status_code == 200
+    body = r.json()
+    assert "shapedirs" in body
+    assert "joint_shapedirs" in body
+    assert len(body["shapedirs"]) == n_verts
+    assert len(body["shapedirs"][0]) == 3
+    assert len(body["shapedirs"][0][0]) == n_betas
+    assert len(body["joint_shapedirs"]) == n_joints

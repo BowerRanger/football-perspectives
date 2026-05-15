@@ -279,6 +279,86 @@ def _clip_segment_to_image(
     return clipped_a, clipped_b
 
 
+def _project_visible_segment(
+    K: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    distortion: tuple[float, float],
+    world_a: tuple[float, float, float],
+    world_b: tuple[float, float, float],
+    image_w: int,
+    image_h: int,
+    *,
+    sample_step_m: float = 1.0,
+    margin_px: float = 5.0,
+    min_run_samples: int = 4,
+    min_segment_px: float = 20.0,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return the endpoints of the longest in-frame sub-segment of a
+    world line.
+
+    Replaces the ``_project_endpoints`` + ``_clip_segment_to_image`` pair
+    for the detection pipeline. A long catalogue line (e.g. the full
+    105 m ``near_touchline``) often has BOTH catalogue endpoints outside
+    the camera's view — one off-screen, one past the camera horizon —
+    yet a middle sub-segment is plainly in frame. The 2-endpoint
+    projection misses that middle entirely; this densely samples the
+    world segment, projects each sample with distortion, and returns
+    the endpoints of the longest contiguous run of samples that fall
+    in front of the camera, project to a finite sane pixel coord, and
+    sit inside the image rect (with a small ``margin_px``).
+
+    Returns ``None`` when no in-frame run is long enough to strip-search.
+    """
+    A = np.asarray(world_a, dtype=np.float64)
+    B = np.asarray(world_b, dtype=np.float64)
+    seg_len_m = float(np.linalg.norm(B - A))
+    n = max(2, int(round(seg_len_m / sample_step_m)) + 1)
+    ts = np.linspace(0.0, 1.0, n)
+    pts = A + ts[:, None] * (B - A)
+    # In-front mask: cam_z = (R @ p)[2] + t[2] = pts @ R[2] + t[2]
+    cam_z = pts @ R[2] + t[2]
+    in_front = cam_z > 0.1
+    if not in_front.any():
+        return None
+    proj = project_world_to_image(K, R, t, distortion, pts[in_front])
+    # Reject post-distortion grazing-degenerate projections (same guard
+    # _project_endpoints uses on the 2-endpoint path).
+    sane = np.isfinite(proj).all(axis=1) & (
+        np.abs(proj).max(axis=1) <= _MAX_PROJ_COORD_PX
+    )
+    full_uv = np.full((n, 2), np.nan, dtype=np.float64)
+    full_uv[in_front] = proj
+    valid = np.zeros(n, dtype=bool)
+    valid[in_front] = sane
+    u, v = full_uv[:, 0], full_uv[:, 1]
+    in_frame = (
+        valid
+        & (u >= -margin_px) & (u <= image_w + margin_px)
+        & (v >= -margin_px) & (v <= image_h + margin_px)
+    )
+    if not in_frame.any():
+        return None
+    # Find the longest contiguous in-frame run.
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for i, f in enumerate(in_frame):
+        if f and start is None:
+            start = i
+        elif not f and start is not None:
+            runs.append((start, i - 1))
+            start = None
+    if start is not None:
+        runs.append((start, n - 1))
+    s, e = max(runs, key=lambda r: r[1] - r[0])
+    if e - s + 1 < min_run_samples:
+        return None
+    pa, pb = full_uv[s], full_uv[e]
+    if np.linalg.norm(pb - pa) < min_segment_px:
+        return None
+    return pa, pb
+
+
 def _fit_line_pca(
     points: np.ndarray, weights: np.ndarray | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -329,17 +409,18 @@ def detect_painted_line(
       7. Project the clipped predicted endpoints onto the fitted line.
     """
     h, w = gray.shape[:2]
-    proj = _project_endpoints(K, R, t, distortion, world_segment[0], world_segment[1])
-    if proj is None:
+    # Use the visible-sub-segment helper rather than projecting only the
+    # two catalogue endpoints + Liang–Barsky clipping. Long lines like
+    # the full-length near_touchline have both catalogue endpoints
+    # outside the view — the 2-endpoint approach has nothing valid to
+    # clip even when the line's middle is plainly in frame.
+    seg = _project_visible_segment(
+        K, R, t, distortion, world_segment[0], world_segment[1], w, h,
+    )
+    if seg is None:
         return None
-    pa_pred, pb_pred = proj
-    clipped = _clip_segment_to_image(pa_pred, pb_pred, w, h)
-    if clipped is None:
-        return None
-    ca, cb = clipped
+    ca, cb = seg
     seg_len = float(np.linalg.norm(cb - ca))
-    if seg_len < 20:
-        return None
     direction = (cb - ca) / seg_len
     normal = np.array([-direction[1], direction[0]], dtype=np.float64)
 

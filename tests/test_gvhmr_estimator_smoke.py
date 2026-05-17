@@ -27,3 +27,8 @@ def test_run_on_track_signature() -> None:
     # avoids reloading the model per player (Slice 1 speed-up).
     assert "estimator" in sig.parameters
     assert sig.parameters["estimator"].default is None
+    # per_frame_K is optional: the calibrated per-frame K from
+    # camera_track replaces GVHMR's default estimate_K() so the body
+    # doesn't lean away from camera under telephoto focal lengths.
+    assert "per_frame_K" in sig.parameters
+    assert sig.parameters["per_frame_K"].default is None

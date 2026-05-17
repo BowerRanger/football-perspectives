@@ -523,9 +523,22 @@ def _apply_hard_knot_anchor_overrides(
 class _BoneWorldLookup:
     """Resolve ``player_touch`` anchors to bone world positions via SMPL FK.
 
-    Caches per-player SmplWorldTrack loads to avoid repeated NPZ reads.
-    Returns ``None`` when the player track, the requested frame, or the
-    bone name is unavailable — caller falls back to the pixel-only
+    Prefers ``output/refined_poses/{player}_refined.npz`` (the cleaned,
+    lean-corrected, smoothed pose track) so player_touch bone positions
+    land where the actual limb is rather than on raw HMR jitter. Falls
+    back to ``output/hmr_world/{shot}__{player}_smpl_world.npz`` when
+    no refined output is available (e.g. refined_poses hasn't been run
+    yet, or the player_id never made it through that stage).
+
+    Refined tracks are keyed by ``player_id`` only and indexed on the
+    shared reference timeline; ball anchors carry shot-local frame
+    indices. We apply ``sync_map.offset_for(shot)`` to translate local
+    anchor frames into the reference timeline before looking them up
+    in the refined track's ``frames`` array.
+
+    Caches per-player loads to avoid repeated NPZ reads. Returns
+    ``None`` when the player track, the requested frame, or the bone
+    name is unavailable — caller falls back to the pixel-only
     behaviour for that anchor.
     """
 
@@ -535,16 +548,61 @@ class _BoneWorldLookup:
         self._output_dir = output_dir
         self._shot_id = shot_id
         self._bone_map = BONE_TO_SMPL_INDEX
-        self._tracks: dict[str, object] = {}
+        # Each cache entry is ``(track, frame_offset)`` where
+        # ``frame_offset`` is added to the anchor's local frame index
+        # to get the lookup key. hmr_world tracks carry shot-local
+        # frames so the offset is 0; refined tracks carry reference-
+        # timeline frames so we subtract the shot's sync offset.
+        self._tracks: dict[str, tuple[object | None, int]] = {}
 
-    def _load_track(self, player_id: str) -> object | None:
+    def _sync_offset(self) -> int:
+        from src.schemas.sync_map import SyncMap
+
+        sync_path = self._output_dir / "shots" / "sync_map.json"
+        if not sync_path.exists():
+            return 0
+        try:
+            return SyncMap.load(sync_path).offset_for(self._shot_id)
+        except Exception as exc:
+            logger.warning(
+                "ball stage: sync_map.json failed to load (%s) — defaulting "
+                "offset 0 for shot %r", exc, self._shot_id,
+            )
+            return 0
+
+    def _load_track(self, player_id: str) -> tuple[object | None, int]:
         if player_id in self._tracks:
             return self._tracks[player_id]
+        # Refined first (post-HMR cleanup applied).
+        refined_path = (
+            self._output_dir / "refined_poses" / f"{player_id}_refined.npz"
+        )
+        if refined_path.exists():
+            from src.schemas.refined_pose import RefinedPose
+
+            try:
+                track = RefinedPose.load(refined_path)
+            except Exception as exc:
+                logger.warning(
+                    "ball stage: failed to load refined track %s: %s",
+                    refined_path, exc,
+                )
+                track = None
+            if track is not None:
+                # Refined frames live on the reference timeline; ball
+                # anchors are shot-local. ``local = ref + offset`` per
+                # SyncMap, so to translate local → ref we ADD ``-offset``.
+                ref_lookup_shift = -self._sync_offset()
+                self._tracks[player_id] = (track, ref_lookup_shift)
+                return self._tracks[player_id]
+        # Fallback: raw hmr_world track for this (shot, player).
         from src.schemas.smpl_world import SmplWorldTrack
         candidates = []
         if self._shot_id:
             candidates.append(
-                self._output_dir / "hmr_world" / f"{self._shot_id}__{player_id}_smpl_world.npz"
+                self._output_dir
+                / "hmr_world"
+                / f"{self._shot_id}__{player_id}_smpl_world.npz"
             )
         candidates.append(
             self._output_dir / "hmr_world" / f"{player_id}_smpl_world.npz"
@@ -555,18 +613,19 @@ class _BoneWorldLookup:
                     track = SmplWorldTrack.load(path)
                 except Exception as exc:
                     logger.warning(
-                        "ball stage: failed to load SMPL track %s: %s", path, exc
+                        "ball stage: failed to load SMPL track %s: %s",
+                        path, exc,
                     )
-                    self._tracks[player_id] = None  # type: ignore[assignment]
-                    return None
-                self._tracks[player_id] = track
-                return track
+                    self._tracks[player_id] = (None, 0)
+                    return self._tracks[player_id]
+                self._tracks[player_id] = (track, 0)
+                return self._tracks[player_id]
         logger.warning(
-            "ball stage: no SmplWorldTrack found for player %r (shot=%r)",
-            player_id, self._shot_id,
+            "ball stage: no SMPL track (refined or hmr_world) for player %r "
+            "(shot=%r)", player_id, self._shot_id,
         )
-        self._tracks[player_id] = None  # type: ignore[assignment]
-        return None
+        self._tracks[player_id] = (None, 0)
+        return self._tracks[player_id]
 
     def bone_world(self, anchor: BallAnchor) -> np.ndarray | None:
         from src.utils.smpl_skeleton import compute_joint_world
@@ -578,15 +637,16 @@ class _BoneWorldLookup:
         joint_idx = self._bone_map.get(anchor.bone)
         if joint_idx is None:
             return None
-        track = self._load_track(anchor.player_id)
+        track, frame_shift = self._load_track(anchor.player_id)
         if track is None:
             return None
         frames = np.asarray(track.frames)  # type: ignore[attr-defined]
-        match = np.where(frames == anchor.frame)[0]
+        lookup_frame = int(anchor.frame) + frame_shift
+        match = np.where(frames == lookup_frame)[0]
         if len(match) == 0:
             logger.debug(
-                "ball stage: SMPL track for %s has no frame %d",
-                anchor.player_id, anchor.frame,
+                "ball stage: SMPL track for %s has no frame %d (lookup=%d)",
+                anchor.player_id, anchor.frame, lookup_frame,
             )
             return None
         i = int(match[0])

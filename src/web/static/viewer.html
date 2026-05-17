@@ -615,28 +615,55 @@ async function loadScene() {
   // tolerate the old bare-string shape so this viewer keeps working
   // against legacy outputs.
   // playerRefs holds {player_id, shot_id} per row so we can pass both
-  // to /hmr_world/preview. With multi-shot, files on disk are keyed
-  // ``{shot_id}__{player_id}_smpl_world.npz`` — fetching by player_id
-  // alone falls back to a legacy filename that no longer exists, so
-  // every preview 404s and the viewer renders an empty pitch.
+  // to the preview endpoint. We prefer ``refined_poses`` (post-HMR
+  // cleanup applied: rotation-outlier rejection + leading/trailing
+  // trim) over raw ``hmr_world`` output. The refined preview accepts
+  // ``?shot=`` to translate its reference-timeline frame indices into
+  // this shot's local timeline, so they line up with the per-shot
+  // camera track. Falls back to hmr_world when refined_poses hasn't
+  // been produced (e.g. pipeline stopped before that stage).
   const playerRefs = [];
   const playerNames = new Map();   // player_id -> player_name (when known)
+  let playerSource = 'hmr_world';
   try {
-    const list = await fetchJson(`/hmr_world/players${_shotQuery('?')}`);
-    const rows = list.players || [];
-    for (const r of rows) {
-      if (typeof r === 'string') {
-        playerRefs.push({ player_id: r, shot_id: SHOT_FILTER || '' });
-      } else if (r && r.player_id) {
+    const refined = await fetchJson('/refined_poses/players');
+    const rows = (refined && refined.players) || [];
+    const matching = rows.filter((row) => {
+      if (!SHOT_FILTER) return true;
+      const cs = row.contributing_shots || [];
+      // Empty contributing_shots means single-shot legacy data; keep it.
+      return cs.length === 0 || cs.includes(SHOT_FILTER);
+    });
+    if (matching.length > 0) {
+      playerSource = 'refined_poses';
+      for (const row of matching) {
         playerRefs.push({
-          player_id: r.player_id,
-          shot_id: r.shot_id || SHOT_FILTER || '',
+          player_id: row.player_id,
+          shot_id: SHOT_FILTER || '',
         });
-        if (r.player_name) playerNames.set(r.player_id, r.player_name);
+        if (row.player_name) playerNames.set(row.player_id, row.player_name);
       }
     }
-  } catch (err) {
-    console.warn('hmr_world/players fetch failed:', err);
+  } catch (_) { /* no refined_poses output yet → fall back below */ }
+
+  if (playerSource !== 'refined_poses') {
+    try {
+      const list = await fetchJson(`/hmr_world/players${_shotQuery('?')}`);
+      const rows = list.players || [];
+      for (const r of rows) {
+        if (typeof r === 'string') {
+          playerRefs.push({ player_id: r, shot_id: SHOT_FILTER || '' });
+        } else if (r && r.player_id) {
+          playerRefs.push({
+            player_id: r.player_id,
+            shot_id: r.shot_id || SHOT_FILTER || '',
+          });
+          if (r.player_name) playerNames.set(r.player_id, r.player_name);
+        }
+      }
+    } catch (err) {
+      console.warn('hmr_world/players fetch failed:', err);
+    }
   }
 
   // 3. Fetch each player's preview WITH pose data (frames + root_t +
@@ -644,6 +671,9 @@ async function loadScene() {
   // ~10× but is required for skeletal animation; the dashboard's
   // trajectory panel calls without that flag and gets the lighter
   // response.
+  const previewEndpoint = playerSource === 'refined_poses'
+    ? '/refined_poses/preview'
+    : '/hmr_world/preview';
   const playerEntries = [];
   for (const ref of playerRefs) {
     try {
@@ -651,7 +681,7 @@ async function loadScene() {
       params.set('player_id', ref.player_id);
       params.set('include_pose', '1');
       if (ref.shot_id) params.set('shot', ref.shot_id);
-      const preview = await fetchJson(`/hmr_world/preview?${params.toString()}`);
+      const preview = await fetchJson(`${previewEndpoint}?${params.toString()}`);
       playerEntries.push(preview);
       if (preview.frames && preview.frames.length > 0) {
         const last = preview.frames[preview.frames.length - 1];
@@ -659,7 +689,7 @@ async function loadScene() {
       }
     } catch (err) {
       console.warn(
-        `hmr_world/preview failed for ${ref.shot_id}__${ref.player_id}:`, err,
+        `${previewEndpoint} failed for ${ref.shot_id}__${ref.player_id}:`, err,
       );
     }
   }

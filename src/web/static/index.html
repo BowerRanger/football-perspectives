@@ -303,8 +303,10 @@ const STAGE_DEPS = {
   tracking:      ["prepare_shots"],
   camera:        ["prepare_shots"],
   hmr_world:     ["tracking", "camera"],
-  ball:          ["camera"],
   refined_poses: ["hmr_world"],
+  // Ball uses refined_poses' cleaned bone positions for player_touch
+  // anchors when available (falls back to raw hmr_world otherwise).
+  ball:          ["camera", "refined_poses"],
   export:        ["camera"],
 };
 

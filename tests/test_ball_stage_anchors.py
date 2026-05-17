@@ -1084,6 +1084,107 @@ def test_player_touch_requires_player_and_bone(tmp_path: Path):
 
 
 @pytest.mark.integration
+def test_player_touch_prefers_refined_pose_over_hmr_world(tmp_path: Path):
+    """When both ``refined_poses/{pid}_refined.npz`` and
+    ``hmr_world/{shot}__{pid}_smpl_world.npz`` exist, the ball stage
+    looks up bone positions from refined_poses (post-cleanup track).
+    The lookup also applies the sync-map offset to translate the
+    shot-local anchor frame into the refined timeline's reference
+    frame indices."""
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 30
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    from src.utils.smpl_skeleton import (
+        SMPL_JOINT_NAMES, SMPL_REST_JOINTS_YUP, compute_joint_world,
+    )
+    from src.schemas.smpl_world import SmplWorldTrack
+    from src.schemas.refined_pose import RefinedPose
+    from src.schemas.sync_map import Alignment, SyncMap
+
+    r_foot_idx = SMPL_JOINT_NAMES.index("r_foot")
+    rest_r_foot = SMPL_REST_JOINTS_YUP[r_foot_idx]
+
+    # Refined pose says r_foot is at world (40, 30, 1.2). Reference
+    # timeline frames are [0..n_frames). With sync offset = 3, the
+    # shot-local anchor at frame 15 looks up ref frame 12.
+    refined_target = np.array([40.0, 30.0, 1.2])
+    refined_root_t = (refined_target - rest_r_foot).astype(np.float32)
+    refined_dir = out / "refined_poses"
+    refined_dir.mkdir(parents=True, exist_ok=True)
+    RefinedPose(
+        player_id="P007",
+        frames=np.arange(n_frames, dtype=np.int64),
+        betas=np.zeros(10, dtype=np.float32),
+        thetas=np.zeros((n_frames, 24, 3), dtype=np.float32),
+        root_R=np.tile(np.eye(3, dtype=np.float32), (n_frames, 1, 1)),
+        root_t=np.tile(refined_root_t, (n_frames, 1)),
+        confidence=np.ones(n_frames, dtype=np.float32),
+        view_count=np.ones(n_frames, dtype=np.int32),
+        contributing_shots=("play",),
+    ).save(refined_dir / "P007_refined.npz")
+
+    # hmr_world has a DIFFERENT r_foot world position. If the ball
+    # stage reads from hmr_world by mistake, the assertion below will
+    # land on this value instead of the refined one.
+    hmr_target = np.array([10.0, 10.0, 2.0])
+    hmr_root_t = (hmr_target - rest_r_foot).astype(np.float32)
+    smpl_dir = out / "hmr_world"
+    smpl_dir.mkdir(parents=True, exist_ok=True)
+    SmplWorldTrack(
+        player_id="P007",
+        frames=np.arange(n_frames, dtype=np.int64),
+        betas=np.zeros(10, dtype=np.float32),
+        thetas=np.zeros((n_frames, 24, 3), dtype=np.float32),
+        root_R=np.tile(np.eye(3, dtype=np.float32), (n_frames, 1, 1)),
+        root_t=np.tile(hmr_root_t, (n_frames, 1)),
+        confidence=np.ones(n_frames, dtype=np.float32),
+        shot_id="play",
+    ).save(smpl_dir / "play__P007_smpl_world.npz")
+
+    # Sync map: play has offset 3, so the anchor's local frame 15
+    # corresponds to reference frame 12 in the refined track.
+    SyncMap(
+        reference_shot="play",
+        alignments=[
+            Alignment(shot_id="play", frame_offset=3, method="manual", confidence=1.0),
+        ],
+    ).save(out / "shots" / "sync_map.json")
+
+    detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720),
+        anchors=(
+            BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="kick"),
+            BallAnchor(
+                frame=15, image_xy=(50.0, 50.0),
+                state="player_touch", player_id="P007", bone="r_foot",
+            ),
+            BallAnchor(frame=25, image_xy=(700.0, 380.0), state="bounce"),
+        ),
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    expected = compute_joint_world(
+        np.zeros((24, 3)), np.eye(3), refined_root_t, r_foot_idx,
+    )
+    f15 = next(f for f in track.frames if f.frame == 15)
+    assert f15.world_xyz is not None
+    assert np.allclose(f15.world_xyz, expected, atol=1e-3), (
+        f"ball stage should have used refined_poses (target {expected.tolist()}), "
+        f"got {list(f15.world_xyz)}"
+    )
+
+
+@pytest.mark.integration
 def test_player_touch_falls_back_when_smpl_track_missing(tmp_path: Path):
     """If the named player has no SmplWorldTrack on disk, the ball
     stage falls back to ray-casting the anchor pixel at the

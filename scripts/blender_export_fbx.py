@@ -30,6 +30,96 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Iterator
+
+
+def iter_player_fbx_entries(
+    output_dir: Path, np_mod,
+) -> Iterator[dict]:
+    """Yield one ``dict`` per (shot, player) FBX to write.
+
+    Prefers ``output/refined_poses/{pid}_refined.npz`` — that's where
+    the rotation-outlier rejection, lean correction, ground snap, and
+    smoothing live. Each refined NPZ is keyed by player_id only and
+    indexed on the shared reference timeline; we apply the sync_map
+    offset for each shot in ``contributing_shots`` to translate into
+    per-shot local frames so the FBX timeline lines up with the
+    per-shot camera FBX.
+
+    Falls back to one entry per ``output/hmr_world/*_smpl_world.npz``
+    file when no refined output is present (e.g. user re-ran
+    ``--stages export`` before running ``refined_poses``).
+
+    The ``np_mod`` argument lets the Blender entry-point pass in the
+    already-imported ``numpy`` rather than re-importing — keeps this
+    helper testable outside Blender too.
+
+    Each yielded entry has keys: ``shot_id``, ``player_id``,
+    ``frames``, ``thetas``, ``root_R``, ``root_t``.
+    """
+    refined_dir = output_dir / "refined_poses"
+    refined_files = (
+        sorted(refined_dir.glob("*_refined.npz"))
+        if refined_dir.exists() else []
+    )
+    if refined_files:
+        sync = None
+        sync_path = output_dir / "shots" / "sync_map.json"
+        if sync_path.exists():
+            try:
+                # Importing src.schemas.sync_map requires repo root on
+                # sys.path; main() does that before invoking us. When
+                # called from a unit test the same applies.
+                from src.schemas.sync_map import SyncMap  # type: ignore
+                sync = SyncMap.load(sync_path)
+            except Exception as exc:
+                sys.stderr.write(
+                    f"[fbx-entries] sync_map.json load failed ({exc}); "
+                    "treating offsets as 0\n"
+                )
+        for path in refined_files:
+            data = np_mod.load(path, allow_pickle=False)
+            player_id = str(data["player_id"])
+            contributing_raw = (
+                data["contributing_shots"]
+                if "contributing_shots" in data.files else []
+            )
+            contributing = [str(s) for s in contributing_raw]
+            if not contributing:
+                # Legacy single-shot refined NPZ — emit with no shot
+                # prefix so the FBX filename matches the older layout.
+                contributing = [""]
+            ref_frames = np_mod.asarray(data["frames"])
+            thetas = np_mod.asarray(data["thetas"])
+            root_R = np_mod.asarray(data["root_R"])
+            root_t = np_mod.asarray(data["root_t"])
+            for sid in contributing:
+                offset = sync.offset_for(sid) if (sync and sid) else 0
+                yield {
+                    "shot_id": sid,
+                    "player_id": player_id,
+                    "frames": ref_frames + int(offset),
+                    "thetas": thetas,
+                    "root_R": root_R,
+                    "root_t": root_t,
+                }
+        return
+
+    hmr_dir = output_dir / "hmr_world"
+    if not hmr_dir.exists():
+        return
+    for path in sorted(hmr_dir.glob("*_smpl_world.npz")):
+        data = np_mod.load(path, allow_pickle=False)
+        yield {
+            "shot_id": (
+                str(data["shot_id"]) if "shot_id" in data.files else ""
+            ),
+            "player_id": str(data["player_id"]),
+            "frames": np_mod.asarray(data["frames"]),
+            "thetas": np_mod.asarray(data["thetas"]),
+            "root_R": np_mod.asarray(data["root_R"]),
+            "root_t": np_mod.asarray(data["root_t"]),
+        }
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -403,95 +493,97 @@ def main(argv: list[str]) -> int:
         )
         return 0
 
-    if hmr_dir.exists():
-        for npz_path in sorted(hmr_dir.glob("*_smpl_world.npz")):
-            data = np.load(npz_path)
-            player_id = str(data["player_id"])
-            shot_id = str(data["shot_id"]) if "shot_id" in data.files else ""
-            display_name = display_name_for(player_id, name_mapping)
-            # FBX filenames must be unique per (shot, player) — two shots
-            # with the same player_id (e.g. after Merge by Name) would
-            # otherwise overwrite each other on disk.
-            fbx_name = (
-                f"{shot_id}__{display_name}" if shot_id else display_name
+    # Source of player tracks: prefer refined_poses (where the
+    # rotation-outlier rejection, lean correction, ground snap, and
+    # smoothing live) and fall back to raw hmr_world if refined isn't
+    # on disk. See ``iter_player_fbx_entries`` for the full contract.
+    for entry in iter_player_fbx_entries(output_dir, np):
+        player_id = entry["player_id"]
+        shot_id = entry["shot_id"]
+        display_name = display_name_for(player_id, name_mapping)
+        # FBX filenames must be unique per (shot, player) — two shots
+        # with the same player_id (e.g. after Merge by Name) would
+        # otherwise overwrite each other on disk.
+        fbx_name = (
+            f"{shot_id}__{display_name}" if shot_id else display_name
+        )
+        frames = entry["frames"]
+        thetas = entry["thetas"]      # (N, 24, 3)
+        root_R = entry["root_R"]      # (N, 3, 3)
+        root_t = entry["root_t"]      # (N, 3)
+        n_frames = int(frames.shape[0])
+        if n_frames == 0:
+            continue
+        _reset_scene()
+        _set_unit_scale_metres()
+        scene = bpy.context.scene
+        scene.frame_start = int(frames[0])
+        scene.frame_end = int(frames[-1])
+        scene.render.fps = int(round(fps))
+        arm = _build_smpl_armature(display_name, joint_positions=smpl_joint_positions)
+        arm.rotation_mode = "QUATERNION"
+        if smpl_data is not None:
+            placeholder = _add_smpl_skinned_mesh(arm, display_name, smpl_data)
+        else:
+            placeholder = _add_placeholder_skinned_mesh(arm, display_name)
+
+        for i, fi in enumerate(frames.tolist()):
+            # Armature object: rotation = root_R[i] (SMPL canonical
+            # y-up → pitch z-up + player body orientation). Location
+            # is set so the pelvis ends up at root_t[i] in world,
+            # accounting for the canonical-space foot-midpoint
+            # anchor — pelvis sits at canonical pelvis_canon_shifted
+            # in armature local space, so its world position is
+            # arm.location + root_R[i] @ pelvis_canon_shifted.
+            pelvis_world_offset_i = (
+                root_R[i] @ pelvis_canon_shifted
             )
-            frames = data["frames"]
-            thetas = data["thetas"]      # (N, 24, 3)
-            root_R = data["root_R"]      # (N, 3, 3)
-            root_t = data["root_t"]      # (N, 3)
-            n_frames = int(frames.shape[0])
-            if n_frames == 0:
-                continue
-            _reset_scene()
-            _set_unit_scale_metres()
-            scene = bpy.context.scene
-            scene.frame_start = int(frames[0])
-            scene.frame_end = int(frames[-1])
-            scene.render.fps = int(round(fps))
-            arm = _build_smpl_armature(display_name, joint_positions=smpl_joint_positions)
-            arm.rotation_mode = "QUATERNION"
-            if smpl_data is not None:
-                placeholder = _add_smpl_skinned_mesh(arm, display_name, smpl_data)
-            else:
-                placeholder = _add_placeholder_skinned_mesh(arm, display_name)
-
-            for i, fi in enumerate(frames.tolist()):
-                # Armature object: rotation = root_R[i] (SMPL canonical
-                # y-up → pitch z-up + player body orientation). Location
-                # is set so the pelvis ends up at root_t[i] in world,
-                # accounting for the canonical-space foot-midpoint
-                # anchor — pelvis sits at canonical pelvis_canon_shifted
-                # in armature local space, so its world position is
-                # arm.location + root_R[i] @ pelvis_canon_shifted.
-                pelvis_world_offset_i = (
-                    root_R[i] @ pelvis_canon_shifted
-                )
-                arm.location = (
-                    float(root_t[i, 0] - pelvis_world_offset_i[0]),
-                    float(root_t[i, 1] - pelvis_world_offset_i[1]),
-                    float(root_t[i, 2] - pelvis_world_offset_i[2]),
-                )
-                R = root_R[i]
-                m = Matrix((
-                    (float(R[0, 0]), float(R[0, 1]), float(R[0, 2]), 0.0),
-                    (float(R[1, 0]), float(R[1, 1]), float(R[1, 2]), 0.0),
-                    (float(R[2, 0]), float(R[2, 1]), float(R[2, 2]), 0.0),
-                    (0.0, 0.0, 0.0, 1.0),
-                ))
-                arm.rotation_quaternion = m.to_quaternion()
-                arm.keyframe_insert(data_path="location", frame=int(fi))
-                arm.keyframe_insert(data_path="rotation_quaternion", frame=int(fi))
-
-                # Per-bone parent-relative rotations. The pelvis (j=0)
-                # is intentionally skipped — its world rotation is
-                # already carried by the armature object's root_R, just
-                # like the web viewer's smplFK (viewer.html:smplFK
-                # explicitly ignores thetas[0]). Applying both produces
-                # a double-rotated, flipping pelvis.
-                pelvis_pb = arm.pose.bones[SMPL_JOINT_NAMES[0]]
-                pelvis_pb.rotation_quaternion = Quaternion((1.0, 0.0, 0.0, 0.0))
-                pelvis_pb.keyframe_insert(data_path="rotation_quaternion", frame=int(fi))
-                for j in range(1, len(SMPL_JOINT_NAMES)):
-                    pb = arm.pose.bones[SMPL_JOINT_NAMES[j]]
-                    q = axis_angle_to_quaternion(thetas[i, j])
-                    pb.rotation_quaternion = Quaternion(
-                        (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
-                    )
-                    pb.keyframe_insert(data_path="rotation_quaternion", frame=int(fi))
-
-            bpy.ops.object.select_all(action="DESELECT")
-            arm.select_set(True)
-            placeholder.select_set(True)
-            bpy.context.view_layer.objects.active = arm
-            # Diagnostic: confirms _reset_scene + _purge_orphans actually
-            # gave us a clean slate per iteration. Any divergence between
-            # arm.name and fbx_name in the log means state leaked.
-            print(
-                f"[blender_export_fbx] exporting {fbx_name}.fbx "
-                f"with arm.name={arm.name!r} arm.data.name={arm.data.name!r} "
-                f"objects_in_scene={[o.name for o in bpy.data.objects]}"
+            arm.location = (
+                float(root_t[i, 0] - pelvis_world_offset_i[0]),
+                float(root_t[i, 1] - pelvis_world_offset_i[1]),
+                float(root_t[i, 2] - pelvis_world_offset_i[2]),
             )
-            _export_fbx(fbx_dir / f"{fbx_name}.fbx")
+            R = root_R[i]
+            m = Matrix((
+                (float(R[0, 0]), float(R[0, 1]), float(R[0, 2]), 0.0),
+                (float(R[1, 0]), float(R[1, 1]), float(R[1, 2]), 0.0),
+                (float(R[2, 0]), float(R[2, 1]), float(R[2, 2]), 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+            ))
+            arm.rotation_quaternion = m.to_quaternion()
+            arm.keyframe_insert(data_path="location", frame=int(fi))
+            arm.keyframe_insert(data_path="rotation_quaternion", frame=int(fi))
+
+            # Per-bone parent-relative rotations. The pelvis (j=0)
+            # is intentionally skipped — its world rotation is
+            # already carried by the armature object's root_R, just
+            # like the web viewer's smplFK (viewer.html:smplFK
+            # explicitly ignores thetas[0]). Applying both produces
+            # a double-rotated, flipping pelvis.
+            pelvis_pb = arm.pose.bones[SMPL_JOINT_NAMES[0]]
+            pelvis_pb.rotation_quaternion = Quaternion((1.0, 0.0, 0.0, 0.0))
+            pelvis_pb.keyframe_insert(data_path="rotation_quaternion", frame=int(fi))
+            for j in range(1, len(SMPL_JOINT_NAMES)):
+                pb = arm.pose.bones[SMPL_JOINT_NAMES[j]]
+                q = axis_angle_to_quaternion(thetas[i, j])
+                pb.rotation_quaternion = Quaternion(
+                    (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+                )
+                pb.keyframe_insert(data_path="rotation_quaternion", frame=int(fi))
+
+        bpy.ops.object.select_all(action="DESELECT")
+        arm.select_set(True)
+        placeholder.select_set(True)
+        bpy.context.view_layer.objects.active = arm
+        # Diagnostic: confirms _reset_scene + _purge_orphans actually
+        # gave us a clean slate per iteration. Any divergence between
+        # arm.name and fbx_name in the log means state leaked.
+        print(
+            f"[blender_export_fbx] exporting {fbx_name}.fbx "
+            f"with arm.name={arm.name!r} arm.data.name={arm.data.name!r} "
+            f"objects_in_scene={[o.name for o in bpy.data.objects]}"
+        )
+        _export_fbx(fbx_dir / f"{fbx_name}.fbx")
 
     # --- Ball FBX (per shot) -----------------------------------------
     # Multi-shot layout writes ``ball/{shot_id}_ball_track.json`` and

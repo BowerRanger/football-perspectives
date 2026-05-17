@@ -11,8 +11,12 @@ _STAGE_NAMES: list[str] = [
     "tracking",
     "camera",
     "hmr_world",
-    "ball",
+    # ``refined_poses`` runs before ``ball`` so the ball stage's
+    # player_touch anchors resolve to bone positions on the cleaned
+    # (outlier-rejected, lean-corrected, smoothed) poses — touches
+    # land where the actual player limb is, not on raw HMR jitter.
     "refined_poses",
+    "ball",
     "export",
 ]
 

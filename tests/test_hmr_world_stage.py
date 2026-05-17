@@ -81,6 +81,7 @@ def fake_gvhmr(monkeypatch):
         batch_size,
         max_sequence_length,
         estimator=None,
+        per_frame_K=None,
     ):
         n = len(track_frames)
         # COCO-17: keypoints 15/16 are left/right ankles. Other joints are
@@ -253,6 +254,7 @@ def test_hmr_world_reuses_one_estimator_across_players(
         batch_size,
         max_sequence_length,
         estimator=None,
+        per_frame_K=None,
     ):
         seen_estimator_ids.append(id(estimator) if estimator is not None else None)
         n = len(track_frames)

@@ -920,16 +920,17 @@ def _stage_status(stages_response: list[dict], name: str) -> dict | None:
 
 @pytest.mark.unit
 def test_refined_poses_appears_in_stages_list(client) -> None:
-    """``GET /api/stages`` includes refined_poses between ball and export
-    so the dashboard sidebar can render it as a first-class stage."""
+    """``GET /api/stages`` includes refined_poses between hmr_world and
+    ball (ball uses refined_poses' cleaned bone positions for
+    player_touch anchors)."""
     c, _ = client
     r = c.get("/api/stages")
     assert r.status_code == 200
     stages = r.json()
     names = [s["name"] for s in stages]
     assert "refined_poses" in names
-    assert names.index("refined_poses") == names.index("ball") + 1
-    assert names.index("export") == names.index("refined_poses") + 1
+    assert names.index("refined_poses") < names.index("ball")
+    assert names.index("ball") < names.index("export")
 
 
 @pytest.mark.integration
@@ -1009,6 +1010,52 @@ def test_refined_poses_preview_returns_404_when_missing(client) -> None:
     c, _ = client
     r = c.get("/refined_poses/preview?player_id=NEVER")
     assert r.status_code == 404
+
+
+@pytest.mark.integration
+def test_refined_poses_preview_applies_shot_offset(client) -> None:
+    """With ``?shot=B`` the endpoint translates reference-timeline
+    frames into B's local timeline via sync_map offset, so the per-shot
+    3D viewer can index directly into the result alongside the
+    per-shot camera_track."""
+    import numpy as np
+
+    from src.schemas.refined_pose import RefinedPose
+    from src.schemas.sync_map import Alignment, SyncMap
+
+    c, tmp = client
+    rp_dir = tmp / "refined_poses"
+    rp_dir.mkdir()
+    RefinedPose(
+        player_id="P001",
+        frames=np.array([0, 1, 2], dtype=np.int64),  # reference timeline
+        betas=np.zeros(10),
+        thetas=np.zeros((3, 24, 3)),
+        root_R=np.tile(np.eye(3), (3, 1, 1)),
+        root_t=np.zeros((3, 3)),
+        confidence=np.array([0.9, 0.9, 0.9]),
+        view_count=np.array([1, 1, 1], dtype=np.int32),
+        contributing_shots=("A", "B"),
+    ).save(rp_dir / "P001_refined.npz")
+
+    (tmp / "shots").mkdir(exist_ok=True)
+    SyncMap(
+        reference_shot="A",
+        alignments=[
+            Alignment(shot_id="A", frame_offset=0, method="manual", confidence=1.0),
+            Alignment(shot_id="B", frame_offset=5, method="manual", confidence=1.0),
+        ],
+    ).save(tmp / "shots" / "sync_map.json")
+
+    # Without shot: reference timeline frames passed through.
+    r = c.get("/refined_poses/preview?player_id=P001")
+    assert r.status_code == 200
+    assert r.json()["frames"] == [0, 1, 2]
+
+    # With shot=B: frames shifted by +5 (B's offset).
+    r = c.get("/refined_poses/preview?player_id=P001&shot=B")
+    assert r.status_code == 200
+    assert r.json()["frames"] == [5, 6, 7]
 
 
 @pytest.mark.integration

@@ -15,23 +15,27 @@ def test_resolve_all():
         "tracking",
         "camera",
         "hmr_world",
-        "ball",
         "refined_poses",
+        "ball",
         "export",
     ]
 
 
 @pytest.mark.unit
-def test_resolve_all_includes_refined_poses_between_ball_and_export() -> None:
+def test_resolve_all_runs_refined_poses_before_ball() -> None:
+    """Ball reads cleaned bone positions from refined_poses for
+    player_touch anchors, so refined_poses must run first."""
     stages = resolve_stages("all", None)
     assert "refined_poses" in stages
-    assert stages.index("refined_poses") == stages.index("ball") + 1
-    assert stages.index("export") == stages.index("refined_poses") + 1
+    assert stages.index("refined_poses") < stages.index("ball")
+    assert stages.index("ball") < stages.index("export")
 
 
 @pytest.mark.unit
-def test_resolve_from_refined_poses_includes_export_only() -> None:
-    assert resolve_stages("all", "refined_poses") == ["refined_poses", "export"]
+def test_resolve_from_refined_poses_includes_ball_and_export() -> None:
+    assert resolve_stages("all", "refined_poses") == [
+        "refined_poses", "ball", "export",
+    ]
 
 
 @pytest.mark.integration
@@ -99,6 +103,10 @@ def test_pipeline_refined_poses_end_to_end(tmp_path: Path) -> None:
             "smooth_rotations": False,
             "beta_aggregation": "weighted_mean",
             "beta_disagreement_warn": 0.3,
+            # Disable ground-snap — the test rigs identity root_R which
+            # the snap interprets unrealistically. Snap's stage-level
+            # wiring is exercised in test_refined_poses_stage.py.
+            "ground_snap_max_distance": 0.0,
         },
     }
     run_pipeline(
@@ -111,7 +119,9 @@ def test_pipeline_refined_poses_end_to_end(tmp_path: Path) -> None:
     refined = RefinedPose.load(out / "refined_poses" / "P001_refined.npz")
     assert refined.contributing_shots == ("A", "B")
     np.testing.assert_array_equal(refined.frames, frames)
-    np.testing.assert_allclose(refined.root_t, base)
+    # Savgol smoothing in refined_poses introduces sub-µm float32
+    # quantization on already-linear inputs; tolerance accommodates it.
+    np.testing.assert_allclose(refined.root_t, base, atol=1e-5)
     summary = json.loads(
         (out / "refined_poses" / "refined_poses_summary.json").read_text()
     )
@@ -136,7 +146,7 @@ def test_resolve_unknown_raises():
 @pytest.mark.unit
 def test_resolve_with_from_stage_skips_earlier():
     result = resolve_stages("all", "hmr_world")
-    assert result == ["hmr_world", "ball", "refined_poses", "export"]
+    assert result == ["hmr_world", "refined_poses", "ball", "export"]
 
 
 @pytest.mark.integration

@@ -389,19 +389,23 @@ class GVHMREstimator:
         frames_bgr: list[np.ndarray],
         bboxes: list[list[float]],
         fps: float = 30.0,
+        K_per_frame: np.ndarray | None = None,
     ) -> dict[str, np.ndarray]:
         # Serialise across the whole process — see the lock's docstring
         # for the rationale. This blocks rather than failing because the
         # caller is a stage worker that has nothing useful to do until
         # the prior estimate finishes.
         with _GVHMR_INFERENCE_LOCK:
-            return self._estimate_sequence_locked(frames_bgr, bboxes, fps)
+            return self._estimate_sequence_locked(
+                frames_bgr, bboxes, fps, K_per_frame
+            )
 
     def _estimate_sequence_locked(
         self,
         frames_bgr: list[np.ndarray],
         bboxes: list[list[float]],
         fps: float = 30.0,
+        K_per_frame: np.ndarray | None = None,
     ) -> dict[str, np.ndarray]:
         """Run GVHMR on a tracked player's video sequence.
 
@@ -463,8 +467,18 @@ class GVHMREstimator:
         finally:
             tmp_video.unlink(missing_ok=True)
 
-        # Camera intrinsics (default estimate from image dimensions)
-        K_fullimg = estimate_K(img_w, img_h).repeat(n_frames, 1, 1)  # (N, 3, 3)
+        # Camera intrinsics: prefer the calibrated per-frame K from the
+        # pipeline's camera_track when supplied. GVHMR's default
+        # ``estimate_K(w, h)`` assumes ~60° FOV (fy ≈ 0.866·max(w, h)),
+        # which under-estimates focal length for broadcast telephoto
+        # shots and biases the predicted body to lean away from camera.
+        if K_per_frame is not None and len(K_per_frame) == n_frames:
+            K_fullimg = torch.tensor(
+                np.asarray(K_per_frame, dtype=np.float32),
+                dtype=torch.float32,
+            )  # (N, 3, 3)
+        else:
+            K_fullimg = estimate_K(img_w, img_h).repeat(n_frames, 1, 1)
 
         if R_w2c is None:
             # Static-camera assumption: identity rotation, zero ang velocity.
@@ -713,6 +727,7 @@ def run_on_track(
     batch_size: int,
     max_sequence_length: int,
     estimator: "GVHMREstimator | None" = None,
+    per_frame_K: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Run GVHMR over a single player's track.
 
@@ -737,6 +752,14 @@ def run_on_track(
         the 30-60s per-call load. Pass ``None`` to construct a fresh
         estimator (legacy behaviour). The caller is responsible for
         ensuring the estimator's checkpoint/device match.
+    per_frame_K:
+        Optional ``(N, 3, 3)`` array of per-frame camera intrinsics
+        aligned to ``track_frames`` order. When supplied, GVHMR uses
+        these instead of its built-in ``estimate_K(w, h)`` default —
+        fixing the lean-away bias caused by underestimated focal length
+        on broadcast telephoto shots. Missing-camera frames should be
+        backfilled (e.g. with the shot's median K) by the caller so the
+        array is dense.
 
     Returns
     -------
@@ -794,7 +817,12 @@ def run_on_track(
         end = min(start + chunk, n)
         sub_frames = frames_bgr[start:end]
         sub_bboxes = bboxes[start:end]
-        out = estimator.estimate_sequence(sub_frames, sub_bboxes)
+        sub_K = (
+            per_frame_K[start:end] if per_frame_K is not None else None
+        )
+        out = estimator.estimate_sequence(
+            sub_frames, sub_bboxes, K_per_frame=sub_K
+        )
 
         global_orient = out["global_orient"]                # (M, 3)
         body_pose = out["body_pose"].reshape(-1, 21, 3)     # (M, 21, 3)

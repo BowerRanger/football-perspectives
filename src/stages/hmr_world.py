@@ -486,6 +486,21 @@ def process_player(
             "prepare_shots for this shot first"
         )
 
+    # Build per-track-frame K array for GVHMR. The default
+    # ``estimate_K(w, h)`` inside GVHMR assumes ~60° FOV which under-
+    # estimates focal length for broadcast telephoto and biases the
+    # predicted body to lean away from the camera. Passing the
+    # calibrated per-frame K (from camera_track) eliminates that
+    # mismatch. Frames missing from ``per_frame_K`` fall back to the
+    # shot's median K so GVHMR receives a dense array.
+    gvhmr_K: np.ndarray | None = None
+    if per_frame_K:
+        K_values = np.stack(list(per_frame_K.values()))
+        K_median = np.median(K_values, axis=0)
+        gvhmr_K = np.stack(
+            [per_frame_K.get(int(fi), K_median) for fi, _ in track_frames]
+        ).astype(np.float32)
+
     hmr_out = run_on_track(
         track_frames=track_frames,
         video_path=video_path,
@@ -494,6 +509,7 @@ def process_player(
         batch_size=int(cfg.get("batch_size", 16)),
         max_sequence_length=int(cfg.get("max_sequence_length", 120)),
         estimator=estimator,
+        per_frame_K=gvhmr_K,
     )
     thetas = np.asarray(hmr_out["thetas"])             # (N, 24, 3)
     betas_all = np.asarray(hmr_out["betas"])           # (N, 10)
@@ -546,6 +562,11 @@ def process_player(
 
     # 5. Foot-anchored translation per-frame using GVHMR's internal
     # ViTPose kp2d (one entry per track frame, aligned with frame_indices).
+    # Frames where a fresh ankle ray-cast succeeded carry their solved
+    # ``root_t``; low-confidence frames hold the last good anchor;
+    # camera-missing frames stay at zero (and zero confidence). The
+    # downstream ``refined_poses`` stage trims the leading/trailing
+    # un-anchored span using ``confidence`` as the anchored signal.
     root_t = np.zeros((len(frame_indices), 3), dtype=float)
     confidence = np.zeros(len(frame_indices), dtype=float)
     last_anchored: np.ndarray | None = None

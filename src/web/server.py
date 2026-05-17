@@ -86,8 +86,8 @@ STAGE_ORDER: list[str] = [
     "tracking",
     "camera",
     "hmr_world",
-    "ball",
     "refined_poses",
+    "ball",
     "export",
 ]
 
@@ -1938,12 +1938,24 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         return {"players": rows}
 
     @app.get("/refined_poses/preview")
-    def get_refined_preview(player_id: str, include_pose: int = 0):
-        """Per-player time-series on the reference timeline.
+    def get_refined_preview(
+        player_id: str,
+        include_pose: int = 0,
+        shot: str | None = None,
+    ):
+        """Per-player time-series.
+
+        Without ``shot``: ``frames`` are on the shared reference
+        timeline (raw NPZ contents).
+
+        With ``shot``: ``frames`` are translated to that shot's local
+        timeline via ``sync_map.offset_for(shot)`` (``local = ref +
+        offset``) so the per-shot 3D viewer can index directly into the
+        result alongside the per-shot camera track.
 
         Returns ``{player_id, frames, root_t, confidence, view_count,
         contributing_shots}``. ``include_pose=1`` adds ``thetas``,
-        ``root_R``, ``betas`` (matches /hmr_world/preview's contract).
+        ``root_R``, ``betas`` (matches ``/hmr_world/preview``'s contract).
         """
         path = _refined_pose_path(player_id)
         if not path.exists():
@@ -1952,9 +1964,18 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             )
         try:
             z = np.load(path, allow_pickle=False)
+            frames = z["frames"]
+            if shot:
+                from src.schemas.sync_map import SyncMap
+
+                sync_path = output_dir / "shots" / "sync_map.json"
+                if sync_path.exists():
+                    offset = SyncMap.load(sync_path).offset_for(shot)
+                    if offset:
+                        frames = frames + offset
             payload = {
                 "player_id": player_id,
-                "frames": z["frames"].tolist(),
+                "frames": frames.tolist(),
                 "root_t": z["root_t"].tolist(),
                 "confidence": z["confidence"].tolist(),
                 "view_count": z["view_count"].astype(int).tolist(),

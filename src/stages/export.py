@@ -243,9 +243,12 @@ class ExportStage(BaseStage):
         """Read the per-shot selection, write one CameraTrack JSON per rig,
         and return NamedCameraEntry rows for the manifest. No-op when no
         selection file exists."""
+        if not hasattr(self, "_virtual_camera_entries"):
+            self._virtual_camera_entries: dict[str | None, list[NamedCameraEntry]] = {}
         prefix = "" if shot_id is None else f"{shot_id}_"
         sel_path = self.output_dir / "export" / f"{prefix}camera_selection.json"
         if not sel_path.exists():
+            self._virtual_camera_entries[shot_id] = []
             return []
         selection = CameraSelection.load(sel_path)
 
@@ -254,6 +257,7 @@ class ExportStage(BaseStage):
             logger.warning(
                 "[export] no broadcast camera for %s; skipping virtual cameras", shot_id
             )
+            self._virtual_camera_entries[shot_id] = []
             return []
         bcast = CameraTrack.load(bcast_path)
         image_size = tuple(bcast.image_size)
@@ -297,6 +301,7 @@ class ExportStage(BaseStage):
                     frame_range=(int(cam.frames[0].frame), int(cam.frames[-1].frame)),
                     track_json=f"camera/{clip_id}_camera_track.json",
                 ))
+        self._virtual_camera_entries[shot_id] = entries
         logger.info(
             "[export] generated %d virtual camera(s) for shot %s", len(entries), shot_id
         )
@@ -312,6 +317,13 @@ class ExportStage(BaseStage):
         gltf_enabled = bool(export_cfg.get("gltf_enabled", True))
         fbx_enabled = bool(export_cfg.get("fbx_enabled", True))
 
+        # Generate virtual cameras up front so the rig CameraTrack JSONs exist
+        # for both glTF node emission and FBX baking, and so the manifest gets
+        # them even when glTF/FBX are disabled.
+        self._virtual_camera_entries = {}
+        for shot_id in self._export_shot_ids():
+            self._generate_virtual_cameras(shot_id)
+
         if gltf_enabled:
             self._export_gltf(pitch_cfg, ball_cfg)
         else:
@@ -324,6 +336,17 @@ class ExportStage(BaseStage):
 
         clip_name = _derive_clip_name(self.output_dir)
         self.write_ue_manifest(clip_name)
+
+    def _export_shot_ids(self) -> list[str | None]:
+        """Shot ids to export (mirrors _export_gltf's shot resolution).
+        Returns [None] for the legacy single-shot layout."""
+        from src.schemas.shots import ShotsManifest
+        manifest_path = self.output_dir / "shots" / "shots_manifest.json"
+        if not manifest_path.exists():
+            return [None]
+        manifest = ShotsManifest.load(manifest_path)
+        shot_filter = getattr(self, "shot_filter", None)
+        return [s.id for s in manifest.shots if shot_filter is None or s.id == shot_filter]
 
     # ------------------------------------------------------------------
     # glTF
@@ -394,7 +417,6 @@ class ExportStage(BaseStage):
         match: dict | None = None,
     ) -> None:
         camera_track = CameraTrack.load(camera_path)
-        self._generate_virtual_cameras(shot_id=shot_id)
 
         # Per-player SMPL tracks for this shot. Pulls from the fused
         # refined_poses output when present (default), with a fallback to
@@ -677,25 +699,9 @@ class ExportStage(BaseStage):
                 frame_range=camera_entry.frame_range,
                 track_json=camera_entry.track_json,
             ))
-        cam_prefix = f"{primary_shot}_" if primary_shot else ""
-        for cam_path in sorted(
-            (self.output_dir / "camera").glob(f"{cam_prefix}*_camera_track.json")
-        ):
-            stem = cam_path.stem[: -len("_camera_track")]
-            rig_name = stem[len(cam_prefix):] if cam_prefix else stem
-            if rig_name in ("camera", ""):  # the broadcast track itself
-                continue
-            cam_meta_v = json.loads(cam_path.read_text())
-            v_frames = cam_meta_v.get("frames", [])
-            if not v_frames:
-                continue
-            named_cameras.append(NamedCameraEntry(
-                name=rig_name,
-                fbx="",
-                image_size=tuple(cam_meta_v.get("image_size", [1920, 1080])),
-                frame_range=(int(v_frames[0]["frame"]), int(v_frames[-1]["frame"])),
-                track_json=f"camera/{cam_path.name}",
-            ))
+        named_cameras.extend(
+            getattr(self, "_virtual_camera_entries", {}).get(primary_shot, [])
+        )
 
         pitch_cfg = self.config.get("pitch", {}) or {}
         manifest = UeManifest(

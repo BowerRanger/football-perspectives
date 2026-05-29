@@ -9,6 +9,7 @@ import pytest
 from src.schemas.camera_selection import CameraSelection, RigSelection
 from src.schemas.camera_track import CameraFrame, CameraTrack
 from src.schemas.smpl_world import SmplWorldTrack
+from src.schemas.ue_manifest import UeManifest
 from src.stages.export import ExportStage
 
 
@@ -106,8 +107,37 @@ def test_write_ue_manifest_includes_virtual_cameras(tmp_path: Path) -> None:
          "match": None}))
     stage.write_ue_manifest("shot_01")
 
-    from src.schemas.ue_manifest import UeManifest
     m = UeManifest.load(out / "export" / "ue_manifest.json")
     names = {c.name for c in m.cameras}
     assert "broadcast" in names
     assert "P003_pov" in names
+    pov = next(c for c in m.cameras if c.name == "P003_pov")
+    assert pov.track_json == "camera/shot_01_P003_pov_camera_track.json"
+    assert pov.frame_range == (0, 2)
+
+
+@pytest.mark.unit
+def test_virtual_cameras_present_when_gltf_disabled(tmp_path: Path) -> None:
+    out = tmp_path
+    (out / "camera").mkdir(parents=True)
+    (out / "hmr_world").mkdir(parents=True)
+    (out / "export" / "fbx").mkdir(parents=True)
+    (out / "shots").mkdir()
+    _write_broadcast_camera(out / "camera" / "shot_01_camera_track.json")
+    _write_player(out / "hmr_world" / "P003_smpl_world.npz")
+    (out / "export" / "fbx" / "shot_01__P003.fbx").write_bytes(b"x")
+    CameraSelection(shot_id="shot_01",
+                    selections=(RigSelection("P003", ("pov",)),)).save(
+        out / "export" / "shot_01_camera_selection.json")
+    (out / "shots" / "shots_manifest.json").write_text(json.dumps(
+        {"shots": [{"id": "shot_01", "clip_file": "shot_01.mp4",
+                    "start_frame": 0, "end_frame": 2, "start_time": 0.0, "end_time": 0.1}],
+         "match": None, "source_file": "x.mp4", "fps": 30.0, "total_frames": 3}))
+
+    stage = ExportStage(output_dir=out, config={
+        "export": {"gltf_enabled": False, "fbx_enabled": False, "virtual_cameras": {}},
+        "pitch": {"length_m": 105.0, "width_m": 68.0}})
+    stage.run()
+
+    m = UeManifest.load(out / "export" / "ue_manifest.json")
+    assert "P003_pov" in {c.name for c in m.cameras}

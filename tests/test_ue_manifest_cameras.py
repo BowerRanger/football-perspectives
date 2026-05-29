@@ -6,6 +6,7 @@ from src.schemas.ue_manifest import (
     PitchInfo,
     PlayerEntry,
     UeManifest,
+    UeManifestError,
     WorldBBox,
     SCHEMA_VERSION,
 )
@@ -59,3 +60,29 @@ def test_cameras_optional_for_backwards_compat(tmp_path) -> None:
     m.save(path)
     loaded = UeManifest.load(path)
     assert loaded.cameras == []
+
+
+def test_validate_rejects_camera_with_inverted_frame_range(tmp_path) -> None:
+    import pytest
+    from src.schemas.ue_manifest import NamedCameraEntry, UeManifestError
+    m = _manifest_with_cameras()
+    m.cameras[1] = NamedCameraEntry(
+        name="bad", fbx="", image_size=(1920, 1080), frame_range=(10, 0),
+        track_json="camera/bad.json",
+    )
+    with pytest.raises(UeManifestError):
+        m.save(tmp_path / "m.json")  # save() calls validate()
+
+
+def test_named_camera_omits_empty_track_json(tmp_path) -> None:
+    import json
+    from src.schemas.ue_manifest import NamedCameraEntry
+    m = _manifest_with_cameras()
+    m.cameras = [NamedCameraEntry(
+        name="P002_pov", fbx="fbx/x.fbx", image_size=(1920, 1080),
+        frame_range=(0, 10), track_json="",
+    )]
+    path = tmp_path / "m.json"
+    m.save(path)
+    raw = json.loads(path.read_text())
+    assert "track_json" not in raw["cameras"][0]

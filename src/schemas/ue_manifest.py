@@ -125,6 +125,13 @@ class UeManifest:
                 raise UeManifestError(
                     f"player {p.player_id} frame_range start > end"
                 )
+        for i, c in enumerate(self.cameras):
+            if not c.name:
+                raise UeManifestError(f"cameras[{i}].name must be non-empty")
+            if c.frame_range[0] > c.frame_range[1]:
+                raise UeManifestError(
+                    f"cameras[{i}] frame_range start > end: {c.frame_range}"
+                )
 
     def save(self, path: Path) -> None:
         self.validate()

@@ -133,3 +133,25 @@ def test_build_ots_track_without_ball_uses_forward_fallback() -> None:
     assert len(cam.frames) == 3
     R = np.array(cam.frames[0].R)
     np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-6)
+
+
+def test_build_ots_track_holds_last_ball_then_falls_back() -> None:
+    track = _straight_standing_track(14)
+    ball = BallTrack(
+        clip_id="shot_01", fps=30.0, flight_segments=(),
+        frames=tuple(
+            BallFrame(frame=i, world_xyz=(12.0, 22.0, 0.0), state="grounded", confidence=1.0)
+            for i in range(3)
+        ),
+    )
+    cam = build_ots_track(track, ball, RigConfig(), image_size=(1920, 1080), fps=30.0, clip_id="P001_ots")
+    # Frame 3: ball gone but within the 10-frame hold window → still aims at last ball pos.
+    f3 = cam.frames[3]
+    R3 = np.array(f3.R); c3 = -R3.T @ np.array(f3.t)
+    aim3 = np.array([12.0, 22.0, 0.0]) - c3; aim3 = aim3 / np.linalg.norm(aim3)
+    np.testing.assert_allclose(R3[2], aim3, atol=1e-6)
+    # Frame 13: occlusion window exceeded → forward fallback, no longer aims at ball.
+    f13 = cam.frames[13]
+    R13 = np.array(f13.R); c13 = -R13.T @ np.array(f13.t)
+    aim13 = np.array([12.0, 22.0, 0.0]) - c13; aim13 = aim13 / np.linalg.norm(aim13)
+    assert not np.allclose(R13[2], aim13, atol=1e-3)

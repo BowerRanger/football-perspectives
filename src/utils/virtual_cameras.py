@@ -19,6 +19,8 @@ from src.utils.smpl_skeleton import compute_joint_world_pose
 WORLD_UP = np.array([0.0, 0.0, 1.0])
 WORLD_UP.flags.writeable = False
 
+_FrameTuple = tuple[int, np.ndarray, np.ndarray, float]  # (frame_idx, R_world2cam, t, confidence)
+
 
 def _normalize(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     v = np.asarray(v, dtype=np.float64).reshape(3)
@@ -71,6 +73,7 @@ HEAD_JOINT_IDX = 15
 # rest pose; sign may need flipping after the first real export — kept as a
 # module constant so tuning is a one-line change.
 FACE_AXIS_CANONICAL = np.array([0.0, 0.0, 1.0])
+FACE_AXIS_CANONICAL.flags.writeable = False
 
 
 @dataclass(frozen=True)
@@ -91,12 +94,12 @@ def _head_pose_world(
         return compute_joint_world_pose(
             track.thetas[i], track.root_R[i], track.root_t[i], HEAD_JOINT_IDX
         )
-    except Exception:
+    except (ValueError, IndexError, np.linalg.LinAlgError):
         pos = np.asarray(track.root_t[i], dtype=np.float64) + np.array([0.0, 0.0, 1.6])
         return pos, np.asarray(track.root_R[i], dtype=np.float64)
 
 
-def _ball_xy_by_frame(ball_track: object) -> dict[int, np.ndarray]:
+def _ball_xyz_by_frame(ball_track: object) -> dict[int, np.ndarray]:
     out: dict[int, np.ndarray] = {}
     if ball_track is None:
         return out
@@ -112,7 +115,7 @@ def _make_track(
     image_size: tuple[int, int],
     fps: float,
     K: list[list[float]],
-    per_frame: list[tuple],
+    per_frame: list[_FrameTuple],
 ) -> CameraTrack:
     frames = tuple(
         CameraFrame(
@@ -154,7 +157,7 @@ def build_pov_track(
     player's facing direction (SMPL canonical forward rotated into world).
     """
     K = intrinsics_from_fov(cfg.pov_fov_deg, image_size)
-    per_frame: list[tuple] = []
+    per_frame: list[_FrameTuple] = []
     for i, fr in enumerate(np.asarray(track.frames).tolist()):
         head_pos, head_R = _head_pose_world(track, i)
         facing = _normalize(head_R @ FACE_AXIS_CANONICAL)
@@ -178,22 +181,22 @@ def build_ots_track(
     occlusion bridging), otherwise falls back to a point ahead of the player.
     """
     K = intrinsics_from_fov(cfg.ots_fov_deg, image_size)
-    ball_xy = _ball_xy_by_frame(ball_track)
-    per_frame: list[tuple] = []
+    ball_xyz = _ball_xyz_by_frame(ball_track)
+    per_frame: list[_FrameTuple] = []
     last_target: np.ndarray | None = None
     frames_since_ball = 0
     for i, fr in enumerate(np.asarray(track.frames).tolist()):
         head_pos, head_R = _head_pose_world(track, i)
         facing = _normalize(head_R @ FACE_AXIS_CANONICAL)
         facing_ground = _normalize(np.array([facing[0], facing[1], 0.0]))
-        right_ground = _normalize(np.cross(WORLD_UP, facing_ground))
+        right_ground = _normalize(np.cross(facing_ground, WORLD_UP))
         center = (
             head_pos
             - cfg.ots_back_m * facing_ground
             + cfg.ots_up_m * WORLD_UP
             + cfg.ots_right_m * right_ground
         )
-        target = ball_xy.get(int(fr))
+        target = ball_xyz.get(int(fr))
         if target is not None:
             last_target = target
             frames_since_ball = 0

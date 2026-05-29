@@ -818,6 +818,66 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         )
         return {"shots": ids}
 
+    @app.get("/api/export/available-players")
+    def available_players(shot: str | None = None):
+        """Player ids with SMPL data for the shot, for the camera picker."""
+        from src.utils.player_names import display_name_for, load_player_names
+        from src.schemas.smpl_world import SmplWorldTrack
+
+        hmr_dir = output_dir / "hmr_world"
+        if not hmr_dir.exists():
+            return {"players": []}
+        names = load_player_names(output_dir)
+        seen: dict[str, str] = {}
+        for npz in sorted(hmr_dir.glob("*_smpl_world.npz")):
+            track = SmplWorldTrack.load(npz)
+            if shot and (getattr(track, "shot_id", "") or "") not in (shot, ""):
+                continue
+            seen[track.player_id] = display_name_for(track.player_id, names)
+        return {"players": [{"player_id": k, "display_name": v} for k, v in seen.items()]}
+
+    def _selection_path(shot: str | None) -> Path:
+        prefix = "" if not shot else f"{shot}_"
+        return output_dir / "export" / f"{prefix}camera_selection.json"
+
+    @app.get("/api/export/camera-selection")
+    def get_camera_selection(shot: str | None = None):
+        """Return the saved camera selection for a shot, or an empty default."""
+        from src.schemas.camera_selection import CameraSelection
+
+        if shot and not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
+            raise HTTPException(status_code=400, detail="Invalid shot id")
+        path = _selection_path(shot)
+        if not path.exists():
+            return {"shot_id": shot or "", "selections": []}
+        return CameraSelection.load(path).to_dict()
+
+    @app.put("/api/export/camera-selection")
+    def put_camera_selection(payload: dict, shot: str | None = None):
+        """Persist the camera rig selection for a shot after validating
+        that all player ids and rig names are known."""
+        from src.schemas.camera_selection import CameraSelection, CameraSelectionError
+        from src.schemas.smpl_world import SmplWorldTrack
+
+        if shot and not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
+            raise HTTPException(status_code=400, detail="Invalid shot id")
+        try:
+            selection = CameraSelection.from_dict(payload)
+        except CameraSelectionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        hmr_dir = output_dir / "hmr_world"
+        valid_ids: set[str] = set()
+        if hmr_dir.exists():
+            for npz in hmr_dir.glob("*_smpl_world.npz"):
+                t = SmplWorldTrack.load(npz)
+                if not shot or (getattr(t, "shot_id", "") or "") in (shot, ""):
+                    valid_ids.add(t.player_id)
+        unknown = [s.player_id for s in selection.selections if s.player_id not in valid_ids]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"unknown players: {unknown}")
+        selection.save(_selection_path(shot))
+        return selection.to_dict()
+
     # ------------------------------------------------------------------
     # Anchor editor + pipeline-output viewers (broadcast-mono, Phase 4a)
     # ------------------------------------------------------------------

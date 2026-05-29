@@ -119,3 +119,32 @@ def test_compute_joint_world_propagates_parent_rotation() -> None:
     R180 = axis_angle_to_matrix(expected)
     expected_head = R180 @ SMPL_REST_JOINTS_YUP[head_idx]
     np.testing.assert_allclose(head, expected_head, atol=1e-9)
+
+
+def test_compute_joint_world_pose_returns_position_and_rotation() -> None:
+    from src.utils.smpl_skeleton import (
+        compute_joint_world,
+        compute_joint_world_pose,
+    )
+
+    thetas = np.zeros((24, 3))
+    root_R = np.eye(3)
+    root_t = np.array([1.0, 2.0, 0.0])
+    head_idx = 15
+
+    pos, R_world = compute_joint_world_pose(thetas, root_R, root_t, head_idx)
+
+    np.testing.assert_allclose(pos, compute_joint_world(thetas, root_R, root_t, head_idx))
+    np.testing.assert_allclose(R_world, np.eye(3), atol=1e-9)
+
+
+def test_compute_joint_world_pose_applies_root_rotation_to_orientation() -> None:
+    from src.utils.smpl_skeleton import axis_angle_to_matrix, compute_joint_world_pose
+
+    thetas = np.zeros((24, 3))
+    root_R = axis_angle_to_matrix(np.array([0.0, 0.0, np.pi / 2]))
+    root_t = np.zeros(3)
+
+    _, R_world = compute_joint_world_pose(thetas, root_R, root_t, 15)
+
+    np.testing.assert_allclose(R_world, root_R, atol=1e-9)

@@ -109,15 +109,18 @@ def axis_angle_to_matrix(aa: np.ndarray) -> np.ndarray:
     return np.eye(3) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
 
 
-def compute_joint_world(
+def compute_joint_world_pose(
     thetas: np.ndarray,
     root_R: np.ndarray,
     root_t: np.ndarray,
     joint_idx: int,
     rest_joints: np.ndarray | None = None,
-) -> np.ndarray:
-    """Forward-kinematics: return joint ``joint_idx``'s position in pitch
-    world frame for a single frame.
+) -> tuple[np.ndarray, np.ndarray]:
+    """Forward-kinematics: world position **and** world rotation of a joint.
+
+    Returns ``(pos, R_world)`` where ``pos`` is the joint centre in pitch
+    metres and ``R_world`` is the joint's global rotation expressed in the
+    pitch frame (``root_R`` composed onto the canonical joint rotation).
 
     Inputs:
         thetas: (24, 3) axis-angle, one row per joint (including pelvis
@@ -153,6 +156,27 @@ def compute_joint_world(
         p = SMPL_PARENTS[j]
         global_rot[j] = global_rot[p] @ local_rot[j]
         global_pos[j] = global_pos[p] + global_rot[p] @ (rest[j] - rest[p])
-    canonical = global_pos[int(joint_idx)]
+    root_R = np.asarray(root_R, dtype=np.float64)
+    root_t = np.asarray(root_t, dtype=np.float64)
+    j = int(joint_idx)
     # Canonical y-up → pitch world.
-    return np.asarray(root_R, dtype=np.float64) @ canonical + np.asarray(root_t, dtype=np.float64)
+    pos = root_R @ global_pos[j] + root_t
+    R_world = root_R @ global_rot[j]
+    return pos, R_world
+
+
+def compute_joint_world(
+    thetas: np.ndarray,
+    root_R: np.ndarray,
+    root_t: np.ndarray,
+    joint_idx: int,
+    rest_joints: np.ndarray | None = None,
+) -> np.ndarray:
+    """Forward-kinematics: world position of ``joint_idx`` (single frame).
+
+    Thin wrapper over :func:`compute_joint_world_pose` kept for existing
+    callers (ball-anchor in ``src/stages/ball.py``). See that function for
+    the full input/convention docs.
+    """
+    pos, _ = compute_joint_world_pose(thetas, root_R, root_t, joint_idx, rest_joints)
+    return pos

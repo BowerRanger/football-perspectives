@@ -47,6 +47,7 @@ class CameraSelection:
                 if r not in VALID_RIGS:
                     raise CameraSelectionError(f"unknown rig {r!r}; valid: {VALID_RIGS}")
             ordered = tuple(r for r in VALID_RIGS if r in set(raw_rigs))
+            # A player with no (valid) rigs is treated as "not selected" and dropped.
             if ordered:
                 out.append(RigSelection(player_id=pid, rigs=ordered))
         return cls(shot_id=shot_id, selections=tuple(out))
@@ -65,8 +66,8 @@ class CameraSelection:
         return cls.from_dict(json.loads(Path(path).read_text()))
 
     def save(self, path: Path) -> None:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        dest = Path(path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
         tmp.write_text(json.dumps(self.to_dict(), indent=2))
-        tmp.replace(path)  # atomic on POSIX
+        tmp.replace(dest)  # atomic on POSIX

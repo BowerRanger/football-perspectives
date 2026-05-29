@@ -277,8 +277,17 @@ class ExportStage(BaseStage):
                 clip_id = f"{prefix}{sel.player_id}_{rig}"
                 if rig == "pov":
                     cam = vcam.build_pov_track(track, cfg, image_size, fps, clip_id)
-                else:
+                elif rig == "ots":
                     cam = vcam.build_ots_track(track, ball_track, cfg, image_size, fps, clip_id)
+                else:
+                    logger.warning("[export] unknown rig %r for %s; skipping", rig, sel.player_id)
+                    continue
+                if not cam.frames:
+                    logger.warning(
+                        "[export] empty camera track for %s/%s; skipping",
+                        sel.player_id, rig,
+                    )
+                    continue
                 cam_path = self.output_dir / "camera" / f"{clip_id}_camera_track.json"
                 cam.save(cam_path)
                 entries.append(NamedCameraEntry(

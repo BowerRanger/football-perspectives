@@ -64,3 +64,17 @@ def test_generate_virtual_cameras_no_selection_returns_empty(tmp_path: Path) -> 
     _write_broadcast_camera(out / "camera" / "shot_01_camera_track.json")
     stage = ExportStage(output_dir=out, config={"export": {"virtual_cameras": {}}})
     assert stage._generate_virtual_cameras(shot_id="shot_01") == []
+
+
+@pytest.mark.unit
+def test_generate_virtual_cameras_skips_unknown_player(tmp_path: Path) -> None:
+    out = tmp_path
+    (out / "camera").mkdir(parents=True)
+    (out / "hmr_world").mkdir(parents=True)
+    _write_broadcast_camera(out / "camera" / "shot_01_camera_track.json")
+    _write_player(out / "hmr_world" / "P003_smpl_world.npz")
+    CameraSelection(shot_id="shot_01",
+                    selections=(RigSelection("P999", ("pov", "ots")),)).save(
+        out / "export" / "shot_01_camera_selection.json")
+    stage = ExportStage(output_dir=out, config={"export": {"virtual_cameras": {}}})
+    assert stage._generate_virtual_cameras(shot_id="shot_01") == []

@@ -80,6 +80,15 @@ class CameraEntry:
 
 
 @dataclass
+class NamedCameraEntry:
+    name: str
+    fbx: str
+    image_size: tuple[int, int]
+    frame_range: tuple[int, int]
+    track_json: str = ""
+
+
+@dataclass
 class UeManifest:
     schema_version: int
     clip_name: str
@@ -89,6 +98,7 @@ class UeManifest:
     players: list[PlayerEntry] = field(default_factory=list)
     ball: Optional[BallEntry] = None
     camera: Optional[CameraEntry] = None
+    cameras: list[NamedCameraEntry] = field(default_factory=list)
     # Role -> hex-colour palette (e.g. {"home": "#3b82f6", ...}). The UE
     # side builds a kit material instance per role from this map and
     # assigns it to each player by PlayerEntry.kit_role. Empty when the
@@ -156,6 +166,17 @@ class UeManifest:
             }
             if self.camera.track_json:
                 raw["camera"]["track_json"] = self.camera.track_json
+        if self.cameras:
+            raw["cameras"] = [
+                {
+                    "name": c.name,
+                    "fbx": c.fbx,
+                    "image_size": list(c.image_size),
+                    "frame_range": list(c.frame_range),
+                    **({"track_json": c.track_json} if c.track_json else {}),
+                }
+                for c in self.cameras
+            ]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(raw, indent=2))
 
@@ -206,6 +227,16 @@ class UeManifest:
                 else None
             ),
             kits=raw.get("kits", {}) or {},
+            cameras=[
+                NamedCameraEntry(
+                    name=c["name"],
+                    fbx=c["fbx"],
+                    image_size=tuple(c["image_size"]),
+                    frame_range=tuple(c["frame_range"]),
+                    track_json=c.get("track_json", ""),
+                )
+                for c in raw.get("cameras", [])
+            ],
         )
         m.validate()
         return m

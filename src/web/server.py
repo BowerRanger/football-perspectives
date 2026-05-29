@@ -872,6 +872,205 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             )
         return asdict(manifest)
 
+    # ------------------------------------------------------------------
+    # Match metadata (manifest-level: one match per output dir)
+    # ------------------------------------------------------------------
+
+    class MomentPayload(BaseModel):
+        minute: int
+        added_time: int = 0
+        event_type: str = "goal"
+        description: str = ""
+
+    class KitColorsPayload(BaseModel):
+        home_primary: str
+        away_primary: str
+        home_goalkeeper: str = ""
+        away_goalkeeper: str = ""
+        referee: str = "#000000"
+
+    class RosterEntryPayload(BaseModel):
+        name: str
+        team: str
+        position: str = ""
+        shirt_number: int | None = None
+
+    class MatchInfoPayload(BaseModel):
+        home_team: str
+        away_team: str
+        home_score: int
+        away_score: int
+        venue: str
+        competition: str = ""
+        date: str = ""
+        moment: "MomentPayload | None" = None
+        kits: "KitColorsPayload | None" = None
+        roster: list["RosterEntryPayload"] = []
+
+    class MatchLookupPayload(BaseModel):
+        season: str
+        home_team: str
+        away_team: str
+        # Default to football-data because Wikidata has near-zero
+        # coverage of regular league fixtures (only major tournament
+        # finals). Wikidata is still useful for kit colours, which the
+        # endpoint hydrates separately after the match list returns.
+        provider: str = "football-data"
+
+    # Per-output-dir manifest write lock. Serialises load-modify-save
+    # against PUT /api/match (and any future writer) so a concurrent
+    # prepare_shots upload can't lose the match block, and vice versa.
+    _match_manifest_lock = Lock()
+
+    def _match_manifest_path() -> Path:
+        return output_dir / "shots" / "shots_manifest.json"
+
+    @app.get("/api/match")
+    def get_match():
+        """Return the manifest-level ``match`` block as JSON, or ``null``
+        when no manifest exists or no match has been saved yet."""
+        from src.schemas.shots import ShotsManifest
+
+        path = _match_manifest_path()
+        if not path.exists():
+            return None
+        try:
+            manifest = ShotsManifest.load(path)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to load manifest: {exc}",
+            )
+        return asdict(manifest.match) if manifest.match is not None else None
+
+    @app.put("/api/match")
+    def put_match(payload: MatchInfoPayload):
+        """Persist the match metadata onto the shots manifest. Creates a
+        stub manifest if none exists yet, so the form can be filled
+        before any clips are imported. Preserves ``shots[]`` and other
+        top-level fields."""
+        from src.schemas.shots import (
+            KitColors,
+            MatchInfo,
+            MomentInfo,
+            RosterEntry,
+            ShotsManifest,
+        )
+
+        path = _match_manifest_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        moment_obj = (
+            MomentInfo(**payload.moment.model_dump())
+            if payload.moment is not None else None
+        )
+        kits_obj = (
+            KitColors(**payload.kits.model_dump())
+            if payload.kits is not None else None
+        )
+        roster_objs = [
+            RosterEntry(**r.model_dump()) for r in payload.roster
+        ]
+        match_obj = MatchInfo(
+            home_team=payload.home_team,
+            away_team=payload.away_team,
+            home_score=payload.home_score,
+            away_score=payload.away_score,
+            venue=payload.venue,
+            competition=payload.competition,
+            date=payload.date,
+            moment=moment_obj,
+            kits=kits_obj,
+            roster=roster_objs,
+        )
+
+        with _match_manifest_lock:
+            if path.exists():
+                try:
+                    manifest = ShotsManifest.load(path)
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to load manifest: {exc}",
+                    )
+            else:
+                manifest = ShotsManifest(
+                    source_file="", fps=0.0, total_frames=0, shots=[],
+                )
+            manifest.match = match_obj
+
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(asdict(manifest), indent=2))
+            tmp.replace(path)
+
+        return {"saved": True, "path": str(path)}
+
+    @app.post("/api/match/lookup")
+    def lookup_match(payload: MatchLookupPayload):
+        """Dispatch a lookup request to the named provider. Returns a
+        possibly-empty list of ``MatchCandidate`` records — empty
+        means "no match found", 502 means "provider failed",
+        404 means "no such provider registered".
+
+        After the chosen provider returns candidates, the endpoint
+        opportunistically hydrates kit colours from Wikidata (the only
+        public source that carries kits as structured hex values).
+        Kit-hydration failures are swallowed so a flaky Wikidata
+        doesn't block a successful match search.
+        """
+        # Import provider modules here so their register_source() side
+        # effects run once before lookup attempts.
+        from src.pipeline.match_sources import get_source
+        import src.pipeline.match_sources.wikidata  # noqa: F401
+        import src.pipeline.match_sources.football_data_org  # noqa: F401
+        from src.pipeline.match_sources.wikidata import (
+            WikidataLookupError,
+            fetch_kits_by_team_names,
+        )
+        from src.pipeline.match_sources.football_data_org import (
+            FootballDataLookupError,
+        )
+
+        source = get_source(payload.provider)
+        if source is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Unknown match provider: {payload.provider}",
+            )
+        try:
+            candidates = source.lookup(
+                season=payload.season,
+                home_team=payload.home_team,
+                away_team=payload.away_team,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid season: {exc}")
+        except (WikidataLookupError, FootballDataLookupError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Provider lookup failed: {exc}",
+            )
+
+        # Hydrate kits per-candidate using the **fixture's** home/away,
+        # not the user's typed order — football-data flips home/away
+        # depending on which leg of a tie this is. A single Wikidata
+        # outage is non-fatal; the candidate just keeps blank kits.
+        for c in candidates:
+            if c.match.kits is not None:
+                continue
+            try:
+                kits = fetch_kits_by_team_names(
+                    c.match.home_team or payload.home_team,
+                    c.match.away_team or payload.away_team,
+                )
+            except WikidataLookupError:
+                kits = None
+            if kits is not None:
+                c.match.kits = kits
+                if "kits" not in c.filled_fields:
+                    c.filled_fields.append("kits")
+
+        return [asdict(c) for c in candidates]
+
     @app.get("/api/output/shot-status/{shot_id}")
     def get_shot_status(shot_id: str):
         """Per-shot artefact-existence summary used by the dashboard's

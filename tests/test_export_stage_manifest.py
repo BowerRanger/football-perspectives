@@ -184,6 +184,98 @@ def test_manifest_uses_shot_prefixed_fbx_when_shots_manifest_present(
     assert m.players[0].fbx == "fbx/origi01__P001.fbx"
 
 
+def test_manifest_kit_role_from_tracks_and_kits_from_match(tmp_path: Path) -> None:
+    """player_id->team/class is joined from tracks/*_tracks.json and the
+    match kit colours land in the manifest's top-level kits map."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    _write_min_inputs(output_dir)
+
+    tracks_dir = output_dir / "tracks"
+    tracks_dir.mkdir()
+    (tracks_dir / "clip_demo_tracks.json").write_text(
+        json.dumps({
+            "shot_id": "clip_demo",
+            "tracks": [
+                {
+                    "track_id": "T001",
+                    "class_name": "goalkeeper",
+                    "team": "A",
+                    "player_id": "P001",
+                    "player_name": "",
+                    "frames": [],
+                }
+            ],
+        })
+    )
+
+    shots_dir = output_dir / "shots"
+    shots_dir.mkdir(exist_ok=True)
+    (shots_dir / "shots_manifest.json").write_text(
+        json.dumps({
+            "source_file": "",
+            "fps": 30.0,
+            "total_frames": 5,
+            "shots": [],
+            "match": {
+                "home_team": "Home",
+                "away_team": "Away",
+                "home_score": 1,
+                "away_score": 0,
+                "venue": "Ground",
+                "kits": {
+                    "home_primary": "#0000ff",
+                    "away_primary": "#ff0000",
+                    "home_goalkeeper": "#00ff00",
+                },
+            },
+        })
+    )
+
+    fbx_dir = output_dir / "export" / "fbx"
+    fbx_dir.mkdir(parents=True)
+    (fbx_dir / "P001.fbx").write_bytes(b"\x00")
+
+    cfg = {
+        "export": {"gltf_enabled": False, "fbx_enabled": False},
+        "pitch": {"length_m": 105.0, "width_m": 68.0},
+        "ball": {"ball_radius_m": 0.11},
+    }
+    stage = ExportStage(output_dir=output_dir, config=cfg)
+    stage.write_ue_manifest(clip_name="clip_demo")
+
+    m = UeManifest.load(output_dir / "export" / "ue_manifest.json")
+    # team A + goalkeeper class -> home_gk.
+    assert m.players[0].kit_role == "home_gk"
+    assert m.kits["home"] == "#0000ff"
+    assert m.kits["home_gk"] == "#00ff00"
+
+
+def test_manifest_kit_role_override_from_players_json(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    _write_min_inputs(output_dir)
+
+    # No tracks file -> derived role would be "unknown"; the override wins.
+    (output_dir / "players.json").write_text(
+        json.dumps({"P001": {"name": "Ref Guy", "kit_role": "referee"}})
+    )
+    fbx_dir = output_dir / "export" / "fbx"
+    fbx_dir.mkdir(parents=True)
+    (fbx_dir / "Ref_Guy.fbx").write_bytes(b"\x00")
+
+    cfg = {
+        "export": {"gltf_enabled": False, "fbx_enabled": False},
+        "pitch": {"length_m": 105.0, "width_m": 68.0},
+        "ball": {"ball_radius_m": 0.11},
+    }
+    stage = ExportStage(output_dir=output_dir, config=cfg)
+    stage.write_ue_manifest(clip_name="clip_demo")
+
+    m = UeManifest.load(output_dir / "export" / "ue_manifest.json")
+    assert m.players[0].kit_role == "referee"
+
+
 def test_manifest_skipped_when_no_player_fbx(tmp_path: Path) -> None:
     output_dir = tmp_path / "output"
     output_dir.mkdir()

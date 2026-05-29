@@ -61,3 +61,18 @@ stadiums:
       orientation: along_touchline
       stripe_width_m: 5.5
       origin_y_m: 0.0
+
+  vitality_stadium:
+    display_name: "Vitality Stadium (AFC Bournemouth)"
+    # AFC Bournemouth's Dean Court has the smallest *capacity* in the
+    # Premier League, but the playing surface itself is the full FIFA
+    # reference 105 m x 68 m. Declared explicitly so the web pitch viewer
+    # and the ball stage's flight-segment x-bounds don't silently lean on
+    # the codebase default.
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
+    # Mow pattern varies by match — keep the league-default stripe width.
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0

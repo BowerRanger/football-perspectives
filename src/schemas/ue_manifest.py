@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class UeManifestError(ValueError):
@@ -43,6 +43,10 @@ class PlayerEntry:
     frame_range: tuple[int, int]
     world_bbox: WorldBBox
     display_name: str = ""
+    # Canonical kit role (see src.utils.team_roles.KIT_ROLES): one of
+    # home/away/home_gk/away_gk/referee/unknown. The UE side looks this
+    # up in UeManifest.kits to colour the player's kit material.
+    kit_role: str = "unknown"
 
     def __post_init__(self) -> None:
         # Default display_name to player_id when omitted, so the UE side
@@ -85,6 +89,11 @@ class UeManifest:
     players: list[PlayerEntry] = field(default_factory=list)
     ball: Optional[BallEntry] = None
     camera: Optional[CameraEntry] = None
+    # Role -> hex-colour palette (e.g. {"home": "#3b82f6", ...}). The UE
+    # side builds a kit material instance per role from this map and
+    # assigns it to each player by PlayerEntry.kit_role. Empty when the
+    # clip has no match metadata.
+    kits: dict = field(default_factory=dict)
 
     def validate(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
@@ -125,10 +134,13 @@ class UeManifest:
                         "min": list(p.world_bbox.min),
                         "max": list(p.world_bbox.max),
                     },
+                    "kit_role": p.kit_role,
                 }
                 for p in self.players
             ],
         }
+        if self.kits:
+            raw["kits"] = dict(self.kits)
         if self.ball is not None:
             raw["ball"] = {
                 "fbx": self.ball.fbx,
@@ -170,6 +182,7 @@ class UeManifest:
                         min=tuple(p["world_bbox"]["min"]),
                         max=tuple(p["world_bbox"]["max"]),
                     ),
+                    kit_role=p.get("kit_role", "unknown"),
                 )
                 for p in raw["players"]
             ],
@@ -192,6 +205,7 @@ class UeManifest:
                 if "camera" in raw
                 else None
             ),
+            kits=raw.get("kits", {}) or {},
         )
         m.validate()
         return m

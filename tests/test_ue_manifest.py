@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from src.schemas.ue_manifest import (
+    SCHEMA_VERSION,
     BallEntry,
     CameraEntry,
     PitchInfo,
@@ -20,7 +21,7 @@ from src.schemas.ue_manifest import (
 
 def _good() -> UeManifest:
     return UeManifest(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         clip_name="clip_demo",
         fps=30.0,
         frame_range=(0, 149),
@@ -77,7 +78,7 @@ def test_rejects_unknown_schema_version(tmp_path: Path) -> None:
 def test_rejects_empty_players() -> None:
     with pytest.raises(UeManifestError, match="players"):
         UeManifest(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             clip_name="x",
             fps=30.0,
             frame_range=(0, 1),
@@ -119,3 +120,37 @@ def test_display_name_round_trips(tmp_path: Path) -> None:
     assert raw["players"][0]["display_name"] == "Bellingham"
     loaded = UeManifest.load(p)
     assert loaded.players[0].display_name == "Bellingham"
+
+
+def test_kit_role_defaults_to_unknown() -> None:
+    p = PlayerEntry(
+        player_id="P001",
+        fbx="fbx/P001.fbx",
+        frame_range=(0, 1),
+        world_bbox=WorldBBox(min=(0.0, 0.0, 0.0), max=(1.0, 1.0, 1.0)),
+    )
+    assert p.kit_role == "unknown"
+
+
+def test_kit_role_and_kits_round_trip(tmp_path: Path) -> None:
+    m = _good()
+    m.players[0].kit_role = "home_gk"
+    m.kits = {"home": "#3b82f6", "home_gk": "#22c55e", "away": "#ef4444"}
+    p = tmp_path / "ue_manifest.json"
+    m.save(p)
+    raw = json.loads(p.read_text())
+    assert raw["players"][0]["kit_role"] == "home_gk"
+    assert raw["kits"]["home_gk"] == "#22c55e"
+    loaded = UeManifest.load(p)
+    assert loaded.players[0].kit_role == "home_gk"
+    assert loaded.kits["home"] == "#3b82f6"
+
+
+def test_empty_kits_omitted_but_loads(tmp_path: Path) -> None:
+    m = _good()
+    p = tmp_path / "ue_manifest.json"
+    m.save(p)
+    raw = json.loads(p.read_text())
+    assert "kits" not in raw
+    loaded = UeManifest.load(p)
+    assert loaded.kits == {}

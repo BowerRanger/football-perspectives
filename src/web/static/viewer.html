@@ -26,12 +26,23 @@
   #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); font-size: 16px; color: #64748b; }
   #close-btn { position: absolute; top: 10px; left: 10px; z-index: 20; background: rgba(0,0,0,0.6); color: #e2e8f0; border: 1px solid #475569; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
   #close-btn:hover { background: rgba(0,0,0,0.8); }
+  #match-header {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    background: rgba(26,29,39,0.92); border: 1px solid #2d3148; border-radius: 6px;
+    padding: 6px 14px; font-size: 13px; color: #e2e8f0; z-index: 15;
+    white-space: nowrap; display: none;
+  }
+  #match-header .home { color: #e2e8f0; }
+  #match-header .score { color: #94a3b8; padding: 0 6px; font-variant-numeric: tabular-nums; }
+  #match-header .away { color: #e2e8f0; }
+  #match-header .meta { color: #64748b; padding-left: 8px; font-size: 12px; }
 </style>
 </head>
 <body>
 
 <div id="viewport">
   <button id="close-btn" onclick="window.location.href='/';">✕ Close</button>
+  <div id="match-header"></div>
   <div id="loading">Loading scene...</div>
 </div>
 
@@ -75,6 +86,58 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const TEAM_COLORS = { A: 0x3b82f6, B: 0xef4444, referee: 0xf59e0b, unknown: 0x6b7280 };
 const PITCH_L = 105, PITCH_W = 68;
+
+// Convert a "#rrggbb" CSS-style hex into the 0xrrggbb integer three.js
+// wants. Returns null when the input isn't a 6-hex triplet so callers
+// can fall back to the default TEAM_COLORS value.
+function hexToInt(s) {
+  if (typeof s !== 'string') return null;
+  const m = s.trim().toLowerCase().match(/^#?([0-9a-f]{6})$/);
+  return m ? parseInt(m[1], 16) : null;
+}
+
+// Apply a MatchInfo block (as stored in scene_metadata.json) to the
+// viewer: override TEAM_COLORS from match.kits and populate the
+// #match-header strip. Safe to call with a null/missing match.
+function applyMatchMetadata(match) {
+  const header = document.getElementById('match-header');
+  if (!match) { header.style.display = 'none'; return; }
+
+  // Override TEAM_COLORS in place so capsules + skeletons rendered
+  // later in loadScene pick up the kit colours.
+  const kits = match.kits || {};
+  const homeInt = hexToInt(kits.home_primary);
+  const awayInt = hexToInt(kits.away_primary);
+  const refInt = hexToInt(kits.referee);
+  if (homeInt != null) TEAM_COLORS.A = homeInt;
+  if (awayInt != null) TEAM_COLORS.B = awayInt;
+  if (refInt != null) TEAM_COLORS.referee = refInt;
+
+  // Header strip: "Home 2–1 Away · 63' · Venue"
+  const moment = match.moment;
+  const minuteStr = moment && moment.minute != null
+    ? `${moment.minute}${moment.added_time ? '+' + moment.added_time : ''}'`
+    : '';
+  header.innerHTML = '';
+  const home = document.createElement('span');
+  home.className = 'home'; home.textContent = match.home_team || 'Home';
+  const score = document.createElement('span');
+  score.className = 'score';
+  score.textContent = `${match.home_score ?? 0}–${match.away_score ?? 0}`;
+  const away = document.createElement('span');
+  away.className = 'away'; away.textContent = match.away_team || 'Away';
+  header.appendChild(home);
+  header.appendChild(score);
+  header.appendChild(away);
+  const metaBits = [minuteStr, match.venue].filter(Boolean);
+  if (metaBits.length) {
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = '· ' + metaBits.join(' · ');
+    header.appendChild(meta);
+  }
+  header.style.display = 'block';
+}
 
 // ── Scene setup (pitch-registered scenes only) ──
 // Coordinate convention: pitch-world is x=along nearside touchline (0..L),
@@ -581,6 +644,14 @@ function _shotQuery(prefix) {
 async function loadScene() {
   const sidebar = document.getElementById('sidebar');
   sidebar.innerHTML = '<h4>Pitch-registered scene</h4>';
+
+  // 0. Scene metadata — must be applied before player meshes are built
+  // so the TEAM_COLORS override from match.kits lands first.
+  try {
+    const meta = await fetchJson(`/api/export/metadata${_shotQuery('?')}`);
+    if (meta && meta.match) applyMatchMetadata(meta.match);
+    else applyMatchMetadata(null);
+  } catch (_) { applyMatchMetadata(null); }
 
   // 1. Camera track tells us fps + frame-count bounds, and seeds the
   // per-frame pose used by the "Tracked" camera dropdown option below.

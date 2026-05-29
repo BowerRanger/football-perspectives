@@ -12,6 +12,7 @@ from src.pipeline.quality_report import write_quality_report
 from src.schemas.anchor import Anchor, AnchorSet, LandmarkObservation
 from src.schemas.ball_track import BallFrame, BallTrack, FlightSegment
 from src.schemas.camera_track import CameraFrame, CameraTrack
+from src.schemas.shots import KitColors, MatchInfo, MomentInfo, ShotsManifest
 from src.schemas.smpl_world import SmplWorldTrack
 
 
@@ -226,3 +227,98 @@ def test_quality_report_includes_refined_poses_section(tmp_path: Path) -> None:
     report = json.loads((tmp_path / "quality_report.json").read_text())
     assert report["refined_poses"]["players_refined"] == 3
     assert report["refined_poses"]["high_disagreement_frames"] == 4
+
+
+@pytest.mark.unit
+def test_quality_report_lifts_jitter_correction_to_top_level(
+    tmp_path: Path,
+) -> None:
+    """The cross-player jitter pass writes a ``jitter`` block inside
+    ``refined_poses_summary.json``. Surface it at top level as
+    ``jitter_correction`` so dashboard / CI checks can read it
+    alongside camera confidence and HMR coverage without parsing the
+    nested refined-poses payload."""
+    refined_dir = tmp_path / "refined_poses"
+    refined_dir.mkdir()
+    summary = {
+        "players_refined": 4,
+        "single_shot_players": 4,
+        "multi_shot_players": 0,
+        "total_frames": 120,
+        "jitter": {
+            "enabled": True,
+            "corrected_frames": 7,
+            "total_frames_evaluated": 119,
+            "max_offset_m": 0.42,
+            "mean_offset_m": 0.18,
+            "shots": [
+                {
+                    "shot_id": "play",
+                    "corrected_frames": 7,
+                    "total_frames_evaluated": 119,
+                    "max_offset_m": 0.42,
+                    "mean_offset_m": 0.18,
+                },
+            ],
+        },
+    }
+    (refined_dir / "refined_poses_summary.json").write_text(json.dumps(summary))
+    write_quality_report(tmp_path)
+    report = json.loads((tmp_path / "quality_report.json").read_text())
+    assert report["jitter_correction"]["corrected_frames"] == 7
+    assert report["jitter_correction"]["max_offset_m"] == pytest.approx(0.42)
+    assert report["jitter_correction"]["fraction_corrected"] == pytest.approx(
+        7 / 119, abs=1e-6,
+    )
+
+
+@pytest.mark.unit
+def test_quality_report_omits_jitter_correction_when_missing(
+    tmp_path: Path,
+) -> None:
+    """No refined_poses_summary.json → no ``jitter_correction`` block.
+    Older outputs from before the jitter pass landed must still
+    aggregate cleanly."""
+    write_quality_report(tmp_path)
+    report = json.loads((tmp_path / "quality_report.json").read_text())
+    assert "jitter_correction" not in report
+
+
+@pytest.mark.unit
+def test_quality_report_includes_match_when_set(tmp_path: Path) -> None:
+    """When ``shots_manifest.json`` has a ``match`` block, the quality
+    report mirrors it under a top-level ``match`` key so downstream
+    tooling can answer 'which match was this?' without re-reading the
+    manifest."""
+    manifest = ShotsManifest(
+        source_file="src.mp4",
+        fps=30.0,
+        total_frames=0,
+        shots=[],
+        match=MatchInfo(
+            home_team="Liverpool",
+            away_team="Real Madrid",
+            home_score=0,
+            away_score=1,
+            venue="Stade de France",
+            date="2022-05-28",
+            moment=MomentInfo(minute=59, description="Vinicius"),
+            kits=KitColors(home_primary="#c8102e", away_primary="#ffffff"),
+        ),
+    )
+    (tmp_path / "shots").mkdir()
+    manifest.save(tmp_path / "shots" / "shots_manifest.json")
+
+    write_quality_report(tmp_path)
+    report = json.loads((tmp_path / "quality_report.json").read_text())
+    assert report["match"]["home_team"] == "Liverpool"
+    assert report["match"]["moment"]["minute"] == 59
+    assert report["match"]["kits"]["home_primary"] == "#c8102e"
+
+
+@pytest.mark.unit
+def test_quality_report_omits_match_when_unset(tmp_path: Path) -> None:
+    """No manifest → no ``match`` key in the report."""
+    write_quality_report(tmp_path)
+    report = json.loads((tmp_path / "quality_report.json").read_text())
+    assert "match" not in report

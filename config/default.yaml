@@ -274,6 +274,60 @@ refined_poses:
   # Beta fusion across all shots a player appears in.
   beta_aggregation: weighted_mean
   beta_disagreement_warn: 0.3
+  # Cross-player camera-jitter correction. Detects frames where every
+  # visible player drifts in unison on the pitch and subtracts the
+  # common XY shift. Runs per shot, between the per-player clean-up
+  # (outlier reject / lean / ground snap / trim) and the per-player
+  # temporal smoothing, so residual error is mopped up by Savgol.
+  jitter:
+    enabled: true
+    # Need at least this many visible confident players' frame-to-
+    # frame deltas before we trust the median as consensus.
+    min_players: 4
+    # Rolling window (seconds) over which the scene-tempo baseline
+    # is computed. Larger → smoother baseline, slower to react to
+    # genuine tempo changes.
+    baseline_window_s: 1.0
+    # Lower bound on the baseline so a perfectly static scene
+    # doesn't make every tiny shift look like a multiple of zero.
+    baseline_floor_m: 0.05
+    # |median Δ| must exceed tempo_ratio × max(baseline,
+    # baseline_floor) to trigger. 2.5 picks out spikes that clearly
+    # exceed the scene's usual motion magnitude.
+    tempo_ratio: 2.5
+    # MAD-based agreement gate: per-axis std of the player Δs must
+    # be ≤ max_spread_ratio × |median Δ|. Larger spread means the
+    # players disagree on direction (real motion, not jitter).
+    max_spread_ratio: 0.30
+    # Residual-consensus pass. Catches sustained wobble (e.g. ~3 Hz
+    # camera-tracking oscillation) that the Δ-based pass cannot see:
+    # the Δ pass requires per-frame agreement, but on real running
+    # scenes per-player frame-to-frame motion (~10 cm/frame sprint)
+    # drowns out a 2-5 cm common-mode shift. The residual pass
+    # smooths each player's track with a heavy Savgol, then treats
+    # the cross-player median residual as the camera bias and
+    # subtracts it.
+    residual_pass_enabled: true
+    # Per-player Savgol window (seconds). 1.2 s is wide enough to
+    # absorb running velocity (poly=2 fits a parabolic accel within
+    # the window) while leaving short-period wobble in the residual.
+    residual_savgol_window_s: 1.2
+    residual_savgol_poly: 2
+    # Minimum confident players contributing residuals before the
+    # cross-player median is trusted. Set lower than the Δ pass
+    # because residuals average out individual HMR noise more
+    # effectively than raw Δs.
+    residual_min_players: 3
+    # Floor on the median-residual magnitude before a correction is
+    # applied. Keeps the pass from chasing 1-2 cm HMR-noise.
+    residual_min_offset_m: 0.02
+    # Safety clamp on a single frame's correction.
+    residual_max_offset_m: 2.0
+    # Iterations of subtract-then-re-fit-baseline. Each iteration
+    # cuts the remaining wobble by ~64 % (Savgol leakage ceiling),
+    # so 2 passes typically push residual error below the per-
+    # player HMR noise floor. >3 buys little.
+    residual_iterations: 2
 
 export:
   gltf_enabled: true

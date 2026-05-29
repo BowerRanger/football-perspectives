@@ -8,6 +8,7 @@ independent — missing inputs simply omit that section from the report.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -15,11 +16,24 @@ import numpy as np
 from src.schemas.anchor import AnchorSet
 from src.schemas.ball_track import BallTrack
 from src.schemas.camera_track import CameraTrack
+from src.schemas.shots import ShotsManifest
 
 
 def write_quality_report(output_dir: Path) -> None:
     """Aggregate diagnostics from camera/, hmr_world/, ball/ into a single JSON."""
     report: dict = {}
+
+    # Match metadata (if set) is mirrored at the top of the report so
+    # downstream tooling can answer "which match was this from?" without
+    # re-reading the manifest. ``None`` when unset or no manifest yet.
+    manifest_path = output_dir / "shots" / "shots_manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = ShotsManifest.load(manifest_path)
+        except Exception:
+            manifest = None
+        if manifest is not None and manifest.match is not None:
+            report["match"] = asdict(manifest.match)
 
     cam_path = output_dir / "camera" / "camera_track.json"
     anchors_path = output_dir / "camera" / "anchors.json"
@@ -149,7 +163,24 @@ def write_quality_report(output_dir: Path) -> None:
 
     refined_summary_path = output_dir / "refined_poses" / "refined_poses_summary.json"
     if refined_summary_path.exists():
-        report["refined_poses"] = json.loads(refined_summary_path.read_text())
+        refined_summary = json.loads(refined_summary_path.read_text())
+        report["refined_poses"] = refined_summary
+        # Lift the cross-player jitter-correction stats to the top
+        # level so a dashboard or CI gate can read them without
+        # descending into the nested refined-poses payload. Older
+        # summaries (pre-jitter) simply lack the inner block and skip.
+        jitter = refined_summary.get("jitter")
+        if jitter is not None:
+            total = int(jitter.get("total_frames_evaluated", 0))
+            corrected = int(jitter.get("corrected_frames", 0))
+            report["jitter_correction"] = {
+                "enabled": bool(jitter.get("enabled", True)),
+                "corrected_frames": corrected,
+                "total_frames_evaluated": total,
+                "fraction_corrected": (corrected / total) if total > 0 else 0.0,
+                "max_offset_m": float(jitter.get("max_offset_m", 0.0)),
+                "mean_offset_m": float(jitter.get("mean_offset_m", 0.0)),
+            }
 
     out = output_dir / "quality_report.json"
     out.write_text(json.dumps(report, indent=2))

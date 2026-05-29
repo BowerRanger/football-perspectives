@@ -7,6 +7,7 @@ from pathlib import Path
 
 from src.utils.player_names import (
     display_name_for,
+    load_kit_roles,
     load_player_names,
     safe_asset_name,
 )
@@ -14,6 +15,23 @@ from src.utils.player_names import (
 
 def test_load_missing_file_returns_empty(tmp_path: Path) -> None:
     assert load_player_names(tmp_path) == {}
+
+
+def test_load_kit_roles_parses_and_normalises(tmp_path: Path) -> None:
+    (tmp_path / "players.json").write_text(
+        json.dumps({
+            "P001": {"name": "Onana", "kit_role": "home-gk"},
+            "P002": {"name": "Saka"},          # no role -> absent
+            "P003": "Bellingham",               # string form -> no role
+            "P004": {"name": "X", "kit_role": "striker"},  # invalid -> dropped
+        })
+    )
+    roles = load_kit_roles(tmp_path)
+    assert roles == {"P001": "home_gk"}
+
+
+def test_load_kit_roles_missing_file(tmp_path: Path) -> None:
+    assert load_kit_roles(tmp_path) == {}
 
 
 def test_load_simple_mapping(tmp_path: Path) -> None:

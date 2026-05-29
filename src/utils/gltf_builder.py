@@ -52,6 +52,11 @@ class SceneBundle:
     ball_radius_m: float = 0.11
     player_height_m: float = 1.85
     player_radius_m: float = 0.30
+    # Optional match metadata mirrored into scene_metadata.json so the
+    # viewer can read kit colours, teams, score, and the moment context
+    # without a separate fetch. ``None`` when no match is set on the
+    # shots manifest.
+    match: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -584,4 +589,6 @@ def build_glb(bundle: SceneBundle) -> tuple[bytes, dict]:
             "coordinate_frame": "pitch z-up; x along nearside, y toward far side",
         },
     }
+    if bundle.match is not None:
+        metadata["match"] = bundle.match
     return g.to_glb(), metadata

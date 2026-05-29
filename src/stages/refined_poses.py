@@ -439,6 +439,330 @@ def _smooth_track(
     )
 
 
+def _apply_jitter_correction(
+    tracks: list[SmplWorldTrack],
+    *,
+    fps: float,
+    enabled: bool = True,
+    min_players: int = 4,
+    baseline_window_s: float = 1.0,
+    baseline_floor_m: float = 0.05,
+    tempo_ratio: float = 2.5,
+    max_spread_ratio: float = 0.30,
+) -> tuple[list[SmplWorldTrack], dict]:
+    """Subtract a per-frame cumulative XY offset from every player's
+    ``root_t`` whenever the players' frame-to-frame deltas agree on a
+    common pitch-plane shift much larger than the recent scene tempo.
+
+    Assumes all input ``tracks`` share a single shot timeline. The
+    consensus is computed by walking the union of frame indices and
+    asking, at each frame, what fraction of visible confident players
+    moved in the same XY direction with the same magnitude. If at
+    least ``min_players`` players have a fresh anchor at frame ``f``
+    and ``f-1``, agree (spread ≤ ``max_spread_ratio × |median Δ|``),
+    and the median shift is ≥ ``tempo_ratio`` times the recent
+    baseline (median |Δ| over a ``baseline_window_s`` window, floored
+    at ``baseline_floor_m``), the median Δ is added to the cumulative
+    offset for ``f`` and every later frame. Snap-back jitter cancels
+    naturally — the reverse-direction Δ subtracts the offset back out.
+
+    Returns the input list with new ``SmplWorldTrack`` instances (the
+    schema is frozen so we never mutate in place) plus a stats dict
+    suitable for ``refined_poses_summary.json`` and
+    ``quality_report.json``.
+
+    XY only — ``z`` is owned by the per-player ground-snap pass and
+    is not touched here.
+    """
+    stats: dict = {
+        "corrected_frames": 0,
+        "total_frames_evaluated": 0,
+        "max_offset_m": 0.0,
+        "mean_offset_m": 0.0,
+    }
+    if not enabled or len(tracks) < min_players:
+        return list(tracks), stats
+
+    # Build a frame → {player_idx: (xy, confidence)} index across the
+    # union of frames from every track.
+    frame_data: dict[int, dict[int, tuple[np.ndarray, float]]] = {}
+    for pi, tr in enumerate(tracks):
+        frames = np.asarray(tr.frames, dtype=np.int64)
+        rt_xy = np.asarray(tr.root_t, dtype=np.float64)[:, :2]
+        confs = np.asarray(tr.confidence, dtype=np.float64)
+        for i, f in enumerate(frames):
+            frame_data.setdefault(int(f), {})[pi] = (rt_xy[i], float(confs[i]))
+    if not frame_data:
+        return list(tracks), stats
+
+    shot_frames = sorted(frame_data.keys())
+
+    # Per-frame consensus median Δ across confident players who have
+    # a valid prev-frame sample. Frames with no Δ are simply absent.
+    deltas: dict[int, np.ndarray] = {}
+    spreads: dict[int, float] = {}
+    visible: dict[int, int] = {}
+    for f in shot_frames:
+        prev = frame_data.get(f - 1)
+        if prev is None:
+            continue
+        cur = frame_data[f]
+        ds: list[np.ndarray] = []
+        for pi, (xy, c) in cur.items():
+            prev_sample = prev.get(pi)
+            if prev_sample is None:
+                continue
+            xy_p, c_p = prev_sample
+            if c < _FRESH_ANCHOR_CONF or c_p < _FRESH_ANCHOR_CONF:
+                continue
+            ds.append(xy - xy_p)
+        if not ds:
+            continue
+        D = np.stack(ds)
+        deltas[f] = np.median(D, axis=0)
+        # Pythagorean combination of per-axis std — large when players
+        # disagree on direction, zero when they march in lockstep.
+        spreads[f] = float(np.linalg.norm(np.std(D, axis=0)))
+        visible[f] = D.shape[0]
+
+    if not deltas:
+        return list(tracks), stats
+
+    half_w = max(1, int(round(baseline_window_s * fps / 2.0)))
+    mag_signal = {f: float(np.linalg.norm(d)) for f, d in deltas.items()}
+
+    # Decide per frame which Δ contribute to the cumulative offset.
+    triggers: dict[int, np.ndarray] = {}
+    for f, d in deltas.items():
+        if visible[f] < min_players:
+            continue
+        # Baseline excludes the frame under test so a single huge
+        # spike doesn't inflate its own threshold to the point of
+        # missing the snap-back at f+1.
+        window_mags = [
+            mag_signal[g] for g in mag_signal
+            if abs(g - f) <= half_w and g != f
+        ]
+        baseline = max(
+            float(np.median(window_mags)) if window_mags else 0.0,
+            baseline_floor_m,
+        )
+        mag = float(np.linalg.norm(d))
+        stats["total_frames_evaluated"] += 1
+        if mag < tempo_ratio * baseline:
+            continue
+        if spreads[f] > max_spread_ratio * mag:
+            continue
+        triggers[f] = d
+
+    if not triggers:
+        return list(tracks), stats
+
+    # Build the cumulative offset signal across every shot frame, then
+    # apply it to each player's root_t in place of a copy.
+    cum = np.zeros(2, dtype=np.float64)
+    offset_at: dict[int, np.ndarray] = {}
+    for f in shot_frames:
+        if f in triggers:
+            cum = cum + triggers[f]
+        offset_at[f] = cum.copy()
+
+    new_tracks: list[SmplWorldTrack] = []
+    applied_mags: list[float] = []
+    for tr in tracks:
+        rt = np.asarray(tr.root_t, dtype=np.float32).copy()
+        for i, f in enumerate(tr.frames):
+            off = offset_at.get(int(f))
+            if off is None:
+                continue
+            rt[i, 0] -= float(off[0])
+            rt[i, 1] -= float(off[1])
+        new_tracks.append(SmplWorldTrack(
+            player_id=tr.player_id,
+            frames=tr.frames,
+            betas=tr.betas,
+            thetas=tr.thetas,
+            root_R=tr.root_R,
+            root_t=rt,
+            confidence=tr.confidence,
+            shot_id=tr.shot_id,
+        ))
+
+    nonzero = [float(np.linalg.norm(v)) for v in offset_at.values() if np.any(v)]
+    stats["corrected_frames"] = len(triggers)
+    stats["max_offset_m"] = float(max(nonzero) if nonzero else 0.0)
+    stats["mean_offset_m"] = float(np.mean(nonzero) if nonzero else 0.0)
+    return new_tracks, stats
+
+
+def _apply_residual_consensus_correction(
+    tracks: list[SmplWorldTrack],
+    *,
+    fps: float,
+    enabled: bool = True,
+    savgol_window_s: float = 1.2,
+    savgol_poly: int = 2,
+    min_players: int = 3,
+    min_offset_m: float = 0.02,
+    max_offset_m: float = 2.0,
+    iterations: int = 2,
+) -> tuple[list[SmplWorldTrack], dict]:
+    """Subtract a per-frame XY common-mode offset from every player's
+    ``root_t``. The offset at frame ``f`` is the cross-player median of
+    each visible player's residual against their own heavy per-player
+    Savgol-smoothed baseline.
+
+    This catches the camera-tracking artifact the Δ-based
+    ``_apply_jitter_correction`` cannot see: a sub-second wobble that
+    rides on every player's track. Frame-to-frame deltas are dominated
+    by individual player motion (a sprinter at 7 m/s contributes
+    ~0.3 m/frame Δ at 25 fps), so the Δ-based detector's consensus
+    gate fails on real running scenes. The residual signal sidesteps
+    this — each player's heavy Savgol baseline absorbs their own
+    trajectory, leaving the common-mode wobble in the residual where
+    a per-frame cross-player median isolates it cleanly.
+
+    Assumes all input ``tracks`` share a single shot timeline (callers
+    are expected to group by ``shot_id`` upstream — jitter is a per-
+    camera-frame artifact and must be measured on each shot's native
+    timeline, before sync_map remapping).
+
+    XY only — ``z`` is owned by the per-player ground-snap pass.
+
+    Parameters
+    ----------
+    savgol_window_s:
+        Per-player Savgol window in seconds. Anything shorter than
+        ~0.5 s lets short wobbles leak into the baseline and reduces
+        the recoverable signal. ~1.2 s leaves running velocity
+        unaffected (it's well below the Nyquist of the polynomial)
+        while putting all of the wobble band into the residual.
+    min_players:
+        Minimum confident players contributing to a frame's residual
+        before its median is trusted as the consensus.
+    min_offset_m:
+        Frames whose median residual magnitude falls below this
+        floor are not corrected — keeps the pass from chasing the
+        per-player HMR-noise floor when there's no actual wobble.
+    max_offset_m:
+        Safety clamp; offsets above this are treated as suspect and
+        skipped (prevents a single bad track from yanking everyone).
+    iterations:
+        Number of correction passes. A single Savgol baseline leaves
+        ~30-40 % of a band-limited wobble in the lowpass — iterating
+        cuts that residual geometrically (a second pass strips ~36 %
+        of the remainder, a third another ~36 %). Two passes are
+        usually enough to push residual error below the per-player
+        HMR noise floor.
+    """
+    stats: dict = {
+        "corrected_frames": 0,
+        "total_frames_evaluated": 0,
+        "max_offset_m": 0.0,
+        "mean_offset_m": 0.0,
+        "iterations_run": 0,
+    }
+    if not enabled or len(tracks) < min_players or iterations < 1:
+        return list(tracks), stats
+
+    window = max(3, int(round(savgol_window_s * fps)))
+    if window % 2 == 0:
+        window += 1
+    poly = int(savgol_poly)
+
+    raw_rt = [np.asarray(tr.root_t, dtype=np.float64).copy() for tr in tracks]
+    confs = [np.asarray(tr.confidence, dtype=np.float64) for tr in tracks]
+    frames_lst = [np.asarray(tr.frames, dtype=np.int64) for tr in tracks]
+    cumulative: dict[int, np.ndarray] = {}
+
+    for _it in range(int(iterations)):
+        # Apply the cumulative offset built up so far before re-fitting
+        # the per-player baseline — so the next residual reflects only
+        # the wobble that survived previous passes.
+        by_frame: dict[int, list[np.ndarray]] = {}
+        for rt_raw, conf, frames in zip(raw_rt, confs, frames_lst):
+            n = int(len(frames))
+            if n < poly + 2:
+                continue
+            rt = rt_raw[:, :2].copy()
+            for i, f in enumerate(frames):
+                off = cumulative.get(int(f))
+                if off is not None:
+                    rt[i] -= off
+            base = savgol_axis(rt, window=window, order=poly, axis=0)
+            resid = rt - base
+            for i, f in enumerate(frames):
+                if conf[i] < _FRESH_ANCHOR_CONF:
+                    continue
+                by_frame.setdefault(int(f), []).append(resid[i])
+
+        if not by_frame:
+            break
+
+        any_applied = False
+        for f, contribs in by_frame.items():
+            if _it == 0:
+                stats["total_frames_evaluated"] += 1
+            if len(contribs) < min_players:
+                continue
+            med = np.median(np.stack(contribs), axis=0)
+            mag = float(np.linalg.norm(med))
+            if mag < min_offset_m or mag > max_offset_m:
+                continue
+            prev = cumulative.get(f)
+            cumulative[f] = med if prev is None else prev + med
+            any_applied = True
+
+        stats["iterations_run"] = _it + 1
+        if not any_applied:
+            break
+
+    if not cumulative:
+        return list(tracks), stats
+
+    new_tracks: list[SmplWorldTrack] = []
+    for tr, frames in zip(tracks, frames_lst):
+        rt = np.asarray(tr.root_t, dtype=np.float32).copy()
+        for i, f in enumerate(frames):
+            off = cumulative.get(int(f))
+            if off is None:
+                continue
+            rt[i, 0] -= float(off[0])
+            rt[i, 1] -= float(off[1])
+        new_tracks.append(SmplWorldTrack(
+            player_id=tr.player_id,
+            frames=tr.frames,
+            betas=tr.betas,
+            thetas=tr.thetas,
+            root_R=tr.root_R,
+            root_t=rt,
+            confidence=tr.confidence,
+            shot_id=tr.shot_id,
+        ))
+
+    applied_mags = [float(np.linalg.norm(v)) for v in cumulative.values()]
+    stats["corrected_frames"] = len(cumulative)
+    stats["max_offset_m"] = float(max(applied_mags))
+    stats["mean_offset_m"] = float(np.mean(applied_mags))
+    return new_tracks, stats
+
+
+def _load_clip_fps(output_dir: Path) -> float:
+    """Return the clip FPS from any available camera_track JSON, or
+    25.0 when none has been written yet (e.g. unit-test fixtures)."""
+    candidates: list[Path] = [output_dir / "camera" / "camera_track.json"]
+    candidates.extend(sorted((output_dir / "camera").glob("*_camera_track.json")))
+    for p in candidates:
+        if not p.exists():
+            continue
+        try:
+            from src.schemas.camera_track import CameraTrack
+            return float(CameraTrack.load(p).fps)
+        except Exception:
+            continue
+    return 25.0
+
+
 def _clean_single_track(
     track: SmplWorldTrack,
     *,
@@ -572,6 +896,24 @@ class RefinedPosesStage(BaseStage):
             "thetas_savgol_window": int(cfg.get("smooth_thetas_window", 9)),
             "thetas_savgol_order": int(cfg.get("smooth_thetas_order", 2)),
         }
+        jitter_cfg = (cfg.get("jitter") or {})
+        jitter_kwargs = {
+            "enabled": bool(jitter_cfg.get("enabled", True)),
+            "min_players": int(jitter_cfg.get("min_players", 4)),
+            "baseline_window_s": float(jitter_cfg.get("baseline_window_s", 1.0)),
+            "baseline_floor_m": float(jitter_cfg.get("baseline_floor_m", 0.05)),
+            "tempo_ratio": float(jitter_cfg.get("tempo_ratio", 2.5)),
+            "max_spread_ratio": float(jitter_cfg.get("max_spread_ratio", 0.30)),
+        }
+        residual_kwargs = {
+            "enabled": bool(jitter_cfg.get("residual_pass_enabled", True)),
+            "savgol_window_s": float(jitter_cfg.get("residual_savgol_window_s", 1.2)),
+            "savgol_poly": int(jitter_cfg.get("residual_savgol_poly", 2)),
+            "min_players": int(jitter_cfg.get("residual_min_players", 3)),
+            "min_offset_m": float(jitter_cfg.get("residual_min_offset_m", 0.02)),
+            "max_offset_m": float(jitter_cfg.get("residual_max_offset_m", 2.0)),
+            "iterations": int(jitter_cfg.get("residual_iterations", 2)),
+        }
 
         sync_map = self._load_sync_map()
         per_player = self._gather_contributions(hmr_dir)
@@ -586,23 +928,130 @@ class RefinedPosesStage(BaseStage):
                 "differs from mean"
             )
 
+        # 1. Per-(shot, player) CLEAN (outlier reject + lean + ground
+        # snap + trim). No smoothing yet — the cross-player jitter
+        # pass needs to operate on the raw cleaned signal so any
+        # residual error gets mopped up by the smoother afterwards.
+        cleaned_by_shot: dict[str, list[tuple[str, SmplWorldTrack]]] = {}
+        for pid, contribs in per_player.items():
+            for shot_id, track in contribs:
+                cleaned = _clean_single_track(
+                    track,
+                    lean_correction_factor=lean_factor,
+                    lean_max_correction_deg=lean_max_deg,
+                    ground_snap_target_z=ground_target,
+                    ground_snap_max_distance=ground_max_dist,
+                    smpl_model=smpl_model,
+                    smoothing=None,
+                )
+                cleaned_by_shot.setdefault(shot_id, []).append((pid, cleaned))
+
+        # 2. Per-shot cross-player JITTER pass. Jitter is a camera
+        # frame artifact so consensus must be computed on each shot's
+        # native timeline before any sync_map remapping.
+        fps = _load_clip_fps(self.output_dir)
+        jitter_summary = {
+            "enabled": jitter_kwargs["enabled"],
+            "corrected_frames": 0,
+            "total_frames_evaluated": 0,
+            "max_offset_m": 0.0,
+            "mean_offset_m": 0.0,
+            "shots": [],
+        }
+        for shot_id, items in cleaned_by_shot.items():
+            tracks_only = [tr for _, tr in items]
+            corrected, shot_stats = _apply_jitter_correction(
+                tracks_only, fps=fps, **jitter_kwargs,
+            )
+            cleaned_by_shot[shot_id] = [
+                (pid, ct) for (pid, _), ct in zip(items, corrected)
+            ]
+            shot_stats["shot_id"] = shot_id
+            jitter_summary["shots"].append(shot_stats)
+            jitter_summary["corrected_frames"] += int(shot_stats["corrected_frames"])
+            jitter_summary["total_frames_evaluated"] += int(
+                shot_stats["total_frames_evaluated"]
+            )
+            jitter_summary["max_offset_m"] = float(max(
+                jitter_summary["max_offset_m"], shot_stats["max_offset_m"],
+            ))
+        # Aggregate mean across shots: weighted by per-shot corrected_frames.
+        weighted_sum = 0.0
+        weight = 0
+        for s in jitter_summary["shots"]:
+            n = int(s["corrected_frames"])
+            if n > 0:
+                weighted_sum += float(s["mean_offset_m"]) * n
+                weight += n
+        if weight > 0:
+            jitter_summary["mean_offset_m"] = weighted_sum / weight
+
+        # 2b. Per-shot RESIDUAL-CONSENSUS pass. The Δ-based pass above
+        # catches single-frame spikes but is blind to sustained wobble
+        # because per-player Δ noise dominates the cross-player std
+        # gate on real running scenes. This residual pass takes the
+        # cross-player median residual against a heavy per-player
+        # Savgol baseline as the common-mode camera bias and subtracts
+        # it. Two iterations strip ~85% of a band-limited wobble.
+        residual_summary = {
+            "enabled": residual_kwargs["enabled"],
+            "corrected_frames": 0,
+            "total_frames_evaluated": 0,
+            "max_offset_m": 0.0,
+            "mean_offset_m": 0.0,
+            "shots": [],
+        }
+        for shot_id, items in cleaned_by_shot.items():
+            tracks_only = [tr for _, tr in items]
+            corrected, shot_stats = _apply_residual_consensus_correction(
+                tracks_only, fps=fps, **residual_kwargs,
+            )
+            cleaned_by_shot[shot_id] = [
+                (pid, ct) for (pid, _), ct in zip(items, corrected)
+            ]
+            shot_stats["shot_id"] = shot_id
+            residual_summary["shots"].append(shot_stats)
+            residual_summary["corrected_frames"] += int(shot_stats["corrected_frames"])
+            residual_summary["total_frames_evaluated"] += int(
+                shot_stats["total_frames_evaluated"]
+            )
+            residual_summary["max_offset_m"] = float(max(
+                residual_summary["max_offset_m"], shot_stats["max_offset_m"],
+            ))
+        weighted_sum_r = 0.0
+        weight_r = 0
+        for s in residual_summary["shots"]:
+            n = int(s["corrected_frames"])
+            if n > 0:
+                weighted_sum_r += float(s["mean_offset_m"]) * n
+                weight_r += n
+        if weight_r > 0:
+            residual_summary["mean_offset_m"] = weighted_sum_r / weight_r
+
+        # 3. Per-(shot, player) SMOOTH on the jitter-corrected tracks.
+        # 4. Regroup back into per_player so the assemble step sees the
+        # same shape as the original contribs but with cleaned +
+        # jitter-corrected + smoothed data.
+        prepared_per_player: dict[str, list[tuple[str, SmplWorldTrack]]] = {}
+        for shot_id, items in cleaned_by_shot.items():
+            for pid, tr in items:
+                if int(len(tr.frames)) > 0:
+                    tr = _smooth_track(tr, **smoothing)
+                prepared_per_player.setdefault(pid, []).append((shot_id, tr))
+
         summary: dict = {
             "players_refined": 0,
             "single_shot_players": 0,
             "multi_shot_players": 0,
             "total_frames": 0,
+            "jitter": jitter_summary,
+            "residual_consensus": residual_summary,
         }
 
-        for pid, contribs in sorted(per_player.items()):
-            refined, diag = _refine_player(
-                pid, contribs, sync_map,
-                lean_correction_factor=lean_factor,
-                lean_max_correction_deg=lean_max_deg,
-                ground_snap_target_z=ground_target,
-                ground_snap_max_distance=ground_max_dist,
-                smpl_model=smpl_model,
-                smoothing=smoothing,
-            )
+        # 5. Assemble each player on the reference timeline and save.
+        for pid in sorted(prepared_per_player.keys()):
+            contribs = prepared_per_player[pid]
+            refined, diag = _assemble_player(pid, contribs, sync_map)
             refined.save(out_dir / f"{pid}_refined.npz")
             diag.save(out_dir / f"{pid}_diagnostics.json")
             summary["players_refined"] += 1
@@ -617,8 +1066,11 @@ class RefinedPosesStage(BaseStage):
             json.dumps(summary, indent=2)
         )
         logger.info(
-            "[refined_poses] %d player(s) refined, %d frame(s) total",
+            "[refined_poses] %d player(s) refined, %d frame(s) total, "
+            "%d Δ-jitter / %d residual-consensus frame(s) corrected",
             summary["players_refined"], summary["total_frames"],
+            jitter_summary["corrected_frames"],
+            residual_summary["corrected_frames"],
         )
 
     # ------------------------------------------------------------------
@@ -669,32 +1121,17 @@ def _discover_player_ids(hmr_dir: Path) -> set[str]:
     return out
 
 
-def _refine_player(
+def _assemble_player(
     player_id: str,
     contribs: list[tuple[str, SmplWorldTrack]],
     sync_map: SyncMap,
-    *,
-    lean_correction_factor: float = 0.7,
-    lean_max_correction_deg: float = 30.0,
-    ground_snap_target_z: float = 0.02,
-    ground_snap_max_distance: float = 0.30,
-    smpl_model: dict | None = None,
-    smoothing: dict | None = None,
 ) -> tuple[RefinedPose, RefinedPoseDiagnostics]:
-    """Clean each shot's track, then assemble onto the reference timeline."""
+    """Assemble already-cleaned/jitter-corrected/smoothed per-shot
+    tracks onto the shared reference timeline."""
     cleaned: list[tuple[str, SmplWorldTrack, int]] = []
     for shot_id, track in contribs:
-        cleaned_track = _clean_single_track(
-            track,
-            lean_correction_factor=lean_correction_factor,
-            lean_max_correction_deg=lean_max_correction_deg,
-            ground_snap_target_z=ground_snap_target_z,
-            ground_snap_max_distance=ground_snap_max_distance,
-            smpl_model=smpl_model,
-            smoothing=smoothing,
-        )
         offset = sync_map.offset_for(shot_id) if shot_id else 0
-        cleaned.append((shot_id, cleaned_track, offset))
+        cleaned.append((shot_id, track, offset))
 
     # Single-shot fast path: pass cleaned data through with sync offset.
     if len(cleaned) == 1:

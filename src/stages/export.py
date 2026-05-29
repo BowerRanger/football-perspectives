@@ -39,6 +39,7 @@ from src.schemas.refined_pose import RefinedPose
 from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.sync_map import SyncMap
 from src.schemas.ue_manifest import (
+    SCHEMA_VERSION,
     BallEntry,
     CameraEntry,
     PitchInfo,
@@ -47,7 +48,12 @@ from src.schemas.ue_manifest import (
     WorldBBox,
 )
 from src.utils.gltf_builder import SceneBundle, build_glb
-from src.utils.player_names import display_name_for, load_player_names
+from src.utils.player_names import (
+    display_name_for,
+    load_kit_roles,
+    load_player_names,
+)
+from src.utils.team_roles import derive_kit_role, kits_map
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +167,44 @@ def _per_shot_smpl_tracks(
     return [t for t in tracks if getattr(t, "shot_id", "") == shot_id]
 
 
+def _player_team_class_map(output_dir: Path) -> dict[str, tuple[str, str]]:
+    """Map ``player_id -> (team, class_name)`` from the tracking outputs.
+
+    Reads every ``tracks/*_tracks.json`` (one ``TracksResult`` per shot)
+    and keys by the global ``player_id``. A player can appear in several
+    shots; we prefer the first entry whose team is classified (not
+    ``"unknown"``) so a late unclassified shot doesn't clobber an
+    earlier good label. Returns an empty map when no tracks exist.
+    """
+    from src.schemas.tracks import TracksResult
+
+    tracks_dir = output_dir / "tracks"
+    if not tracks_dir.exists():
+        return {}
+    out: dict[str, tuple[str, str]] = {}
+    for path in sorted(tracks_dir.glob("*_tracks.json")):
+        try:
+            result = TracksResult.load(path)
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            logger.warning("[export] could not read tracks %s: %s", path, exc)
+            continue
+        for track in result.tracks:
+            pid = getattr(track, "player_id", "") or ""
+            if not pid:
+                continue
+            team = getattr(track, "team", "") or ""
+            cls = getattr(track, "class_name", "") or ""
+            existing = out.get(pid)
+            # First write wins, but upgrade an "unknown" team if a later
+            # shot classified the same player.
+            if existing is None or (
+                existing[0].strip().lower() == "unknown"
+                and team.strip().lower() != "unknown"
+            ):
+                out[pid] = (team, cls)
+    return out
+
+
 class ExportStage(BaseStage):
     name = "export"
 
@@ -203,6 +247,8 @@ class ExportStage(BaseStage):
     # ------------------------------------------------------------------
 
     def _export_gltf(self, pitch_cfg: dict, ball_cfg: dict) -> None:
+        from dataclasses import asdict as _asdict
+
         from src.schemas.shots import ShotsManifest
 
         manifest_path = self.output_dir / "shots" / "shots_manifest.json"
@@ -225,10 +271,14 @@ class ExportStage(BaseStage):
                 gltf_dir=gltf_dir,
                 pitch_cfg=pitch_cfg,
                 ball_cfg=ball_cfg,
+                match=None,
             )
             return
 
         manifest = ShotsManifest.load(manifest_path)
+        # Mirrored into every per-shot scene_metadata.json so the viewer
+        # can pick up kit colours / score / venue without a second fetch.
+        match_dict = _asdict(manifest.match) if manifest.match is not None else None
         shot_filter = getattr(self, "shot_filter", None)
         for shot in manifest.shots:
             if shot_filter is not None and shot.id != shot_filter:
@@ -247,6 +297,7 @@ class ExportStage(BaseStage):
                 gltf_dir=gltf_dir,
                 pitch_cfg=pitch_cfg,
                 ball_cfg=ball_cfg,
+                match=match_dict,
             )
 
     def _export_gltf_for_shot(
@@ -257,6 +308,7 @@ class ExportStage(BaseStage):
         gltf_dir: Path,
         pitch_cfg: dict,
         ball_cfg: dict,
+        match: dict | None = None,
     ) -> None:
         camera_track = CameraTrack.load(camera_path)
 
@@ -274,6 +326,7 @@ class ExportStage(BaseStage):
             pitch_length_m=float(pitch_cfg.get("length_m", 105.0)),
             pitch_width_m=float(pitch_cfg.get("width_m", 68.0)),
             ball_radius_m=float(ball_cfg.get("ball_radius_m", 0.11)),
+            match=match,
         )
         glb_bytes, metadata = build_glb(bundle)
 
@@ -348,6 +401,23 @@ class ExportStage(BaseStage):
     # UE manifest
     # ------------------------------------------------------------------
 
+    def _load_match_dict(self) -> dict | None:
+        """Return the ``asdict``-ed match block from shots_manifest, or None.
+
+        Used to source kit colours for the UE manifest. Mirrors the load
+        in ``_export_gltf`` but kept separate so manifest writing works
+        even when the glTF path was skipped.
+        """
+        from dataclasses import asdict as _asdict
+
+        from src.schemas.shots import ShotsManifest
+
+        manifest_path = self.output_dir / "shots" / "shots_manifest.json"
+        if not manifest_path.exists():
+            return None
+        manifest = ShotsManifest.load(manifest_path)
+        return _asdict(manifest.match) if manifest.match is not None else None
+
     def write_ue_manifest(self, clip_name: str) -> None:
         """Write ``output/export/ue_manifest.json`` for UE5 ingest.
 
@@ -370,9 +440,17 @@ class ExportStage(BaseStage):
         all_tracks = _per_shot_smpl_tracks(self.output_dir, shot_id=primary_shot)
 
         name_mapping = load_player_names(self.output_dir)
+        # Kit-role inputs: per-player team/class from the tracking output,
+        # plus optional hand-authored overrides in players.json.
+        team_class = _player_team_class_map(self.output_dir)
+        role_overrides = load_kit_roles(self.output_dir)
         players: list[PlayerEntry] = []
         for track in all_tracks:
             display_name = display_name_for(track.player_id, name_mapping)
+            kit_role = role_overrides.get(track.player_id)
+            if kit_role is None:
+                team, class_name = team_class.get(track.player_id, ("", ""))
+                kit_role = derive_kit_role(team, class_name)
             shot_id = getattr(track, "shot_id", "") or ""
             keyed = f"{shot_id}__{display_name}" if shot_id else display_name
             fbx_rel = f"fbx/{keyed}.fbx"
@@ -406,6 +484,7 @@ class ExportStage(BaseStage):
                         min=(float(mn[0]), float(mn[1]), float(mn[2])),
                         max=(float(mx[0]), float(mx[1]), float(mx[2])),
                     ),
+                    kit_role=kit_role,
                 )
             )
 
@@ -505,7 +584,7 @@ class ExportStage(BaseStage):
 
         pitch_cfg = self.config.get("pitch", {}) or {}
         manifest = UeManifest(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             clip_name=clip_name,
             fps=fps,
             frame_range=clip_range,
@@ -516,6 +595,7 @@ class ExportStage(BaseStage):
             players=players,
             ball=ball_entry,
             camera=camera_entry,
+            kits=kits_map(self._load_match_dict()),
         )
         manifest.save(export_dir / "ue_manifest.json")
         logger.info(

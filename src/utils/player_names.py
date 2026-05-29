@@ -51,6 +51,48 @@ def load_player_names(output_dir: Path) -> dict[str, str]:
     return out
 
 
+def load_kit_roles(output_dir: Path) -> dict[str, str]:
+    """Load per-player kit-role overrides from ``output/players.json``.
+
+    Only the object form carries a role::
+
+        {"P001": {"name": "Onana", "kit_role": "home_gk"}}
+
+    Returns ``{player_id: normalised_role}`` for entries with a valid
+    ``kit_role`` (see ``team_roles.normalise_role``); ids without an
+    override are simply absent so the caller falls back to the derived
+    role. Unknown role strings are dropped with a warning.
+    """
+    from src.utils.team_roles import normalise_role
+
+    path = output_dir / "players.json"
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        logger.warning("[player_names] %s is not valid JSON: %s", path, exc)
+        return {}
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(v, Mapping):
+            continue
+        raw_role = v.get("kit_role") or v.get("role")
+        if raw_role is None:
+            continue
+        role = normalise_role(str(raw_role))
+        if role is None:
+            logger.warning(
+                "[player_names] %s: unrecognised kit_role %r for %s",
+                path, raw_role, k,
+            )
+            continue
+        out[k] = role
+    return out
+
+
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_]+")
 
 

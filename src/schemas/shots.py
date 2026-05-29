@@ -37,11 +37,74 @@ class Shot:
 
 
 @dataclass
+class MomentInfo:
+    minute: int
+    added_time: int = 0
+    event_type: str = "goal"
+    description: str = ""
+
+
+@dataclass
+class KitColors:
+    home_primary: str
+    away_primary: str
+    home_goalkeeper: str = ""
+    away_goalkeeper: str = ""
+    referee: str = "#000000"
+
+
+@dataclass
+class RosterEntry:
+    name: str
+    team: str
+    position: str = ""
+    shirt_number: int | None = None
+
+
+@dataclass
+class MatchInfo:
+    home_team: str
+    away_team: str
+    home_score: int
+    away_score: int
+    venue: str
+    competition: str = ""
+    date: str = ""
+    moment: MomentInfo | None = None
+    kits: KitColors | None = None
+    roster: list[RosterEntry] = field(default_factory=list)
+
+
+def _filter_kwargs(cls: type, data: dict) -> dict:
+    """Drop keys not declared on ``cls`` so unknown fields written by a
+    newer writer don't break the loader."""
+    known = {f.name for f in cls.__dataclass_fields__.values()}
+    return {k: v for k, v in data.items() if k in known}
+
+
+def _load_match(data: dict | None) -> MatchInfo | None:
+    if not data:
+        return None
+    moment_raw = data.get("moment")
+    kits_raw = data.get("kits")
+    roster_raw = data.get("roster") or []
+    moment = MomentInfo(**_filter_kwargs(MomentInfo, moment_raw)) if moment_raw else None
+    kits = KitColors(**_filter_kwargs(KitColors, kits_raw)) if kits_raw else None
+    roster = [RosterEntry(**_filter_kwargs(RosterEntry, e)) for e in roster_raw]
+    match_kwargs = _filter_kwargs(
+        MatchInfo,
+        {k: v for k, v in data.items() if k not in {"moment", "kits", "roster"}},
+    )
+    return MatchInfo(moment=moment, kits=kits, roster=roster, **match_kwargs)
+
+
+@dataclass
 class ShotsManifest:
     source_file: str
     fps: float
     total_frames: int
     shots: list[Shot] = field(default_factory=list)
+    match: MatchInfo | None = None
 
     def save(self, path: Path) -> None:
         path.write_text(json.dumps(asdict(self), indent=2))
@@ -49,17 +112,12 @@ class ShotsManifest:
     @classmethod
     def load(cls, path: Path) -> "ShotsManifest":
         data = json.loads(path.read_text())
-        fields = {
-            "id",
-            "start_frame",
-            "end_frame",
-            "start_time",
-            "end_time",
-            "clip_file",
-            "speed_factor",
-        }
-        shots = [Shot(**{k: v for k, v in s.items() if k in fields}) for s in data.pop("shots")]
-        return cls(shots=shots, **data)
+        shots = [
+            Shot(**_filter_kwargs(Shot, s)) for s in data.pop("shots", [])
+        ]
+        match = _load_match(data.pop("match", None))
+        manifest_kwargs = _filter_kwargs(cls, data)
+        return cls(shots=shots, match=match, **manifest_kwargs)
 
     @classmethod
     def infer_from_clips(

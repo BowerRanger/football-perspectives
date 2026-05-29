@@ -694,7 +694,455 @@ async function fetchJsonOrNull(url) {
 
 // ── Stage renderers ──────────────────────────────────────────────────
 
+// Cache of the latest fetched match metadata, used by the tracking
+// stage's player_name dropdown so it can present a roster of names
+// without re-fetching for every track row.
+let MATCH_INFO_CACHE = null;
+
+async function fetchMatchInfo(force = false) {
+  if (MATCH_INFO_CACHE !== null && !force) return MATCH_INFO_CACHE;
+  const data = await fetchJsonOrNull("/api/match");
+  MATCH_INFO_CACHE = data || null;
+  return MATCH_INFO_CACHE;
+}
+
+// Default kit colours that mirror the viewer's hardcoded TEAM_COLORS,
+// so a fresh form already shows reasonable swatches.
+const DEFAULT_KITS = {
+  home_primary: "#3b82f6",
+  away_primary: "#ef4444",
+  home_goalkeeper: "",
+  away_goalkeeper: "",
+  referee: "#f59e0b",
+};
+
+// Build "YYYY-YY" season options spanning the last ~60 years up to the
+// upcoming season. Football seasons in Europe start in July, so months
+// July onward count toward the season starting that year.
+function _seasonOptions() {
+  const today = new Date();
+  const m = today.getMonth();          // 0-based
+  const y = today.getFullYear();
+  const currentStart = (m >= 6) ? y : y - 1;
+  const out = [];
+  for (let s = currentStart + 1; s >= currentStart - 60; s--) {
+    const e = String((s + 1) % 100).padStart(2, "0");
+    out.push(`${s}-${e}`);
+  }
+  return { options: out, defaultSeason: `${currentStart}-${String((currentStart + 1) % 100).padStart(2, "0")}` };
+}
+
+// Best-effort guess of the season string for an existing ISO match
+// date. Returns "" when the date is missing or malformed.
+function _seasonFromIsoDate(iso) {
+  if (typeof iso !== "string") return "";
+  const m = iso.match(/^(\d{4})-(\d{2})-\d{2}$/);
+  if (!m) return "";
+  const y = Number(m[1]), month = Number(m[2]);
+  const start = month >= 7 ? y : y - 1;
+  return `${start}-${String((start + 1) % 100).padStart(2, "0")}`;
+}
+
+function _labeledInput(label, input, hint) {
+  const wrap = document.createElement("label");
+  wrap.style.cssText = "display:flex;flex-direction:column;gap:4px;font-size:11px;color:#94a3b8;";
+  const lbl = document.createElement("span");
+  lbl.textContent = label;
+  wrap.appendChild(lbl);
+  wrap.appendChild(input);
+  if (hint) {
+    const h = document.createElement("span");
+    h.textContent = hint;
+    h.style.cssText = "font-size:10px;color:#475569;";
+    wrap.appendChild(h);
+  }
+  return wrap;
+}
+
+function _styledInput(type, value, placeholder) {
+  const i = document.createElement("input");
+  i.type = type;
+  if (value != null) i.value = value;
+  if (placeholder) i.placeholder = placeholder;
+  i.style.cssText = "padding:6px 8px;border-radius:4px;border:1px solid #2d3148;background:#0a0c12;color:#e2e8f0;font-size:12px;";
+  return i;
+}
+
+function _styledTextarea(value, placeholder) {
+  const t = document.createElement("textarea");
+  t.value = value || "";
+  if (placeholder) t.placeholder = placeholder;
+  t.style.cssText = "padding:6px 8px;border-radius:4px;border:1px solid #2d3148;background:#0a0c12;color:#e2e8f0;font-size:12px;min-height:48px;resize:vertical;";
+  return t;
+}
+
+function _renderRosterColumn(teamLabel, teamCode, entries) {
+  const col = document.createElement("div");
+  col.style.cssText = "flex:1;display:flex;flex-direction:column;gap:6px;";
+  const header = document.createElement("div");
+  header.style.cssText = "font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em;";
+  header.textContent = `${teamLabel} (Team ${teamCode})`;
+  col.appendChild(header);
+
+  const rowsHost = document.createElement("div");
+  rowsHost.style.cssText = "display:flex;flex-direction:column;gap:4px;";
+  col.appendChild(rowsHost);
+
+  function addRow(entry) {
+    const row = document.createElement("div");
+    row.dataset.team = teamCode;
+    row.style.cssText = "display:flex;gap:4px;align-items:center;";
+    const name = _styledInput("text", entry?.name || "", "Name");
+    name.dataset.field = "name";
+    name.style.flex = "2";
+    const position = _styledInput("text", entry?.position || "", "Pos");
+    position.dataset.field = "position";
+    position.style.flex = "1";
+    position.style.maxWidth = "60px";
+    const shirt = _styledInput("number", entry?.shirt_number ?? "", "#");
+    shirt.dataset.field = "shirt_number";
+    shirt.style.maxWidth = "56px";
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "btn btn-secondary";
+    del.style.cssText += ";padding:4px 8px;font-size:11px;";
+    del.textContent = "×";
+    del.addEventListener("click", () => row.remove());
+    row.appendChild(name);
+    row.appendChild(position);
+    row.appendChild(shirt);
+    row.appendChild(del);
+    rowsHost.appendChild(row);
+  }
+
+  (entries || []).forEach(addRow);
+
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "btn btn-secondary";
+  add.style.cssText += ";font-size:11px;padding:4px 10px;align-self:flex-start;";
+  add.textContent = `+ Add ${teamLabel}`;
+  add.addEventListener("click", () => addRow());
+  col.appendChild(add);
+
+  col.dataset.team = teamCode;
+  col.__rowsHost = rowsHost;
+  return col;
+}
+
+function _collectRoster(col) {
+  const out = [];
+  for (const row of col.__rowsHost.querySelectorAll("[data-team]")) {
+    const name = row.querySelector('input[data-field="name"]').value.trim();
+    if (!name) continue;
+    const position = row.querySelector('input[data-field="position"]').value.trim();
+    const shirtRaw = row.querySelector('input[data-field="shirt_number"]').value.trim();
+    out.push({
+      name,
+      team: row.dataset.team,
+      position,
+      shirt_number: shirtRaw === "" ? null : Number(shirtRaw),
+    });
+  }
+  return out;
+}
+
+async function renderMatchInfoForm(panel) {
+  const existing = await fetchMatchInfo(true);
+  const { wrap, body } = makePanel("Match Info");
+  body.style.padding = "16px";
+  body.style.display = "flex";
+  body.style.flexDirection = "column";
+  body.style.gap = "14px";
+
+  // ── Wikidata lookup row ──────────────────────────────────────────
+  const lookupRow = document.createElement("div");
+  lookupRow.style.cssText = "display:flex;gap:8px;align-items:end;flex-wrap:wrap;padding:8px;background:#0f1320;border-radius:4px;";
+  const { options: seasonOpts, defaultSeason } = _seasonOptions();
+  const lookupSeason = document.createElement("select");
+  lookupSeason.style.cssText = "padding:6px 8px;border-radius:4px;border:1px solid #2d3148;background:#0a0c12;color:#e2e8f0;font-size:12px;min-width:110px;";
+  for (const s of seasonOpts) {
+    const opt = document.createElement("option");
+    opt.value = s; opt.textContent = s;
+    lookupSeason.appendChild(opt);
+  }
+  const existingSeason = _seasonFromIsoDate(existing?.date) || defaultSeason;
+  if (seasonOpts.includes(existingSeason)) lookupSeason.value = existingSeason;
+  const lookupHome = _styledInput("text", existing?.home_team || "", "Home team");
+  const lookupAway = _styledInput("text", existing?.away_team || "", "Away team");
+  const lookupBtn = document.createElement("button");
+  lookupBtn.type = "button";
+  lookupBtn.className = "btn btn-secondary";
+  lookupBtn.textContent = "Lookup (football-data.org)";
+  lookupBtn.title = "Pulls match + squad from football-data.org and kit colours from Wikidata. Requires FOOTBALL_DATA_ORG_API_KEY env var on the server.";
+  const lookupStatus = document.createElement("span");
+  lookupStatus.style.cssText = "font-size:11px;color:#94a3b8;flex-basis:100%;";
+  lookupRow.appendChild(_labeledInput("Season", lookupSeason));
+  lookupRow.appendChild(_labeledInput("Home team", lookupHome));
+  lookupRow.appendChild(_labeledInput("Away team", lookupAway));
+  lookupRow.appendChild(lookupBtn);
+  lookupRow.appendChild(lookupStatus);
+  body.appendChild(lookupRow);
+
+  // ── Match fields ─────────────────────────────────────────────────
+  const matchGrid = document.createElement("div");
+  matchGrid.style.cssText = "display:grid;grid-template-columns:repeat(4,1fr);gap:10px;";
+  const homeTeam = _styledInput("text", existing?.home_team || "");
+  const awayTeam = _styledInput("text", existing?.away_team || "");
+  const homeScore = _styledInput("number", existing?.home_score ?? 0);
+  const awayScore = _styledInput("number", existing?.away_score ?? 0);
+  const venue = _styledInput("text", existing?.venue || "");
+  const date = _styledInput("date", existing?.date || "");
+  const competition = _styledInput("text", existing?.competition || "");
+  matchGrid.appendChild(_labeledInput("Home team", homeTeam));
+  matchGrid.appendChild(_labeledInput("Away team", awayTeam));
+  matchGrid.appendChild(_labeledInput("Home score", homeScore));
+  matchGrid.appendChild(_labeledInput("Away score", awayScore));
+  matchGrid.appendChild(_labeledInput("Venue", venue));
+  matchGrid.appendChild(_labeledInput("Date", date));
+  matchGrid.appendChild(_labeledInput("Competition", competition));
+  body.appendChild(matchGrid);
+
+  // ── Moment ──────────────────────────────────────────────────────
+  const momentTitle = document.createElement("div");
+  momentTitle.style.cssText = "font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.06em;";
+  momentTitle.textContent = "Moment";
+  body.appendChild(momentTitle);
+  const momentGrid = document.createElement("div");
+  momentGrid.style.cssText = "display:grid;grid-template-columns:repeat(4,1fr);gap:10px;";
+  const momentMinute = _styledInput("number", existing?.moment?.minute ?? "", "1-120");
+  momentMinute.min = "0"; momentMinute.max = "130";
+  const momentAdded = _styledInput("number", existing?.moment?.added_time ?? 0);
+  momentAdded.min = "0"; momentAdded.max = "20";
+  const momentEvent = document.createElement("select");
+  momentEvent.style.cssText = "padding:6px 8px;border-radius:4px;border:1px solid #2d3148;background:#0a0c12;color:#e2e8f0;font-size:12px;";
+  const optGoal = document.createElement("option");
+  optGoal.value = "goal"; optGoal.textContent = "goal";
+  momentEvent.appendChild(optGoal);
+  momentEvent.value = existing?.moment?.event_type || "goal";
+  momentEvent.disabled = true;
+  momentEvent.title = "Only goals are supported in v1; more event types coming.";
+  const momentDesc = _styledTextarea(existing?.moment?.description || "", "e.g. Salah header from corner");
+  momentGrid.appendChild(_labeledInput("Minute", momentMinute));
+  momentGrid.appendChild(_labeledInput("Added time", momentAdded));
+  momentGrid.appendChild(_labeledInput("Event", momentEvent));
+  body.appendChild(momentGrid);
+  body.appendChild(_labeledInput("Description", momentDesc));
+
+  // ── Kits ────────────────────────────────────────────────────────
+  const kitsTitle = document.createElement("div");
+  kitsTitle.style.cssText = "font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.06em;";
+  kitsTitle.textContent = "Kits";
+  body.appendChild(kitsTitle);
+  const kitsRow = document.createElement("div");
+  kitsRow.style.cssText = "display:grid;grid-template-columns:repeat(5,1fr);gap:10px;";
+  const kits = existing?.kits || DEFAULT_KITS;
+  const kitHome = _styledInput("color", kits.home_primary || DEFAULT_KITS.home_primary);
+  const kitAway = _styledInput("color", kits.away_primary || DEFAULT_KITS.away_primary);
+  const kitHomeGK = _styledInput("color", kits.home_goalkeeper || "#000000");
+  const kitAwayGK = _styledInput("color", kits.away_goalkeeper || "#000000");
+  const kitRef = _styledInput("color", kits.referee || DEFAULT_KITS.referee);
+  kitsRow.appendChild(_labeledInput("Home primary", kitHome));
+  kitsRow.appendChild(_labeledInput("Away primary", kitAway));
+  kitsRow.appendChild(_labeledInput("Home GK", kitHomeGK));
+  kitsRow.appendChild(_labeledInput("Away GK", kitAwayGK));
+  kitsRow.appendChild(_labeledInput("Referee", kitRef));
+  body.appendChild(kitsRow);
+
+  // ── Roster ──────────────────────────────────────────────────────
+  const rosterTitle = document.createElement("div");
+  rosterTitle.style.cssText = "font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.06em;";
+  rosterTitle.textContent = "Roster (players on the pitch)";
+  body.appendChild(rosterTitle);
+  const rosterRow = document.createElement("div");
+  rosterRow.style.cssText = "display:flex;gap:16px;";
+  const homeEntries = (existing?.roster || []).filter((r) => r.team === "A");
+  const awayEntries = (existing?.roster || []).filter((r) => r.team === "B");
+  const homeCol = _renderRosterColumn("Home", "A", homeEntries);
+  const awayCol = _renderRosterColumn("Away", "B", awayEntries);
+  rosterRow.appendChild(homeCol);
+  rosterRow.appendChild(awayCol);
+  body.appendChild(rosterRow);
+
+  // ── Save / status bar ───────────────────────────────────────────
+  const actionsRow = document.createElement("div");
+  actionsRow.style.cssText = "display:flex;gap:8px;align-items:center;";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "btn btn-primary";
+  saveBtn.textContent = "Save Match Info";
+  const saveStatus = document.createElement("span");
+  saveStatus.style.cssText = "font-size:11px;color:#94a3b8;";
+  actionsRow.appendChild(saveBtn);
+  actionsRow.appendChild(saveStatus);
+  body.appendChild(actionsRow);
+
+  function applyCandidateToForm(cand, missingNote) {
+    const m = cand.match;
+    homeTeam.value = m.home_team || homeTeam.value;
+    awayTeam.value = m.away_team || awayTeam.value;
+    homeScore.value = m.home_score ?? homeScore.value;
+    awayScore.value = m.away_score ?? awayScore.value;
+    venue.value = m.venue || "";
+    date.value = m.date || date.value;
+    competition.value = m.competition || "";
+    if (m.kits) {
+      if (m.kits.home_primary) kitHome.value = m.kits.home_primary;
+      if (m.kits.away_primary) kitAway.value = m.kits.away_primary;
+    }
+    if (Array.isArray(m.roster)) {
+      // Wipe existing roster rows, repopulate.
+      homeCol.__rowsHost.innerHTML = "";
+      awayCol.__rowsHost.innerHTML = "";
+      // Re-render via the same helper by appending entries.
+      const repop = (col, code, list) => {
+        const fresh = _renderRosterColumn(code === "A" ? "Home" : "Away", code, list);
+        col.__rowsHost.replaceWith(fresh.__rowsHost);
+        col.__rowsHost = fresh.__rowsHost;
+      };
+      repop(homeCol, "A", m.roster.filter((r) => r.team === "A"));
+      repop(awayCol, "B", m.roster.filter((r) => r.team === "B"));
+    }
+    const missing = ["score", "venue", "competition", "kits", "roster"]
+      .filter((f) => !(cand.filled_fields || []).includes(f));
+    if (missing.length) {
+      lookupStatus.style.color = "#f59e0b";
+      lookupStatus.textContent = `Filled ${cand.filled_fields.join(", ") || "nothing"} — not found: ${missing.join(", ")}. Fill the rest by hand.`;
+    } else {
+      lookupStatus.style.color = "#4ade80";
+      lookupStatus.textContent = "All fields filled from Wikidata.";
+    }
+  }
+
+  lookupBtn.addEventListener("click", async () => {
+    const payload = {
+      season: lookupSeason.value,
+      home_team: lookupHome.value.trim(),
+      away_team: lookupAway.value.trim(),
+      provider: "football-data",
+    };
+    if (!payload.season || !payload.home_team || !payload.away_team) {
+      lookupStatus.style.color = "#f87171";
+      lookupStatus.textContent = "Lookup needs season, home team, and away team.";
+      return;
+    }
+    lookupBtn.disabled = true;
+    lookupStatus.style.color = "#94a3b8";
+    lookupStatus.textContent = "Querying Wikidata…";
+    try {
+      const res = await fetch("/api/match/lookup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const detail = (await res.json().catch(() => ({}))).detail || res.statusText;
+        lookupStatus.style.color = "#f87171";
+        lookupStatus.textContent = `Lookup failed: ${detail}`;
+        return;
+      }
+      const cands = await res.json();
+      if (!cands || cands.length === 0) {
+        lookupStatus.style.color = "#f59e0b";
+        lookupStatus.textContent = "No matches found — fill in manually.";
+        return;
+      }
+      if (cands.length === 1) {
+        applyCandidateToForm(cands[0]);
+        return;
+      }
+      // Render candidate picker.
+      lookupStatus.style.color = "#94a3b8";
+      lookupStatus.textContent = `Found ${cands.length} candidates:`;
+      const picker = document.createElement("div");
+      picker.style.cssText = "display:flex;flex-direction:column;gap:4px;margin-top:6px;width:100%;";
+      cands.forEach((cand) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn btn-secondary";
+        btn.style.cssText += ";font-size:11px;text-align:left;";
+        const m = cand.match;
+        btn.textContent = `${m.date || "?"} · ${m.competition || "?"} · ${m.venue || "?"}`;
+        btn.addEventListener("click", () => {
+          picker.remove();
+          applyCandidateToForm(cand);
+        });
+        picker.appendChild(btn);
+      });
+      lookupStatus.appendChild(picker);
+    } catch (err) {
+      lookupStatus.style.color = "#f87171";
+      lookupStatus.textContent = `Lookup failed: ${err.message || err}`;
+    } finally {
+      lookupBtn.disabled = false;
+    }
+  });
+
+  saveBtn.addEventListener("click", async () => {
+    const minuteRaw = momentMinute.value.trim();
+    const moment = (minuteRaw === "") ? null : {
+      minute: Number(minuteRaw),
+      added_time: Number(momentAdded.value || 0),
+      event_type: momentEvent.value || "goal",
+      description: momentDesc.value || "",
+    };
+    const payload = {
+      home_team: homeTeam.value.trim(),
+      away_team: awayTeam.value.trim(),
+      home_score: Number(homeScore.value || 0),
+      away_score: Number(awayScore.value || 0),
+      venue: venue.value.trim(),
+      competition: competition.value.trim(),
+      date: date.value,
+      moment,
+      kits: {
+        home_primary: kitHome.value,
+        away_primary: kitAway.value,
+        home_goalkeeper: kitHomeGK.value,
+        away_goalkeeper: kitAwayGK.value,
+        referee: kitRef.value,
+      },
+      roster: [..._collectRoster(homeCol), ..._collectRoster(awayCol)],
+    };
+    if (!payload.home_team || !payload.away_team || !payload.venue) {
+      saveStatus.style.color = "#f87171";
+      saveStatus.textContent = "Home team, away team, and venue are required.";
+      return;
+    }
+    saveBtn.disabled = true;
+    saveStatus.style.color = "#94a3b8";
+    saveStatus.textContent = "Saving…";
+    try {
+      const res = await fetch("/api/match", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const detail = (await res.json().catch(() => ({}))).detail || res.statusText;
+        saveStatus.style.color = "#f87171";
+        saveStatus.textContent = `Save failed: ${detail}`;
+        return;
+      }
+      saveStatus.style.color = "#4ade80";
+      saveStatus.textContent = "Saved.";
+      // Refresh the cached match info so the tracking dropdown picks up
+      // the new roster on next render.
+      await fetchMatchInfo(true);
+    } catch (err) {
+      saveStatus.style.color = "#f87171";
+      saveStatus.textContent = `Save failed: ${err.message || err}`;
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+
+  panel.appendChild(wrap);
+}
+
 async function renderPrepareShots(panel) {
+  await renderMatchInfoForm(panel);
+
   const data = await fetchJsonOrNull("/api/output/shots");
   const shots = (data && data.shots) || [];
 
@@ -1638,6 +2086,31 @@ async function buildTrackEditor(container, shotId, preview) {
   rebuildDatalist(datalist, allNames);
   container.appendChild(datalist);
 
+  // Per-team datalists populated from the match roster (if one is set).
+  // Lets team A / team B rows narrow their autocomplete to the 11 (or
+  // however many) names on the pitch for that side, while
+  // referee / unknown rows keep the all-names datalist.
+  const match = await fetchMatchInfo();
+  const rosterA = (match && match.roster) ? match.roster.filter((r) => r.team === "A").map((r) => r.name) : [];
+  const rosterB = (match && match.roster) ? match.roster.filter((r) => r.team === "B").map((r) => r.name) : [];
+  const teamAListId = `player-names-${shotId}-A`;
+  const teamBListId = `player-names-${shotId}-B`;
+  const teamADatalist = document.createElement("datalist");
+  teamADatalist.id = teamAListId;
+  rebuildDatalist(teamADatalist, new Set([...rosterA, ...allNames]));
+  container.appendChild(teamADatalist);
+  const teamBDatalist = document.createElement("datalist");
+  teamBDatalist.id = teamBListId;
+  rebuildDatalist(teamBDatalist, new Set([...rosterB, ...allNames]));
+  container.appendChild(teamBDatalist);
+
+  function _datalistForTeam(team) {
+    if (rosterA.length === 0 && rosterB.length === 0) return datalistId;
+    if (team === "A") return teamAListId;
+    if (team === "B") return teamBListId;
+    return datalistId;
+  }
+
   // ── Group tracks by player_id (fall back to track_id when empty) ──
   // hmr_world groups by the same key, so the visible row collapse mirrors
   // what eventually goes into GVHMR: one row = one player.
@@ -1758,12 +2231,19 @@ async function buildTrackEditor(container, shotId, preview) {
       item.appendChild(countBadge);
     }
 
+    // Resolve teamLabel up-front so the datalist choice can use it.
+    // Mirrors the badge logic below; computed early so the input can
+    // bind to the right (per-team) datalist.
+    const _teamCounts = {};
+    for (const t of g.tracks) _teamCounts[t.team || "unknown"] = (_teamCounts[t.team || "unknown"] || 0) + 1;
+    const _teamLabel = Object.entries(_teamCounts).sort((a, b) => b[1] - a[1])[0][0];
+
     // Name input — applies to every member track
     const nameInput = document.createElement("input");
     nameInput.type = "text";
     nameInput.value = g.name || "";
     nameInput.placeholder = "Name…";
-    nameInput.setAttribute("list", datalistId);
+    nameInput.setAttribute("list", _datalistForTeam(_teamLabel));
     nameInput.style.cssText = "flex:1;min-width:0;background:#0f1117;color:#e2e8f0;border:1px solid #334155;padding:3px 6px;border-radius:3px;font-size:12px;";
     // Light up this row's bbox in orange while its name field has
     // focus, so the operator can see which player on the pitch they

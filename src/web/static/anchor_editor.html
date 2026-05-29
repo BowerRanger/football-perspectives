@@ -1078,6 +1078,23 @@ els.overlay.addEventListener("click", async (ev) => {
   renderAnchorList();
 });
 
+// Right-click on the video to drop the current frame's anchor — mirrors
+// ball_anchor_editor.html's contextmenu handler. preventDefault stops the
+// browser's native menu so the gesture is purely destructive. The
+// per-frame anchor here covers many points + lines, so we delete the
+// whole anchor at state.frame regardless of cursor position within the
+// overlay; the ball editor's proximity check is specific to one-point
+// anchors and doesn't map to this case.
+els.overlay.addEventListener("contextmenu", (ev) => {
+  ev.preventDefault();
+  const f = state.frame;
+  if (deleteAnchorAt(f)) {
+    setStatus(`Deleted anchor at frame ${f}`, "#fca5a5");
+  } else {
+    setStatus(`No anchor at frame ${f} to delete`, "#94a3b8");
+  }
+});
+
 if (els.snapToggle) {
   els.snapToggle.addEventListener("change", (ev) => {
     state.snapEnabled = !!ev.target.checked;
@@ -1092,6 +1109,20 @@ els.addAnchorBtn.addEventListener("click", () => {
 });
 
 // ── Anchor list ─────────────────────────────────────────────────────
+// Remove the anchor at ``frame`` from in-memory state. Shared between the
+// per-row "×" button in the anchor list and the right-click handler on the
+// video overlay (mirrors ball_anchor_editor.html's contextmenu behaviour).
+// Returns true when an anchor existed and was deleted, false otherwise.
+// Caller is responsible for surfacing user-facing status; the save button
+// persists the change like any other edit.
+function deleteAnchorAt(frame) {
+  if (!state.anchors.has(frame)) return false;
+  state.anchors.delete(frame);
+  renderAnchorList();
+  redrawOverlay();
+  return true;
+}
+
 function renderAnchorList() {
   els.anchorList.innerHTML = "";
   const frames = [...state.anchors.keys()].sort((a, b) => a - b);
@@ -1113,9 +1144,7 @@ function renderAnchorList() {
     `;
     row.addEventListener("click", (ev) => {
       if (ev.target.classList.contains("del-btn")) {
-        state.anchors.delete(f);
-        renderAnchorList();
-        redrawOverlay();
+        deleteAnchorAt(f);
         return;
       }
       seekToFrame(f);

@@ -394,6 +394,7 @@ class ExportStage(BaseStage):
         match: dict | None = None,
     ) -> None:
         camera_track = CameraTrack.load(camera_path)
+        self._generate_virtual_cameras(shot_id=shot_id)
 
         # Per-player SMPL tracks for this shot. Pulls from the fused
         # refined_poses output when present (default), with a fallback to
@@ -665,6 +666,37 @@ class ExportStage(BaseStage):
                     track_json=camera_track_rel,
                 )
 
+        # Named-cameras list: broadcast first, then per-rig virtual cameras
+        # generated for the primary shot.
+        named_cameras: list[NamedCameraEntry] = []
+        if camera_entry is not None:
+            named_cameras.append(NamedCameraEntry(
+                name="broadcast",
+                fbx=camera_entry.fbx,
+                image_size=camera_entry.image_size,
+                frame_range=camera_entry.frame_range,
+                track_json=camera_entry.track_json,
+            ))
+        cam_prefix = f"{primary_shot}_" if primary_shot else ""
+        for cam_path in sorted(
+            (self.output_dir / "camera").glob(f"{cam_prefix}*_camera_track.json")
+        ):
+            stem = cam_path.stem[: -len("_camera_track")]
+            rig_name = stem[len(cam_prefix):] if cam_prefix else stem
+            if rig_name in ("camera", ""):  # the broadcast track itself
+                continue
+            cam_meta_v = json.loads(cam_path.read_text())
+            v_frames = cam_meta_v.get("frames", [])
+            if not v_frames:
+                continue
+            named_cameras.append(NamedCameraEntry(
+                name=rig_name,
+                fbx="",
+                image_size=tuple(cam_meta_v.get("image_size", [1920, 1080])),
+                frame_range=(int(v_frames[0]["frame"]), int(v_frames[-1]["frame"])),
+                track_json=f"camera/{cam_path.name}",
+            ))
+
         pitch_cfg = self.config.get("pitch", {}) or {}
         manifest = UeManifest(
             schema_version=SCHEMA_VERSION,
@@ -678,6 +710,7 @@ class ExportStage(BaseStage):
             players=players,
             ball=ball_entry,
             camera=camera_entry,
+            cameras=named_cameras,
             kits=kits_map(self._load_match_dict()),
         )
         manifest.save(export_dir / "ue_manifest.json")

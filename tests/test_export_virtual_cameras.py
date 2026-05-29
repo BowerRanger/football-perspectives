@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -78,3 +79,35 @@ def test_generate_virtual_cameras_skips_unknown_player(tmp_path: Path) -> None:
         out / "export" / "shot_01_camera_selection.json")
     stage = ExportStage(output_dir=out, config={"export": {"virtual_cameras": {}}})
     assert stage._generate_virtual_cameras(shot_id="shot_01") == []
+
+
+@pytest.mark.unit
+def test_write_ue_manifest_includes_virtual_cameras(tmp_path: Path) -> None:
+    out = tmp_path
+    (out / "camera").mkdir(parents=True)
+    (out / "hmr_world").mkdir(parents=True)
+    (out / "export" / "fbx").mkdir(parents=True)
+    _write_broadcast_camera(out / "camera" / "shot_01_camera_track.json")
+    _write_player(out / "hmr_world" / "P003_smpl_world.npz")
+    (out / "export" / "fbx" / "shot_01__P003.fbx").write_bytes(b"x")  # player fbx so manifest writes
+    CameraSelection(shot_id="shot_01",
+                    selections=(RigSelection("P003", ("pov",)),)).save(
+        out / "export" / "shot_01_camera_selection.json")
+
+    stage = ExportStage(output_dir=out, config={"export": {"virtual_cameras": {}},
+                                                 "pitch": {"length_m": 105.0, "width_m": 68.0}})
+    stage._generate_virtual_cameras(shot_id="shot_01")
+    (out / "shots").mkdir()
+    (out / "shots" / "shots_manifest.json").write_text(json.dumps(
+        {"source_file": "shot_01.mp4", "fps": 30.0, "total_frames": 3,
+         "shots": [{"id": "shot_01", "clip_file": "shot_01.mp4",
+                    "start_frame": 0, "end_frame": 2,
+                    "start_time": 0.0, "end_time": 0.1}],
+         "match": None}))
+    stage.write_ue_manifest("shot_01")
+
+    from src.schemas.ue_manifest import UeManifest
+    m = UeManifest.load(out / "export" / "ue_manifest.json")
+    names = {c.name for c in m.cameras}
+    assert "broadcast" in names
+    assert "P003_pov" in names

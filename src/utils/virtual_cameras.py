@@ -13,6 +13,7 @@ import math
 import numpy as np
 
 WORLD_UP = np.array([0.0, 0.0, 1.0])
+WORLD_UP.flags.writeable = False
 
 
 def _normalize(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
@@ -23,6 +24,8 @@ def _normalize(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
 
 def intrinsics_from_fov(fov_deg: float, image_size: tuple[int, int]) -> list[list[float]]:
     """3x3 K from a horizontal field of view. Principal point centred."""
+    if not (0.0 < fov_deg < 180.0):
+        raise ValueError(f"fov_deg must be in (0, 180), got {fov_deg}")
     w, h = int(image_size[0]), int(image_size[1])
     f = (w / 2.0) / math.tan(math.radians(fov_deg) / 2.0)
     return [[f, 0.0, w / 2.0], [0.0, f, h / 2.0], [0.0, 0.0, 1.0]]
@@ -39,7 +42,12 @@ def look_at_view(
     (+Y), forward (+Z). ``t = -R @ center``.
     """
     center = np.asarray(center, dtype=np.float64).reshape(3)
-    z = _normalize(np.asarray(target, dtype=np.float64).reshape(3) - center)
+    target = np.asarray(target, dtype=np.float64).reshape(3)
+    if float(np.linalg.norm(target - center)) < 1e-9:
+        raise ValueError(
+            f"look_at_view: center and target are coincident (center={center}, target={target})"
+        )
+    z = _normalize(target - center)
     up = np.asarray(up, dtype=np.float64).reshape(3)
     x = np.cross(z, up)
     if float(np.linalg.norm(x)) < 1e-9:

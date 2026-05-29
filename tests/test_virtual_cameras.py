@@ -38,3 +38,19 @@ def test_look_at_view_handles_target_along_world_up() -> None:
     R, _ = look_at_view(center, target)
     np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-9)
     assert np.isclose(np.linalg.det(R), 1.0)
+    np.testing.assert_allclose(R[2], [0.0, 0.0, 1.0], atol=1e-9)
+
+
+def test_intrinsics_from_fov_non_square_60deg() -> None:
+    import math
+    K = intrinsics_from_fov(60.0, (1280, 720))
+    expected_fx = (1280 / 2.0) / math.tan(math.radians(60.0) / 2.0)
+    assert np.isclose(K[0][0], expected_fx)
+    assert np.isclose(K[0][2], 640.0)
+    assert np.isclose(K[1][2], 360.0)
+
+
+def test_look_at_view_raises_on_coincident_center_target() -> None:
+    import pytest
+    with pytest.raises(ValueError):
+        look_at_view(np.array([1.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]))

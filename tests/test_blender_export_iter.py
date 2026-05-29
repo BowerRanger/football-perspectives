@@ -17,6 +17,7 @@ needing Blender.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,7 @@ _spec = importlib.util.spec_from_file_location("bef_iter", _SCRIPT_PATH)
 _bef = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_bef)
 iter_player_fbx_entries = _bef.iter_player_fbx_entries
+_load_shot_ids = _bef._load_shot_ids
 
 
 def _write_refined(
@@ -188,3 +190,27 @@ def test_iter_emits_one_entry_per_contributing_shot(tmp_path: Path) -> None:
     assert [e["shot_id"] for e in entries] == ["A", "B"]
     np.testing.assert_array_equal(entries[0]["frames"], [0, 1, 2, 3])
     np.testing.assert_array_equal(entries[1]["frames"], [10, 11, 12, 13])
+
+
+@pytest.mark.unit
+def test_load_shot_ids_returns_ids_from_manifest(tmp_path: Path) -> None:
+    """_load_shot_ids reads shot ids from shots_manifest.json."""
+    (tmp_path / "shots").mkdir(parents=True)
+    (tmp_path / "shots" / "shots_manifest.json").write_text(
+        json.dumps({
+            "shots": [
+                {"id": "shot_01", "clip_file": "shot_01.mp4",
+                 "start_frame": 0, "end_frame": 10, "start_time": 0.0, "end_time": 0.4},
+                {"id": "shot_02", "clip_file": "shot_02.mp4",
+                 "start_frame": 0, "end_frame": 10, "start_time": 0.0, "end_time": 0.4},
+            ],
+            "source_file": "x.mp4", "fps": 25.0, "total_frames": 20, "match": None,
+        })
+    )
+    assert _load_shot_ids(tmp_path) == {"shot_01", "shot_02"}
+
+
+@pytest.mark.unit
+def test_load_shot_ids_returns_empty_set_without_manifest(tmp_path: Path) -> None:
+    """_load_shot_ids returns an empty set when no shots_manifest.json exists."""
+    assert _load_shot_ids(tmp_path) == set()

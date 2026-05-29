@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from src.utils.virtual_cameras import intrinsics_from_fov, look_at_view
 
@@ -51,7 +52,6 @@ def test_intrinsics_from_fov_non_square_60deg() -> None:
 
 
 def test_look_at_view_raises_on_coincident_center_target() -> None:
-    import pytest
     with pytest.raises(ValueError):
         look_at_view(np.array([1.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]))
 
@@ -133,6 +133,37 @@ def test_build_ots_track_without_ball_uses_forward_fallback() -> None:
     assert len(cam.frames) == 3
     R = np.array(cam.frames[0].R)
     np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-6)
+
+
+@pytest.mark.unit
+def test_fk_fallback_halves_confidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Frames where FK raises should get 0.5× confidence; normal FK frames keep full confidence."""
+    import src.utils.virtual_cameras as _vcam
+
+    call_count = 0
+
+    def _patched_joint_pose(thetas, root_R, root_t, joint_idx):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:  # Make frame index 1 (second call) fail FK
+            raise ValueError("simulated FK failure")
+        # Normal FK: return head position elevated above root
+        pos = np.asarray(root_t, dtype=np.float64) + np.array([0.0, 0.0, 1.6])
+        R = np.asarray(root_R, dtype=np.float64)
+        return pos, R
+
+    monkeypatch.setattr(_vcam, "compute_joint_world_pose", _patched_joint_pose)
+
+    track = _straight_standing_track(3)
+    cam = build_pov_track(track, RigConfig(), image_size=(1920, 1080), fps=30.0, clip_id="P001_pov")
+
+    assert len(cam.frames) == 3
+    # Frame 0: FK succeeded → confidence unchanged (1.0 * 1.0 = 1.0)
+    assert cam.frames[0].confidence == pytest.approx(1.0)
+    # Frame 1: FK failed → confidence halved (1.0 * 0.5 = 0.5)
+    assert cam.frames[1].confidence == pytest.approx(0.5)
+    # Frame 2: FK succeeded → confidence unchanged
+    assert cam.frames[2].confidence == pytest.approx(1.0)
 
 
 def test_build_ots_track_holds_last_ball_then_falls_back() -> None:

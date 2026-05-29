@@ -117,6 +117,72 @@ def test_write_ue_manifest_includes_virtual_cameras(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_write_ue_manifest_backfills_virtual_camera_fbx(tmp_path: Path) -> None:
+    """FBX file for a virtual camera is reflected in the manifest entry when
+    the file exists on disk by the time write_ue_manifest runs."""
+    out = tmp_path
+    (out / "camera").mkdir(parents=True)
+    (out / "hmr_world").mkdir(parents=True)
+    (out / "export" / "fbx").mkdir(parents=True)
+    _write_broadcast_camera(out / "camera" / "shot_01_camera_track.json")
+    _write_player(out / "hmr_world" / "P003_smpl_world.npz")
+    (out / "export" / "fbx" / "shot_01__P003.fbx").write_bytes(b"x")  # player FBX so manifest writes
+    # Create the virtual camera FBX that Blender would have written.
+    (out / "export" / "fbx" / "shot_01_P003_pov.fbx").write_bytes(b"vcam")
+    CameraSelection(shot_id="shot_01",
+                    selections=(RigSelection("P003", ("pov",)),)).save(
+        out / "export" / "shot_01_camera_selection.json")
+
+    stage = ExportStage(output_dir=out, config={"export": {"virtual_cameras": {}},
+                                                 "pitch": {"length_m": 105.0, "width_m": 68.0}})
+    stage._generate_virtual_cameras(shot_id="shot_01")
+    (out / "shots").mkdir()
+    (out / "shots" / "shots_manifest.json").write_text(json.dumps(
+        {"source_file": "shot_01.mp4", "fps": 30.0, "total_frames": 3,
+         "shots": [{"id": "shot_01", "clip_file": "shot_01.mp4",
+                    "start_frame": 0, "end_frame": 2,
+                    "start_time": 0.0, "end_time": 0.1}],
+         "match": None}))
+    stage.write_ue_manifest("shot_01")
+
+    m = UeManifest.load(out / "export" / "ue_manifest.json")
+    pov = next(c for c in m.cameras if c.name == "P003_pov")
+    assert pov.fbx == "fbx/shot_01_P003_pov.fbx"
+
+
+@pytest.mark.unit
+def test_write_ue_manifest_virtual_camera_fbx_empty_when_missing(tmp_path: Path) -> None:
+    """When the virtual camera FBX does not exist yet, fbx stays empty string."""
+    out = tmp_path
+    (out / "camera").mkdir(parents=True)
+    (out / "hmr_world").mkdir(parents=True)
+    (out / "export" / "fbx").mkdir(parents=True)
+    _write_broadcast_camera(out / "camera" / "shot_01_camera_track.json")
+    _write_player(out / "hmr_world" / "P003_smpl_world.npz")
+    (out / "export" / "fbx" / "shot_01__P003.fbx").write_bytes(b"x")
+    # NOTE: no shot_01_P003_pov.fbx written — Blender didn't run.
+    CameraSelection(shot_id="shot_01",
+                    selections=(RigSelection("P003", ("pov",)),)).save(
+        out / "export" / "shot_01_camera_selection.json")
+
+    stage = ExportStage(output_dir=out, config={"export": {"virtual_cameras": {}},
+                                                 "pitch": {"length_m": 105.0, "width_m": 68.0}})
+    stage._generate_virtual_cameras(shot_id="shot_01")
+    (out / "shots").mkdir()
+    (out / "shots" / "shots_manifest.json").write_text(json.dumps(
+        {"source_file": "shot_01.mp4", "fps": 30.0, "total_frames": 3,
+         "shots": [{"id": "shot_01", "clip_file": "shot_01.mp4",
+                    "start_frame": 0, "end_frame": 2,
+                    "start_time": 0.0, "end_time": 0.1}],
+         "match": None}))
+    stage.write_ue_manifest("shot_01")
+
+    m = UeManifest.load(out / "export" / "ue_manifest.json")
+    pov = next(c for c in m.cameras if c.name == "P003_pov")
+    assert pov.fbx == ""
+
+
+@pytest.mark.unit
 def test_virtual_cameras_present_when_gltf_disabled(tmp_path: Path) -> None:
     out = tmp_path
     (out / "camera").mkdir(parents=True)

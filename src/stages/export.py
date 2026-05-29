@@ -211,6 +211,10 @@ def _player_team_class_map(output_dir: Path) -> dict[str, tuple[str, str]]:
 class ExportStage(BaseStage):
     name = "export"
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._virtual_camera_entries: dict[str | None, list[NamedCameraEntry]] = {}
+
     def is_complete(self) -> bool:
         from src.schemas.shots import ShotsManifest
         manifest_path = self.output_dir / "shots" / "shots_manifest.json"
@@ -243,8 +247,6 @@ class ExportStage(BaseStage):
         """Read the per-shot selection, write one CameraTrack JSON per rig,
         and return NamedCameraEntry rows for the manifest. No-op when no
         selection file exists."""
-        if not hasattr(self, "_virtual_camera_entries"):
-            self._virtual_camera_entries: dict[str | None, list[NamedCameraEntry]] = {}
         prefix = "" if shot_id is None else f"{shot_id}_"
         sel_path = self.output_dir / "export" / f"{prefix}camera_selection.json"
         if not sel_path.exists():
@@ -706,9 +708,19 @@ class ExportStage(BaseStage):
                 frame_range=camera_entry.frame_range,
                 track_json=camera_entry.track_json,
             ))
-        named_cameras.extend(
-            getattr(self, "_virtual_camera_entries", {}).get(primary_shot, [])
-        )
+        for cached in getattr(self, "_virtual_camera_entries", {}).get(primary_shot, []):
+            # Derive the clip_id from the track_json path:
+            # "camera/{clip_id}_camera_track.json" → clip_id
+            track_stem = Path(cached.track_json).name  # e.g. "shot_01_P003_pov_camera_track.json"
+            clip_id = track_stem[len("") : -len("_camera_track.json")]
+            vc_fbx_path = fbx_dir / f"{clip_id}.fbx"
+            named_cameras.append(NamedCameraEntry(
+                name=cached.name,
+                fbx=f"fbx/{clip_id}.fbx" if vc_fbx_path.exists() else "",
+                image_size=cached.image_size,
+                frame_range=cached.frame_range,
+                track_json=cached.track_json,
+            ))
 
         pitch_cfg = self.config.get("pitch", {}) or {}
         manifest = UeManifest(

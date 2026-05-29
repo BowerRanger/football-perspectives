@@ -89,14 +89,21 @@ class RigConfig:
 def _head_pose_world(
     track: "SmplWorldTrack",
     i: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Return ``(head_pos, head_R, ok)`` for frame index ``i``.
+
+    ``ok`` is ``True`` on the normal FK path and ``False`` when FK raises
+    and we fall back to root-only head pose. Callers should halve frame
+    confidence when ``ok`` is ``False``.
+    """
     try:
-        return compute_joint_world_pose(
+        pos, R = compute_joint_world_pose(
             track.thetas[i], track.root_R[i], track.root_t[i], HEAD_JOINT_IDX
         )
+        return pos, R, True
     except (ValueError, IndexError, np.linalg.LinAlgError):
         pos = np.asarray(track.root_t[i], dtype=np.float64) + np.array([0.0, 0.0, 1.6])
-        return pos, np.asarray(track.root_R[i], dtype=np.float64)
+        return pos, np.asarray(track.root_R[i], dtype=np.float64), False
 
 
 def _ball_xyz_by_frame(ball_track: object) -> dict[int, np.ndarray]:
@@ -159,10 +166,11 @@ def build_pov_track(
     K = intrinsics_from_fov(cfg.pov_fov_deg, image_size)
     per_frame: list[_FrameTuple] = []
     for i, fr in enumerate(np.asarray(track.frames).tolist()):
-        head_pos, head_R = _head_pose_world(track, i)
+        head_pos, head_R, ok = _head_pose_world(track, i)
         facing = _normalize(head_R @ FACE_AXIS_CANONICAL)
         R, t = look_at_view(head_pos, head_pos + facing)
-        per_frame.append((int(fr), R, t, float(track.confidence[i])))
+        conf = float(track.confidence[i]) * (1.0 if ok else 0.5)
+        per_frame.append((int(fr), R, t, conf))
     return _make_track(clip_id, image_size, fps, K, per_frame)
 
 
@@ -186,7 +194,7 @@ def build_ots_track(
     last_target: np.ndarray | None = None
     frames_since_ball = 0
     for i, fr in enumerate(np.asarray(track.frames).tolist()):
-        head_pos, head_R = _head_pose_world(track, i)
+        head_pos, head_R, ok = _head_pose_world(track, i)
         facing = _normalize(head_R @ FACE_AXIS_CANONICAL)
         facing_ground = _normalize(np.array([facing[0], facing[1], 0.0]))
         right_ground = _normalize(np.cross(facing_ground, WORLD_UP))
@@ -209,5 +217,6 @@ def build_ots_track(
         else:
             target = head_pos + facing * 10.0
         R, t = look_at_view(center, target)
-        per_frame.append((int(fr), R, t, float(track.confidence[i])))
+        conf = float(track.confidence[i]) * (1.0 if ok else 0.5)
+        per_frame.append((int(fr), R, t, conf))
     return _make_track(clip_id, image_size, fps, K, per_frame)

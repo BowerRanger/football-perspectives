@@ -337,3 +337,10 @@ export:
     forward_axis: -Y
     up_axis: Z
     scale: 1.0
+  virtual_cameras:
+    pov_fov_deg: 75.0
+    ots_fov_deg: 60.0
+    ots_back_m: 0.4
+    ots_up_m: 0.3
+    ots_right_m: 0.0
+    ball_target_max_occlusion_frames: 10

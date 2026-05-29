@@ -34,6 +34,7 @@ import numpy as np
 
 from src.pipeline.base import BaseStage
 from src.schemas.ball_track import BallTrack
+from src.schemas.camera_selection import CameraSelection
 from src.schemas.camera_track import CameraTrack
 from src.schemas.refined_pose import RefinedPose
 from src.schemas.smpl_world import SmplWorldTrack
@@ -42,11 +43,13 @@ from src.schemas.ue_manifest import (
     SCHEMA_VERSION,
     BallEntry,
     CameraEntry,
+    NamedCameraEntry,
     PitchInfo,
     PlayerEntry,
     UeManifest,
     WorldBBox,
 )
+from src.utils import virtual_cameras as vcam
 from src.utils.gltf_builder import SceneBundle, build_glb
 from src.utils.player_names import (
     display_name_for,
@@ -218,6 +221,77 @@ class ExportStage(BaseStage):
             (self.output_dir / "export" / "gltf" / f"{shot.id}_scene.glb").exists()
             for shot in manifest.shots
         )
+
+    # ------------------------------------------------------------------
+    # Virtual cameras
+    # ------------------------------------------------------------------
+
+    def _virtual_camera_cfg(self) -> vcam.RigConfig:
+        raw = ((self.config.get("export", {}) or {}).get("virtual_cameras", {})) or {}
+        return vcam.RigConfig(
+            pov_fov_deg=float(raw.get("pov_fov_deg", 75.0)),
+            ots_fov_deg=float(raw.get("ots_fov_deg", 60.0)),
+            ots_back_m=float(raw.get("ots_back_m", 0.4)),
+            ots_up_m=float(raw.get("ots_up_m", 0.3)),
+            ots_right_m=float(raw.get("ots_right_m", 0.0)),
+            ball_target_max_occlusion_frames=int(
+                raw.get("ball_target_max_occlusion_frames", 10)
+            ),
+        )
+
+    def _generate_virtual_cameras(self, shot_id: str | None) -> list[NamedCameraEntry]:
+        """Read the per-shot selection, write one CameraTrack JSON per rig,
+        and return NamedCameraEntry rows for the manifest. No-op when no
+        selection file exists."""
+        prefix = "" if shot_id is None else f"{shot_id}_"
+        sel_path = self.output_dir / "export" / f"{prefix}camera_selection.json"
+        if not sel_path.exists():
+            return []
+        selection = CameraSelection.load(sel_path)
+
+        bcast_path = self.output_dir / "camera" / f"{prefix}camera_track.json"
+        if not bcast_path.exists():
+            logger.warning(
+                "[export] no broadcast camera for %s; skipping virtual cameras", shot_id
+            )
+            return []
+        bcast = CameraTrack.load(bcast_path)
+        image_size = tuple(bcast.image_size)
+        fps = float(bcast.fps)
+        cfg = self._virtual_camera_cfg()
+
+        players = {t.player_id: t for t in _per_shot_smpl_tracks(self.output_dir, shot_id=shot_id)}
+        ball_path = self.output_dir / "ball" / f"{prefix}ball_track.json"
+        ball_track = BallTrack.load(ball_path) if ball_path.exists() else None
+
+        entries: list[NamedCameraEntry] = []
+        for sel in selection.selections:
+            track = players.get(sel.player_id)
+            if track is None:
+                logger.warning(
+                    "[export] selection player %s not in shot %s; skipping",
+                    sel.player_id, shot_id,
+                )
+                continue
+            for rig in sel.rigs:
+                clip_id = f"{prefix}{sel.player_id}_{rig}"
+                if rig == "pov":
+                    cam = vcam.build_pov_track(track, cfg, image_size, fps, clip_id)
+                else:
+                    cam = vcam.build_ots_track(track, ball_track, cfg, image_size, fps, clip_id)
+                cam_path = self.output_dir / "camera" / f"{clip_id}_camera_track.json"
+                cam.save(cam_path)
+                entries.append(NamedCameraEntry(
+                    name=f"{sel.player_id}_{rig}",
+                    fbx="",
+                    image_size=(int(image_size[0]), int(image_size[1])),
+                    frame_range=(int(cam.frames[0].frame), int(cam.frames[-1].frame)),
+                    track_json=f"camera/{clip_id}_camera_track.json",
+                ))
+        logger.info(
+            "[export] generated %d virtual camera(s) for shot %s", len(entries), shot_id
+        )
+        return entries
 
     # ------------------------------------------------------------------
 

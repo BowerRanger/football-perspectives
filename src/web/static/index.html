@@ -5665,10 +5665,10 @@ async function renderExport(panel) {
 
   async function renderCameraPicker(shotId) {
     camBody.innerHTML = "";
-    const avail = await fetchJsonOrNull(
-      `/api/export/available-players?shot=${encodeURIComponent(shotId)}`);
-    const sel = await fetchJsonOrNull(
-      `/api/export/camera-selection?shot=${encodeURIComponent(shotId)}`);
+    const [avail, sel] = await Promise.all([
+      fetchJsonOrNull(`/api/export/available-players?shot=${encodeURIComponent(shotId)}`),
+      fetchJsonOrNull(`/api/export/camera-selection?shot=${encodeURIComponent(shotId)}`),
+    ]);
     const players = (avail && avail.players) || [];
     const chosen = new Map();
     ((sel && sel.selections) || []).forEach(s => chosen.set(s.player_id, new Set(s.rigs)));
@@ -5695,7 +5695,7 @@ async function renderExport(panel) {
     camBody.appendChild(tbl);
 
     const banner = document.createElement("p");
-    banner.style.display = "none"; banner.className = "cell-green";
+    banner.style.display = "none";
     const saveBtn = document.createElement("button");
     saveBtn.textContent = "Save selection";
     saveBtn.onclick = async () => {
@@ -5718,8 +5718,10 @@ async function renderExport(panel) {
         banner.textContent =
           "Selection saved. Re-run the Export stage to generate the FBX cameras.";
       } else {
+        let detail;
+        try { detail = (await resp.json()).detail; } catch (e) { detail = await resp.text(); }
         banner.className = "cell-red";
-        banner.textContent = "Save failed: " + (await resp.text());
+        banner.textContent = "Save failed: " + detail;
       }
       banner.style.display = "";
     };
@@ -5728,10 +5730,10 @@ async function renderExport(panel) {
 
   if (defaultShot) await renderCameraPicker(defaultShot);
 
-  panel.appendChild(buildEmbeddedViewer(viewerShots, defaultShot));
+  panel.appendChild(buildEmbeddedViewer(viewerShots, defaultShot, renderCameraPicker));
 }
 
-function buildEmbeddedViewer(shotIds, defaultShot) {
+function buildEmbeddedViewer(shotIds, defaultShot, onShotChange) {
   const { wrap, body } = makePanel("3D Viewer");
   body.style.padding = "0";
 
@@ -5769,7 +5771,10 @@ function buildEmbeddedViewer(shotIds, defaultShot) {
     frame.src = target;
     popOut.href = target;
   }
-  select.addEventListener("change", () => loadShot(select.value));
+  select.addEventListener("change", () => {
+    loadShot(select.value);
+    if (onShotChange) onShotChange(select.value);
+  });
   loadShot(select.value);
   return wrap;
 }

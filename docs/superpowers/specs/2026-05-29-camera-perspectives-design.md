@@ -89,8 +89,9 @@ forward kinematics into the pitch frame.
   `thetas`, `betas`); orientation = head-joint rotation (camera looks where the head faces).
   Per-frame fallback to `root_t + fixed head offset` with `root_R` when head FK is unavailable
   for that frame.
-- **OTS**: position = head pose translated by a configurable offset expressed in the head
-  frame (default `forward -0.4 m`, `up +0.3 m`); orientation = look-at the **ball** world
+- **OTS**: position = head pose offset along the ground-projected facing direction
+  (`ots_back_m` behind, `ots_up_m` above, `ots_right_m` lateral; defaults 0.4 / 0.3 / 0.0 m);
+  orientation = look-at the **ball** world
   position when available. During short ball-occlusion gaps (≤
   `ball_target_max_occlusion_frames`), hold the last good target; if the ball is absent
   entirely, look along the player's forward direction.
@@ -132,7 +133,9 @@ export:
   virtual_cameras:
     pov_fov_deg: 75.0
     ots_fov_deg: 60.0
-    ots_offset_m: {forward: -0.4, up: 0.3, right: 0.0}
+    ots_back_m: 0.4
+    ots_up_m: 0.3
+    ots_right_m: 0.0
     ball_target_max_occlusion_frames: 10
 ```
 

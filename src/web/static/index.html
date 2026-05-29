@@ -5658,6 +5658,76 @@ async function renderExport(panel) {
     const sorted = [...summaryRows].sort((a, b) => b.hmrCount - a.hmrCount);
     defaultShot = sorted[0] && sorted[0].shotId;
   }
+  // ── Perspective cameras picker ──────────────────────────────────────
+  const { wrap: camWrap, body: camBody } = makePanel("Perspective cameras");
+  camBody.style.padding = "14px 16px";
+  panel.appendChild(camWrap);
+
+  async function renderCameraPicker(shotId) {
+    camBody.innerHTML = "";
+    const avail = await fetchJsonOrNull(
+      `/api/export/available-players?shot=${encodeURIComponent(shotId)}`);
+    const sel = await fetchJsonOrNull(
+      `/api/export/camera-selection?shot=${encodeURIComponent(shotId)}`);
+    const players = (avail && avail.players) || [];
+    const chosen = new Map();
+    ((sel && sel.selections) || []).forEach(s => chosen.set(s.player_id, new Set(s.rigs)));
+
+    if (!players.length) {
+      camBody.innerHTML = "<p class='cell-dim'>No players with SMPL data for this shot yet.</p>";
+      return;
+    }
+    const { t: tbl, tbody: tb } = makeTable(["Player", "POV", "OTS"]);
+    players.forEach(p => {
+      const rigs = chosen.get(p.player_id) || new Set();
+      const mk = (rig) => {
+        const cb = document.createElement("input");
+        cb.type = "checkbox"; cb.checked = rigs.has(rig);
+        cb.dataset.player = p.player_id; cb.dataset.rig = rig;
+        const td = document.createElement("td"); td.appendChild(cb); return td;
+      };
+      const nameTd = document.createElement("td");
+      nameTd.textContent = p.display_name || p.player_id;
+      const tr = document.createElement("tr");
+      tr.appendChild(nameTd); tr.appendChild(mk("pov")); tr.appendChild(mk("ots"));
+      tb.appendChild(tr);
+    });
+    camBody.appendChild(tbl);
+
+    const banner = document.createElement("p");
+    banner.style.display = "none"; banner.className = "cell-green";
+    const saveBtn = document.createElement("button");
+    saveBtn.textContent = "Save selection";
+    saveBtn.onclick = async () => {
+      const byPlayer = new Map();
+      camBody.querySelectorAll("input[type=checkbox]").forEach(cb => {
+        if (!cb.checked) return;
+        if (!byPlayer.has(cb.dataset.player)) byPlayer.set(cb.dataset.player, []);
+        byPlayer.get(cb.dataset.player).push(cb.dataset.rig);
+      });
+      const putBody = {
+        shot_id: shotId,
+        selections: [...byPlayer.entries()].map(([player_id, r]) => ({ player_id, rigs: r })),
+      };
+      const resp = await fetch(
+        `/api/export/camera-selection?shot=${encodeURIComponent(shotId)}`,
+        { method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(putBody) });
+      if (resp.ok) {
+        banner.className = "cell-green";
+        banner.textContent =
+          "Selection saved. Re-run the Export stage to generate the FBX cameras.";
+      } else {
+        banner.className = "cell-red";
+        banner.textContent = "Save failed: " + (await resp.text());
+      }
+      banner.style.display = "";
+    };
+    camBody.appendChild(saveBtn); camBody.appendChild(banner);
+  }
+
+  if (defaultShot) await renderCameraPicker(defaultShot);
+
   panel.appendChild(buildEmbeddedViewer(viewerShots, defaultShot));
 }
 

@@ -62,7 +62,7 @@ class SceneBundle:
     # a ``(name, CameraTrack)`` pair.  The CameraTrack may have per-frame
     # ``t`` on each CameraFrame (virtual cameras); frames whose ``t`` is
     # None fall back to ``t_world``.
-    extra_cameras: tuple = ()   # tuple[(name: str, CameraTrack), ...]
+    extra_cameras: tuple[tuple[str, object], ...] = ()   # tuple[(name: str, CameraTrack), ...]
 
 
 # ---------------------------------------------------------------------------
@@ -592,16 +592,17 @@ def build_glb(bundle: SceneBundle) -> tuple[bytes, dict]:
         vfx = float(vK[0, 0])
         vyfov = 2.0 * np.arctan2(float(vh) / 2.0, vfx)
         vaspect = float(vw) / float(vh) if vh else 1.0
+        # Virtual POV/OTS cameras sit much closer to players than the
+        # broadcast camera, so use a tighter near plane (0.05 vs 0.1).
         vcam_idx = g.add_camera(
             {"yfov": float(vyfov), "aspectRatio": float(vaspect),
              "znear": 0.05, "zfar": 1000.0}, cam_name)
 
         def _centre(fr, _vtrack=vtrack):  # default-arg capture avoids closure-over-loop-var
-            R = np.asarray(fr.R, dtype=np.float64)
-            t = np.asarray(
-                fr.t if fr.t is not None else _vtrack.t_world, dtype=np.float64
-            )
-            return -R.T @ t
+            if fr.t is not None:
+                R = np.asarray(fr.R, dtype=np.float64)
+                return -R.T @ np.asarray(fr.t, dtype=np.float64)
+            return np.asarray(_vtrack.t_world, dtype=np.float64)
 
         c0 = _centre(vfirst)
         vnode_idx = g.add_node({
@@ -620,13 +621,13 @@ def build_glb(bundle: SceneBundle) -> tuple[bytes, dict]:
         vpos_acc = g.add_accessor_vec3_f32(vtrans)
         g.add_animation(
             name=f"{cam_name}_anim",
-            channels=[
-                {"sampler": 0, "target": {"node": vnode_idx, "path": "rotation"}},
-                {"sampler": 1, "target": {"node": vnode_idx, "path": "translation"}},
-            ],
             samplers=[
                 {"input": vt_acc, "output": vrot_acc, "interpolation": "LINEAR"},
                 {"input": vt_acc, "output": vpos_acc, "interpolation": "LINEAR"},
+            ],
+            channels=[
+                {"sampler": 0, "target": {"node": vnode_idx, "path": "rotation"}},
+                {"sampler": 1, "target": {"node": vnode_idx, "path": "translation"}},
             ],
         )
         extra_camera_meta.append({

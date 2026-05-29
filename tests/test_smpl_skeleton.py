@@ -8,7 +8,10 @@ from src.utils.smpl_skeleton import (
     SMPL_JOINT_NAMES,
     SMPL_PARENTS,
     SMPL_REST_JOINTS_YUP,
+    axis_angle_to_matrix,
     axis_angle_to_quaternion,
+    compute_joint_world,
+    compute_joint_world_pose,
     parent_relative_offsets_yup,
 )
 
@@ -59,14 +62,6 @@ def test_axis_angle_to_quaternion_90deg_x() -> None:
     q = axis_angle_to_quaternion(aa)
     expected = np.array([np.cos(np.pi / 4), np.sin(np.pi / 4), 0.0, 0.0])
     np.testing.assert_allclose(q, expected, atol=1e-9)
-
-
-from src.utils.smpl_skeleton import (
-    SMPL_JOINT_NAMES,
-    SMPL_REST_JOINTS_YUP,
-    axis_angle_to_matrix,
-    compute_joint_world,
-)
 
 
 def test_axis_angle_to_matrix_identity() -> None:
@@ -122,11 +117,6 @@ def test_compute_joint_world_propagates_parent_rotation() -> None:
 
 
 def test_compute_joint_world_pose_returns_position_and_rotation() -> None:
-    from src.utils.smpl_skeleton import (
-        compute_joint_world,
-        compute_joint_world_pose,
-    )
-
     thetas = np.zeros((24, 3))
     root_R = np.eye(3)
     root_t = np.array([1.0, 2.0, 0.0])
@@ -139,8 +129,6 @@ def test_compute_joint_world_pose_returns_position_and_rotation() -> None:
 
 
 def test_compute_joint_world_pose_applies_root_rotation_to_orientation() -> None:
-    from src.utils.smpl_skeleton import axis_angle_to_matrix, compute_joint_world_pose
-
     thetas = np.zeros((24, 3))
     root_R = axis_angle_to_matrix(np.array([0.0, 0.0, np.pi / 2]))
     root_t = np.zeros(3)
@@ -148,3 +136,18 @@ def test_compute_joint_world_pose_applies_root_rotation_to_orientation() -> None
     _, R_world = compute_joint_world_pose(thetas, root_R, root_t, 15)
 
     np.testing.assert_allclose(R_world, root_R, atol=1e-9)
+
+
+def test_compute_joint_world_pose_composes_joint_and_root_rotation() -> None:
+    # l_knee (joint 4) chain is 4<-1<-0; with pelvis/hip thetas zero its
+    # global rotation equals its own local rotation, so R_world must equal
+    # root_R @ R(theta_knee).
+    thetas = np.zeros((24, 3))
+    thetas[4] = np.array([0.0, np.pi / 2, 0.0])
+    root_R = axis_angle_to_matrix(np.array([0.0, 0.0, np.pi / 2]))
+    root_t = np.zeros(3)
+
+    _, R_world = compute_joint_world_pose(thetas, root_R, root_t, 4)
+
+    expected = root_R @ axis_angle_to_matrix(np.array([0.0, np.pi / 2, 0.0]))
+    np.testing.assert_allclose(R_world, expected, atol=1e-9)

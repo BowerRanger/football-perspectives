@@ -628,19 +628,16 @@ def main(argv: list[str]) -> int:
             fbx_name = f"{shot_id}_ball.fbx" if shot_id else "ball.fbx"
             _export_fbx(fbx_dir / fbx_name)
 
-    # --- Camera FBX (per shot) ---------------------------------------
-    # Same per-shot pattern as ball above.
-
+    # --- Camera FBX (broadcast + per-player virtual cameras) ----------
+    # One FBX per camera-track file. The broadcast track is
+    # `{shot}_camera_track.json` (or legacy `camera_track.json`); virtual
+    # cameras are `{shot}_{player}_{rig}_camera_track.json`. Each FBX is
+    # named after the track-file stem. Position is animated per-frame when
+    # the track carries per-frame `t` (camera centre C = -R^T t); otherwise
+    # the single clip-shared `t_world` is used (broadcast convention).
     cam_dir = output_dir / "camera"
     if cam_dir.exists():
-        cam_track_paths: list[tuple[str, Path]] = []
-        for path in sorted(cam_dir.glob("*_camera_track.json")):
-            shot_id = path.stem[: -len("_camera_track")]
-            cam_track_paths.append((shot_id, path))
-        legacy_cam = cam_dir / "camera_track.json"
-        if legacy_cam.exists():
-            cam_track_paths.append(("", legacy_cam))
-        for shot_id, cam_path in cam_track_paths:
+        for cam_path in sorted(cam_dir.glob("*_camera_track.json")):
             cam = json.loads(cam_path.read_text())
             frames = cam.get("frames", [])
             image_w, _ = cam.get("image_size", [1920, 1080])
@@ -652,19 +649,61 @@ def main(argv: list[str]) -> int:
             scene.frame_start = int(frames[0]["frame"])
             scene.frame_end = int(frames[-1]["frame"])
             scene.render.fps = int(round(fps))
-            bpy.ops.object.camera_add(location=tuple(cam.get("t_world", [0, 0, 0])))
+            cam_name = cam_path.stem[: -len("_camera_track")]  # e.g. shot_01_P003_pov
+            # For per-frame-t tracks, first_t is the world->cam translation, so
+            # convert to a centre; for t_world-only tracks it's already a centre.
+            if frames[0].get("t") is not None:
+                R0 = np.array(frames[0]["R"], dtype=float)
+                t0 = np.array(frames[0]["t"], dtype=float)
+                first_loc = (-R0.T @ t0).tolist()
+            else:
+                first_loc = list(cam.get("t_world", [0, 0, 0]))
+            bpy.ops.object.camera_add(location=tuple(first_loc))
             cam_obj = bpy.context.active_object
-            cam_obj.name = "broadcast_camera"
+            cam_obj.name = cam_name
             cam_data = cam_obj.data
             cam_data.sensor_width = float(image_w) / 100.0  # arbitrary; consumer rescales
             for f in frames:
+                fr = int(f["frame"])
                 fx = float(f["K"][0][0])
                 cam_data.lens = fx * (cam_data.sensor_width / float(image_w))
-                cam_data.keyframe_insert(data_path="lens", frame=int(f["frame"]))
+                cam_data.keyframe_insert(data_path="lens", frame=fr)
+                if f.get("t") is not None:
+                    R = np.array(f["R"], dtype=float)
+                    t = np.array(f["t"], dtype=float)
+                    centre = -R.T @ t
+                    cam_obj.location = tuple(float(x) for x in centre)
+                    cam_obj.keyframe_insert(data_path="location", frame=fr)
             bpy.ops.object.select_all(action="DESELECT")
             cam_obj.select_set(True)
-            fbx_name = f"{shot_id}_camera.fbx" if shot_id else "camera.fbx"
-            _export_fbx(fbx_dir / fbx_name)
+            _export_fbx(fbx_dir / f"{cam_name}.fbx")
+        legacy_cam = cam_dir / "camera_track.json"
+        if legacy_cam.exists():
+            cam = json.loads(legacy_cam.read_text())
+            frames = cam.get("frames", [])
+            image_w, _ = cam.get("image_size", [1920, 1080])
+            if frames:
+                _reset_scene()
+                _set_unit_scale_metres()
+                scene = bpy.context.scene
+                scene.frame_start = int(frames[0]["frame"])
+                scene.frame_end = int(frames[-1]["frame"])
+                scene.render.fps = int(round(fps))
+                bpy.ops.object.camera_add(
+                    location=tuple(cam.get("t_world", [0, 0, 0]))
+                )
+                cam_obj = bpy.context.active_object
+                cam_obj.name = "camera"
+                cam_data = cam_obj.data
+                cam_data.sensor_width = float(image_w) / 100.0
+                for f in frames:
+                    fr = int(f["frame"])
+                    fx = float(f["K"][0][0])
+                    cam_data.lens = fx * (cam_data.sensor_width / float(image_w))
+                    cam_data.keyframe_insert(data_path="lens", frame=fr)
+                bpy.ops.object.select_all(action="DESELECT")
+                cam_obj.select_set(True)
+                _export_fbx(fbx_dir / "camera.fbx")
 
     return 0
 

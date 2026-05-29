@@ -73,3 +73,36 @@ def test_selection_put_rejects_unknown_rig(client) -> None:
     body = {"shot_id": "shot_01", "selections": [{"player_id": "P003", "rigs": ["dolly"]}]}
     r = c.put("/api/export/camera-selection", params={"shot": "shot_01"}, json=body)
     assert r.status_code == 400
+
+
+@pytest.mark.integration
+def test_available_players_rejects_bad_shot_id(client) -> None:
+    c, _ = client
+    r = c.get("/api/export/available-players", params={"shot": "../etc"})
+    assert r.status_code == 400
+
+
+@pytest.mark.integration
+def test_get_selection_rejects_bad_shot_id(client) -> None:
+    c, _ = client
+    r = c.get("/api/export/camera-selection", params={"shot": "../etc"})
+    assert r.status_code == 400
+
+
+@pytest.mark.integration
+def test_put_selection_rejects_bad_shot_id(client) -> None:
+    c, _ = client
+    body = {"shot_id": "shot_01", "selections": []}
+    r = c.put("/api/export/camera-selection", params={"shot": "bad shot"}, json=body)
+    assert r.status_code == 400
+
+
+@pytest.mark.integration
+def test_available_players_includes_legacy_blank_shot_id(client) -> None:
+    # A player with shot_id="" is the legacy single-shot marker and should
+    # appear in any shot-filtered query (per SmplWorldTrack docstring).
+    c, out = client
+    _write_player(out, "P003", "")
+    r = c.get("/api/export/available-players", params={"shot": "shot_01"})
+    assert r.status_code == 200
+    assert "P003" in {p["player_id"] for p in r.json()["players"]}

@@ -824,6 +824,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         from src.utils.player_names import display_name_for, load_player_names
         from src.schemas.smpl_world import SmplWorldTrack
 
+        if shot and not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
+            raise HTTPException(status_code=400, detail="Invalid shot id")
         hmr_dir = output_dir / "hmr_world"
         if not hmr_dir.exists():
             return {"players": []}

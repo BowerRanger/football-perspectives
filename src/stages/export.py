@@ -425,6 +425,12 @@ class ExportStage(BaseStage):
 
         ball_track = BallTrack.load(ball_path) if ball_path.exists() else None
 
+        extra_cameras: list[tuple[str, CameraTrack]] = []
+        for entry in getattr(self, "_virtual_camera_entries", {}).get(shot_id, []):
+            tpath = self.output_dir / entry.track_json
+            if tpath.exists():
+                extra_cameras.append((entry.name, CameraTrack.load(tpath)))
+
         bundle = SceneBundle(
             camera_track=camera_track,
             players=tuple(players),
@@ -433,6 +439,7 @@ class ExportStage(BaseStage):
             pitch_width_m=float(pitch_cfg.get("width_m", 68.0)),
             ball_radius_m=float(ball_cfg.get("ball_radius_m", 0.11)),
             match=match,
+            extra_cameras=tuple(extra_cameras),
         )
         glb_bytes, metadata = build_glb(bundle)
 

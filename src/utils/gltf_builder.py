@@ -57,6 +57,12 @@ class SceneBundle:
     # without a separate fetch. ``None`` when no match is set on the
     # shots manifest.
     match: dict | None = None
+    # Optional list of virtual cameras (POV / OTS) to emit as animated
+    # glTF camera nodes alongside the broadcast camera.  Each element is
+    # a ``(name, CameraTrack)`` pair.  The CameraTrack may have per-frame
+    # ``t`` on each CameraFrame (virtual cameras); frames whose ``t`` is
+    # None fall back to ``t_world``.
+    extra_cameras: tuple = ()   # tuple[(name: str, CameraTrack), ...]
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +581,61 @@ def build_glb(bundle: SceneBundle) -> tuple[bytes, dict]:
             "fps": float(cam_fps),
         }
 
+    # Extra (virtual) cameras — POV / OTS rigs with per-frame translation.
+    extra_camera_meta: list[dict] = []
+    for cam_name, vtrack in getattr(bundle, "extra_cameras", ()) or ():
+        if not getattr(vtrack, "frames", None):
+            continue
+        vfirst = vtrack.frames[0]
+        vK = np.asarray(vfirst.K, dtype=np.float64)
+        vw, vh = vtrack.image_size
+        vfx = float(vK[0, 0])
+        vyfov = 2.0 * np.arctan2(float(vh) / 2.0, vfx)
+        vaspect = float(vw) / float(vh) if vh else 1.0
+        vcam_idx = g.add_camera(
+            {"yfov": float(vyfov), "aspectRatio": float(vaspect),
+             "znear": 0.05, "zfar": 1000.0}, cam_name)
+
+        def _centre(fr, _vtrack=vtrack):  # default-arg capture avoids closure-over-loop-var
+            R = np.asarray(fr.R, dtype=np.float64)
+            t = np.asarray(
+                fr.t if fr.t is not None else _vtrack.t_world, dtype=np.float64
+            )
+            return -R.T @ t
+
+        c0 = _centre(vfirst)
+        vnode_idx = g.add_node({
+            "name": cam_name,
+            "camera": vcam_idx,
+            "translation": [float(c0[0]), float(c0[1]), float(c0[2])],
+            "rotation": [float(q) for q in _camera_orientation_quat(np.asarray(vfirst.R))],
+        })
+        vfps = float(vtrack.fps) if vtrack.fps else fps
+        vtimes = np.array([f.frame for f in vtrack.frames], dtype=np.float32) / max(vfps, 1e-6)
+        vquats = np.array([_camera_orientation_quat(np.asarray(f.R, dtype=np.float64))
+                           for f in vtrack.frames], dtype=np.float32)
+        vtrans = np.array([_centre(f) for f in vtrack.frames], dtype=np.float32)
+        vt_acc = g.add_accessor_scalar_f32(vtimes)
+        vrot_acc = g.add_accessor_vec4_f32(vquats)
+        vpos_acc = g.add_accessor_vec3_f32(vtrans)
+        g.add_animation(
+            name=f"{cam_name}_anim",
+            channels=[
+                {"sampler": 0, "target": {"node": vnode_idx, "path": "rotation"}},
+                {"sampler": 1, "target": {"node": vnode_idx, "path": "translation"}},
+            ],
+            samplers=[
+                {"input": vt_acc, "output": vrot_acc, "interpolation": "LINEAR"},
+                {"input": vt_acc, "output": vpos_acc, "interpolation": "LINEAR"},
+            ],
+        )
+        extra_camera_meta.append({
+            "name": cam_name,
+            "image_size": [int(vw), int(vh)],
+            "frame_range": [int(vtrack.frames[0].frame), int(vtrack.frames[-1].frame)],
+            "fps": float(vfps),
+        })
+
     metadata = {
         "fps": fps,
         "pitch": {
@@ -584,6 +645,7 @@ def build_glb(bundle: SceneBundle) -> tuple[bytes, dict]:
         "players": player_meta,
         "ball": ball_meta,
         "camera": camera_meta,
+        "cameras": extra_camera_meta,
         "notes": {
             "player_geometry": "v1 capsule; full SMPL skinning is a future enhancement",
             "coordinate_frame": "pitch z-up; x along nearside, y toward far side",

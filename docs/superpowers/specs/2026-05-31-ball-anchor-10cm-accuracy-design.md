@@ -60,9 +60,11 @@ above. The stale file is not a code problem; it just needs regeneration.
   airborne states included. The user's click is authoritative for lateral
   position.
 - **Airborne depth genuinely recovered, not punted.** For flight spans
-  bracketed by ≥ 2 hard 3D knots, the arc (depth included) is determined by
-  gravity + the knots; for under-constrained spans, a ball apparent-size
-  prior supplies a depth estimate.
+  bracketed by ≥ 2 hard 3D knots, the arc (depth included) is determined
+  exactly by gravity + the knots. Spans with < 2 hard knots are monocularly
+  under-determined; the design surfaces them as a diagnostic so the user can
+  add one bracketing anchor (which makes C2 resolve them exactly), with an
+  optional coarse size prior as a best-effort smoothing aid.
 - **No regression** on the paths that already measure 0.00 m (ground and
   ground-contact states).
 - Existing `tests/test_ball*.py` continue to pass; a new validation harness
@@ -133,10 +135,10 @@ airborne player_touch via C1):
   knots determine the 6-DOF arc, depth included. Demote z-buckets to a light
   one-sided hinge (low `z_range_weight`) so they cannot fight the determined
   arc.
-- **Exactly 1 hard knot:** pin `p0` to it (today's safe behavior); add the
-  C3 size prior for the remaining frames.
+- **Exactly 1 hard knot:** pin `p0` to it (today's safe behavior); the span
+  is flagged under-constrained by C3 and gets the optional coarse size prior.
 - **0 hard knots:** pin `p0` to the first airborne bucket ray-cast (today);
-  add the C3 size prior.
+  flagged under-constrained by C3.
 
 Freeing `p0` is gated on ≥ 2 hard knots specifically to prevent the
 historical "`p0` drifts metres along the ray" failure: with two knots it
@@ -144,40 +146,50 @@ cannot drift.
 
 Note on observation weighting: the Phase-2 fit's observations are *all*
 anchor pixels (no WASB), so within Phase-2 the clicks are already
-authoritative and the lever is the knot conditioning above — not a weight.
-`anchor_pixel_weight` governs the *IMM flight-segment* and *promotion* fits,
-where WASB observations dominate and any anchor pixel that falls in the run
-must outweigh them so the user's click wins. When a span has no WASB/anchor
-mix, the weight is a no-op.
+authoritative and the lever is the knot conditioning above. The
+IMM/promotion fits use WASB observations; rather than add per-observation
+weighting there, anchored-frame **lateral** accuracy is guaranteed
+end-to-end by C4's ray-faithful snap, and **depth** by C2's conditioning —
+so no `anchor_pixel_weight` knob is needed.
 
 The Phase-2 acceptance check keeps the existing looser sanity bounds
 (finite, |v0| ≤ 100, |p0| ≤ 1000) so user-anchored trajectories are trusted.
 
-### C3 — Ball apparent-size depth prior (secondary, gated)
+### C3 — Under-constrained-span diagnostic (+ optional coarse size prior)
 
-**Where:** new optional soft residual in `fit_parabola_to_image_observations`
-(a `size_depth_frames: dict[int, (d̂, depth_est, weight)]` or equivalent),
-plus a blob-radius side-output from the detector.
+Planning surfaced a hard physical limit: at 60–95 m from camera the ball is
+only ~5–7 px in diameter, so a sub-pixel apparent-radius error scales depth
+by ±10–20 m. An apparent-size prior therefore **cannot** deliver 10 cm depth
+for far airborne balls — the only monocular mechanism that recovers correct
+airborne depth is C2's physics (gravity + 2 hard knots fully determine the
+arc). So C3's primary, high-value job is a **diagnostic**, with the size
+prior demoted to an optional coarse aid.
 
-For a ball of physical radius `r` at depth `D` along the ray, the apparent
-pixel diameter is `d_px ≈ f·2r/D`, so `D ≈ f·2r/d_px`. Add a soft residual
-pulling the fitted position's along-ray depth toward `D` at frames where a
-pixel diameter is available.
+**C3a — Under-constrained-span diagnostic (primary).** During span
+processing, count the hard 3D knots bracketing each flight span. When a span
+has < 2 hard knots, record it in `output/quality_report.json` (ball section)
+and log a warning: "flight span [a, b] has N<2 hard knots — depth is
+monocularly under-determined; add a kick/bounce/goal_impact/grounded anchor
+to bracket it." This is how airborne depth actually gets pushed to 10 cm: the
+user adds one bracketing anchor and C2 then determines the arc exactly.
 
-`d_px` sources:
-- **Detector:** extend `WASBBallDetector` to emit the heatmap blob extent
-  (radius) alongside `(u, v, confidence)`, persisted to a per-shot sidecar
-  (e.g. `output/ball/<shot>_ball_size.json`). The `BallDetector.detect`
-  contract stays `(u, v, conf)`; the radius is an optional side-channel so
-  YOLO and tests are unaffected.
-- **Anchor frames:** measure the ball's apparent radius from the image patch
-  at the clicked pixel (blob/radial-profile around the click).
+**C3b — Optional coarse size prior (secondary).** A soft residual in
+`fit_parabola_to_image_observations`: a new
+`size_depth_frames: dict[int, tuple[np.ndarray, np.ndarray, float]]` mapping
+`{rel_idx: (R, t, D_est)}` plus a scalar `size_depth_weight`. The residual is
+`size_depth_weight * ((R @ pos_k + t)[2] − D_est)` (camera-frame depth toward
+`D_est = f·2r/d_px`). For the 10 cm-at-anchors goal, `d_px` is measured from
+the clip image patch at the **clicked anchor pixel** (radial-profile around
+the click) — **no detector contract change**. Applies only to < 2-knot
+airborne spans; gated by `ball.size_depth_prior.enabled` (default `false`);
+clamped to a plausible pixel-diameter range; graceful fallback to today's
+bucket midpoint when size is unavailable or implausible. Because the prior is
+coarse (metre-scale at distance) it is off by default and is a smoothing aid,
+not a 10 cm mechanism.
 
-Applies **only to ≤ 1-knot spans** (the under-constrained ones). Gated by
-`ball.size_depth_prior.enabled`; clamped to a plausible pixel-diameter range;
-graceful fallback to today's bucket midpoint when size is unavailable or
-implausible. This is the riskiest component and the one most likely to be
-deferred if C2 alone clears the bar on the real clips.
+A WASB heatmap blob-radius side-output (for unanchored-frame smoothing) is
+**out of scope** here — it does not affect anchored-frame accuracy, which is
+what the goal measures.
 
 ### C4 — Ray-faithfulness guarantee
 
@@ -214,12 +226,12 @@ The harness is the gate every component (C1–C4) must pass before commit.
 
 ```yaml
 ball:
-  anchor_pixel_weight: 50.0          # clicked-anchor obs weight vs WASB obs
   free_p0_min_hard_knots: 2          # free p0 when >= this many hard knots
   ray_faithful_tolerance_px: 3.0     # snap airborne-anchored frame if reproj exceeds
+  min_hard_knots_warn: 2             # C3a: flag flight spans with fewer hard knots
   size_depth_prior:
-    enabled: true
-    weight: 50.0
+    enabled: false                   # C3b: coarse aid, off by default (not a 10cm mechanism)
+    weight: 20.0
     min_pixel_diameter: 3.0
     max_pixel_diameter: 40.0
 ```
@@ -236,14 +248,14 @@ resolve hard knots  ── C1: airborne player_touch projected onto clicked ray
         │
         ▼
 Phase-2 arc fit     ── C2: >=2 hard knots → free p0 (physics determines depth)
-                       1/0 hard knots → pinned p0 + C3 size prior
-                       clicked pixels weighted as truth
+                       <2 hard knots → pinned p0 (+ optional C3b size prior)
+                       C3a: flag <2-knot spans in quality_report
         │
         ▼
 final hard-knot pin (existing) + C4 ray-faithful snap (airborne anchors)
         │
         ▼
-BallTrack save
+BallTrack save + quality_report under-constrained-span diagnostics
         │
         ▼
 C5 harness: per-state lateral + reproj acceptance on real clips
@@ -253,13 +265,14 @@ C5 harness: per-state lateral + reproj acceptance on real clips
 
 | Path | Status | Purpose |
 |---|---|---|
-| `src/stages/ball.py` | MODIFY | C1 ray-constrained `_resolve_anchor_world`; C2 fit conditioning; C4 ray-faithful pass; load size sidecar |
-| `src/utils/bundle_adjust.py` | MODIFY | C2 anchor-pixel weighting; C3 size-depth soft residual + `free p0` path already present |
-| `src/utils/ball_detector.py` | MODIFY | C3 optional blob-radius side-output from WASB (contract unchanged) |
+| `src/stages/ball.py` | MODIFY | C1 ray-constrained `_resolve_anchor_world`; C2 fit conditioning; C3a span-knot diagnostic; C4 ray-faithful pass |
+| `src/utils/bundle_adjust.py` | MODIFY | C3b `size_depth_frames` soft residual (free-p0 + knot path already present) |
+| `src/pipeline/quality_report.py` | MODIFY | C3a: record under-constrained flight spans in the ball section |
 | `config/default.yaml` | MODIFY | new `ball:` keys above |
 | `tests/test_ball_ray_constrained_touch.py` | NEW | C1 unit tests (bone→ray-depth projection) |
 | `tests/test_bundle_adjust_free_p0_knots.py` | NEW | C2 unit tests (≥2 knots + free p0 recovers depth) |
-| `tests/test_ball_size_depth_prior.py` | NEW | C3 unit tests (size→depth residual, gating, fallback) |
+| `tests/test_ball_size_depth_prior.py` | NEW | C3b unit tests (size→depth residual, gating, fallback) |
+| `tests/test_ball_underconstrained_diag.py` | NEW | C3a unit tests (span-knot count + quality flag) |
 | `tests/test_ball_ray_faithful.py` | NEW | C4 unit tests (snap onto ray, no-op for on-ray points) |
 | `tests/test_ball_anchor_accuracy.py` | NEW | C5 acceptance test on gberch/kroupi01/origi01 |
 | `docs/superpowers/notes/ball-accuracy/` | EXISTING | measurement scripts (source for the promoted harness) |
@@ -273,10 +286,15 @@ the clicked pixel; bone-unavailable falls back to on-ray height ray-cast.
 **Unit, C2** — synthesise a parabola, project to pixels through a moving
 camera, supply start + end as hard knots with `p0` free → recovered arc
 matches truth (depth included) to < 0.10 m; with only 1 knot, `p0` stays
-pinned. Verify elevated anchor-pixel weight reduces reproj at clicked frames.
+pinned (the selection rule picks free-vs-pinned by hard-knot count).
 
-**Unit, C3** — known `d_px` → `D = f·2r/d_px` within tolerance; out-of-range
-`d_px` ignored; prior only applied on ≤ 1-knot spans; disabled flag → no-op.
+**Unit, C3a** — a span with 0/1/2 hard knots → diagnostic flags the 0- and
+1-knot spans, not the 2-knot span; the flag appears in the ball quality
+section.
+
+**Unit, C3b** — known `d_px` → `D = f·2r/d_px` within tolerance; out-of-range
+`d_px` ignored; prior only applied on < 2-knot spans; disabled flag (default)
+→ no-op.
 
 **Unit, C4** — off-ray point with reproj > tol → snapped onto ray (reproj →
 0, depth preserved); on-ray point → unchanged.
@@ -290,9 +308,8 @@ below the recorded baseline; print the per-state table for the record.
 | Risk | Mitigation |
 |---|---|
 | Freeing `p0` reintroduces metre-scale along-ray drift | Free `p0` only when ≥ 2 hard knots constrain the arc (`free_p0_min_hard_knots`); otherwise keep today's pinned behavior |
-| Ball-size measurement noisy at distance / motion blur | C3 soft + gated + clamped + fallback to bucket midpoint; only on ≤ 1-knot spans; deferrable if C2 alone clears the bar |
+| Far airborne balls (~5–7 px) are monocularly depth-ambiguous | C2 determines depth exactly for ≥2-knot spans; C3a surfaces <2-knot spans so the user adds a bracketing anchor; C3b size prior is a coarse aid only (off by default) |
 | Regression on currently-perfect ground/contact paths | C5 harness asserts those stay 0.00 m; C1 and C4 only alter airborne frames; existing `tests/test_ball*` stay green |
-| Detector contract change breaks YOLO/tests | Blob radius is an optional side-channel; `detect()` signature unchanged; absence → C3 falls back |
 | Snapping (C4) creates frame-to-frame kinks at anchors | C2 makes the whole arc honor the clicks first, so C4 rarely fires; when it does, the corrected lateral is ≤ tol so the kink is sub-10 cm |
 
 ## Rollout
@@ -306,13 +323,16 @@ below the recorded baseline; print the per-state table for the record.
    recovered.
 4. **C4** — ray-faithful guarantee. Re-run: no anchored frame exceeds the
    reprojection tolerance.
-5. **C3** — size prior, only if the harness still shows ≤ 1-knot airborne
-   spans missing the depth bar after C2.
-6. Regenerate the stale `origi01` track (and any other clips) with the final
+5. **C3a** — under-constrained-span diagnostic in `quality_report.json`.
+   This is the lever that lets the user push remaining airborne depth to
+   10 cm by adding a bracketing anchor (which C2 then resolves exactly).
+6. **C3b** — optional coarse size prior, only built if there is appetite for
+   smoothing <2-knot airborne spans; off by default.
+7. Regenerate the stale `origi01` track (and any other clips) with the final
    code.
 
 ## Open questions
 
-- None blocking. C3's necessity is decided empirically by the C5 harness
-  after C2/C4; the user pre-approved the gated design and the option to defer
-  C3 if physics alone clears the bar.
+- None blocking. C3b's necessity is decided empirically by the C5 harness;
+  the user pre-approved the gated design and the option to defer the size
+  prior if physics (C2) plus the diagnostic (C3a) clear the bar.

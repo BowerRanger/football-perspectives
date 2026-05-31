@@ -5598,6 +5598,12 @@ async function renderRefinedShotBody(panel) {
   }
 }
 
+// Last-known camera selection per shot. Module-level so it survives the
+// full export-tab rebuild that runs after an export job finishes — if the
+// re-render's GET momentarily fails, we restore the ticked boxes from here
+// rather than showing a blank picker.
+const _cameraSelByShot = {};
+
 async function renderExport(panel) {
   // Two independent sources can drive the viewer:
   //   1. Per-shot exported scenes on disk (the export stage's output).
@@ -5670,13 +5676,55 @@ async function renderExport(panel) {
       fetchJsonOrNull(`/api/export/camera-selection?shot=${encodeURIComponent(shotId)}`),
     ]);
     const players = (avail && avail.players) || [];
+    // Prefer the server's persisted selection; if the GET failed (null),
+    // fall back to the last-known in-memory state so a re-render after an
+    // export run never silently clears ticked boxes.
+    const persisted = (sel && Array.isArray(sel.selections))
+      ? sel.selections
+      : (_cameraSelByShot[shotId] || []);
+    _cameraSelByShot[shotId] = persisted;
     const chosen = new Map();
-    ((sel && sel.selections) || []).forEach(s => chosen.set(s.player_id, new Set(s.rigs)));
+    persisted.forEach(s => chosen.set(s.player_id, new Set(s.rigs)));
 
     if (!players.length) {
       camBody.innerHTML = "<p class='cell-dim'>No players with SMPL data for this shot yet.</p>";
       return;
     }
+    // Persisted-state line + auto-save. Every checkbox toggle writes the
+    // selection immediately (no easy-to-miss Save button), and the status
+    // line reflects exactly what's on disk so you never assume it saved.
+    const status = document.createElement("p");
+    status.style.margin = "8px 0 0";
+    async function save() {
+      const byPlayer = new Map();
+      camBody.querySelectorAll("input[type=checkbox]").forEach(cb => {
+        if (!cb.checked) return;
+        if (!byPlayer.has(cb.dataset.player)) byPlayer.set(cb.dataset.player, []);
+        byPlayer.get(cb.dataset.player).push(cb.dataset.rig);
+      });
+      const selections = [...byPlayer.entries()].map(([player_id, r]) => ({ player_id, rigs: r }));
+      status.className = "cell-dim"; status.textContent = "Saving…";
+      try {
+        const resp = await fetch(
+          `/api/export/camera-selection?shot=${encodeURIComponent(shotId)}`,
+          { method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ shot_id: shotId, selections }) });
+        if (!resp.ok) {
+          let detail; try { detail = (await resp.json()).detail; } catch (e) { detail = await resp.text(); }
+          status.className = "cell-red"; status.textContent = "Save failed: " + detail;
+          return;
+        }
+        _cameraSelByShot[shotId] = selections;  // keep the in-memory fallback fresh
+        const n = selections.reduce((a, s) => a + s.rigs.length, 0);
+        status.className = n ? "cell-green" : "cell-dim";
+        status.textContent = n
+          ? `Saved ${n} camera(s) for "${shotId}" → re-run Export to generate them.`
+          : `No cameras selected for "${shotId}".`;
+      } catch (e) {
+        status.className = "cell-red"; status.textContent = "Save failed: " + e;
+      }
+    }
+
     const { t: tbl, tbody: tb } = makeTable(["Player", "POV", "OTS"]);
     players.forEach(p => {
       const rigs = chosen.get(p.player_id) || new Set();
@@ -5684,6 +5732,7 @@ async function renderExport(panel) {
         const cb = document.createElement("input");
         cb.type = "checkbox"; cb.checked = rigs.has(rig);
         cb.dataset.player = p.player_id; cb.dataset.rig = rig;
+        cb.addEventListener("change", save);
         const td = document.createElement("td"); td.appendChild(cb); return td;
       };
       const nameTd = document.createElement("td");
@@ -5694,38 +5743,18 @@ async function renderExport(panel) {
     });
     camBody.appendChild(tbl);
 
-    const banner = document.createElement("p");
-    banner.style.display = "none";
-    const saveBtn = document.createElement("button");
-    saveBtn.textContent = "Save selection";
-    saveBtn.onclick = async () => {
-      const byPlayer = new Map();
-      camBody.querySelectorAll("input[type=checkbox]").forEach(cb => {
-        if (!cb.checked) return;
-        if (!byPlayer.has(cb.dataset.player)) byPlayer.set(cb.dataset.player, []);
-        byPlayer.get(cb.dataset.player).push(cb.dataset.rig);
-      });
-      const putBody = {
-        shot_id: shotId,
-        selections: [...byPlayer.entries()].map(([player_id, r]) => ({ player_id, rigs: r })),
-      };
-      const resp = await fetch(
-        `/api/export/camera-selection?shot=${encodeURIComponent(shotId)}`,
-        { method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(putBody) });
-      if (resp.ok) {
-        banner.className = "cell-green";
-        banner.textContent =
-          "Selection saved. Re-run the Export stage to generate the FBX cameras.";
-      } else {
-        let detail;
-        try { detail = (await resp.json()).detail; } catch (e) { detail = await resp.text(); }
-        banner.className = "cell-red";
-        banner.textContent = "Save failed: " + detail;
-      }
-      banner.style.display = "";
-    };
-    camBody.appendChild(saveBtn); camBody.appendChild(banner);
+    // No Save button — every checkbox toggle auto-saves; the status line
+    // is the only feedback needed.
+    camBody.appendChild(status);
+
+    // Reflect what's already persisted on first render so a returning user
+    // sees their saved selection rather than a blank slate.
+    const initialCount = [...chosen.values()].reduce((a, s) => a + s.size, 0);
+    if (initialCount) {
+      status.className = "cell-green";
+      status.textContent =
+        `Saved ${initialCount} camera(s) for "${shotId}" → re-run Export to generate them.`;
+    }
   }
 
   if (defaultShot) await renderCameraPicker(defaultShot);

@@ -124,11 +124,12 @@ def compute_joint_world_pose(
 
     Inputs:
         thetas: (24, 3) axis-angle, one row per joint (including pelvis
-            at index 0). ``thetas[0]`` is the body's intrinsic
-            orientation in canonical y-up; ``root_R`` carries the
-            canonical-y-up → pitch-world rotation on top of that.
-        root_R: (3, 3) rotation taking canonical-y-up coordinates to
-            pitch world.
+            at index 0). ``thetas[0]`` (the global orient) is
+            **intentionally ignored** — ``root_R`` already carries the root
+            joint's world orientation (the same convention the web viewer's
+            ``smplFK`` uses). Only ``thetas[1:]`` drive the articulated pose.
+        root_R: (3, 3) world rotation of the root joint in the pitch frame
+            (combines the canonical-y-up → z-up map with the body's yaw).
         root_t: (3,) translation of the pelvis in pitch world (metres).
         joint_idx: index into ``SMPL_JOINT_NAMES`` (0–23).
         rest_joints: optional (24, 3) override of the rest-pose joint
@@ -147,10 +148,14 @@ def compute_joint_world_pose(
     local_rot = np.empty((24, 3, 3))
     for j in range(24):
         local_rot[j] = axis_angle_to_matrix(thetas[j])
-    # Walk hierarchy.
+    # Walk hierarchy. The root joint's global rotation is identity in the
+    # canonical frame — ``thetas[0]`` is NOT applied here, because ``root_R``
+    # (applied below) already carries the body's world orientation. Applying
+    # both double-counts the orientation and flips the body upside down for
+    # any non-trivial ``thetas[0]`` (matches the viewer's ``smplFK``).
     global_rot = np.empty((24, 3, 3))
     global_pos = np.empty((24, 3))
-    global_rot[0] = local_rot[0]
+    global_rot[0] = np.eye(3)
     global_pos[0] = rest[0]  # canonical pelvis at origin
     for j in range(1, 24):
         p = SMPL_PARENTS[j]

@@ -1,0 +1,37 @@
+{
+  "folders": [
+    {
+      "name": "pipeline (football-perspectives)",
+      "path": "."
+    },
+    {
+      "name": "UE5 (FootballPerspectives 5.8)",
+      "path": "../FootballPerspectives 5.8"
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/.pytest_cache": true
+    },
+    "search.exclude": {
+      "**/.venv": true,
+      "**/.venv313": true,
+      "**/.venv311": true,
+      "**/third_party": true,
+      "**/output-*": true,
+      "**/Intermediate": true,
+      "**/Saved": true,
+      "**/DerivedDataCache": true,
+      "**/Binaries": true
+    },
+    "files.watcherExclude": {
+      "**/.venv/**": true,
+      "**/.venv313/**": true,
+      "**/.venv311/**": true,
+      "**/Intermediate/**": true,
+      "**/Saved/**": true,
+      "**/DerivedDataCache/**": true
+    }
+  }
+}

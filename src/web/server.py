@@ -200,7 +200,11 @@ _STAGE_COMPLETE = {
 # ``output_dir`` at delete time and each match is unlinked.
 # ``camera/anchors.json`` and ``ball/*_ball_anchors.json`` are deliberately
 # omitted — they are user-supplied input (anchors), not outputs, and
-# must survive a stage re-run.
+# must survive a stage re-run. For the same reason the ``export`` entry
+# lists only the generated outputs (gltf/fbx/manifest) rather than the
+# whole ``export/`` dir: ``*_camera_selection.json`` (the perspective-camera
+# picker) and ``*_team_overrides.json`` are user input stored there and
+# must survive an export re-run.
 _STAGE_ARTIFACTS: dict[str, list[str]] = {
     "prepare_shots": ["shots"],
     "tracking": ["tracks"],
@@ -212,7 +216,7 @@ _STAGE_ARTIFACTS: dict[str, list[str]] = {
     "hmr_world": ["hmr_world"],
     "ball": ["ball/*_ball_track.json", "ball/ball_track.json"],
     "refined_poses": ["refined_poses"],
-    "export": ["export"],
+    "export": ["export/gltf", "export/fbx", "export/ue_manifest.json"],
 }
 
 # ---------------------------------------------------------------------------

@@ -58,6 +58,36 @@ def test_selection_put_round_trip(client) -> None:
 
 
 @pytest.mark.integration
+def test_export_rerun_preserves_camera_selection(client) -> None:
+    # Re-running the export stage (DELETE /api/output/export) wipes the
+    # generated outputs but must preserve the user's camera selection and
+    # team-override sidecars stored alongside them.
+    c, out = client
+    _write_player(out, "P003", "shot_01")
+    c.put(
+        "/api/export/camera-selection", params={"shot": "shot_01"},
+        json={"shot_id": "shot_01", "selections": [{"player_id": "P003", "rigs": ["pov"]}]},
+    )
+    sel = out / "export" / "shot_01_camera_selection.json"
+    overrides = out / "export" / "gberch_team_overrides.json"
+    overrides.write_text("{}")
+    (out / "export" / "gltf").mkdir(parents=True, exist_ok=True)
+    (out / "export" / "gltf" / "scene.glb").write_bytes(b"glb")
+    (out / "export" / "fbx").mkdir(parents=True, exist_ok=True)
+    (out / "export" / "ue_manifest.json").write_text("{}")
+    assert sel.exists()
+
+    r = c.delete("/api/output/export")
+    assert r.status_code == 200
+
+    # User input survives; generated outputs are gone.
+    assert sel.exists(), "camera_selection.json must survive an export re-run"
+    assert overrides.exists(), "team_overrides.json must survive an export re-run"
+    assert not (out / "export" / "gltf").exists()
+    assert not (out / "export" / "ue_manifest.json").exists()
+
+
+@pytest.mark.integration
 def test_selection_put_rejects_unknown_player(client) -> None:
     c, out = client
     _write_player(out, "P003", "shot_01")

@@ -209,6 +209,28 @@ ball:
   max_gap_frames: 6
   flight_max_residual_px: 5.0
   max_occlusion_frames: 8
+  # 10cm-accuracy controls (anchor-driven reconstruction).
+  # C2: when a flight span carries at least this many hard 3D knots
+  # (kick/bounce/goal_impact/grounded/contact), gravity + the knots fully
+  # determine the arc, so p0 is left free instead of pinned — this recovers
+  # airborne depth. Below the threshold p0 stays pinned (no drift).
+  free_p0_min_hard_knots: 2
+  # C4: an airborne-anchored frame whose emitted world reprojects farther
+  # than this from the user's clicked pixel is snapped onto the clicked ray
+  # (keeping fitted depth). Makes the user's click authoritative for lateral.
+  ray_faithful_tolerance_px: 3.0
+  # C3a: flight spans with fewer than this many hard knots are flagged in the
+  # quality report as monocularly depth-under-determined (add a bracketing
+  # kick/bounce/goal_impact/grounded anchor to resolve them via C2).
+  min_hard_knots_warn: 2
+  # C3b: optional coarse ball-apparent-size depth prior. Off by default — a
+  # ~5px ball at 90m gives metre-scale depth, so this is a smoothing aid for
+  # under-constrained spans, not a 10cm mechanism.
+  size_depth_prior:
+    enabled: false
+    weight: 20.0
+    min_pixel_diameter: 3.0
+    max_pixel_diameter: 40.0
   wasb:
     checkpoint: third_party/wasb_sbdt/pretrained_weights/wasb_soccer_best.pth.tar
     confidence: 0.3
@@ -274,6 +296,34 @@ refined_poses:
   # Beta fusion across all shots a player appears in.
   beta_aggregation: weighted_mean
   beta_disagreement_warn: 0.3
+  # Per-player robust translation cleanup. Runs first in the per-player
+  # clean-up (after lean/ground-snap/trim, before the cross-player
+  # consensus and the final smoother) so per-player teleports don't
+  # corrupt the consensus median and the Savgol isn't fitting through
+  # outliers. All thresholds are in physical units (m/s, metres,
+  # seconds) so the same config generalises across clips and frame
+  # rates. Targets two of the three jitter artifacts directly:
+  # implausibly fast per-player motion and missing frames.
+  cleanup:
+    enabled: true
+    # Gaps up to this many frames are filled by interpolation (linear
+    # root_t/thetas, SLERP root_R). Longer gaps are left as keyframe
+    # holds (the glTF LINEAR sampler bridges them) rather than
+    # fabricating a multi-second straight-line glide.
+    max_gap_fill_frames: 15
+    # Hampel outlier test: a frame whose pitch-XY position deviates
+    # from the local median (over this many seconds) by more than
+    # max(hampel_k · 1.4826 · MAD, hampel_floor_m) is rejected and
+    # re-interpolated from trusted neighbours.
+    hampel_window_s: 0.4
+    hampel_k: 3.0
+    hampel_floor_m: 0.6
+    # Physical speed cap. Frame-to-frame displacement is limited to
+    # v_max_m_s / fps metres (forward/backward, no lag). 12 m/s sits
+    # safely above an elite sprint (~10 m/s) so genuine fast motion is
+    # preserved while monocular depth wobble and tracking teleports are
+    # reined in.
+    v_max_m_s: 12.0
   # Cross-player camera-jitter correction. Detects frames where every
   # visible player drifts in unison on the pitch and subtracts the
   # common XY shift. Runs per shot, between the per-player clean-up

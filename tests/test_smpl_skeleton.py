@@ -101,19 +101,34 @@ def test_compute_joint_world_applies_root_rotation() -> None:
     np.testing.assert_allclose(head, expected, atol=1e-9)
 
 
-def test_compute_joint_world_propagates_parent_rotation() -> None:
-    """Rotating the pelvis 180° in canonical y-up flips the head's
-    position to the opposite side."""
-    thetas = np.zeros((24, 3))
-    thetas[0] = np.array([0.0, 0.0, np.pi])  # 180° about canonical z
+def test_compute_joint_world_ignores_theta0() -> None:
+    """``thetas[0]`` (global orient) is ignored — ``root_R`` carries the
+    root orientation. Rotating only the pelvis leaves every joint at its
+    rest world position (otherwise the body double-rotates and flips)."""
+    head_idx = SMPL_JOINT_NAMES.index("head")
     root_R = np.eye(3)
     root_t = np.zeros(3)
-    head_idx = SMPL_JOINT_NAMES.index("head")
+    rest_head = compute_joint_world(np.zeros((24, 3)), root_R, root_t, head_idx)
+
+    thetas = np.zeros((24, 3))
+    thetas[0] = np.array([0.0, 0.0, np.pi])  # 180° pelvis — must be ignored
     head = compute_joint_world(thetas, root_R, root_t, head_idx)
-    expected = np.array([0.0, 0.0, np.pi])
-    R180 = axis_angle_to_matrix(expected)
-    expected_head = R180 @ SMPL_REST_JOINTS_YUP[head_idx]
-    np.testing.assert_allclose(head, expected_head, atol=1e-9)
+    np.testing.assert_allclose(head, rest_head, atol=1e-9)
+    np.testing.assert_allclose(head, SMPL_REST_JOINTS_YUP[head_idx], atol=1e-9)
+
+
+def test_compute_joint_world_propagates_non_root_parent_rotation() -> None:
+    """An articulated (non-root) parent rotation propagates to its
+    descendants. Rotating spine1 (joint 3, an ancestor of the head) moves
+    the head off its rest position."""
+    head_idx = SMPL_JOINT_NAMES.index("head")
+    root_R = np.eye(3)
+    root_t = np.zeros(3)
+    thetas = np.zeros((24, 3))
+    thetas[3] = np.array([0.0, 0.0, np.pi / 2])  # spine1 yaw
+    head = compute_joint_world(thetas, root_R, root_t, head_idx)
+    rest_head = SMPL_REST_JOINTS_YUP[head_idx]
+    assert not np.allclose(head, rest_head, atol=1e-3)
 
 
 def test_compute_joint_world_pose_returns_position_and_rotation() -> None:

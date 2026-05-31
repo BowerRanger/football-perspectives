@@ -250,9 +250,20 @@ class ExportStage(BaseStage):
         prefix = "" if shot_id is None else f"{shot_id}_"
         sel_path = self.output_dir / "export" / f"{prefix}camera_selection.json"
         if not sel_path.exists():
+            logger.info(
+                "[export] no camera selection at %s — no POV/OTS cameras for "
+                "shot %s. Tick players in the Export panel's 'Perspective "
+                "cameras' picker and click Save selection before exporting.",
+                sel_path, shot_id,
+            )
             self._virtual_camera_entries[shot_id] = []
             return []
         selection = CameraSelection.load(sel_path)
+        if not selection.selections:
+            logger.info(
+                "[export] camera selection at %s is empty (no players ticked); "
+                "no POV/OTS cameras for shot %s", sel_path, shot_id,
+            )
 
         bcast_path = self.output_dir / "camera" / f"{prefix}camera_track.json"
         if not bcast_path.exists():
@@ -269,6 +280,9 @@ class ExportStage(BaseStage):
         players = {t.player_id: t for t in _per_shot_smpl_tracks(self.output_dir, shot_id=shot_id)}
         ball_path = self.output_dir / "ball" / f"{prefix}ball_track.json"
         ball_track = BallTrack.load(ball_path) if ball_path.exists() else None
+        # Name virtual cameras after the player's display name (matching the
+        # player FBX naming), falling back to the track id when unnamed.
+        name_mapping = load_player_names(self.output_dir)
 
         entries: list[NamedCameraEntry] = []
         for sel in selection.selections:
@@ -279,8 +293,9 @@ class ExportStage(BaseStage):
                     sel.player_id, shot_id,
                 )
                 continue
+            display_name = display_name_for(sel.player_id, name_mapping)
             for rig in sel.rigs:
-                clip_id = f"{prefix}{sel.player_id}_{rig}"
+                clip_id = f"{prefix}{display_name}_{rig}"
                 if rig == "pov":
                     cam = vcam.build_pov_track(track, cfg, image_size, fps, clip_id)
                 elif rig == "ots":
@@ -297,7 +312,7 @@ class ExportStage(BaseStage):
                 cam_path = self.output_dir / "camera" / f"{clip_id}_camera_track.json"
                 cam.save(cam_path)
                 entries.append(NamedCameraEntry(
-                    name=f"{sel.player_id}_{rig}",
+                    name=f"{display_name}_{rig}",
                     fbx="",
                     image_size=(int(image_size[0]), int(image_size[1])),
                     frame_range=(int(cam.frames[0].frame), int(cam.frames[-1].frame)),

@@ -60,6 +60,30 @@ def test_generate_virtual_cameras_writes_rig_tracks(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_virtual_cameras_named_after_player_display_name(tmp_path: Path) -> None:
+    # When players.json maps the id to a name, the camera entries + track
+    # files use the (sanitised) display name, mirroring the player FBX
+    # naming convention rather than the raw track id.
+    out = tmp_path
+    (out / "camera").mkdir(parents=True)
+    (out / "hmr_world").mkdir(parents=True)
+    _write_broadcast_camera(out / "camera" / "shot_01_camera_track.json")
+    _write_player(out / "hmr_world" / "P003_smpl_world.npz")
+    (out / "players.json").write_text(json.dumps({"P003": "Alisson Becker"}))
+    CameraSelection(shot_id="shot_01",
+                    selections=(RigSelection("P003", ("pov", "ots")),)).save(
+        out / "export" / "shot_01_camera_selection.json")
+
+    stage = ExportStage(output_dir=out, config={"export": {"virtual_cameras": {}}})
+    named = stage._generate_virtual_cameras(shot_id="shot_01")
+
+    assert {c.name for c in named} == {"Alisson_Becker_pov", "Alisson_Becker_ots"}
+    assert (out / "camera" / "shot_01_Alisson_Becker_pov_camera_track.json").exists()
+    pov = next(c for c in named if c.name == "Alisson_Becker_pov")
+    assert pov.track_json == "camera/shot_01_Alisson_Becker_pov_camera_track.json"
+
+
+@pytest.mark.unit
 def test_generate_virtual_cameras_no_selection_returns_empty(tmp_path: Path) -> None:
     out = tmp_path
     (out / "camera").mkdir(parents=True)

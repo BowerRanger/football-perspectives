@@ -747,6 +747,268 @@ def _apply_residual_consensus_correction(
     return new_tracks, stats
 
 
+def _velocity_limit_xy(xy: np.ndarray, max_step: float) -> np.ndarray:
+    """Forward/backward displacement-limited filter on a 2-D path.
+
+    Caps each consecutive frame-to-frame displacement at ``max_step``
+    metres by running a one-sided limiter forward and backward and
+    averaging the two. Averaging keeps the result symmetric (no lag)
+    while preserving the ``|Δ| ≤ max_step`` bound — so a genuine sprint
+    below the cap passes through untouched and only super-physical jumps
+    (HMR depth wobble, tracking teleports) are reined in.
+    """
+    arr = np.asarray(xy, dtype=float)
+    n = arr.shape[0]
+    if n < 2 or max_step <= 0.0:
+        return arr.copy()
+
+    def _limit(seq: np.ndarray) -> np.ndarray:
+        out = seq.copy()
+        for i in range(1, len(out)):
+            step = out[i] - out[i - 1]
+            d = float(np.linalg.norm(step))
+            if d > max_step:
+                out[i] = out[i - 1] + step * (max_step / d)
+        return out
+
+    fwd = _limit(arr)
+    bwd = _limit(arr[::-1])[::-1]
+    return 0.5 * (fwd + bwd)
+
+
+def _hampel_outlier_mask(
+    xy: np.ndarray, *, window: int, k: float, abs_floor: float,
+) -> np.ndarray:
+    """Boolean mask (``True`` = outlier) over a 2-D path via a Hampel test.
+
+    For each frame, compares its distance to the local median (over a
+    centred ``window`` of frames) against ``max(k · 1.4826 · MAD,
+    abs_floor)``. The ``abs_floor`` (metres) keeps a perfectly still run
+    — where the MAD collapses to ~0 — from flagging sub-floor noise as
+    outliers, while ``k · 1.4826 · MAD`` adapts the threshold to the
+    local motion so a genuine fast move is not mistaken for a spike.
+    """
+    arr = np.asarray(xy, dtype=float)
+    n = arr.shape[0]
+    mask = np.zeros(n, dtype=bool)
+    if n == 0:
+        return mask
+    half = max(1, int(window) // 2)
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        win = arr[lo:hi]
+        med = np.median(win, axis=0)
+        dists = np.linalg.norm(win - med, axis=1)
+        mad = float(np.median(dists))
+        thresh = max(k * 1.4826 * mad, abs_floor)
+        if float(np.linalg.norm(arr[i] - med)) > thresh:
+            mask[i] = True
+    return mask
+
+
+def _slerp_fill(
+    src_frames: np.ndarray, src_R: np.ndarray, dense_frames: np.ndarray,
+) -> np.ndarray:
+    """SLERP a sparse stack of rotations onto a dense frame grid.
+
+    ``dense_frames`` is assumed to span ``[src_frames[0],
+    src_frames[-1]]`` (the resampler only fills *inside* a run), so no
+    extrapolation occurs; values are clamped defensively regardless.
+    """
+    from scipy.spatial.transform import Rotation, Slerp
+
+    sf = np.asarray(src_frames, dtype=float)
+    df = np.asarray(dense_frames, dtype=float)
+    src_R = np.asarray(src_R, dtype=float)
+    if len(sf) == 1:
+        return np.tile(src_R[0], (len(df), 1, 1))
+    rots = Rotation.from_matrix(src_R)
+    slerp = Slerp(sf, rots)
+    return slerp(np.clip(df, sf[0], sf[-1])).as_matrix()
+
+
+def _clean_player_translation(
+    track: SmplWorldTrack,
+    *,
+    fps: float,
+    enabled: bool = True,
+    max_gap_fill_frames: int = 15,
+    hampel_window_s: float = 0.4,
+    hampel_k: float = 3.0,
+    hampel_floor_m: float = 0.6,
+    v_max_m_s: float = 12.0,
+) -> tuple[SmplWorldTrack, dict]:
+    """Per-player robust translation cleanup, run before the cross-player
+    consensus and the final smoother.
+
+    Three things, all in physical units so the same config generalises
+    across clips and frame rates:
+
+      1. **Gap fill.** The anchored span is resampled onto a uniform
+         per-frame grid; missing frames are interpolated (linear for
+         ``root_t`` / ``thetas`` / ``confidence``, SLERP for ``root_R``).
+         Gaps wider than ``max_gap_fill_frames`` are *not* fabricated —
+         the track is split into runs at those points so a multi-second
+         hole isn't turned into a straight-line glide. (Artifact #3.)
+      2. **Outlier rejection.** A Hampel test on pitch XY flags
+         single-frame teleports / large excursions among the originally
+         present frames; flagged positions are re-interpolated from
+         trusted neighbours. (Artifact #2, spikes.)
+      3. **Velocity limit.** A physical speed cap (``v_max_m_s``) bounds
+         any residual high-frequency depth wobble without flattening a
+         genuine sprint. (Artifact #2, wobble.)
+
+    XY only — ``z`` is owned by the per-player ground-snap pass and is
+    carried (interpolated) but not clamped here. Returns a new dense
+    ``SmplWorldTrack`` plus a stats dict.
+    """
+    stats = {"filled_frames": 0, "rejected_frames": 0, "clamped_frames": 0}
+    frames = np.asarray(track.frames, dtype=np.int64)
+    n = int(len(frames))
+    if not enabled or n < 2:
+        return track, stats
+
+    # Sort + dedupe frames (first occurrence wins) so the interp is
+    # monotone and a duplicated frame index can't break np.interp.
+    order = np.argsort(frames, kind="stable")
+    frames = frames[order]
+    root_t = np.asarray(track.root_t, dtype=float)[order]
+    root_R = np.asarray(track.root_R, dtype=float)[order]
+    thetas = np.asarray(track.thetas, dtype=float)[order]
+    conf = np.asarray(track.confidence, dtype=float)[order]
+    _, first_idx = np.unique(frames, return_index=True)
+    first_idx = np.sort(first_idx)
+    frames = frames[first_idx]
+    root_t, root_R = root_t[first_idx], root_R[first_idx]
+    thetas, conf = thetas[first_idx], conf[first_idx]
+    n = int(len(frames))
+    if n < 2:
+        return track, stats
+
+    # Split into runs at gaps wider than we are willing to fabricate.
+    diffs = np.diff(frames)
+    split_after = np.where(diffs > max_gap_fill_frames)[0]
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for s in split_after:
+        bounds.append((start, int(s) + 1))
+        start = int(s) + 1
+    bounds.append((start, n))
+
+    hwin = max(3, int(round(hampel_window_s * fps)))
+    max_step = float(v_max_m_s) / float(fps) if fps > 0 else float("inf")
+
+    out_f, out_t, out_R, out_th, out_c = [], [], [], [], []
+    for a, b in bounds:
+        rf = frames[a:b]
+        f0, f1 = int(rf[0]), int(rf[-1])
+        dense_f = np.arange(f0, f1 + 1)
+        present = np.zeros(len(dense_f), dtype=bool)
+        present[rf - f0] = True
+        stats["filled_frames"] += int((~present).sum())
+
+        # Densify translation (xyz) + confidence by linear interpolation.
+        dense_t = np.empty((len(dense_f), 3))
+        for ax in range(3):
+            dense_t[:, ax] = np.interp(dense_f, rf, root_t[a:b, ax])
+        dense_c = np.interp(dense_f, rf, conf[a:b])
+
+        # Densify thetas (linear per element) and rotation (SLERP).
+        rth = thetas[a:b].reshape(b - a, -1)
+        dth = np.empty((len(dense_f), rth.shape[1]))
+        for j in range(rth.shape[1]):
+            dth[:, j] = np.interp(dense_f, rf, rth[:, j])
+        dense_th = dth.reshape((len(dense_f),) + thetas.shape[1:])
+        dense_R = _slerp_fill(rf, root_R[a:b], dense_f)
+
+        # Reject position outliers among the originally-present frames,
+        # then re-interpolate the rejected positions from trusted ones.
+        xy = dense_t[:, :2]
+        outliers = _hampel_outlier_mask(
+            xy, window=hwin, k=hampel_k, abs_floor=hampel_floor_m,
+        ) & present
+        stats["rejected_frames"] += int(outliers.sum())
+        trusted = present & ~outliers
+        if outliers.any() and int(trusted.sum()) >= 2:
+            ti = np.where(trusted)[0]
+            grid = np.arange(len(dense_f))
+            for ax in range(2):
+                xy[:, ax] = np.interp(grid, ti, xy[ti, ax])
+
+        # Physical velocity limit on the de-spiked path.
+        before = xy.copy()
+        xy = _velocity_limit_xy(xy, max_step)
+        stats["clamped_frames"] += int(
+            (np.linalg.norm(xy - before, axis=1) > 1e-6).sum()
+        )
+        dense_t[:, :2] = xy
+
+        out_f.append(dense_f)
+        out_t.append(dense_t)
+        out_R.append(dense_R)
+        out_th.append(dense_th)
+        out_c.append(dense_c)
+
+    new = SmplWorldTrack(
+        player_id=track.player_id,
+        frames=np.concatenate(out_f).astype(np.int64),
+        betas=np.asarray(track.betas, dtype=np.float32),
+        thetas=np.concatenate(out_th).astype(np.float32),
+        root_R=np.concatenate(out_R).astype(np.float32),
+        root_t=np.concatenate(out_t).astype(np.float32),
+        confidence=np.concatenate(out_c).astype(np.float32),
+        shot_id=track.shot_id,
+    )
+    return new, stats
+
+
+def _clean_refined_translation(
+    refined: RefinedPose, **cleanup_kwargs,
+) -> tuple[RefinedPose, dict]:
+    """Re-apply the per-player translation cleanup to an assembled
+    multi-shot track.
+
+    The multi-shot assembly picks the highest-confidence shot per
+    reference frame, which teleports a player between two disagreeing
+    camera solves at every switch frame. Running the same physical
+    cleanup (Hampel reject + velocity limit) on the merged track bounds
+    those switches without re-introducing the per-shot work. ``view_count``
+    is carried onto the (possibly densified) frame set — gap-filled
+    frames inherit the nearest neighbour's count.
+    """
+    tr = SmplWorldTrack(
+        player_id=refined.player_id,
+        frames=np.asarray(refined.frames),
+        betas=np.asarray(refined.betas),
+        thetas=np.asarray(refined.thetas),
+        root_R=np.asarray(refined.root_R),
+        root_t=np.asarray(refined.root_t),
+        confidence=np.asarray(refined.confidence),
+        shot_id="",
+    )
+    cleaned, stats = _clean_player_translation(tr, **cleanup_kwargs)
+    vc_map = {
+        int(f): int(v)
+        for f, v in zip(np.asarray(refined.frames), np.asarray(refined.view_count))
+    }
+    new_vc = np.array(
+        [vc_map.get(int(f), 1) for f in cleaned.frames], dtype=np.int32,
+    )
+    out = RefinedPose(
+        player_id=refined.player_id,
+        frames=cleaned.frames,
+        betas=cleaned.betas,
+        thetas=cleaned.thetas,
+        root_R=cleaned.root_R,
+        root_t=cleaned.root_t,
+        confidence=cleaned.confidence,
+        view_count=new_vc,
+        contributing_shots=refined.contributing_shots,
+    )
+    return out, stats
+
+
 def _load_clip_fps(output_dir: Path) -> float:
     """Return the clip FPS from any available camera_track JSON, or
     25.0 when none has been written yet (e.g. unit-test fixtures)."""
@@ -772,7 +1034,8 @@ def _clean_single_track(
     ground_snap_max_distance: float = 0.30,
     smpl_model: dict | None = None,
     smoothing: dict | None = None,
-) -> SmplWorldTrack:
+    cleanup: dict | None = None,
+) -> tuple[SmplWorldTrack, dict]:
     """Apply outlier rejection + lean reduction + leading/trailing trim.
 
     Returns a new ``SmplWorldTrack`` carrying the same ``shot_id`` /
@@ -819,17 +1082,23 @@ def _clean_single_track(
     frames = np.asarray(track.frames, dtype=np.int64)
     confidence = np.asarray(track.confidence)
 
+    empty_cleanup_stats = {
+        "filled_frames": 0, "rejected_frames": 0, "clamped_frames": 0,
+    }
     anchored = confidence >= _FRESH_ANCHOR_CONF
     if not anchored.any():
-        return SmplWorldTrack(
-            player_id=track.player_id,
-            frames=np.zeros(0, dtype=np.int64),
-            betas=np.asarray(track.betas, dtype=np.float32),
-            thetas=np.zeros((0, 24, 3), dtype=np.float32),
-            root_R=np.zeros((0, 3, 3), dtype=np.float32),
-            root_t=np.zeros((0, 3), dtype=np.float32),
-            confidence=np.zeros(0, dtype=np.float32),
-            shot_id=track.shot_id,
+        return (
+            SmplWorldTrack(
+                player_id=track.player_id,
+                frames=np.zeros(0, dtype=np.int64),
+                betas=np.asarray(track.betas, dtype=np.float32),
+                thetas=np.zeros((0, 24, 3), dtype=np.float32),
+                root_R=np.zeros((0, 3, 3), dtype=np.float32),
+                root_t=np.zeros((0, 3), dtype=np.float32),
+                confidence=np.zeros(0, dtype=np.float32),
+                shot_id=track.shot_id,
+            ),
+            empty_cleanup_stats,
         )
 
     idx = np.where(anchored)[0]
@@ -848,6 +1117,16 @@ def _clean_single_track(
         shot_id=track.shot_id,
     )
 
+    # Per-player robust translation cleanup AFTER trim (so it runs on the
+    # anchored span) and BEFORE the cross-player consensus + final
+    # smoother (so per-player teleports don't corrupt the consensus
+    # median and the Savgol isn't fitting through outliers). Gap-fill
+    # densifies the track onto a uniform grid; outlier rejection +
+    # velocity limit bound implausible per-frame motion.
+    cleanup_stats = dict(empty_cleanup_stats)
+    if cleanup and cleanup.get("enabled", False):
+        trimmed, cleanup_stats = _clean_player_translation(trimmed, **cleanup)
+
     # Temporal smoothing AFTER trim so the smoother's edge taps stay
     # inside the anchored span. ``hmr_world`` already applies a mild
     # Savgol on root_t (window 5); this pass is additional and targets
@@ -856,7 +1135,7 @@ def _clean_single_track(
     # to ``<= 1`` in the ``refined_poses`` config block.
     if smoothing:
         trimmed = _smooth_track(trimmed, **smoothing)
-    return trimmed
+    return trimmed, cleanup_stats
 
 
 class RefinedPosesStage(BaseStage):
@@ -915,6 +1194,26 @@ class RefinedPosesStage(BaseStage):
             "iterations": int(jitter_cfg.get("residual_iterations", 2)),
         }
 
+        # fps drives the physical-unit cleanup + jitter passes; load it
+        # once up front (before the per-player clean loop, which now uses
+        # it for the velocity limit / Hampel window).
+        fps = _load_clip_fps(self.output_dir)
+
+        # Per-player robust translation cleanup (gap-fill + outlier
+        # rejection + velocity limit). Disabled when the config block is
+        # absent so minimal-config callers keep the legacy behaviour;
+        # config/default.yaml turns it on for production.
+        cleanup_cfg = (cfg.get("cleanup") or {})
+        cleanup_kwargs = {
+            "enabled": bool(cleanup_cfg.get("enabled", False)),
+            "fps": fps,
+            "max_gap_fill_frames": int(cleanup_cfg.get("max_gap_fill_frames", 15)),
+            "hampel_window_s": float(cleanup_cfg.get("hampel_window_s", 0.4)),
+            "hampel_k": float(cleanup_cfg.get("hampel_k", 3.0)),
+            "hampel_floor_m": float(cleanup_cfg.get("hampel_floor_m", 0.6)),
+            "v_max_m_s": float(cleanup_cfg.get("v_max_m_s", 12.0)),
+        }
+
         sync_map = self._load_sync_map()
         per_player = self._gather_contributions(hmr_dir)
         # Loaded once per stage run so each per-player call can apply
@@ -929,13 +1228,22 @@ class RefinedPosesStage(BaseStage):
             )
 
         # 1. Per-(shot, player) CLEAN (outlier reject + lean + ground
-        # snap + trim). No smoothing yet — the cross-player jitter
-        # pass needs to operate on the raw cleaned signal so any
-        # residual error gets mopped up by the smoother afterwards.
+        # snap + trim + per-player translation cleanup). No final
+        # smoothing yet — the cross-player jitter pass needs to operate
+        # on the cleaned signal so any residual error gets mopped up by
+        # the smoother afterwards.
+        cleanup_summary = {
+            "enabled": cleanup_kwargs["enabled"],
+            "filled_frames": 0,
+            "rejected_frames": 0,
+            "clamped_frames": 0,
+            "assembly_rejected_frames": 0,
+            "assembly_clamped_frames": 0,
+        }
         cleaned_by_shot: dict[str, list[tuple[str, SmplWorldTrack]]] = {}
         for pid, contribs in per_player.items():
             for shot_id, track in contribs:
-                cleaned = _clean_single_track(
+                cleaned, c_stats = _clean_single_track(
                     track,
                     lean_correction_factor=lean_factor,
                     lean_max_correction_deg=lean_max_deg,
@@ -943,13 +1251,16 @@ class RefinedPosesStage(BaseStage):
                     ground_snap_max_distance=ground_max_dist,
                     smpl_model=smpl_model,
                     smoothing=None,
+                    cleanup=cleanup_kwargs,
                 )
+                cleanup_summary["filled_frames"] += int(c_stats["filled_frames"])
+                cleanup_summary["rejected_frames"] += int(c_stats["rejected_frames"])
+                cleanup_summary["clamped_frames"] += int(c_stats["clamped_frames"])
                 cleaned_by_shot.setdefault(shot_id, []).append((pid, cleaned))
 
         # 2. Per-shot cross-player JITTER pass. Jitter is a camera
         # frame artifact so consensus must be computed on each shot's
         # native timeline before any sync_map remapping.
-        fps = _load_clip_fps(self.output_dir)
         jitter_summary = {
             "enabled": jitter_kwargs["enabled"],
             "corrected_frames": 0,
@@ -1044,6 +1355,7 @@ class RefinedPosesStage(BaseStage):
             "single_shot_players": 0,
             "multi_shot_players": 0,
             "total_frames": 0,
+            "cleanup": cleanup_summary,
             "jitter": jitter_summary,
             "residual_consensus": residual_summary,
         }
@@ -1052,10 +1364,28 @@ class RefinedPosesStage(BaseStage):
         for pid in sorted(prepared_per_player.keys()):
             contribs = prepared_per_player[pid]
             refined, diag = _assemble_player(pid, contribs, sync_map)
+            distinct_shots = {sid for sid, _ in contribs}
+            # Multi-shot assembly merges by per-frame highest-confidence
+            # pick, which teleports a player between disagreeing camera
+            # solves at switch frames. Bound that with the same physical
+            # cleanup. Single-shot tracks were already cleaned per-shot.
+            if (
+                cleanup_kwargs["enabled"]
+                and len(distinct_shots) > 1
+                and int(len(refined.frames)) > 1
+            ):
+                refined, a_stats = _clean_refined_translation(
+                    refined, **cleanup_kwargs,
+                )
+                cleanup_summary["assembly_rejected_frames"] += int(
+                    a_stats["rejected_frames"]
+                )
+                cleanup_summary["assembly_clamped_frames"] += int(
+                    a_stats["clamped_frames"]
+                )
             refined.save(out_dir / f"{pid}_refined.npz")
             diag.save(out_dir / f"{pid}_diagnostics.json")
             summary["players_refined"] += 1
-            distinct_shots = {sid for sid, _ in contribs}
             if len(distinct_shots) <= 1:
                 summary["single_shot_players"] += 1
             else:
@@ -1067,8 +1397,12 @@ class RefinedPosesStage(BaseStage):
         )
         logger.info(
             "[refined_poses] %d player(s) refined, %d frame(s) total, "
+            "cleanup[%d filled / %d rejected / %d clamped], "
             "%d Δ-jitter / %d residual-consensus frame(s) corrected",
             summary["players_refined"], summary["total_frames"],
+            cleanup_summary["filled_frames"],
+            cleanup_summary["rejected_frames"],
+            cleanup_summary["clamped_frames"],
             jitter_summary["corrected_frames"],
             residual_summary["corrected_frames"],
         )

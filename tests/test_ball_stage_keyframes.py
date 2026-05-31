@@ -1,10 +1,9 @@
 """Integration: the ball stage writes a sparse ball_keyframes.json sidecar
 next to the dense ball_track.json, with one entry per manual anchor."""
-import json
 from pathlib import Path
 
 from src.schemas.ball_keyframes import BallKeyframeSet
-from src.schemas.ball_track import BallFrame, BallTrack
+from src.schemas.ball_track import BallFrame
 
 
 def test_run_shot_writes_keyframes_sidecar(tmp_path: Path, monkeypatch):

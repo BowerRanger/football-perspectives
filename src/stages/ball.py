@@ -37,7 +37,6 @@ from src.schemas.ball_track import BallFrame, BallTrack, FlightSegment
 from src.schemas.camera_track import CameraTrack
 from src.schemas.shots import ShotsManifest
 from src.schemas.ball_anchor import BallAnchor, BallAnchorSet
-from src.schemas.ball_keyframes import BallKeyframeSet  # noqa: F401  (re-exported for tests)
 from src.utils.ball_keyframe_builder import build_ball_keyframe_set
 from src.utils.ball_anchor_heights import (
     AIRBORNE_STATES,
@@ -732,10 +731,13 @@ def _emit_ball_keyframes(
     per_frame_t: dict[int, np.ndarray],
     distortion: tuple[float, float],
     ground_touch_frames: set[int],
-) -> Path:
+) -> None:
     """Write the sparse ``*_ball_keyframes.json`` sidecar next to the dense
     track. ``world_xyz`` for each anchor is taken from the already-built
     dense ``per_frame_out`` so the two artifacts agree exactly.
+
+    The dense track is the stage contract; this sidecar is enrichment.
+    Callers should treat a failure here as non-fatal (wrap in try/except).
     """
     world_by_frame = {
         bf.frame: bf.world_xyz
@@ -758,7 +760,7 @@ def _emit_ball_keyframes(
         ball_out_path.name.replace("ball_track", "ball_keyframes")
     )
     kfset.save(kf_path)
-    return kf_path
+    logger.debug("ball: wrote %d keyframes to %s", len(kfset.keyframes), kf_path)
 
 
 class BallStage(BaseStage):
@@ -2114,19 +2116,25 @@ class BallStage(BaseStage):
         )
         track.save(ball_out_path)
 
-        _emit_ball_keyframes(
-            ball_out_path=ball_out_path,
-            clip_id=camera.clip_id,
-            fps=camera.fps,
-            image_size=camera.image_size,
-            per_frame_out=per_frame_out,
-            anchor_by_frame=anchor_by_frame,
-            per_frame_K=per_frame_K,
-            per_frame_R=per_frame_R,
-            per_frame_t=per_frame_t,
-            distortion=distortion,
-            ground_touch_frames=ground_touch_frames,
-        )
+        try:
+            _emit_ball_keyframes(
+                ball_out_path=ball_out_path,
+                clip_id=camera.clip_id,
+                fps=camera.fps,
+                image_size=camera.image_size,
+                per_frame_out=per_frame_out,
+                anchor_by_frame=anchor_by_frame,
+                per_frame_K=per_frame_K,
+                per_frame_R=per_frame_R,
+                per_frame_t=per_frame_t,
+                distortion=distortion,
+                ground_touch_frames=ground_touch_frames,
+            )
+        except Exception as exc:  # noqa: BLE001 — sidecar is enrichment, never block the stage
+            logger.warning(
+                "ball: failed to write keyframes sidecar for %s: %s",
+                ball_out_path, exc,
+            )
 
         # C3a — surface depth-under-determined flight spans. A span with
         # < min_hard_knots_warn hard 3D knots cannot have its airborne depth

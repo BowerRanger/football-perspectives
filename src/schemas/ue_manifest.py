@@ -65,6 +65,10 @@ class BallEntry:
     # round-trip needed when binding to an FBX. Empty string when the
     # legacy FBX path is the only source.
     track_json: str = ""
+    # Pipeline-relative path to the sparse ball_keyframes.json (one entry
+    # per manual anchor + camera rays + metadata). Preferred by the UE side
+    # when present; empty when the run predates the sparse-keyframe export.
+    keyframes_json: str = ""
 
 
 @dataclass
@@ -165,6 +169,8 @@ class UeManifest:
             }
             if self.ball.track_json:
                 raw["ball"]["track_json"] = self.ball.track_json
+            if self.ball.keyframes_json:
+                raw["ball"]["keyframes_json"] = self.ball.keyframes_json
         if self.camera is not None:
             raw["camera"] = {
                 "fbx": self.camera.fbx,
@@ -219,6 +225,7 @@ class UeManifest:
                     fbx=raw["ball"]["fbx"],
                     frame_range=tuple(raw["ball"]["frame_range"]),
                     track_json=raw["ball"].get("track_json", ""),
+                    keyframes_json=raw["ball"].get("keyframes_json", ""),
                 )
                 if "ball" in raw
                 else None

@@ -154,3 +154,18 @@ def test_empty_kits_omitted_but_loads(tmp_path: Path) -> None:
     assert "kits" not in raw
     loaded = UeManifest.load(p)
     assert loaded.kits == {}
+
+
+def test_ball_keyframes_json_round_trips(tmp_path: Path) -> None:
+    m = _good()
+    m.ball = BallEntry(
+        fbx="fbx/ball.fbx",
+        frame_range=(12, 78),
+        track_json="ball/ball_track.json",
+        keyframes_json="ball/ball_keyframes.json",
+    )
+    p = tmp_path / "ue_manifest.json"
+    m.save(p)
+    loaded = UeManifest.load(p)
+    assert loaded.ball is not None
+    assert loaded.ball.keyframes_json == "ball/ball_keyframes.json"

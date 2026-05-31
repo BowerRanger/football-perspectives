@@ -106,6 +106,18 @@ def _demote_run_to_missing(
         per_frame_world.pop(fi, None)
 
 
+def _underconstrained_spans(
+    spans: list[tuple[int, int, int]],
+    min_hard_knots: int,
+) -> list[tuple[int, int, int]]:
+    """Return flight spans ``(fa, fb, n_hard_knots)`` with fewer than
+    ``min_hard_knots`` hard 3D knots — monocularly depth-under-determined.
+    Adding a bracketing kick/bounce/goal_impact/grounded anchor lets the
+    physics-first fit (C2) resolve their depth exactly.
+    """
+    return [s for s in spans if s[2] < min_hard_knots]
+
+
 def _project_point_onto_pixel_ray(
     point: np.ndarray,
     uv: tuple[float, float],
@@ -815,6 +827,11 @@ class BallStage(BaseStage):
         # C2: free p0 in the Phase-2 fit when a span has >= this many hard
         # knots (gravity + 2 knots fully determine the arc, depth included).
         free_p0_min_hard_knots = int(cfg.get("free_p0_min_hard_knots", 2))
+        # C3a: flight spans with fewer hard knots than this are monocularly
+        # depth-under-determined; recorded for the quality report so the user
+        # can add a bracketing anchor.
+        min_hard_knots_warn = int(cfg.get("min_hard_knots_warn", 2))
+        span_knot_counts: list[tuple[int, int, int]] = []
 
         tracker = BallTracker(
             process_noise_grounded_px=float(tracker_cfg.get("process_noise_grounded_px", 4.0)),
@@ -1719,6 +1736,10 @@ class BallStage(BaseStage):
                 # exactly for a kick→bounce or kick→airborne pair.
                 if len(obs_p2) < 2:
                     continue
+                # C3a: record how many hard 3D knots bracket this flight
+                # span (before any are consumed as the p0 pin) so the
+                # quality report can flag depth-under-determined spans.
+                span_knot_counts.append((fa_span, fb_span, len(knots)))
                 # Pin p0 to a known world position when possible:
                 #   - Hard-knot start (kick/header/etc.): use its exact
                 #     state-height ray-cast (already in knots[0]).
@@ -2048,6 +2069,30 @@ class BallStage(BaseStage):
             flight_segments=tuple(flight_segments),
         )
         track.save(ball_out_path)
+
+        # C3a — surface depth-under-determined flight spans. A span with
+        # < min_hard_knots_warn hard 3D knots cannot have its airborne depth
+        # determined monocularly; adding a bracketing kick/bounce/goal_impact/
+        # grounded anchor lets the physics-first fit (C2) resolve it exactly.
+        underconstrained = _underconstrained_spans(
+            span_knot_counts, min_hard_knots_warn,
+        )
+        for fa_uc, fb_uc, nk in underconstrained:
+            logger.warning(
+                "ball: flight span %d-%d has %d<%d hard knots — depth is "
+                "monocularly under-determined; add a kick/bounce/goal_impact/"
+                "grounded anchor to bracket it",
+                fa_uc, fb_uc, nk, min_hard_knots_warn,
+            )
+        diag_path = ball_out_path.with_name(
+            ball_out_path.name.replace("ball_track", "ball_diag")
+        )
+        diag_path.write_text(json.dumps({
+            "underconstrained_spans": [
+                {"start": fa_uc, "end": fb_uc, "hard_knots": nk}
+                for fa_uc, fb_uc, nk in underconstrained
+            ],
+        }, indent=2))
 
     @staticmethod
     def _flight_runs(

@@ -160,6 +160,20 @@ def write_quality_report(output_dir: Path) -> None:
             ),
             "spin_coverage_pct": spin_coverage,
         }
+        # C3a: surface depth-under-determined flight spans written by the
+        # ball stage. These are spans whose airborne depth cannot be
+        # recovered monocularly (fewer than 2 hard knots) — adding a
+        # bracketing kick/bounce/goal_impact/grounded anchor resolves them.
+        diag_path = ball_path.with_name(
+            ball_path.name.replace("ball_track", "ball_diag")
+        )
+        if diag_path.exists():
+            try:
+                report["ball"]["underconstrained_spans"] = json.loads(
+                    diag_path.read_text()
+                ).get("underconstrained_spans", [])
+            except Exception:
+                report["ball"]["underconstrained_spans"] = []
 
     refined_summary_path = output_dir / "refined_poses" / "refined_poses_summary.json"
     if refined_summary_path.exists():

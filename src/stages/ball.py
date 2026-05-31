@@ -811,6 +811,9 @@ class BallStage(BaseStage):
             width_m=float(pitch_cfg.get("width_m", 68.0)),
         )
         goal_geometry = GoalGeometry.from_pitch_config(pitch_cfg)
+        # C2: free p0 in the Phase-2 fit when a span has >= this many hard
+        # knots (gravity + 2 knots fully determine the arc, depth included).
+        free_p0_min_hard_knots = int(cfg.get("free_p0_min_hard_knots", 2))
 
         tracker = BallTracker(
             process_noise_grounded_px=float(tracker_cfg.get("process_noise_grounded_px", 4.0)),
@@ -1723,7 +1726,24 @@ class BallStage(BaseStage):
                 #     free reign over p0 along the camera ray and drifts
                 #     several metres from where the user clicked.
                 first_anc = span[0][1]
-                if 0 in knots and first_anc.state in HARD_KNOT_STATES:
+                # C2: when >=free_p0_min_hard_knots hard knots bracket the
+                # span AND the span is short enough to be a single ballistic
+                # arc (<=2 s), gravity + the knots fully determine the 6-DOF
+                # arc (depth included), so leave p0 FREE and keep every knot.
+                # Pinning p0 here would discard the arc-curvature depth
+                # information. A single parabola only models one ballistic
+                # flight (~<=2 s); longer "spans" are mis-segmented multi-arc
+                # sequences where a free p0 swings wildly, so keep them
+                # pinned. Below the knot threshold, keep the historical safe
+                # pinning (p0 free-drifts along the ray without >=2 knots).
+                span_duration_s = (fb_span - fa_span) / camera.fps
+                free_p0 = (
+                    len(knots) >= free_p0_min_hard_knots
+                    and 0.0 < span_duration_s <= 2.0
+                )
+                if free_p0:
+                    p0_pin = None  # keep all entries in `knots`
+                elif 0 in knots and first_anc.state in HARD_KNOT_STATES:
                     p0_pin = knots.pop(0)
                 elif (
                     0 not in knots
@@ -1750,6 +1770,11 @@ class BallStage(BaseStage):
                         fps=camera.fps, distortion=distortion,
                         p0_fixed=p0_pin, knot_frames=knots or None,
                         z_range_frames=z_ranges or None,
+                        # When p0 is free the >=2 hard knots already pin Z at
+                        # their frames; demote the coarse airborne z-buckets
+                        # to a light hinge so they can't fight the determined
+                        # arc.
+                        z_range_weight=(20.0 if free_p0 else 200.0),
                     )
                 except Exception as exc:
                     logger.debug(

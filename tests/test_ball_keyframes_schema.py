@@ -70,3 +70,45 @@ def test_unknown_state_rejected(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="unknown ball keyframe state"):
         BallKeyframeSet.load(path)
+
+
+def test_player_touch_missing_bone_raises(tmp_path: Path):
+    path = tmp_path / "kf.json"
+    BallKeyframeSet(
+        clip_id="c", fps=25.0, image_size=(1920, 1080),
+        keyframes=(
+            BallKeyframe(
+                frame=1, state="player_touch", world_xyz=(1.0, 2.0, 1.0),
+                image_xy=(10.0, 10.0), depth_source="player_bone",
+                player_id="P001", bone="right_foot", confidence=1.0,
+            ),
+        ),
+    ).save(path)
+    import json
+    raw = json.loads(path.read_text())
+    del raw["keyframes"][0]["bone"]
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="bone is required"):
+        BallKeyframeSet.load(path)
+
+
+def test_unknown_depth_source_rejected(tmp_path: Path):
+    path = tmp_path / "kf.json"
+    path.write_text(
+        '{"clip_id":"c","fps":25.0,"image_size":[1920,1080],'
+        '"keyframes":[{"frame":1,"state":"grounded","depth_source":"banana",'
+        '"world_xyz":[1.0,2.0,0.0],"image_xy":[800.0,600.0]}]}'
+    )
+    with pytest.raises(ValueError, match="depth_source"):
+        BallKeyframeSet.load(path)
+
+
+def test_goal_impact_missing_goal_element_raises(tmp_path: Path):
+    path = tmp_path / "kf.json"
+    path.write_text(
+        '{"clip_id":"c","fps":25.0,"image_size":[1920,1080],'
+        '"keyframes":[{"frame":5,"state":"goal_impact","depth_source":"goal_geometry",'
+        '"world_xyz":[105.0,34.0,1.2],"image_xy":[960.0,540.0]}]}'
+    )
+    with pytest.raises(ValueError, match="goal_element is required"):
+        BallKeyframeSet.load(path)

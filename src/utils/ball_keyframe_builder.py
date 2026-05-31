@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.schemas.ball_anchor import BallAnchor
-from src.schemas.ball_keyframes import BallKeyframe, BallKeyframeSet
+from src.schemas.ball_keyframes import BallKeyframe, BallKeyframeSet, DepthSource
 
 _AIRBORNE_STATES = frozenset(
     {"airborne_low", "airborne_mid", "airborne_high"}
@@ -43,7 +43,31 @@ def _camera_ray(
 
 def _depth_source(
     anc: BallAnchor, ground_touch_frames: set[int],
-) -> str:
+) -> DepthSource:
+    """Return the ``DepthSource`` bucket for a resolved anchor.
+
+    The mapping is:
+
+    * ``goal_impact`` → ``"goal_geometry"``: the dense stage pins the ball
+      through the geometrically-known goal contact point.
+    * ``player_touch`` (airborne, i.e. frame NOT in ``ground_touch_frames``) →
+      ``"player_bone"``: the dense stage drives the ball through the SMPL
+      bone world position for the named player/bone.
+    * ``player_touch`` (ground-touch frame, i.e. frame IN
+      ``ground_touch_frames``) → ``"ground"``: the dense stage resolves via a
+      ray cast to z=ball_radius, the same family as other contact states.
+    * ``airborne_low`` / ``airborne_mid`` / ``airborne_high`` →
+      ``"ray_physics"``: depth is underdetermined from a single pixel so the
+      dense stage uses ray constraints together with gravity/knot physics.
+    * Everything else (``grounded``, ``kick``, ``catch``, ``bounce``,
+      ``header``, ``volley``, ``chest``, ``off_screen_flight``) → ``"ground"``:
+      the dense stage resolves these via a ray cast to a canonical-height
+      horizontal plane (``ankle_ray_to_pitch`` at ``state_to_height(state)``).
+      This is the "ray-to-known-plane" family.  The bucket is labelled
+      ``"ground"`` even when the canonical height is non-zero (e.g. a
+      ``"header"`` resolves to ~2.3 m) because the depth source is still an
+      analytically-known horizontal plane, not a player bone or physics fit.
+    """
     if anc.state == "goal_impact":
         return "goal_geometry"
     if anc.state == "player_touch":
@@ -75,6 +99,10 @@ def build_ball_keyframe_set(
     matches the dense track exactly. Airborne anchors additionally get the
     clicked camera ray; ``off_screen_flight`` anchors (no pixel) get neither
     ray nor world position.
+
+    Emitted keyframes keep the schema default ``confidence=1.0`` by design:
+    a manual anchor is user-supplied ground truth, so there is no per-anchor
+    confidence to propagate in Phase A.
     """
     gtf = ground_touch_frames or set()
     keyframes: list[BallKeyframe] = []
@@ -98,7 +126,7 @@ def build_ball_keyframe_set(
             BallKeyframe(
                 frame=fi,
                 state=anc.state,  # type: ignore[arg-type]
-                depth_source=_depth_source(anc, gtf),  # type: ignore[arg-type]
+                depth_source=_depth_source(anc, gtf),
                 world_xyz=(
                     (float(world[0]), float(world[1]), float(world[2]))
                     if world is not None else None

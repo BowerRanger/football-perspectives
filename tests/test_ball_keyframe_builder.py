@@ -74,6 +74,66 @@ def test_player_touch_carries_player_bone_and_player_bone_source():
     assert kf.bone == "head"
 
 
+def test_goal_impact_depth_source():
+    K, R, t = _ident_cam()
+    anchors = {
+        10: BallAnchor(
+            frame=10, image_xy=(960.0, 540.0), state="goal_impact",
+            goal_element="crossbar",
+        )
+    }
+    world = {10: (104.5, 34.0, 2.44)}
+    kfset = build_ball_keyframe_set(
+        clip_id="c", fps=25.0, image_size=(1920, 1080),
+        anchor_by_frame=anchors, world_by_frame=world,
+        per_frame_K={10: K}, per_frame_R={10: R}, per_frame_t={10: t},
+        distortion=(0.0, 0.0),
+    )
+    kf = kfset.keyframes[0]
+    assert kf.depth_source == "goal_geometry"
+    assert kf.goal_element == "crossbar"
+
+
+def test_player_touch_ground_touch_frame_is_ground():
+    K, R, t = _ident_cam()
+    anchors = {
+        3: BallAnchor(
+            frame=3, image_xy=(900.0, 500.0), state="player_touch",
+            player_id="P001", bone="left_ankle",
+        )
+    }
+    world = {3: (10.0, 5.0, 0.11)}
+    kfset = build_ball_keyframe_set(
+        clip_id="c", fps=25.0, image_size=(1920, 1080),
+        anchor_by_frame=anchors, world_by_frame=world,
+        per_frame_K={3: K}, per_frame_R={3: R}, per_frame_t={3: t},
+        distortion=(0.0, 0.0),
+        ground_touch_frames={3},
+    )
+    kf = kfset.keyframes[0]
+    assert kf.depth_source == "ground"
+
+
+def test_off_screen_flight_has_no_ray_no_world():
+    K, R, t = _ident_cam()
+    anchors = {
+        15: BallAnchor(frame=15, image_xy=None, state="off_screen_flight")
+    }
+    # world_by_frame does NOT contain frame 15 — world is None
+    world: dict = {}
+    kfset = build_ball_keyframe_set(
+        clip_id="c", fps=25.0, image_size=(1920, 1080),
+        anchor_by_frame=anchors, world_by_frame=world,
+        per_frame_K={15: K}, per_frame_R={15: R}, per_frame_t={15: t},
+        distortion=(0.0, 0.0),
+    )
+    kf = kfset.keyframes[0]
+    assert kf.world_xyz is None
+    assert kf.ray is None
+    assert kf.image_xy is None
+    assert kf.depth_source == "ground"
+
+
 def test_keyframes_sorted_by_frame():
     K, R, t = _ident_cam()
     anchors = {

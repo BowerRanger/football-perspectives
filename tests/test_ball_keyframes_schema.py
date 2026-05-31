@@ -124,6 +124,18 @@ def test_off_screen_flight_with_world_xyz_raises(tmp_path: Path):
         BallKeyframeSet.load(path)
 
 
+def test_goal_impact_unknown_goal_element_raises(tmp_path: Path):
+    path = tmp_path / "kf.json"
+    path.write_text(
+        '{"clip_id":"c","fps":25.0,"image_size":[1920,1080],'
+        '"keyframes":[{"frame":5,"state":"goal_impact","depth_source":"goal_geometry",'
+        '"world_xyz":[105.0,34.0,1.2],"image_xy":[960.0,540.0],'
+        '"goal_element":"banana"}]}'
+    )
+    with pytest.raises(ValueError, match="unknown goal_element"):
+        BallKeyframeSet.load(path)
+
+
 def test_off_screen_flight_clean_round_trips(tmp_path: Path):
     path = tmp_path / "kf.json"
     path.write_text(

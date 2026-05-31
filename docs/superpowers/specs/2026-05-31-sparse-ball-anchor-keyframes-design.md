@@ -78,9 +78,9 @@ the `ball_track.json` naming.
 |---|---|---|
 | `frame` | always | same frame space as `ball_track.json` |
 | `state` | always | `kick` / `bounce` / `grounded` / `airborne_low` / `airborne_mid` / `airborne_high` / `catch` / `header` / `volley` / `chest` / `player_touch` / `goal_impact` / `off_screen_flight` |
-| `world_xyz` | always except `off_screen_flight` | resolved 3D — the artist's default key position (pitch metres) |
+| `world_xyz` | always except `off_screen_flight`; `airborne_*` MAY be null | resolved 3D — the artist's default key position (pitch metres). For `airborne_*` anchors where monocular depth is under-determined (honest gap from the dense stage), `world_xyz` is `null`; consumers must fall back to the `ray` to place the key. |
 | `image_xy` | when clicked (i.e. not `off_screen_flight`) | the authoritative pixel |
-| `ray` | `airborne_*` | `{origin: [x,y,z], dir: [x,y,z]}` camera ray (unit dir) for re-snapping after an artist moves the key |
+| `ray` | `airborne_*` | `[[ox,oy,oz],[dx,dy,dz]]` — nested array: origin first, then unit direction. Serialised as a 2-element array (NOT an object) so the UE loader reads `ray[0]` for origin and `ray[1]` for unit direction. Used to re-snap a moved key onto the line of sight. |
 | `depth_source` | always | `ground` \| `ray_physics` \| `player_bone` \| `goal_geometry` — how depth was obtained, signals trustworthiness |
 | `player_id`, `bone` | `player_touch` | drives the ball through that bone |
 | `goal_element` | `goal_impact` | `post` / `crossbar` / `back_net` / `side_net` |

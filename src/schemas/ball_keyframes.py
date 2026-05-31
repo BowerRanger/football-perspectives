@@ -109,8 +109,18 @@ def _load_keyframe(k: dict) -> BallKeyframe:
             raise ValueError("player_id is required for state 'player_touch'")
         if not k.get("bone"):
             raise ValueError("bone is required for state 'player_touch'")
-    if state == "goal_impact" and not k.get("goal_element"):
-        raise ValueError("goal_element is required for state 'goal_impact'")
+    goal_element = k.get("goal_element")
+    if state == "goal_impact":
+        if not goal_element:
+            raise ValueError("goal_element is required for state 'goal_impact'")
+        # Lazy import mirrors ball_anchor.py BallAnchorSet.load to avoid
+        # any potential import-cycle risk.
+        from src.utils.ball_anchor_heights import VALID_GOAL_ELEMENTS  # noqa: PLC0415
+        if goal_element not in VALID_GOAL_ELEMENTS:
+            raise ValueError(
+                f"unknown goal_element {goal_element!r}; "
+                f"valid: {sorted(VALID_GOAL_ELEMENTS)}"
+            )
     world = k.get("world_xyz")
     xy = k.get("image_xy")
     if state == "off_screen_flight":
@@ -129,7 +139,7 @@ def _load_keyframe(k: dict) -> BallKeyframe:
         ray=_load_ray(k.get("ray")),
         player_id=k.get("player_id"),
         bone=k.get("bone"),
-        goal_element=k.get("goal_element"),
+        goal_element=goal_element,
         touch_type=k.get("touch_type"),
         spin=k.get("spin"),
         confidence=float(k.get("confidence", 1.0)),

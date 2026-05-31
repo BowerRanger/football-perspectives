@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+from src.schemas.ball_keyframes import BallKeyframe, BallKeyframeSet
 from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.ue_manifest import UeManifest
 from src.stages.export import ExportStage
@@ -384,3 +385,47 @@ def test_manifest_picks_up_per_shot_ball_and_camera_fbx(tmp_path: Path) -> None:
     assert m.ball.frame_range == (0, 3)
     assert m.camera is not None, "manifest should reference per-shot camera FBX"
     assert m.camera.fbx == "fbx/origi01_camera.fbx"
+
+
+def test_manifest_references_ball_keyframes_when_present(tmp_path: Path) -> None:
+    """When a ball_keyframes.json sidecar exists alongside the dense track,
+    the manifest's ball entry carries a keyframes_json pointer to it."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    _write_min_inputs(output_dir)
+
+    fbx_dir = output_dir / "export" / "fbx"
+    fbx_dir.mkdir(parents=True)
+    (fbx_dir / "P001.fbx").write_bytes(b"\x00")
+
+    ball_dir = output_dir / "ball"
+    ball_dir.mkdir()
+    (ball_dir / "ball_track.json").write_text(
+        json.dumps({
+            "frames": [
+                {"frame": 0, "world_xyz": [10.0, 20.0, 0.11], "state": "grounded"},
+                {"frame": 3, "world_xyz": [12.0, 21.0, 0.11], "state": "grounded"},
+            ],
+        })
+    )
+    BallKeyframeSet(
+        clip_id="clip_demo", fps=30.0, image_size=(1920, 1080),
+        keyframes=(
+            BallKeyframe(
+                frame=0, state="grounded", depth_source="ground",
+                world_xyz=(10.0, 20.0, 0.11), image_xy=(800.0, 600.0),
+            ),
+        ),
+    ).save(ball_dir / "ball_keyframes.json")
+
+    cfg = {
+        "export": {"gltf_enabled": False, "fbx_enabled": False},
+        "pitch": {"length_m": 105.0, "width_m": 68.0},
+        "ball": {"ball_radius_m": 0.11},
+    }
+    stage = ExportStage(output_dir=output_dir, config=cfg)
+    stage.write_ue_manifest(clip_name="clip_demo")
+
+    m = UeManifest.load(output_dir / "export" / "ue_manifest.json")
+    assert m.ball is not None
+    assert m.ball.keyframes_json == "ball/ball_keyframes.json"

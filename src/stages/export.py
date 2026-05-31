@@ -661,11 +661,15 @@ class ExportStage(BaseStage):
             ball_track_path = self.output_dir / "ball" / f"{primary_shot}_ball_track.json"
             ball_fbx_rel = f"fbx/{primary_shot}_ball.fbx"
             ball_track_rel = f"ball/{primary_shot}_ball_track.json"
+            ball_keyframes_path = self.output_dir / "ball" / f"{primary_shot}_ball_keyframes.json"
+            ball_keyframes_rel = f"ball/{primary_shot}_ball_keyframes.json"
         else:
             ball_fbx = fbx_dir / "ball.fbx"
             ball_track_path = self.output_dir / "ball" / "ball_track.json"
             ball_fbx_rel = "fbx/ball.fbx"
             ball_track_rel = "ball/ball_track.json"
+            ball_keyframes_path = self.output_dir / "ball" / "ball_keyframes.json"
+            ball_keyframes_rel = "ball/ball_keyframes.json"
         # The UE side prefers ``track_json`` for ball animation — reads
         # per-frame world_xyz directly into a MovieScene3DTransformTrack
         # on the BP_BallActor binding (static mesh, not a skeletal
@@ -683,6 +687,9 @@ class ExportStage(BaseStage):
                     fbx=ball_fbx_rel if ball_fbx.exists() else "",
                     frame_range=(int(ball_frames[0]), int(ball_frames[-1])),
                     track_json=ball_track_rel,
+                    keyframes_json=(
+                        ball_keyframes_rel if ball_keyframes_path.exists() else ""
+                    ),
                 )
 
         camera_entry: CameraEntry | None = None

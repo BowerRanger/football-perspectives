@@ -990,9 +990,11 @@ def test_bounce_to_volley_fits_rising_parabola(tmp_path: Path):
 
 @pytest.mark.integration
 def test_player_touch_drives_trajectory_through_bone_world(tmp_path: Path):
-    """A 'player_touch' anchor pins the parabola at the named bone's
-    actual world position (SMPL FK), not at a fixed state-height
-    bucket. The pixel ray-cast is ignored — the bone's XYZ wins."""
+    """A 'player_touch' anchor pins the trajectory to the named bone's
+    DEPTH (SMPL FK) along the user's clicked-pixel ray (C1: clicks are
+    authoritative for lateral position, the bone supplies depth). When the
+    user clicks the bone's true projection, the result equals the bone's
+    world position — and the depth source is the bone, not a fixed bucket."""
     K, R, t = _camera_pose()
     out = tmp_path / "out"
     n_frames = 30
@@ -1030,15 +1032,21 @@ def test_player_touch_drives_trajectory_through_bone_world(tmp_path: Path):
 
     # Build anchors: kick at frame 5, player_touch at frame 15 (the volley
     # apex via the player's r_foot), bounce at frame 25.
+    # C1: the user clicks the ball at the bone's true projection. The ball
+    # then lands on that ray at the bone's depth == the bone world position.
+    from src.utils.camera_projection import project_world_to_image
+    touch_uv = tuple(
+        float(x) for x in project_world_to_image(
+            K, R, t, (0.0, 0.0), target_world.reshape(1, 3),
+        )[0]
+    )
     detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
     BallAnchorSet(
         clip_id="play", image_size=(1280, 720),
         anchors=(
             BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="kick"),
-            # The image_xy here is deliberately wrong — the bone world
-            # should win, not the pixel ray-cast.
             BallAnchor(
-                frame=15, image_xy=(50.0, 50.0),
+                frame=15, image_xy=touch_uv,
                 state="player_touch", player_id="P007", bone="r_foot",
             ),
             BallAnchor(frame=25, image_xy=(700.0, 380.0), state="bounce"),
@@ -1154,13 +1162,23 @@ def test_player_touch_prefers_refined_pose_over_hmr_world(tmp_path: Path):
         ],
     ).save(out / "shots" / "sync_map.json")
 
+    # C1: click the ball at the REFINED bone's projection. The ball lands on
+    # that ray at the bone's depth; if the stage wrongly used hmr_world the
+    # depth (and thus the 3D point) would differ, so this still distinguishes
+    # the two tracks.
+    from src.utils.camera_projection import project_world_to_image
+    touch_uv = tuple(
+        float(x) for x in project_world_to_image(
+            K, R, t, (0.0, 0.0), refined_target.reshape(1, 3),
+        )[0]
+    )
     detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
     BallAnchorSet(
         clip_id="play", image_size=(1280, 720),
         anchors=(
             BallAnchor(frame=5,  image_xy=(640.0, 360.0), state="kick"),
             BallAnchor(
-                frame=15, image_xy=(50.0, 50.0),
+                frame=15, image_xy=touch_uv,
                 state="player_touch", player_id="P007", bone="r_foot",
             ),
             BallAnchor(frame=25, image_xy=(700.0, 380.0), state="bounce"),

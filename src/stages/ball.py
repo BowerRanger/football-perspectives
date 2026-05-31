@@ -105,6 +105,45 @@ def _demote_run_to_missing(
         per_frame_world.pop(fi, None)
 
 
+def _project_point_onto_pixel_ray(
+    point: np.ndarray,
+    uv: tuple[float, float],
+    K: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    distortion: tuple[float, float],
+) -> np.ndarray:
+    """Return the point on the camera ray through pixel ``uv`` that lies at
+    ``point``'s along-ray depth. Keeps the user's clicked lateral position
+    (the result reprojects to ``uv``) while taking depth from ``point``.
+    """
+    from src.utils.camera_projection import undistort_pixel
+
+    uv_arr = np.asarray(uv, dtype=float)
+    if distortion != (0.0, 0.0):
+        uv_arr = undistort_pixel(uv_arr, K, distortion)
+    C = -R.T @ t
+    d_world = R.T @ (np.linalg.inv(K) @ np.array([uv_arr[0], uv_arr[1], 1.0]))
+    d_hat = d_world / np.linalg.norm(d_world)
+    depth = float(np.dot(np.asarray(point, dtype=float) - C, d_hat))
+    return C + depth * d_hat
+
+
+def _snap_world_onto_pixel_ray(
+    world: np.ndarray,
+    uv: tuple[float, float],
+    K: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    distortion: tuple[float, float],
+) -> np.ndarray:
+    """Move ``world`` onto the camera ray through ``uv``, preserving its
+    along-ray depth (lateral error -> 0). Same math as
+    :func:`_project_point_onto_pixel_ray`; named separately for the C4 pass.
+    """
+    return _project_point_onto_pixel_ray(world, uv, K, R, t, distortion)
+
+
 def _load_foot_uvs_for_shot(
     output_dir: Path, shot_id: str
 ) -> dict[int, list[tuple[float, float]]]:
@@ -454,7 +493,14 @@ def _resolve_anchor_world(
     if anc.state == "player_touch" and fi not in ground_touch_frames:
         bone_world = bone_lookup.bone_world(anc)
         if bone_world is not None:
-            return np.asarray(bone_world, dtype=float)
+            # C1: keep the user's clicked lateral position; take only the
+            # depth from the (HMR-drifting) bone. Projecting the bone onto
+            # the clicked-pixel ray drives lateral error -> 0 while the
+            # ball stays at the contacting player's depth.
+            return _project_point_onto_pixel_ray(
+                np.asarray(bone_world, dtype=float), uv,
+                K, R, t, distortion,
+            )
         # Fall through to fallback ray-cast at z=1.0 below.
 
     # Ray-cast fallback path. Plane height depends on state semantics.

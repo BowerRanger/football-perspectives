@@ -8,9 +8,10 @@ transform track only at these frames and tweens between them.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 # Mirror of BallAnchorState — the states a keyframe may carry.
 KeyframeState = Literal[
@@ -19,17 +20,11 @@ KeyframeState = Literal[
     "player_touch", "goal_impact", "off_screen_flight",
 ]
 
-_VALID_STATES: frozenset[str] = frozenset({
-    "grounded", "airborne_low", "airborne_mid", "airborne_high",
-    "kick", "catch", "bounce", "header", "volley", "chest",
-    "player_touch", "goal_impact", "off_screen_flight",
-})
+_VALID_STATES: frozenset[str] = frozenset(get_args(KeyframeState))
 
 DepthSource = Literal["ground", "ray_physics", "player_bone", "goal_geometry"]
 
-_VALID_DEPTH_SOURCES: frozenset[str] = frozenset({
-    "ground", "ray_physics", "player_bone", "goal_geometry",
-})
+_VALID_DEPTH_SOURCES: frozenset[str] = frozenset(get_args(DepthSource))
 
 # (ray_origin_xyz, ray_dir_xyz); dir is a unit vector in world frame.
 Ray = tuple[tuple[float, float, float], tuple[float, float, float]]
@@ -92,7 +87,7 @@ class BallKeyframeSet:
         )
 
 
-def _as_tuple3(v) -> tuple[float, float, float]:
+def _as_tuple3(v: Sequence[float]) -> tuple[float, float, float]:
     return (float(v[0]), float(v[1]), float(v[2]))
 
 
@@ -118,6 +113,13 @@ def _load_keyframe(k: dict) -> BallKeyframe:
         raise ValueError("goal_element is required for state 'goal_impact'")
     world = k.get("world_xyz")
     xy = k.get("image_xy")
+    if state == "off_screen_flight":
+        if world is not None or xy is not None:
+            raise ValueError(
+                "off_screen_flight must have null world_xyz and image_xy"
+            )
+    elif xy is None:
+        raise ValueError(f"image_xy is required for state {state!r}")
     return BallKeyframe(
         frame=int(k["frame"]),
         state=state,  # type: ignore[arg-type]

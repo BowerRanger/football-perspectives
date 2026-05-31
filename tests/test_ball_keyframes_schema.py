@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,7 @@ def _airborne() -> BallKeyframe:
         state="airborne_high",
         world_xyz=(18.3, 9.2, 4.1),
         image_xy=(900.0, 300.0),
-        ray=((0.0, 0.0, 15.0), (0.1, 0.2, -0.97)),
+        ray=((0.0, 0.0, 15.0), (0.0, 0.0, -1.0)),
         depth_source="ray_physics",
         confidence=0.8,
     )
@@ -54,7 +55,6 @@ def test_player_touch_requires_player_and_bone(tmp_path: Path):
         ),
     ).save(path)
     # Missing player_id must fail validation on load.
-    import json
     raw = json.loads(path.read_text())
     del raw["keyframes"][0]["player_id"]
     path.write_text(json.dumps(raw))
@@ -84,7 +84,6 @@ def test_player_touch_missing_bone_raises(tmp_path: Path):
             ),
         ),
     ).save(path)
-    import json
     raw = json.loads(path.read_text())
     del raw["keyframes"][0]["bone"]
     path.write_text(json.dumps(raw))
@@ -112,3 +111,29 @@ def test_goal_impact_missing_goal_element_raises(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="goal_element is required"):
         BallKeyframeSet.load(path)
+
+
+def test_off_screen_flight_with_world_xyz_raises(tmp_path: Path):
+    path = tmp_path / "kf.json"
+    path.write_text(
+        '{"clip_id":"c","fps":25.0,"image_size":[1920,1080],'
+        '"keyframes":[{"frame":7,"state":"off_screen_flight","depth_source":"ray_physics",'
+        '"world_xyz":[1,2,3],"image_xy":null}]}'
+    )
+    with pytest.raises(ValueError, match="off_screen_flight must have null"):
+        BallKeyframeSet.load(path)
+
+
+def test_off_screen_flight_clean_round_trips(tmp_path: Path):
+    path = tmp_path / "kf.json"
+    path.write_text(
+        '{"clip_id":"c","fps":25.0,"image_size":[1920,1080],'
+        '"keyframes":[{"frame":7,"state":"off_screen_flight","depth_source":"ray_physics",'
+        '"world_xyz":null,"image_xy":null}]}'
+    )
+    result = BallKeyframeSet.load(path)
+    assert len(result.keyframes) == 1
+    kf = result.keyframes[0]
+    assert kf.state == "off_screen_flight"
+    assert kf.world_xyz is None
+    assert kf.image_xy is None

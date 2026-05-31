@@ -65,6 +65,7 @@ from src.utils.ball_appearance_bridge import (
     AppearanceBridgeCfg,
 )
 from src.utils.ball_kick_anchor import KickAnchorCfg, find_kick_anchor
+from src.utils.camera_projection import project_world_to_image
 from src.utils.foot_anchor import ankle_ray_to_pitch
 from src.utils.goal_geometry import GoalGeometry, resolve_goal_impact_world
 from src.utils.ball_spin_presets import (
@@ -1974,6 +1975,35 @@ class BallStage(BaseStage):
             ball_radius=ball_radius,
             goal_geometry=goal_geometry,
         )
+
+        # C4 — ray-faithfulness guarantee. The user's clicked pixel is hard
+        # lateral ground truth. For every AIRBORNE-soft anchored frame
+        # (airborne_low/mid/high) whose emitted world reprojects farther than
+        # the tolerance from the click, snap it onto the clicked ray, keeping
+        # the fitted along-ray depth. Hard-knot states are already pinned
+        # on-ray, so they are skipped here.
+        ray_faithful_tol_px = float(cfg.get("ray_faithful_tolerance_px", 3.0))
+        _RAY_SNAP_STATES = frozenset({
+            "airborne_low", "airborne_mid", "airborne_high",
+        })
+        for fi, anc in anchor_by_frame.items():
+            if anc.state not in _RAY_SNAP_STATES or anc.image_xy is None:
+                continue
+            if fi not in per_frame_world or fi not in per_frame_K:
+                continue
+            world, conf = per_frame_world[fi]
+            uvp = project_world_to_image(
+                per_frame_K[fi], per_frame_R[fi], per_frame_t[fi],
+                distortion, np.asarray(world, dtype=float).reshape(1, 3),
+            )[0]
+            if float(np.linalg.norm(uvp - np.array(anc.image_xy))) <= ray_faithful_tol_px:
+                continue
+            snapped = _snap_world_onto_pixel_ray(
+                np.asarray(world, dtype=float),
+                (float(anc.image_xy[0]), float(anc.image_xy[1])),
+                per_frame_K[fi], per_frame_R[fi], per_frame_t[fi], distortion,
+            )
+            per_frame_world[fi] = (snapped, conf)
 
         per_frame_out: list[BallFrame] = []
         for fi in range(n_frames):

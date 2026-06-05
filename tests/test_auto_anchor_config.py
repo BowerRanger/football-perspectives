@@ -11,6 +11,6 @@ def test_default_config_has_auto_anchors_block():
     # precedence so this only adds a cold-start for un-anchored shots.
     assert aa["enabled"] is True
     assert aa["mode"] == "replace_when_empty"
-    assert aa["keyframe_interval"] == 30
+    assert aa["keyframe_interval"] == 18
     assert "min_points_per_anchor" in aa
     assert aa["model"]["device"] == "auto"

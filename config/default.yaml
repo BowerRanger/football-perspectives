@@ -178,7 +178,7 @@ camera:
   # Temporal smoothing window for the final per-frame (rotation, focal)
   # trajectory after the static-line solve. 0 disables it. ~7-11 removes the
   # seam steps where line-solved frames meet interpolated gap frames.
-  line_extraction_smooth_window: 0
+  line_extraction_smooth_window: 9
   # ORB is the only detector currently implemented in feature_propagator.
   # SuperPoint is a future enhancement (better repeatability under zoom).
   feature_detector: orb
@@ -201,10 +201,14 @@ camera:
   auto_anchors:
     enabled: true
     mode: replace_when_empty
-    keyframe_interval: 30
-    max_keyframes: 12
+    # Denser keyframes (interval 18 / up to 24 anchors) keep the per-frame
+    # bootstrap accurate across the whole clip so the strict line detector
+    # finds lines on every frame (no interpolation gaps). Validated on gberch:
+    # 0-line frames 145 -> 0, max per-frame rotation jitter 5.3° -> 0.3°.
+    keyframe_interval: 18
+    max_keyframes: 24
     min_points_per_anchor: 4
-    consensus_max_position_mad: 3.0
+    consensus_max_position_mad: 4.0
     plausibility_bounds:
       x: [-30.0, 135.0]
       y: [-60.0, 130.0]

@@ -255,12 +255,12 @@ class PnLCalibrator:
         with cfg_line_path.open("r") as fh:
             cfg_line = yaml.safe_load(fh)
 
-        state_kp = torch.load(str(kp_path), map_location=self._device)
+        state_kp = torch.load(str(kp_path), map_location=self._device, weights_only=False)
         model_kp = modules["get_cls_net"](cfg_kp)
         model_kp.load_state_dict(state_kp)
         model_kp.to(self._device).eval()
 
-        state_line = torch.load(str(lines_path), map_location=self._device)
+        state_line = torch.load(str(lines_path), map_location=self._device, weights_only=False)
         model_line = modules["get_cls_net_l"](cfg_line)
         model_line.load_state_dict(state_line)
         model_line.to(self._device).eval()

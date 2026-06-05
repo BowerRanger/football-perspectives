@@ -45,3 +45,19 @@ def test_ensure_anchors_noop_when_disabled(tmp_path):
     cfg = {"auto_anchors": {"enabled": False}}
     stage._ensure_anchors("s1", anchors_path, tmp_path / "s1.mp4", cfg)
     assert not anchors_path.exists()
+
+
+def test_run_shot_skips_when_no_anchors_generated(tmp_path, monkeypatch):
+    """enabled + generation yields nothing + no manual file -> skip, no crash."""
+    stage = CameraStage.__new__(CameraStage)
+    stage.output_dir = tmp_path
+    anchors_path = tmp_path / "camera" / "s1_anchors.json"
+    cfg = {"auto_anchors": {"enabled": True, "mode": "replace_when_empty"}}
+    # _ensure_anchors is a no-op here (generation returns None) -> no file written.
+    monkeypatch.setattr(
+        "src.stages.camera._generate_auto_anchors",
+        lambda shot_id, clip_path, cfg: None,
+    )
+    # _run_shot must return early (no FileNotFoundError) when the file is absent.
+    stage._run_shot("s1", anchors_path, tmp_path / "s1.mp4", cfg)
+    assert not anchors_path.exists()

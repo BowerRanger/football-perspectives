@@ -37,8 +37,6 @@ def _generate_auto_anchors(shot_id, clip_path, cfg):
     """Run the PnLCalib auto-anchor pipeline for one shot. Returns an
     AnchorSet or None. Heavy imports are local so the camera stage has no
     hard torch dependency unless auto-anchors are actually used."""
-    import cv2
-
     from src.utils.auto_anchor import generate
     from src.utils.neural_calibrator import PnLCalibrator
 
@@ -159,6 +157,11 @@ class CameraStage(BaseStage):
                 clip_id=generated.clip_id, image_size=generated.image_size,
                 anchors=merged,
             )
+        elif mode == "force" and anchors_path.exists():
+            logger.warning(
+                "auto_anchors mode=force: overwriting existing anchors at %s",
+                anchors_path,
+            )
         anchors_path.parent.mkdir(parents=True, exist_ok=True)
         generated.save(anchors_path)
         logger.info(
@@ -176,6 +179,13 @@ class CameraStage(BaseStage):
         """Single-shot camera solve. The body is the original run() logic
         with file paths parameterised on shot_id."""
         self._ensure_anchors(shot_id, anchors_path, clip_path, cfg)
+        if not anchors_path.exists():
+            logger.warning(
+                "camera stage: no anchors for shot %s (auto-generation "
+                "produced none and no manual anchors exist); skipping shot.",
+                shot_id,
+            )
+            return
         anchors = AnchorSet.load(anchors_path)
 
         cap = cv2.VideoCapture(str(clip_path))

@@ -66,8 +66,20 @@ def _load_pnlcalib_keypoint_table() -> dict[int, tuple[float, float, float]]:
     return table
 
 
-_TABLE = _load_pnlcalib_keypoint_table()
-NUM_KEYPOINTS = len(_TABLE)
+_TABLE: dict[int, tuple[float, float, float]] | None = None
+
+
+def _get_table() -> dict[int, tuple[float, float, float]]:
+    global _TABLE
+    if _TABLE is None:
+        _TABLE = _load_pnlcalib_keypoint_table()
+    return _TABLE
+
+
+def __getattr__(name: str):  # PEP 562 module-level lazy attribute
+    if name == "NUM_KEYPOINTS":
+        return len(_get_table())
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def keypoint_world_xyz_ours(kp_id: int) -> tuple[float, float, float] | None:
@@ -75,7 +87,7 @@ def keypoint_world_xyz_ours(kp_id: int) -> tuple[float, float, float] | None:
     keypoint ``kp_id``, or None if unknown. The imported table is in
     PnLCalib's CENTRED frame; convert to ours (matches
     ``convert_pnlcalib_to_ours`` for a position)."""
-    entry = _TABLE.get(kp_id)
+    entry = _get_table().get(kp_id)
     if entry is None:
         return None
     x, y, z = entry

@@ -797,11 +797,11 @@ class CameraStage(BaseStage):
         smooth_window = int(cfg.get("line_extraction_smooth_window", 0))
         ordered = [i for i in covered if per_frame_R[i] is not None]
         if smooth_window >= 3 and len(ordered) >= smooth_window:
-            from src.utils.temporal_smoothing import savgol_axis, slerp_window
+            from src.utils.temporal_smoothing import quat_savgol, savgol_axis
             Rs = np.stack([per_frame_R[i] for i in ordered])
             fxs = np.array([float(per_frame_K[i][0, 0]) for i in ordered])
             fys = np.array([float(per_frame_K[i][1, 1]) for i in ordered])
-            Rs_s = slerp_window(Rs, window=smooth_window)
+            Rs_s = quat_savgol(Rs, window=smooth_window, order=2)
             fxs_s = savgol_axis(fxs, window=smooth_window, order=2)
             fys_s = savgol_axis(fys, window=smooth_window, order=2)
             for j, i in enumerate(ordered):

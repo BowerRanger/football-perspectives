@@ -16,6 +16,31 @@ def savgol_axis(x: np.ndarray, *, window: int, order: int, axis: int = 0) -> np.
     return savgol_filter(x, window_length=w, polyorder=order, axis=axis)
 
 
+def quat_savgol(Rs: np.ndarray, *, window: int, order: int = 2) -> np.ndarray:
+    """Savitzky-Golay-smooth a sequence of rotations via continuous quaternions.
+
+    Unlike :func:`slerp_window` (which re-interpolates through the same
+    keyframes and is a no-op at the data points), this actually low-pass
+    filters the rotation track: convert to quaternions, flip each into the
+    previous one's hemisphere (q and -q are the same rotation, but savgol
+    needs a continuous signal), SavGol the four components, renormalise, and
+    convert back. Smooths single-frame rotation spikes (e.g. solve seams)
+    while preserving the slow broadcast pan.
+    """
+    n = Rs.shape[0]
+    if n < 3 or window < 3:
+        return Rs
+    q = Rotation.from_matrix(Rs).as_quat()  # (n, 4) x, y, z, w
+    for i in range(1, n):
+        if float(np.dot(q[i], q[i - 1])) < 0.0:
+            q[i] = -q[i]
+    qs = savgol_axis(q, window=window, order=order, axis=0)
+    norms = np.linalg.norm(qs, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    qs = qs / norms
+    return Rotation.from_quat(qs).as_matrix()
+
+
 def slerp_window(Rs: np.ndarray, *, window: int) -> np.ndarray:
     """SLERP-smooth a sequence of rotations using a sliding centred window."""
     n = Rs.shape[0]

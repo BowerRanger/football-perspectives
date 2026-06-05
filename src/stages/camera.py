@@ -789,6 +789,34 @@ class CameraStage(BaseStage):
             if i not in sol.per_frame_KRt and per_frame_R[i] is not None:
                 per_frame_t[i] = -per_frame_R[i] @ C
 
+        # Optional temporal smoothing of the per-frame (rotation, focal)
+        # trajectory. Removes the seam steps where line-solved frames meet
+        # interpolated gap frames (a few degrees of rotation / tens of px of
+        # focal). Re-derives t = -R @ C so the camera body stays fixed.
+        # window < 3 disables it (default).
+        smooth_window = int(cfg.get("line_extraction_smooth_window", 0))
+        ordered = [i for i in covered if per_frame_R[i] is not None]
+        if smooth_window >= 3 and len(ordered) >= smooth_window:
+            from src.utils.temporal_smoothing import savgol_axis, slerp_window
+            Rs = np.stack([per_frame_R[i] for i in ordered])
+            fxs = np.array([float(per_frame_K[i][0, 0]) for i in ordered])
+            fys = np.array([float(per_frame_K[i][1, 1]) for i in ordered])
+            Rs_s = slerp_window(Rs, window=smooth_window)
+            fxs_s = savgol_axis(fxs, window=smooth_window, order=2)
+            fys_s = savgol_axis(fys, window=smooth_window, order=2)
+            for j, i in enumerate(ordered):
+                R = Rs_s[j]
+                K = per_frame_K[i].copy()
+                K[0, 0] = float(fxs_s[j])
+                K[1, 1] = float(fys_s[j])
+                per_frame_K[i] = K
+                per_frame_R[i] = R
+                per_frame_t[i] = -R @ C
+            logger.info(
+                "static line solve: temporal-smoothed %d frames (window=%d)",
+                len(ordered), smooth_window,
+            )
+
         rms_arr = np.array(
             [v for v in sol.per_frame_line_rms.values() if np.isfinite(v)]
         )

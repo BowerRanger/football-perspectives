@@ -1,0 +1,5 @@
+# Step A: temporal smoothing on top of the two-knob detection gains.
+camera:
+  line_extraction_strip_px: 40
+  line_extraction_det_min_n_samples: 20
+  line_extraction_smooth_window: 9

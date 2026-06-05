@@ -175,6 +175,10 @@ camera:
   # clips dominated by near-parallel near-side lines.
   line_extraction_det_min_n_samples: 40
   line_extraction_det_min_confidence: 0.5
+  # Temporal smoothing window for the final per-frame (rotation, focal)
+  # trajectory after the static-line solve. 0 disables it. ~7-11 removes the
+  # seam steps where line-solved frames meet interpolated gap frames.
+  line_extraction_smooth_window: 0
   # ORB is the only detector currently implemented in feature_propagator.
   # SuperPoint is a future enhancement (better repeatability under zoom).
   feature_detector: orb

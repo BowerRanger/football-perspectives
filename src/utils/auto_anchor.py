@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.schemas.anchor import Anchor, LandmarkObservation
+from src.schemas.anchor import Anchor, AnchorSet, LandmarkObservation
 from src.utils.pnlcalib_pitch_map import keypoint_world_xyz_ours
 
 
@@ -92,3 +92,72 @@ def is_plausible_position(
         and y_lo <= position[1] <= y_hi
         and z_lo <= position[2] <= z_hi
     )
+
+
+def generate(
+    *,
+    calibrator,
+    clip_id: str,
+    n_frames: int,
+    image_size: tuple[int, int],
+    cfg: dict,
+    frames_reader,
+) -> AnchorSet | None:
+    """Auto-anchor pipeline: sample keyframes -> PnLCalib per keyframe ->
+    plausibility + MAD-consensus gate on camera position -> keypoint anchors.
+
+    ``calibrator`` is a PnLCalibrator (or a stand-in with ``calibrate`` and
+    ``extract_keypoints_pixels``). ``frames_reader(indices, image_size)``
+    returns ``{idx: bgr_frame}`` (injected so tests need no video/torch).
+    Returns an AnchorSet, or None if no keyframe survives.
+    """
+    keyframes = compute_keyframes(
+        total_frames=n_frames,
+        keyframe_interval=int(cfg.get("keyframe_interval", 30)),
+        max_keyframes=int(cfg.get("max_keyframes", 12)),
+    )
+    if not keyframes:
+        return None
+    bounds = cfg.get("plausibility_bounds", {
+        "x": (-30.0, 135.0), "y": (-60.0, 130.0), "z": (3.0, 80.0),
+    })
+    frames = frames_reader(keyframes, image_size)
+
+    # Pass 1: calibrate each keyframe, keep plausible camera positions.
+    plausible: dict[int, np.ndarray] = {}
+    for idx in keyframes:
+        frame = frames.get(idx)
+        if frame is None:
+            continue
+        calib = calibrator.calibrate(frame)
+        if calib is None:
+            continue
+        if is_plausible_position(np.asarray(calib.world_position), bounds):
+            plausible[idx] = np.asarray(calib.world_position, dtype=np.float64)
+    if not plausible:
+        return None
+
+    # Pass 2: MAD consensus on position -> keep keyframes near the robust median.
+    median = robust_median_position(list(plausible.values()))
+    max_mad = float(cfg.get("consensus_max_position_mad", 3.0))
+    arr = np.asarray(list(plausible.values()))
+    mad = _median_absolute_deviation(arr)
+    mad_clipped = np.where(mad > 1e-6, mad, 1e-6)
+    kept = [
+        idx for idx, pos in plausible.items()
+        if np.all(np.abs(pos - median) / mad_clipped < max_mad)
+    ]
+    if not kept:
+        return None
+
+    # Pass 3: keypoint anchors for the survivors.
+    min_points = int(cfg.get("min_points_per_anchor", 4))
+    anchors = []
+    for idx in sorted(kept):
+        pixels = calibrator.extract_keypoints_pixels(frames[idx])
+        anchor = keypoints_to_anchor(pixels, frame=idx, min_points=min_points)
+        if anchor is not None:
+            anchors.append(anchor)
+    if not anchors:
+        return None
+    return AnchorSet(clip_id=clip_id, image_size=image_size, anchors=tuple(anchors))

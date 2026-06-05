@@ -34,6 +34,10 @@ dependencies = [
     "mmpose>=1.3,<1.4",
     "mmdet>=3.3,<3.4",
     "xtcocotools==1.14.3",
+    # Required by the vendored PnLCalib calibration path (third_party/PnLCalib
+    # utils.utils_calib -> utils_optimize import shapely); used by the
+    # landmark-free auto-anchor camera cold-start.
+    "shapely>=2.0,<3.0",
 ]
 
 [project.optional-dependencies]

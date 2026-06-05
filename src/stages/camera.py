@@ -615,6 +615,12 @@ class CameraStage(BaseStage):
         # (extreme focal, rotation flips). Exclude them so they keep the smooth
         # interpolated camera instead. See the static-line glitch investigation.
         min_lines = int(cfg.get("line_extraction_min_lines_per_frame", 4))
+        # Per-detection acceptance gates (tunable). Lowering min_n_samples lets
+        # SHORT lines through (e.g. the far touchline, which projects short in
+        # the image) — adding a perpendicular constraint that improves solve
+        # conditioning where near-parallel near-side lines dominate.
+        det_min_n_samples = int(cfg.get("line_extraction_det_min_n_samples", 40))
+        det_min_confidence = float(cfg.get("line_extraction_det_min_confidence", 0.5))
         point_hint_weight = float(
             cfg.get("line_extraction_point_hint_weight", 0.05)
         )
@@ -639,6 +645,7 @@ class CameraStage(BaseStage):
         # Step 0 — detect under the propagated bootstrap cameras.
         per_frame_lines = detect_lines_for_frames(
             frames_bgr, _cameras_from_arrays(), dist2, det_cfg,
+            min_confidence=det_min_confidence, min_n_samples=det_min_n_samples,
         )
         n_before = len(per_frame_lines)
         per_frame_lines = drop_underdetermined_frames(per_frame_lines, min_lines)
@@ -741,6 +748,8 @@ class CameraStage(BaseStage):
                 }
                 redet = detect_lines_for_frames(
                     frames_bgr, cams, tuple(sol.distortion[:2]), det_cfg,
+                    min_confidence=det_min_confidence,
+                    min_n_samples=det_min_n_samples,
                 )
                 redet = drop_underdetermined_frames(redet, min_lines)
                 if len(redet) >= 2:

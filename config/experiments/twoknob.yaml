@@ -1,0 +1,6 @@
+# Two-knob detection experiment: widen the search strip (tolerate bootstrap
+# drift in keyframe gaps) and admit shorter lines (the far touchline).
+# Merged over config/default.yaml.
+camera:
+  line_extraction_strip_px: 40
+  line_extraction_det_min_n_samples: 20

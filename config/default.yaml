@@ -168,6 +168,13 @@ camera:
   # smooth interpolated camera instead. Lower it if a clip is line-poor and
   # you would rather have noisier per-frame solves than more interpolation.
   line_extraction_min_lines_per_frame: 4
+  # Per-detection acceptance gates for the static-line solve. min_n_samples is
+  # the number of perpendicular cross-sections a detected line must have; 40 is
+  # ~120px of line, which rejects short far-side lines (e.g. far_touchline).
+  # Lower it (e.g. 20) to admit shorter lines and improve solve conditioning on
+  # clips dominated by near-parallel near-side lines.
+  line_extraction_det_min_n_samples: 40
+  line_extraction_det_min_confidence: 0.5
   # ORB is the only detector currently implemented in feature_propagator.
   # SuperPoint is a future enhancement (better repeatability under zoom).
   feature_detector: orb

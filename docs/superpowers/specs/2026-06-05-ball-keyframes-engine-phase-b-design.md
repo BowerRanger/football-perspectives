@@ -31,7 +31,10 @@ authoring and in-editor visual verification are done via MCP tools.
    bow below the pitch).
 3. **Spin: rolling + preset curl, authored in `BP_BallActor` (not Sequencer).**
    The Blueprint derives spin from the ball's own motion each Tick — robust to
-   artist edits — and adds a curl from the kick/volley `spin` preset.
+   artist edits — and adds a curl from the kick/volley `spin` preset. Curl is
+   **per-flight-span**: each distinct flight (between contact points) carries
+   its own constant spin, keyed at its launch contact, so a clip with two
+   differently-spun flights curls each correctly.
 4. **Piece C: auto-snap on load (no interactive tool).** Use the exported
    `world_xyz` directly (already ray-faithful at physics depth from Phase A).
    For `airborne_*` keyframes with `world_xyz == null`, place the key on the
@@ -65,17 +68,19 @@ ball_keyframes.py   (NEW, unreal-free, unit-tested)  ── parse sidecar → Ba
 ball_motion.py      (NEW, unreal-free, unit-tested)  ── pure helpers:
      • resolved_position_m(kf)   → world_xyz, or ray-fallback depth when null (pitch m)
      • key_interp_modes(kfs)     → per-key CUBIC (airborne-context) | LINEAR (ground)
-     • flight_curl(preset, v0)   → (curl_axis_world, curl_strength) for the BP seed
+     • flight_curls(kfs)         → per-flight-span [(launch_frame, curl_axis_world,
+                                    curl_strength)] from each flight's launch preset + v0
    │
    ▼
 load_reconstruction.py (MODIFY _load_ball_keys)  ── prefer keyframes_json; build a
-     richer BallMotion struct (positions + per-key interp + curl seed); fall back to
-     dense track_json (linear, no curl) when keyframes_json is absent
+     richer BallMotion struct (positions + per-key interp + per-flight curl keys); fall
+     back to dense track_json (linear, no curl) when keyframes_json is absent
    │
    ▼
 build_sequence.py (MODIFY _add_ball_spawnable)  ── key the transform track ONLY at
-     anchor frames; set per-key position interpolation; seed the ball spawnable's
-     CurlAxis / CurlStrength variables. Keeps the existing axis-swap + offset.
+     anchor frames; set per-key position interpolation; key the ball spawnable's
+     CurlAxis / CurlStrength variables at each flight launch (step interp). Keeps the
+     existing axis-swap + offset.
    │
    ▼
 BP_BallActor (Blueprint, authored via MCP)  ── Tick: motion-derived spin
@@ -121,13 +126,16 @@ Member variables added (instance-editable so the artist can tweak):
 4. `PrevLocation = loc`.
 
 Gating spin mode on the ball's own height (not on span metadata) keeps the BP
-self-contained and keeps spin correct when the artist re-positions keys.
-`build_sequence` seeds `CurlAxis` + `CurlStrengthDegPerSec` on the ball
-spawnable from `ball_motion.flight_curl(preset, v0)` for the clip's
-representative flight (the first `player_touch` shot/volley anchor carrying a
-spin preset). **Known limitation (documented):** a single curl per ball this
-increment; per-flight curl variation (keying the variables) is a future
-refinement.
+self-contained and keeps spin correct when the artist re-positions keys. The
+`CurlAxis` / `CurlStrengthDegPerSec` variables are **exposed to cinematics**
+(keyable). `build_sequence` keys them per flight span from
+`ball_motion.flight_curls(kfs)`: at each flight's launch contact it keys the
+curl for that flight (axis + strength, with **step** interpolation so the value
+switches abruptly at launch, not interpolating between flights). A flight whose
+launch carries no spin preset (or `none`/`knuckle`) keys zero strength. Because
+the BP only applies curl while airborne, the keyed strength is what the ball
+spins by during that flight; on the ground the height gate selects rolling
+instead.
 
 ### C — Ray handling at load (`ball_motion.resolved_position_m`)
 
@@ -149,8 +157,9 @@ current behaviour is unchanged, and `BP_BallActor` rolling spin still applies
 - **Unreal-free, unit-tested with the pipeline venv** (the logic core):
   `ball_keyframes.py` (parse round-trip; `ray` array `[[origin],[dir]]`;
   null-world handling) and `ball_motion.py` (`key_interp_modes` over mixed
-  sequences; `resolved_position_m` incl. ray-fallback; `flight_curl` preset
-  mapping incl. side-curl vertical axis and top/back ⊥-travel). Run:
+  sequences; `resolved_position_m` incl. ray-fallback; `flight_curls`
+  flight-span detection + preset mapping incl. side-curl vertical axis and
+  top/back ⊥-travel, multiple flights each with their own curl). Run:
   `cd "<UE>/Content/Python" && <pipeline>/.venv/bin/python -m pytest tests -q`.
 - **In-editor only, MCP-verified** (thin glue + asset): `build_sequence`
   keying changes, `load_reconstruction` wiring, and the `BP_BallActor` graph.
@@ -164,9 +173,12 @@ current behaviour is unchanged, and `BP_BallActor` rolling spin still applies
    during editor playback / Movie Render Queue so motion-derived spin is visible.
    If spawnable tick is suppressed, fall back to keying rotation channels for
    curl and reconsider rolling.
-2. **Seeding variables on a spawnable's object template** — confirm
-   `build_sequence` can set `CurlAxis`/`CurlStrengthDegPerSec` on the ball
-   spawnable's template so the values persist at spawn.
+2. **Keying exposed Blueprint variables on a spawnable** — confirm
+   `build_sequence` can add a keyable track for `CurlAxis` /
+   `CurlStrengthDegPerSec` on the ball spawnable binding and set step keys at
+   each flight launch (this is what enables per-flight curl). Fallback if the
+   Python API can't key BP variables on a spawnable: set a single template
+   default (one curl per clip) and log the lost multi-flight fidelity.
 3. **Cubic-tangent API** — confirm the MovieScene scripting API exposes per-key
    interpolation/tangent mode on the position channels from Python.
 
@@ -174,7 +186,6 @@ Each risk gets a small spike at the top of the plan before the dependent work.
 
 ## Out of scope / YAGNI
 
-- Per-flight curl variation (keyed spin vars) — single curl per ball this pass.
 - Interactive re-snap-to-ray Sequencer tool — replaced by load-time auto-snap.
 - Any change to Phase A's pipeline contract or the dense `ball_track.json`.
 - Ball material / VFX polish (trails, etc.).
@@ -182,9 +193,10 @@ Each risk gets a small spike at the top of the plan before the dependent work.
 ## Acceptance
 
 - Loading a clip whose manifest carries `keyframes_json` produces a ball with
-  **sparse** transform keys (one per anchor), per-state interpolation, and
-  seeded curl variables; visually the ball tweens a smooth flight arc and rolls
-  with motion-derived spin, curling on a preset-tagged shot.
+  **sparse** transform keys (one per anchor), per-state interpolation, and curl
+  variables keyed per flight span; visually the ball tweens a smooth flight arc
+  and rolls with motion-derived spin, and a clip with two differently-spun
+  flights curls each flight according to its own preset.
 - A clip without `keyframes_json` still loads via the dense fallback unchanged.
 - The unreal-free modules pass their unit tests; the probe script asserts the
   binding/interp/curl-seed state in-editor.

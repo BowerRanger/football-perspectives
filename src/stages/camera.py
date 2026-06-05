@@ -33,6 +33,50 @@ def _angle_between(R1: np.ndarray, R2: np.ndarray) -> float:
     return float(np.degrees(np.arccos(cos_t)))
 
 
+def _generate_auto_anchors(shot_id, clip_path, cfg):
+    """Run the PnLCalib auto-anchor pipeline for one shot. Returns an
+    AnchorSet or None. Heavy imports are local so the camera stage has no
+    hard torch dependency unless auto-anchors are actually used."""
+    import cv2
+
+    from src.utils.auto_anchor import generate
+    from src.utils.neural_calibrator import PnLCalibrator
+
+    aa = cfg.get("auto_anchors", {})
+    model_cfg = aa.get("model", {})
+    cap = cv2.VideoCapture(str(clip_path))
+    if not cap.isOpened():
+        return None
+    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+
+    calibrator = PnLCalibrator(
+        device=model_cfg.get("device", "auto"),
+        kp_threshold=float(model_cfg.get("kp_threshold", 0.3434)),
+        line_threshold=float(model_cfg.get("line_threshold", 0.7867)),
+    )
+
+    def _frames_reader(indices, image_size):
+        cap = cv2.VideoCapture(str(clip_path))
+        out = {}
+        try:
+            for idx in indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ok, frame = cap.read()
+                if ok:
+                    out[idx] = frame
+        finally:
+            cap.release()
+        return out
+
+    return generate(
+        calibrator=calibrator, clip_id=shot_id, n_frames=n_frames,
+        image_size=(w, h), cfg=aa, frames_reader=_frames_reader,
+    )
+
+
 class CameraStage(BaseStage):
     name = "camera"
 
@@ -66,7 +110,7 @@ class CameraStage(BaseStage):
             anchors_path = (
                 self.output_dir / "camera" / f"{shot.id}_anchors.json"
             )
-            if not anchors_path.exists():
+            if not anchors_path.exists() and not cfg.get("auto_anchors", {}).get("enabled", False):
                 logger.warning(
                     "camera stage skipping shot %s — no anchors at %s. Open "
                     "the anchor editor and place keyframes before re-running.",
@@ -82,6 +126,46 @@ class CameraStage(BaseStage):
                 "had matching anchors. Place keyframes via the anchor editor."
             )
 
+    def _ensure_anchors(self, shot_id, anchors_path, clip_path, cfg):
+        """Auto-generate anchors when enabled and appropriate. On any failure,
+        leave the file as-is so existing manual path/warnings apply."""
+        aa = cfg.get("auto_anchors", {})
+        if not aa.get("enabled", False):
+            return
+        mode = aa.get("mode", "replace_when_empty")
+        if anchors_path.exists() and mode == "replace_when_empty":
+            return
+        try:
+            generated = _generate_auto_anchors(shot_id, clip_path, cfg)
+        except Exception as exc:  # noqa: BLE001 - degrade gracefully
+            logger.warning(
+                "auto_anchors: generation failed for shot %s (%s); "
+                "falling back to manual anchors", shot_id, exc,
+            )
+            return
+        if generated is None or not generated.anchors:
+            logger.warning(
+                "auto_anchors: no usable anchors for shot %s; "
+                "falling back to manual anchors", shot_id,
+            )
+            return
+        if mode == "augment" and anchors_path.exists():
+            existing = AnchorSet.load(anchors_path)
+            seen = {e.frame for e in existing.anchors}
+            merged = existing.anchors + tuple(
+                a for a in generated.anchors if a.frame not in seen
+            )
+            generated = AnchorSet(
+                clip_id=generated.clip_id, image_size=generated.image_size,
+                anchors=merged,
+            )
+        anchors_path.parent.mkdir(parents=True, exist_ok=True)
+        generated.save(anchors_path)
+        logger.info(
+            "auto_anchors: wrote %d generated anchors for shot %s to %s",
+            len(generated.anchors), shot_id, anchors_path,
+        )
+
     def _run_shot(
         self,
         shot_id: str,
@@ -91,6 +175,7 @@ class CameraStage(BaseStage):
     ) -> None:
         """Single-shot camera solve. The body is the original run() logic
         with file paths parameterised on shot_id."""
+        self._ensure_anchors(shot_id, anchors_path, clip_path, cfg)
         anchors = AnchorSet.load(anchors_path)
 
         cap = cv2.VideoCapture(str(clip_path))

@@ -217,4 +217,3 @@ __marimo__/
 .DS_Store
 *.pt
 test-media/
-third_party/pnlcalib/weights/

@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_pnlcalib_submodule_present():
     """The vendored repo and the files our wrapper imports must exist."""
-    base = ROOT / "third_party" / "pnlcalib"
+    base = ROOT / "third_party" / "PnLCalib"
     assert (base / "inference.py").exists()
     assert (base / "model" / "cls_hrnet.py").exists()
     assert (base / "utils" / "utils_keypoints.py").exists()

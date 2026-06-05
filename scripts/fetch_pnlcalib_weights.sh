@@ -2,7 +2,7 @@
 # Download PnLCalib single-view checkpoints from the v1.0.0 release.
 # Idempotent: skips files that already exist.
 set -euo pipefail
-DEST="third_party/pnlcalib/weights"
+DEST="data/models/pnlcalib"
 BASE="https://github.com/mguti97/PnLCalib/releases/download/v1.0.0"
 mkdir -p "$DEST"
 for asset in SV_kp SV_lines; do

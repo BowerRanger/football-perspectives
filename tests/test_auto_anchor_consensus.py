@@ -9,12 +9,19 @@ from src.utils.auto_anchor import (
 
 def test_compute_keyframes_caps_count():
     got = compute_keyframes(total_frames=1000, keyframe_interval=10, max_keyframes=5)
-    assert len(got) <= 5
+    assert len(got) <= 6  # <= max_keyframes interior + the appended endpoint
     assert got[0] == 0
+    assert got[-1] == 999  # last frame always covered
 
 
 def test_compute_keyframes_uses_interval_for_short_shots():
-    assert compute_keyframes(total_frames=100, keyframe_interval=30, max_keyframes=10) == [0, 30, 60, 90]
+    # interior samples at the interval, plus the last frame for tail coverage
+    assert compute_keyframes(total_frames=100, keyframe_interval=30, max_keyframes=10) == [0, 30, 60, 90, 99]
+
+
+def test_compute_keyframes_always_includes_last_frame():
+    kf = compute_keyframes(total_frames=429, keyframe_interval=18, max_keyframes=24)
+    assert kf[-1] == 428  # was 414 before the tail-coverage fix
 
 
 def test_robust_median_drops_outliers():

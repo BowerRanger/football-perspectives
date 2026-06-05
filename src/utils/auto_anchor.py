@@ -44,16 +44,23 @@ def keypoints_to_anchor(
 def compute_keyframes(
     total_frames: int, keyframe_interval: int, max_keyframes: int
 ) -> list[int]:
-    """Sample keyframes from [0, total_frames). Interval is at least
-    ``keyframe_interval`` but never yields more than ``max_keyframes``.
-    Recovered from the shelved calibration stage."""
+    """Sample keyframes spanning [0, total_frames). Interval is at least
+    ``keyframe_interval`` but never yields more than ``max_keyframes`` interior
+    samples. The LAST frame is always included so the camera stage (which drops
+    frames after the last anchor) covers the tail of the clip — otherwise the
+    final ``total_frames % effective`` frames get no camera at all. May return
+    one more than ``max_keyframes`` (the appended endpoint)."""
     if total_frames <= 0:
         return []
     effective = max(keyframe_interval, 1)
     if max_keyframes > 0:
         interval_from_cap = -(-total_frames // max_keyframes)  # ceil div
         effective = max(effective, interval_from_cap)
-    return list(range(0, total_frames, effective))
+    frames = list(range(0, total_frames, effective))
+    last = total_frames - 1
+    if frames and frames[-1] != last:
+        frames.append(last)
+    return frames
 
 
 def _median_absolute_deviation(arr: np.ndarray) -> np.ndarray:

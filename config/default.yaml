@@ -209,6 +209,13 @@ camera:
     max_keyframes: 24
     min_points_per_anchor: 4
     consensus_max_position_mad: 4.0
+    # Snap each PnLCalib keypoint to its sub-pixel painted-line intersection
+    # before it becomes an anchor, to cut PnLCalib's ~4-5px point noise.
+    # line_intersection mode only moves a keypoint when two roughly-
+    # perpendicular lines are found; spots/occluded corners keep their estimate.
+    snap_keypoints: false
+    snap_window_px: 30
+    snap_min_confidence: 0.5
     plausibility_bounds:
       x: [-30.0, 135.0]
       y: [-60.0, 130.0]

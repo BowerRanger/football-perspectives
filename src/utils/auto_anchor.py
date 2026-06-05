@@ -13,6 +13,44 @@ from src.schemas.anchor import Anchor, AnchorSet, LandmarkObservation
 from src.utils.pnlcalib_pitch_map import keypoint_world_xyz_ours
 
 
+def snap_keypoints(
+    pixels: dict[int, tuple[float, float]],
+    frame_bgr,
+    *,
+    window_px: int = 30,
+    min_confidence: float = 0.5,
+    snap_fn=None,
+) -> dict[int, tuple[float, float]]:
+    """Refine PnLCalib keypoints to sub-pixel painted-line intersections.
+
+    Most PnLCalib keypoints are line intersections (corners, box corners, line
+    crossings). PnLCalib places them with ~4-5px noise; snapping each to the
+    actual sub-pixel intersection of the two painted lines it sits on cuts that
+    noise, tightening the anchor (and thus the camera solve). Uses
+    ``line_intersection`` mode so a keypoint is only moved when two roughly-
+    perpendicular lines are found — points with no clear intersection (penalty
+    / centre spots, occluded corners) keep their original PnLCalib estimate.
+
+    ``snap_fn`` is injectable for tests; defaults to click_snap.snap_click.
+    """
+    if snap_fn is None:
+        from src.utils.click_snap import SnapConfig, snap_click
+
+        cfg = SnapConfig(window_px=window_px)
+
+        def snap_fn(frame, xy):  # noqa: ANN001
+            return snap_click(frame, xy, mode="line_intersection", cfg=cfg)
+
+    out: dict[int, tuple[float, float]] = {}
+    for kp_id, xy in pixels.items():
+        res = snap_fn(frame_bgr, xy)
+        if res.snapped and res.confidence >= min_confidence:
+            out[kp_id] = (float(res.xy[0]), float(res.xy[1]))
+        else:
+            out[kp_id] = xy
+    return out
+
+
 def keypoints_to_anchor(
     pixels: dict[int, tuple[float, float]],
     frame: int,
@@ -157,11 +195,21 @@ def generate(
     if not kept:
         return None
 
-    # Pass 3: keypoint anchors for the survivors.
+    # Pass 3: keypoint anchors for the survivors. Optionally snap each keypoint
+    # to its sub-pixel painted-line intersection to cut PnLCalib's ~4-5px point
+    # noise before it becomes an anchor.
     min_points = int(cfg.get("min_points_per_anchor", 4))
+    snap = bool(cfg.get("snap_keypoints", False))
+    snap_window = int(cfg.get("snap_window_px", 30))
+    snap_conf = float(cfg.get("snap_min_confidence", 0.5))
     anchors = []
     for idx in sorted(kept):
         pixels = calibrator.extract_keypoints_pixels(frames[idx])
+        if snap:
+            pixels = snap_keypoints(
+                pixels, frames[idx],
+                window_px=snap_window, min_confidence=snap_conf,
+            )
         anchor = keypoints_to_anchor(pixels, frame=idx, min_points=min_points)
         if anchor is not None:
             anchors.append(anchor)

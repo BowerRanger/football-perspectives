@@ -169,6 +169,27 @@ camera:
   enable_bidirectional: true
   pitch_line_consistency_max_px: 5.0
   forward_backward_disagreement_warn_deg: 0.5
+  # Landmark-free cold-start via the vendored PnLCalib model. When enabled,
+  # the camera stage auto-generates anchors and writes {shot}_anchors.json
+  # before the normal solve. mode:
+  #   replace_when_empty - only auto-generate when no manual anchors exist
+  #   augment            - union auto anchors with existing manual ones
+  #   force              - always regenerate (overwrites manual)
+  auto_anchors:
+    enabled: false
+    mode: replace_when_empty
+    keyframe_interval: 30
+    max_keyframes: 12
+    min_points_per_anchor: 4
+    consensus_max_position_mad: 3.0
+    plausibility_bounds:
+      x: [-30.0, 135.0]
+      y: [-60.0, 130.0]
+      z: [3.0, 80.0]
+    model:
+      device: auto          # auto -> cuda on the Linux box, cpu/mps on Mac
+      kp_threshold: 0.3434
+      line_threshold: 0.7867
 
 hmr_world:
   # Force CPU on macOS: GVHMR's RoPE attention has a slice op that

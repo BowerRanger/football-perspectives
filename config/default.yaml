@@ -169,14 +169,18 @@ camera:
   enable_bidirectional: true
   pitch_line_consistency_max_px: 5.0
   forward_backward_disagreement_warn_deg: 0.5
-  # Landmark-free cold-start via the vendored PnLCalib model. When enabled,
+  # Landmark-free cold-start via the vendored PnLCalib model. On by default:
   # the camera stage auto-generates anchors and writes {shot}_anchors.json
-  # before the normal solve. mode:
+  # before the normal solve. With mode: replace_when_empty this ONLY runs for
+  # shots that have no manual anchors, so hand-placed anchors always take
+  # precedence; un-anchored shots (previously skipped) now get a PnLCalib
+  # cold-start. First use downloads ~500MB of weights to data/models/pnlcalib/.
+  # Set enabled: false to restore manual-only anchoring. mode:
   #   replace_when_empty - only auto-generate when no manual anchors exist
   #   augment            - union auto anchors with existing manual ones
   #   force              - always regenerate (overwrites manual)
   auto_anchors:
-    enabled: false
+    enabled: true
     mode: replace_when_empty
     keyframe_interval: 30
     max_keyframes: 12

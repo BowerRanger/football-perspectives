@@ -220,10 +220,16 @@ Recover the proven loader as a private helper, then add the our-frame conversion
 Recovers the proven keypoint-table loader from the (shelved) calibration
 work: it imports PnLCalib's own ``keypoint_world_coords_2D`` /
 ``keypoint_aux_world_coords_2D`` tables via a temporary sys.path swap, so the
-table is never hand-transcribed. PnLCalib's table is corner-origin
-x in [0,105], y in [0,68] with y pointing toward the image top and goalpost
-tops at z=-2.44. This project is near-left-corner, y toward the far touchline,
-z-up, so a table point converts as: x_ours = x, y_ours = 68 - y, z_ours = -z.
+table is never hand-transcribed.
+
+IMPORTANT: ``utils/utils_calib.py`` RE-CENTRES the table at import time
+(``[x - 52.5, y - 34]``), so the imported values are in PnLCalib's centred
+pitch frame (x in [-52.5, 52.5], y in [-34, 34]); kp1 imports as
+``[-52.5, -34]``, NOT ``[0, 0]``. Goalpost tops {12,15,16,19} are z=-2.44
+(z-down). This project is near-left-corner (x in [0,105], y toward the far
+touchline in [0,68], z-up). The point transform — identical to the position
+half of ``neural_calibrator.convert_pnlcalib_to_ours`` — is:
+``x_ours = x + 52.5, y_ours = 34 - y, z_ours = -z``.
 """
 
 from __future__ import annotations
@@ -233,7 +239,8 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PNLCALIB_ROOT = _REPO_ROOT / "third_party" / "PnLCalib"
-_PITCH_WIDTH = 68.0
+_HALF_LENGTH = 52.5
+_HALF_WIDTH = 34.0
 
 # PnLCalib assigns z = -2.44 to the four goalpost-top keypoints (crossbars).
 _GOALPOST_TOP_KEYS = {12, 15, 16, 19}
@@ -282,15 +289,17 @@ NUM_KEYPOINTS = len(_TABLE)
 
 def keypoint_world_xyz_ours(kp_id: int) -> tuple[float, float, float] | None:
     """World (x, y, z) in THIS project's pitch frame for 1-based PnLCalib
-    keypoint ``kp_id``, or None if unknown."""
+    keypoint ``kp_id``, or None if unknown. The imported table is in
+    PnLCalib's CENTRED frame; convert to ours (matches
+    ``convert_pnlcalib_to_ours`` for a position)."""
     entry = _TABLE.get(kp_id)
     if entry is None:
         return None
     x, y, z = entry
-    return (x, _PITCH_WIDTH - y, -z)
+    return (x + _HALF_LENGTH, _HALF_WIDTH - y, -z)
 ```
 
-> **Note:** the import name is `from utils.utils_calib import keypoint_world_coords_2D, keypoint_aux_world_coords_2D`. If those symbols are defined in `utils.utils_keypoints` instead in the pinned submodule commit, adjust the import line (verify with `grep -rn "keypoint_world_coords_2D" third_party/PnLCalib/utils/`). The proven recovered code imported them from `utils.utils_calib`.
+> **Verified import path:** `from utils.utils_calib import keypoint_world_coords_2D, keypoint_aux_world_coords_2D` is correct for the pinned submodule (module-level lists, 57 main + 16 aux, re-centred at import). Confirmed against `third_party/PnLCalib/utils/utils_calib.py`. Do NOT import from `utils_calib_wp.py` (a different WorldPose variant with a different y convention).
 
 - [ ] **Step 4: Run test to verify it passes**
 

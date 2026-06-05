@@ -1,0 +1,9 @@
+# Step B: denser keyframe coverage + smoothing, on baseline (strict) detection.
+# Regenerating denser anchors requires deleting the cached gberch_anchors.json
+# so auto_anchor re-runs PnLCalib at the denser interval.
+camera:
+  line_extraction_smooth_window: 9
+  auto_anchors:
+    keyframe_interval: 18
+    max_keyframes: 24
+    consensus_max_position_mad: 4.0

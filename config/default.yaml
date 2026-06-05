@@ -160,6 +160,14 @@ camera:
   # round anyway, so >1 only costs runtime. Raise per-clip if a clip's
   # propagated bootstrap cameras are poor enough that re-detection helps.
   line_extraction_static_rounds: 1
+  # Minimum detected painted lines for a frame's per-frame static-C solve to
+  # be trusted. A per-frame solve recovers 4 DOF (rotation + focal); with
+  # fewer than this many lines (often near-parallel touchlines) the solve is
+  # under-determined and can yield non-physical cameras (extreme focal,
+  # rotation flips) that still fit the few lines. Frames below this keep the
+  # smooth interpolated camera instead. Lower it if a clip is line-poor and
+  # you would rather have noisier per-frame solves than more interpolation.
+  line_extraction_min_lines_per_frame: 4
   # ORB is the only detector currently implemented in feature_propagator.
   # SuperPoint is a future enhancement (better repeatability under zoom).
   feature_detector: orb

@@ -222,3 +222,22 @@ def detect_lines_for_frames(
                 for d in usable
             ]
     return out
+
+
+def drop_underdetermined_frames(
+    per_frame_lines: dict[int, list], min_lines: int
+) -> dict[int, list]:
+    """Drop frames whose detected-line count is below ``min_lines``.
+
+    A per-frame static-camera solve recovers 4 DOF (rotation + focal length).
+    With fewer than ~4 line correspondences — often near-parallel touchlines —
+    the solve is under-determined and can converge to a non-physical camera
+    (extreme focal, large rotation flip) that still fits the few lines with a
+    low residual. Excluding these frames from the solve makes them fall back
+    to the smooth interpolated camera instead of a wild per-frame fit, which
+    removes single-frame glitches. ``min_lines <= 1`` is a no-op on non-empty
+    frames.
+    """
+    return {
+        f: lines for f, lines in per_frame_lines.items() if len(lines) >= min_lines
+    }

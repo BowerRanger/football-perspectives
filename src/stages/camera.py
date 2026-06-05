@@ -597,7 +597,10 @@ class CameraStage(BaseStage):
         """
         from src.utils.anchor_solver import _is_rich
         from src.utils.line_detector import DetectorConfig
-        from src.utils.line_camera_refine import detect_lines_for_frames
+        from src.utils.line_camera_refine import (
+            detect_lines_for_frames,
+            drop_underdetermined_frames,
+        )
         from src.utils.static_c_profile import make_c_grid, profile_camera_centre
         from src.utils.static_line_solver import solve_static_camera_from_lines
 
@@ -607,6 +610,11 @@ class CameraStage(BaseStage):
         )
         lens_model = str(cfg.get("line_extraction_lens_model", "pinhole_k1k2"))
         n_rounds = int(cfg.get("line_extraction_static_rounds", 1))
+        # A per-frame solve recovers 4 DOF (rvec + fx); frames with too few
+        # detected lines are under-determined and yield non-physical cameras
+        # (extreme focal, rotation flips). Exclude them so they keep the smooth
+        # interpolated camera instead. See the static-line glitch investigation.
+        min_lines = int(cfg.get("line_extraction_min_lines_per_frame", 4))
         point_hint_weight = float(
             cfg.get("line_extraction_point_hint_weight", 0.05)
         )
@@ -632,6 +640,14 @@ class CameraStage(BaseStage):
         per_frame_lines = detect_lines_for_frames(
             frames_bgr, _cameras_from_arrays(), dist2, det_cfg,
         )
+        n_before = len(per_frame_lines)
+        per_frame_lines = drop_underdetermined_frames(per_frame_lines, min_lines)
+        if n_before != len(per_frame_lines):
+            logger.info(
+                "static line solve: dropped %d/%d under-determined frames "
+                "(<%d detected lines); they keep the interpolated camera",
+                n_before - len(per_frame_lines), n_before, min_lines,
+            )
         if len(per_frame_lines) < 2:
             logger.warning(
                 "static line solve: only %d frame(s) yielded detected lines; "
@@ -726,6 +742,7 @@ class CameraStage(BaseStage):
                 redet = detect_lines_for_frames(
                     frames_bgr, cams, tuple(sol.distortion[:2]), det_cfg,
                 )
+                redet = drop_underdetermined_frames(redet, min_lines)
                 if len(redet) >= 2:
                     per_frame_lines = redet
                 c_seed = sol.camera_centre

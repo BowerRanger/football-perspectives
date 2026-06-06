@@ -708,9 +708,14 @@ class CameraStage(BaseStage):
                 cam = seed_cams.get(fid)
                 if cam is None:
                     continue
+                # Use zero distortion for the circle projection, NOT the
+                # anchor-solve dist2 (often saturated at its bounds — a
+                # non-physical LM artifact). The circle spans the image, so a
+                # bogus k1/k2 throws its projection off the search strip; the
+                # solve re-estimates real distortion from zero anyway.
                 det = detect_circle(
                     frames_bgr[fid], np.asarray(cam["K"]), np.asarray(cam["R"]),
-                    np.asarray(cam["t"]), dist2, det_cfg,
+                    np.asarray(cam["t"]), (0.0, 0.0), det_cfg,
                 )
                 if det is None:
                     continue
@@ -894,8 +899,11 @@ class CameraStage(BaseStage):
                 self._pnlcalib_bootstrap_cameras(ext_bgr, cfg) if ext_bgr else {}
             )
             if ext_cams:
+                # Detect under the solve's re-estimated (sane) distortion, not
+                # the saturated anchor dist2.
+                ext_dist = tuple(float(x) for x in sol.distortion[:2])
                 ext_lines = detect_lines_for_frames(
-                    ext_bgr, ext_cams, dist2, det_cfg,
+                    ext_bgr, ext_cams, ext_dist, det_cfg,
                     min_confidence=det_min_confidence,
                     min_n_samples=det_min_n_samples, min_lines=1,
                 )

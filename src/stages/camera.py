@@ -667,8 +667,14 @@ class CameraStage(BaseStage):
         ):
             pnl_cams = self._pnlcalib_bootstrap_cameras(frames_bgr, cfg)
             if pnl_cams:
+                # Detect under ZERO distortion, not the anchor-solve dist2
+                # (often saturated at its bounds — non-physical). The saturated
+                # value throws midfield line projections off the search strip,
+                # so those frames detect <2 lines and never become circle-rescue
+                # candidates. PnLCalib's camera + ~zero distortion projects the
+                # catalogue accurately; the solve re-estimates real distortion.
                 raw_pnl = detect_lines_for_frames(
-                    frames_bgr, pnl_cams, dist2, det_cfg,
+                    frames_bgr, pnl_cams, (0.0, 0.0), det_cfg,
                     min_confidence=det_min_confidence,
                     min_n_samples=det_min_n_samples, min_lines=1,
                 )

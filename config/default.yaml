@@ -194,7 +194,11 @@ camera:
   # visible are rescued by detecting the circle and adding it as a weighted
   # point constraint. Only dropped frames are rescued, so well-lined clips
   # (gberch) are unchanged.
-  line_extraction_detect_circle: true
+  # Off by default: as currently tuned the circle constraint trades straight-
+  # line fit for circle fit and regresses the line-RMS metric on midfield-heavy
+  # clips (origi01: mean 3.1 -> 5.0px). Enable to experiment; needs circle_weight
+  # tuning to be a clear win. Camera stays smooth either way.
+  line_extraction_detect_circle: false
   line_extraction_circle_min_lines: 2     # need >=this many straight lines too
   line_extraction_circle_points: 20       # circle samples fed to the solve
   line_extraction_circle_weight: 0.3      # residual weight vs straight lines

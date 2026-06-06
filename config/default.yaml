@@ -179,6 +179,16 @@ camera:
   # trajectory after the static-line solve. 0 disables it. ~7-11 removes the
   # seam steps where line-solved frames meet interpolated gap frames.
   line_extraction_smooth_window: 9
+  # Clip-adaptive detection bootstrap. The static-line solve normally bootstraps
+  # detection from the anchor-interpolated camera. On clips where the anchors
+  # are sparse/partial (PnLCalib only cold-started part of the clip), that
+  # bootstrap is off by more than the search strip and detection finds nothing
+  # even though lines are visible. When line-detected coverage falls below
+  # _min_coverage, re-bootstrap detection from PnLCalib's accurate per-frame
+  # camera instead. gberch's coverage is ~100% so this never triggers there
+  # (its path is unchanged); origi/kroupi benefit.
+  line_extraction_pnlcalib_bootstrap: true
+  line_extraction_pnlcalib_bootstrap_min_coverage: 0.5
   # ORB is the only detector currently implemented in feature_propagator.
   # SuperPoint is a future enhancement (better repeatability under zoom).
   feature_detector: orb

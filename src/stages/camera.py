@@ -642,9 +642,10 @@ class CameraStage(BaseStage):
                 for i in frames_bgr
             }
 
-        # Step 0 — detect under the propagated bootstrap cameras.
+        # Step 0 — detect under the propagated (anchor-interpolated) bootstrap.
+        prop_cams = _cameras_from_arrays()
         per_frame_lines = detect_lines_for_frames(
-            frames_bgr, _cameras_from_arrays(), dist2, det_cfg,
+            frames_bgr, prop_cams, dist2, det_cfg,
             min_confidence=det_min_confidence, min_n_samples=det_min_n_samples,
         )
         n_before = len(per_frame_lines)
@@ -655,6 +656,45 @@ class CameraStage(BaseStage):
                 "(<%d detected lines); they keep the interpolated camera",
                 n_before - len(per_frame_lines), n_before, min_lines,
             )
+
+        # ``seed_cams`` supplies the per-frame (rvec, fx) + C seeds for the
+        # solve; it tracks whichever camera source the surviving detections
+        # came from. Defaults to the propagated cameras.
+        seed_cams = prop_cams
+
+        # Clip-adaptive fallback: when the anchor-interpolated bootstrap yields
+        # detections on too few frames (sparse/partial auto-anchors), the
+        # bootstrap is off by more than the search strip. Re-bootstrap
+        # detection from PnLCalib's accurate per-frame camera instead — it
+        # projects the catalogue correctly even where anchor interpolation is
+        # poor. gberch's coverage is ~100% so this never fires there.
+        coverage = len(per_frame_lines) / max(1, len(covered))
+        min_cov = float(
+            cfg.get("line_extraction_pnlcalib_bootstrap_min_coverage", 0.5)
+        )
+        if (
+            bool(cfg.get("line_extraction_pnlcalib_bootstrap", True))
+            and coverage < min_cov
+        ):
+            pnl_cams = self._pnlcalib_bootstrap_cameras(frames_bgr, cfg)
+            if pnl_cams:
+                redet = detect_lines_for_frames(
+                    frames_bgr, pnl_cams, dist2, det_cfg,
+                    min_confidence=det_min_confidence,
+                    min_n_samples=det_min_n_samples,
+                )
+                redet = drop_underdetermined_frames(redet, min_lines)
+                if len(redet) > len(per_frame_lines):
+                    logger.info(
+                        "static line solve: anchor-bootstrap coverage %.0f%% "
+                        "< %.0f%%; switched to PnLCalib per-frame bootstrap "
+                        "(%d -> %d line-detected frames)",
+                        100 * coverage, 100 * min_cov,
+                        len(per_frame_lines), len(redet),
+                    )
+                    per_frame_lines = redet
+                    seed_cams = pnl_cams
+
         if len(per_frame_lines) < 2:
             logger.warning(
                 "static line solve: only %d frame(s) yielded detected lines; "
@@ -663,19 +703,25 @@ class CameraStage(BaseStage):
             )
             return None
 
-        # Per-frame (rvec, fx) bootstrap seeds from the propagated cameras.
+        # Per-frame (rvec, fx) bootstrap seeds from the chosen camera source.
         bootstrap: dict[int, tuple[np.ndarray, float]] = {}
         for fid in per_frame_lines:
-            rv, _ = cv2.Rodrigues(per_frame_R[fid])
-            bootstrap[fid] = (rv.reshape(3), float(per_frame_K[fid][0, 0]))
+            cam = seed_cams[fid]
+            rv, _ = cv2.Rodrigues(np.asarray(cam["R"]))
+            bootstrap[fid] = (rv.reshape(3), float(np.asarray(cam["K"])[0, 0]))
 
-        # Seed C from the propagated centres (rich-anchor frames preferred).
+        # Seed C from the chosen cameras' centres (rich-anchor frames preferred
+        # when using the propagated bootstrap; all detected frames otherwise).
         rich = {a.frame for a in anchors.anchors if _is_rich(a)}
+
+        def _centre(f: int) -> np.ndarray:
+            R = np.asarray(seed_cams[f]["R"]); t = np.asarray(seed_cams[f]["t"])
+            return -R.T @ t
+
         seed_cs = [
-            -per_frame_R[f].T @ per_frame_t[f]
-            for f in per_frame_lines if f in rich
+            _centre(f) for f in per_frame_lines if f in rich
         ] or [
-            -per_frame_R[f].T @ per_frame_t[f] for f in per_frame_lines
+            _centre(f) for f in per_frame_lines
         ]
         c_center = np.median(np.stack(seed_cs), axis=0)
         cx0 = float(per_frame_K[covered[0]][0, 2])
@@ -829,6 +875,63 @@ class CameraStage(BaseStage):
                 float(rms_arr.max()), float((rms_arr < 1.0).mean()),
             )
         return sol
+
+    def _pnlcalib_bootstrap_cameras(
+        self, frames_bgr: dict[int, np.ndarray], cfg: dict,
+    ) -> dict[int, dict]:
+        """Per-frame PnLCalib cameras (our frame) for detection bootstrap.
+
+        Used only as the clip-adaptive fallback in the static-line solve when
+        the anchor-interpolated bootstrap has poor detection coverage. PnLCalib
+        projects the catalogue accurately per frame even where anchor
+        interpolation is off, so it makes a strong detection bootstrap. Returns
+        ``{frame: {"K","R","t"}}`` for frames that calibrate to a physically
+        plausible camera position (implausible / off-pitch solves are dropped,
+        so they don't poison the C seed). Empty dict if PnLCalib is unavailable.
+        """
+        try:
+            from src.utils.auto_anchor import is_plausible_position
+            from src.utils.neural_calibrator import PnLCalibrator
+        except Exception as exc:  # noqa: BLE001 - degrade gracefully
+            logger.warning("PnLCalib bootstrap unavailable (%s)", exc)
+            return {}
+
+        aa = cfg.get("auto_anchors", {})
+        mc = aa.get("model", {})
+        bounds = aa.get("plausibility_bounds", {
+            "x": (-30.0, 135.0), "y": (-60.0, 130.0), "z": (3.0, 80.0),
+        })
+        try:
+            cal = PnLCalibrator(
+                device=mc.get("device", "auto"),
+                kp_threshold=float(mc.get("kp_threshold", 0.3434)),
+                line_threshold=float(mc.get("line_threshold", 0.7867)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("PnLCalib bootstrap init failed (%s)", exc)
+            return {}
+
+        out: dict[int, dict] = {}
+        for fid, img in frames_bgr.items():
+            try:
+                r = cal.calibrate(img)
+            except Exception:  # noqa: BLE001 - PnLCalib optimiser can raise
+                continue
+            if r is None:
+                continue
+            if not is_plausible_position(np.asarray(r.world_position), bounds):
+                continue
+            R, _ = cv2.Rodrigues(np.asarray(r.rvec).reshape(3))
+            out[fid] = {
+                "K": np.asarray(r.K),
+                "R": R,
+                "t": np.asarray(r.tvec).reshape(3),
+            }
+        logger.info(
+            "PnLCalib per-frame bootstrap: %d/%d covered frames calibrated "
+            "plausibly", len(out), len(frames_bgr),
+        )
+        return out
 
     def _propagate_pair(
         self,

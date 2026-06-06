@@ -258,6 +258,7 @@
     <button id="run-all-btn" class="btn btn-secondary" style="margin-left:auto;font-size:12px;">Run All</button>
     <button id="continue-btn" class="btn btn-secondary" disabled style="font-size:12px;" title="Run this stage without wiping its output directory — resumes from any cached per-player results.">Continue</button>
     <button id="rerun-btn" class="btn btn-primary" disabled style="font-size:12px;">Re-run Stage</button>
+    <select id="output-dir-select" title="Active output directory — switch which reconstruction is shown and written to" style="font-size:12px;margin-left:8px;"></select>
   </div>
 
   <div id="main-body">
@@ -313,6 +314,77 @@ const STAGE_DEPS = {
 // ── Initialise ───────────────────────────────────────────────────────
 async function init() {
   await loadStages();
+  await loadOutputDirs();
+}
+
+// ── Output-directory switcher ────────────────────────────────────────
+//
+// The active output dir is server-wide: switching re-points every
+// endpoint at once, so after a switch we reload the page to refresh the
+// stage status and all panels against the new directory.
+async function loadOutputDirs() {
+  const sel = document.getElementById("output-dir-select");
+  if (!sel) return;
+  let data;
+  try {
+    const res = await fetch("/api/output-dirs");
+    if (!res.ok) return;
+    data = await res.json();
+  } catch (_e) {
+    return;
+  }
+  sel.innerHTML = "";
+  for (const name of data.dirs) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    if (name === data.current) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  const newOpt = document.createElement("option");
+  newOpt.value = "__new__";
+  newOpt.textContent = "New output…";
+  sel.appendChild(newOpt);
+  // Remember the active value so we can restore it if a switch is
+  // cancelled or rejected.
+  sel.dataset.current = data.current;
+}
+
+async function onOutputDirChange(ev) {
+  const sel = ev.target;
+  const value = sel.value;
+  const current = sel.dataset.current || "";
+  if (value === current) return;
+
+  let request;
+  if (value === "__new__") {
+    const name = (window.prompt(
+      "New output directory name (e.g. exp1 → output-exp1):") || "").trim();
+    if (!name) { sel.value = current; return; }
+    request = { url: "/api/output-dirs", method: "POST", body: { name } };
+  } else {
+    request = { url: "/api/output-dirs/active", method: "PUT", body: { name: value } };
+  }
+
+  try {
+    const res = await fetch(request.url, {
+      method: request.method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request.body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      window.alert("Could not switch output directory: " + (err.detail || res.status));
+      sel.value = current;
+      return;
+    }
+  } catch (e) {
+    window.alert("Request failed: " + e);
+    sel.value = current;
+    return;
+  }
+  // Reload so every panel reflects the newly active directory.
+  window.location.reload();
 }
 
 // ── Sidebar ──────────────────────────────────────────────────────────
@@ -424,6 +496,16 @@ async function selectStage(name) {
     : "Run this stage without wiping its output directory — resumes from any cached per-player results.";
   runAllBtn.disabled = isAnyRunning;
   runAllBtn.title = isAnyRunning ? blockedReason : "";
+  const outputDirSelect = document.getElementById("output-dir-select");
+  if (outputDirSelect) {
+    // Don't let the operator re-point the server mid-run — the in-flight
+    // job keeps writing to the dir it started on, so switching now would
+    // only confuse the displayed state.
+    outputDirSelect.disabled = isAnyRunning;
+    outputDirSelect.title = isAnyRunning
+      ? blockedReason
+      : "Active output directory — switch which reconstruction is shown and written to";
+  }
 
   document.getElementById("output-panel").innerHTML = "";
   loadOutput(name);
@@ -552,6 +634,8 @@ function _streamJobLogs(jobId, targetStages, onDone) {
 document.getElementById("log-close-btn").addEventListener("click", () => {
   document.getElementById("log-panel").style.display = "none";
 });
+
+document.getElementById("output-dir-select").addEventListener("change", onOutputDirChange);
 
 document.getElementById("rerun-btn").addEventListener("click", async () => {
   if (!currentStage) return;

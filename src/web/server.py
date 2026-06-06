@@ -184,6 +184,24 @@ def _refined_poses_complete(output_dir: Path) -> bool:
     return all((refined / f"{pid}_refined.npz").exists() for pid in expected)
 
 
+# A valid output-directory basename: letters, digits, dash, underscore. No
+# path separators or dots, so it can never escape the parent directory.
+_OUTPUT_DIR_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _discover_output_dirs(current: Path) -> list[str]:
+    """Sorted basenames of every ``output*`` directory beside ``current``.
+
+    Globs sibling directories of ``current`` (its parent is typically the
+    repo root) and always includes ``current`` itself, even when its own
+    name doesn't match ``output*`` (e.g. a custom ``--output`` path).
+    """
+    parent = current.parent
+    names = {p.name for p in parent.glob("output*") if p.is_dir()}
+    names.add(current.name)
+    return sorted(names)
+
+
 _STAGE_COMPLETE = {
     "prepare_shots": lambda d: (d / "shots" / "shots_manifest.json").exists(),
     "tracking": lambda d: any((d / "tracks").glob("*_tracks.json")),
@@ -493,6 +511,68 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             }
             for i, name in enumerate(STAGE_ORDER)
         ]
+
+    def _output_dirs_payload() -> dict:
+        return {
+            "current": output_dir.name,
+            "dirs": _discover_output_dirs(output_dir),
+            "parent": str(output_dir.parent),
+        }
+
+    @app.get("/api/output-dirs")
+    def list_output_dirs():
+        """List selectable ``output*`` sibling dirs and the active one."""
+        return _output_dirs_payload()
+
+    @app.put("/api/output-dirs/active")
+    def set_active_output_dir(payload: dict):
+        """Re-point the server at an existing ``output*`` sibling.
+
+        Reassigns the ``output_dir`` closure cell shared by every endpoint
+        defined in ``create_app`` (``nonlocal``), so all existing handlers
+        immediately read from the new directory. In-flight pipeline jobs are
+        unaffected — they captured their own ``output_dir`` at submit time.
+        """
+        nonlocal output_dir
+        name = (payload or {}).get("name")
+        if not isinstance(name, str) or not _OUTPUT_DIR_NAME_RE.match(name):
+            raise HTTPException(status_code=400, detail="Invalid output directory name")
+        parent = output_dir.parent
+        target = (parent / name).resolve()
+        if (
+            target.parent != parent
+            or not target.is_dir()
+            or name not in _discover_output_dirs(output_dir)
+        ):
+            raise HTTPException(
+                status_code=400, detail=f"Unknown output directory: {name}"
+            )
+        output_dir = target
+        app.state.output_dir = target
+        return _output_dirs_payload()
+
+    @app.post("/api/output-dirs")
+    def create_output_dir(payload: dict):
+        """Create a new empty ``output-<name>`` sibling and switch to it.
+
+        ``name`` is used as-is when it already starts with ``output``,
+        otherwise it's prefixed (``foo`` → ``output-foo``). Sanitised to
+        ``[A-Za-z0-9_-]+`` so it can't escape the parent directory.
+        """
+        nonlocal output_dir
+        raw = (payload or {}).get("name")
+        name = raw.strip() if isinstance(raw, str) else ""
+        if not _OUTPUT_DIR_NAME_RE.match(name):
+            raise HTTPException(status_code=400, detail="Invalid output directory name")
+        dir_name = name if name.startswith("output") else f"output-{name}"
+        parent = output_dir.parent
+        target = (parent / dir_name).resolve()
+        if target.parent != parent:
+            raise HTTPException(status_code=400, detail="Invalid output directory name")
+        target.mkdir(parents=True, exist_ok=True)
+        output_dir = target
+        app.state.output_dir = target
+        return _output_dirs_payload()
 
     @app.get("/api/config")
     def get_config():

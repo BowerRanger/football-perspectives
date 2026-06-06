@@ -642,33 +642,22 @@ class CameraStage(BaseStage):
                 for i in frames_bgr
             }
 
-        # Step 0 — detect under the propagated (anchor-interpolated) bootstrap.
+        # Step 0 — detect lines under the propagated bootstrap. Keep the RAW
+        # (pre-filter) detections so midfield frames with too few straight
+        # lines can be rescued by the centre circle below.
         prop_cams = _cameras_from_arrays()
-        per_frame_lines = detect_lines_for_frames(
+        raw_lines = detect_lines_for_frames(
             frames_bgr, prop_cams, dist2, det_cfg,
             min_confidence=det_min_confidence, min_n_samples=det_min_n_samples,
+            min_lines=1,
         )
-        n_before = len(per_frame_lines)
-        per_frame_lines = drop_underdetermined_frames(per_frame_lines, min_lines)
-        if n_before != len(per_frame_lines):
-            logger.info(
-                "static line solve: dropped %d/%d under-determined frames "
-                "(<%d detected lines); they keep the interpolated camera",
-                n_before - len(per_frame_lines), n_before, min_lines,
-            )
-
-        # ``seed_cams`` supplies the per-frame (rvec, fx) + C seeds for the
-        # solve; it tracks whichever camera source the surviving detections
-        # came from. Defaults to the propagated cameras.
         seed_cams = prop_cams
+        well_lined = drop_underdetermined_frames(raw_lines, min_lines)
 
-        # Clip-adaptive fallback: when the anchor-interpolated bootstrap yields
-        # detections on too few frames (sparse/partial auto-anchors), the
-        # bootstrap is off by more than the search strip. Re-bootstrap
-        # detection from PnLCalib's accurate per-frame camera instead — it
-        # projects the catalogue correctly even where anchor interpolation is
-        # poor. gberch's coverage is ~100% so this never fires there.
-        coverage = len(per_frame_lines) / max(1, len(covered))
+        # Clip-adaptive fallback: poor anchor-bootstrap coverage -> re-bootstrap
+        # detection from PnLCalib's accurate per-frame camera. gberch (~100%
+        # coverage) never triggers this, so its path is unchanged.
+        coverage = len(well_lined) / max(1, len(covered))
         min_cov = float(
             cfg.get("line_extraction_pnlcalib_bootstrap_min_coverage", 0.5)
         )
@@ -678,30 +667,70 @@ class CameraStage(BaseStage):
         ):
             pnl_cams = self._pnlcalib_bootstrap_cameras(frames_bgr, cfg)
             if pnl_cams:
-                redet = detect_lines_for_frames(
+                raw_pnl = detect_lines_for_frames(
                     frames_bgr, pnl_cams, dist2, det_cfg,
                     min_confidence=det_min_confidence,
-                    min_n_samples=det_min_n_samples,
+                    min_n_samples=det_min_n_samples, min_lines=1,
                 )
-                redet = drop_underdetermined_frames(redet, min_lines)
-                if len(redet) > len(per_frame_lines):
+                well_pnl = drop_underdetermined_frames(raw_pnl, min_lines)
+                if len(well_pnl) > len(well_lined):
                     logger.info(
                         "static line solve: anchor-bootstrap coverage %.0f%% "
                         "< %.0f%%; switched to PnLCalib per-frame bootstrap "
                         "(%d -> %d line-detected frames)",
                         100 * coverage, 100 * min_cov,
-                        len(per_frame_lines), len(redet),
+                        len(well_lined), len(well_pnl),
                     )
-                    per_frame_lines = redet
-                    seed_cams = pnl_cams
+                    raw_lines, well_lined, seed_cams = raw_pnl, well_pnl, pnl_cams
 
-        if len(per_frame_lines) < 2:
+        if len(well_lined) < 2:
             logger.warning(
-                "static line solve: only %d frame(s) yielded detected lines; "
-                "keeping the propagated cameras unchanged",
-                len(per_frame_lines),
+                "static line solve: only %d well-lined frame(s); keeping the "
+                "propagated cameras unchanged", len(well_lined),
             )
             return None
+
+        # Q1 — centre-circle rescue: frames the straight-line filter dropped
+        # (too few lines, e.g. midfield where the box is out of view) but where
+        # the centre circle is visible get the circle as a weighted point
+        # constraint, so they can still be solved. Only DROPPED frames are
+        # rescued, so well-lined clips (gberch) are untouched.
+        per_frame_circle: dict[int, list] = {}
+        rescued_lines: dict[int, list] = {}
+        if bool(cfg.get("line_extraction_detect_circle", True)):
+            from src.schemas.anchor import LandmarkObservation
+            from src.utils.circle_detector import detect_circle
+            circ_min_lines = int(cfg.get("line_extraction_circle_min_lines", 2))
+            n_circ = int(cfg.get("line_extraction_circle_points", 20))
+            for fid in frames_bgr:
+                if fid in well_lined or len(raw_lines.get(fid, [])) < circ_min_lines:
+                    continue
+                cam = seed_cams.get(fid)
+                if cam is None:
+                    continue
+                det = detect_circle(
+                    frames_bgr[fid], np.asarray(cam["K"]), np.asarray(cam["R"]),
+                    np.asarray(cam["t"]), dist2, det_cfg,
+                )
+                if det is None:
+                    continue
+                k = min(n_circ, len(det.image_points))
+                idx = np.linspace(0, len(det.image_points) - 1, k).astype(int)
+                per_frame_circle[fid] = [
+                    LandmarkObservation(
+                        name=det.name, image_xy=det.image_points[j],
+                        world_xyz=det.world_points[j],
+                    )
+                    for j in idx
+                ]
+                rescued_lines[fid] = raw_lines[fid]
+            if rescued_lines:
+                logger.info(
+                    "static line solve: centre circle rescued %d midfield "
+                    "frame(s)", len(rescued_lines),
+                )
+
+        per_frame_lines = {**well_lined, **rescued_lines}
 
         # Per-frame (rvec, fx) bootstrap seeds from the chosen camera source.
         bootstrap: dict[int, tuple[np.ndarray, float]] = {}
@@ -719,9 +748,9 @@ class CameraStage(BaseStage):
             return -R.T @ t
 
         seed_cs = [
-            _centre(f) for f in per_frame_lines if f in rich
+            _centre(f) for f in well_lined if f in rich
         ] or [
-            _centre(f) for f in per_frame_lines
+            _centre(f) for f in well_lined
         ]
         c_center = np.median(np.stack(seed_cs), axis=0)
         cx0 = float(per_frame_K[covered[0]][0, 2])
@@ -735,13 +764,16 @@ class CameraStage(BaseStage):
         # Step 1 — C-profile: coarse grid then a fine grid around its argmin.
         # profile_camera_centre subsamples frames for the grid sweep, so the
         # cost scales with the grid size, not the (often hundreds of) frames.
+        # C-profile uses only the WELL-LINED frames so the shared centre is
+        # found from well-constrained geometry; the circle-rescued midfield
+        # frames join the final bundle solve (where the circle constrains them).
         coarse = profile_camera_centre(
-            per_frame_lines, anchors.image_size,
+            well_lined, anchors.image_size,
             c_grid=make_c_grid(c_center, extent_m=7.5, n_steps=5),
             lens_seed=lens_seed, per_frame_bootstrap=bootstrap,
         )
         fine = profile_camera_centre(
-            per_frame_lines, anchors.image_size,
+            well_lined, anchors.image_size,
             c_grid=make_c_grid(coarse.argmin_c, extent_m=2.0, n_steps=5),
             lens_seed=lens_seed, per_frame_bootstrap=coarse.per_frame_seeds,
         )
@@ -756,7 +788,10 @@ class CameraStage(BaseStage):
             a.frame: list(a.landmarks) for a in anchors.anchors if a.landmarks
         }
         c_seed = fine.argmin_c
-        seeds = fine.per_frame_seeds
+        # Refined seeds for well-lined frames; bootstrap seeds for the
+        # circle-rescued frames (which the C-profile didn't see).
+        seeds = {**bootstrap, **fine.per_frame_seeds}
+        circle_weight = float(cfg.get("line_extraction_circle_weight", 0.3))
         # Re-detecting under the static-C cameras (a per-frame compromise)
         # is not guaranteed to improve every round, so keep the best round
         # by mean line RMS rather than blindly taking the last.
@@ -769,7 +804,9 @@ class CameraStage(BaseStage):
                 per_frame_lines, anchors.image_size,
                 c_seed=c_seed, lens_seed=lens_seed,
                 per_frame_seeds=seeds, point_hints=anchor_landmarks,
+                circle_points=per_frame_circle,
                 lens_model=lens_model, point_hint_weight=point_hint_weight,
+                circle_weight=circle_weight,
             )
             round_rms = np.array(
                 [v for v in sol.per_frame_line_rms.values() if np.isfinite(v)]
@@ -835,13 +872,80 @@ class CameraStage(BaseStage):
             if i not in sol.per_frame_KRt and per_frame_R[i] is not None:
                 per_frame_t[i] = -per_frame_R[i] @ C
 
+        # Q2 — coverage extension. Solve frames BEYOND the anchor span where
+        # PnLCalib gives a plausible camera and lines are detectable (e.g. the
+        # clip tail where the box is in view but no anchor cold-started there).
+        # Each frame's (rvec, fx) is solved with the locked C, so the camera
+        # body stays fixed. Only ADDS frames -> full-coverage clips (gberch)
+        # get nothing to extend.
+        if bool(cfg.get("line_extraction_extend_coverage", True)):
+            from src.utils.static_c_profile import _solve_frame_at_fixed_c
+            from src.utils.static_line_solver import _dist5
+            uncovered = [
+                i for i in range(len(per_frame_K)) if per_frame_K[i] is None
+            ]
+            ext_bgr: dict[int, np.ndarray] = {}
+            for i in uncovered:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+                ok, fr = cap.read()
+                if ok:
+                    ext_bgr[i] = fr
+            ext_cams = (
+                self._pnlcalib_bootstrap_cameras(ext_bgr, cfg) if ext_bgr else {}
+            )
+            if ext_cams:
+                ext_lines = detect_lines_for_frames(
+                    ext_bgr, ext_cams, dist2, det_cfg,
+                    min_confidence=det_min_confidence,
+                    min_n_samples=det_min_n_samples, min_lines=1,
+                )
+                ext_lines = drop_underdetermined_frames(ext_lines, min_lines)
+                cx_s, cy_s = sol.principal_point
+                dist5 = _dist5(sol.distortion)
+                max_ext_rms = float(cfg.get("line_extraction_extend_max_rms", 4.0))
+                n_ext = 0
+                for fid, lines in ext_lines.items():
+                    cam = ext_cams[fid]
+                    rv_seed, _ = cv2.Rodrigues(np.asarray(cam["R"]))
+                    fx_seed = float(np.asarray(cam["K"])[0, 0])
+                    rvec, fx, rms = _solve_frame_at_fixed_c(
+                        lines, cx_s, cy_s, dist5, C,
+                        rv_seed.reshape(3), fx_seed,
+                    )
+                    if not np.isfinite(rms) or rms > max_ext_rms:
+                        continue
+                    R_e, _ = cv2.Rodrigues(rvec)
+                    per_frame_K[fid] = np.array(
+                        [[fx, 0.0, cx_s], [0.0, fx, cy_s], [0.0, 0.0, 1.0]]
+                    )
+                    per_frame_R[fid] = R_e
+                    per_frame_t[fid] = -R_e @ C
+                    per_frame_conf[fid] = max(0.3, min(1.0, 1.0 - rms / 6.0))
+                    detected_lines_by_frame[fid] = [
+                        {
+                            "name": ln.name,
+                            "image_segment": [list(ln.image_segment[0]),
+                                              list(ln.image_segment[1])],
+                            "world_segment": [list(ln.world_segment[0]),
+                                              list(ln.world_segment[1])],
+                        }
+                        for ln in lines
+                    ]
+                    n_ext += 1
+                if n_ext:
+                    logger.info(
+                        "static line solve: coverage-extended %d frame(s) "
+                        "beyond the anchor span", n_ext,
+                    )
+
         # Optional temporal smoothing of the per-frame (rotation, focal)
         # trajectory. Removes the seam steps where line-solved frames meet
         # interpolated gap frames (a few degrees of rotation / tens of px of
         # focal). Re-derives t = -R @ C so the camera body stays fixed.
         # window < 3 disables it (default).
         smooth_window = int(cfg.get("line_extraction_smooth_window", 0))
-        ordered = [i for i in covered if per_frame_R[i] is not None]
+        # Include coverage-extended frames (beyond ``covered``) in the smooth.
+        ordered = [i for i in range(len(per_frame_R)) if per_frame_R[i] is not None]
         if smooth_window >= 3 and len(ordered) >= smooth_window:
             from src.utils.temporal_smoothing import quat_savgol, savgol_axis
             Rs = np.stack([per_frame_R[i] for i in ordered])

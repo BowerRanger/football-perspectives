@@ -135,8 +135,10 @@ def solve_static_camera_from_lines(
     lens_seed: tuple[float, float, float, float],
     per_frame_seeds: dict[int, tuple[np.ndarray, float]],
     point_hints: dict[int, list[LandmarkObservation]] | None = None,
+    circle_points: dict[int, list[LandmarkObservation]] | None = None,
     lens_model: LensModel = "pinhole_k1k2",
     point_hint_weight: float = 0.05,
+    circle_weight: float = 0.3,
     max_nfev: int = 600,
 ) -> StaticCameraSolution:
     """Solve one fixed camera centre across all frames in
@@ -207,6 +209,7 @@ def solve_static_camera_from_lines(
         upper[base + 3] = fx0 * 2.0
 
     hints = point_hints or {}
+    circles = circle_points or {}
 
     def _unpack_shared(p: np.ndarray):
         cx, cy = float(p[0]), float(p[1])
@@ -236,6 +239,14 @@ def solve_static_camera_from_lines(
                         hint, K_i, rvec, t_i, (dist[0], dist[1])
                     )
                 )
+            circ = circles.get(fid)
+            if circ:
+                parts.append(
+                    circle_weight
+                    * _point_residuals_distorted(
+                        circ, K_i, rvec, t_i, (dist[0], dist[1])
+                    )
+                )
         return np.concatenate(parts) if parts else np.empty(0)
 
     # Sparse Jacobian: each frame's residuals touch SHARED cols + its PER cols.
@@ -244,6 +255,8 @@ def solve_static_camera_from_lines(
         n_res = 2 * len(per_frame_lines[fid])
         if fid in hints:
             n_res += 2 * len(hints[fid])
+        if fid in circles:
+            n_res += 2 * len(circles[fid])
         n_res_per_frame.append(n_res)
     total_res = sum(n_res_per_frame)
     total_par = SHARED + PER * n

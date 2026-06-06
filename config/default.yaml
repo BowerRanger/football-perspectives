@@ -189,6 +189,20 @@ camera:
   # (its path is unchanged); origi/kroupi benefit.
   line_extraction_pnlcalib_bootstrap: true
   line_extraction_pnlcalib_bootstrap_min_coverage: 0.5
+  # Centre-circle rescue: frames the straight-line filter drops (too few lines —
+  # e.g. midfield where the box is out of view) but where the centre circle is
+  # visible are rescued by detecting the circle and adding it as a weighted
+  # point constraint. Only dropped frames are rescued, so well-lined clips
+  # (gberch) are unchanged.
+  line_extraction_detect_circle: true
+  line_extraction_circle_min_lines: 2     # need >=this many straight lines too
+  line_extraction_circle_points: 20       # circle samples fed to the solve
+  line_extraction_circle_weight: 0.3      # residual weight vs straight lines
+  # Coverage extension: solve frames beyond the anchor span where PnLCalib
+  # gives a plausible camera and lines are detectable (e.g. clip tails). Only
+  # adds frames; full-coverage clips are unaffected.
+  line_extraction_extend_coverage: true
+  line_extraction_extend_max_rms: 4.0     # px; reject extended frames above this
   # ORB is the only detector currently implemented in feature_propagator.
   # SuperPoint is a future enhancement (better repeatability under zoom).
   feature_detector: orb

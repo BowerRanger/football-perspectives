@@ -1876,7 +1876,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         return {"saved": saved, "skipped": skipped, "job_id": job_id}
 
     @app.get("/camera/track")
-    def get_camera_track(shot: str | None = None):
+    def get_camera_track(response: Response, shot: str | None = None):
         """Return a CameraTrack as JSON.
 
         ``?shot=xxx`` returns ``{shot}_camera_track.json``; absent or
@@ -1885,6 +1885,9 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         compatibility with viewer / dashboard callers that don't yet
         pass a shot filter.
         """
+        # Re-running the camera stage rewrites this file in place; never let a
+        # browser serve a cached (stale) track after a re-run or dir switch.
+        response.headers["Cache-Control"] = "no-store"
         if shot:
             if not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
                 raise HTTPException(status_code=400, detail="Invalid shot id")
@@ -1907,7 +1910,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         return asdict(track)
 
     @app.get("/camera/detected-lines")
-    def get_detected_lines(shot: str | None = None):
+    def get_detected_lines(response: Response, shot: str | None = None):
         """Return the painted-line detections written by the camera
         stage's ``line_extraction`` pass.
 
@@ -1916,6 +1919,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         plus their world-segment correspondences. Returns an empty
         ``{"frames": {}}`` shape when line extraction wasn't run.
         """
+        # Rewritten in place on every camera re-run -> no-store (see /camera/track).
+        response.headers["Cache-Control"] = "no-store"
         if shot:
             if not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
                 raise HTTPException(status_code=400, detail="Invalid shot id")

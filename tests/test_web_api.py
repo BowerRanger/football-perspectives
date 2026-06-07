@@ -71,6 +71,17 @@ def test_get_camera_track_empty(client) -> None:
 
 
 @pytest.mark.integration
+def test_camera_endpoints_are_no_store(client) -> None:
+    """Camera track + detected-lines are rewritten in place on every re-run /
+    output-dir switch, so they must never be browser-cached."""
+    c, _ = client
+    for path in ("/camera/track", "/camera/detected-lines"):
+        resp = c.get(path)
+        assert resp.status_code == 200
+        assert resp.headers.get("cache-control") == "no-store", path
+
+
+@pytest.mark.integration
 def test_get_ball_preview_empty(client) -> None:
     c, _ = client
     resp = c.get("/ball/preview")

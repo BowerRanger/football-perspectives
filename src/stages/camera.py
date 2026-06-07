@@ -952,6 +952,80 @@ class CameraStage(BaseStage):
                         "beyond the anchor span", n_ext,
                     )
 
+        # Outlier rejection: a minority of frames get a bad per-frame solve
+        # (wrong-line lock / sparse lines) with line-RMS far above the clip
+        # median, dragging the mean and spiking jitter. Replace each such frame
+        # with a SLERP/LERP interpolation from its nearest good neighbours (then
+        # the smoothing below finishes the job). The absolute threshold is high
+        # enough that gberch's well-fit frames are never touched -> no-op there.
+        if bool(cfg.get("line_extraction_outlier_rejection", True)):
+            from src.utils.camera_projection import project_world_to_image
+            _odist = tuple(float(x) for x in sol.distortion[:2])
+
+            def _frame_rms(fid: int) -> float | None:
+                lines = detected_lines_by_frame.get(fid)
+                if not lines or per_frame_K[fid] is None:
+                    return None
+                K = per_frame_K[fid]; R = per_frame_R[fid]; t = per_frame_t[fid]
+                rs: list[float] = []
+                for ln in lines:
+                    proj = project_world_to_image(
+                        K, R, t, _odist, np.array(ln["world_segment"]))
+                    pa, pb = proj[0], proj[1]
+                    d = pb - pa
+                    nrm = np.array([-d[1], d[0]])
+                    if np.linalg.norm(nrm) < 1e-6:
+                        continue
+                    nrm = nrm / np.linalg.norm(nrm)
+                    for ip in ln["image_segment"]:
+                        rs.append(abs(float(np.dot(np.array(ip) - pa, nrm))))
+                return float(np.sqrt(np.mean(np.square(rs)))) if rs else None
+
+            rms_map = {
+                i: _frame_rms(i)
+                for i in range(len(per_frame_K)) if per_frame_K[i] is not None
+            }
+            vals = np.array([v for v in rms_map.values() if v is not None])
+            if vals.size:
+                med = float(np.median(vals))
+                thr = max(
+                    float(cfg.get("line_extraction_outlier_max_rms", 8.0)),
+                    float(cfg.get("line_extraction_outlier_rel", 3.0)) * med,
+                )
+                bad = sorted(
+                    i for i, v in rms_map.items() if v is not None and v > thr
+                )
+                good = np.array(sorted(
+                    i for i, v in rms_map.items()
+                    if v is not None and v <= thr and per_frame_R[i] is not None
+                ))
+                if bad and good.size >= 2:
+                    from scipy.spatial.transform import Rotation, Slerp
+                    for i in bad:
+                        lo = good[good < i]; hi = good[good > i]
+                        if lo.size and hi.size:
+                            a, b = int(lo[-1]), int(hi[0])
+                            w = (i - a) / (b - a)
+                            R = Slerp([0.0, 1.0], Rotation.from_matrix(
+                                [per_frame_R[a], per_frame_R[b]]))(
+                                [w]).as_matrix()[0]
+                            fx = (1 - w) * per_frame_K[a][0, 0] + w * per_frame_K[b][0, 0]
+                        else:
+                            j = int(lo[-1]) if lo.size else int(hi[0])
+                            R = per_frame_R[j]; fx = float(per_frame_K[j][0, 0])
+                        K = per_frame_K[i].copy()
+                        K[0, 0] = fx; K[1, 1] = fx
+                        per_frame_K[i] = K
+                        per_frame_R[i] = R
+                        per_frame_t[i] = -R @ C
+                        per_frame_conf[i] = 0.4
+                        detected_lines_by_frame.pop(i, None)
+                    logger.info(
+                        "static line solve: outlier-rejected %d frame(s) "
+                        "(line-RMS > %.1f px), replaced by neighbour interp",
+                        len(bad), thr,
+                    )
+
         # Optional temporal smoothing of the per-frame (rotation, focal)
         # trajectory. Removes the seam steps where line-solved frames meet
         # interpolated gap frames (a few degrees of rotation / tens of px of

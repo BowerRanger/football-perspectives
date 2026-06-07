@@ -207,6 +207,12 @@ camera:
   # adds frames; full-coverage clips are unaffected.
   line_extraction_extend_coverage: true
   line_extraction_extend_max_rms: 4.0     # px; reject extended frames above this
+  # Outlier rejection: frames whose per-frame line-RMS exceeds max(abs, rel x
+  # clip-median) are bad per-frame solves; replace them with neighbour
+  # interpolation. abs=8px keeps gberch's well-fit frames untouched.
+  line_extraction_outlier_rejection: true
+  line_extraction_outlier_max_rms: 8.0
+  line_extraction_outlier_rel: 3.0
   # ORB is the only detector currently implemented in feature_propagator.
   # SuperPoint is a future enhancement (better repeatability under zoom).
   feature_detector: orb

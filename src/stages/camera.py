@@ -952,19 +952,32 @@ class CameraStage(BaseStage):
                         "beyond the anchor span", n_ext,
                     )
 
-        # Outlier rejection: a minority of frames get a bad per-frame solve
-        # (wrong-line lock / sparse lines) with line-RMS far above the clip
-        # median, dragging the mean and spiking jitter. Replace each such frame
-        # with a SLERP/LERP interpolation from its nearest good neighbours (then
-        # the smoothing below finishes the job). The absolute threshold is high
-        # enough that gberch's well-fit frames are never touched -> no-op there.
+        # Outlier rejection: replace bad single-frame solves with a SLERP/LERP
+        # interpolation from their nearest good neighbours, BEFORE smoothing —
+        # so the smoother never spreads a spike across its window (a single 60deg
+        # solve spike was being smeared into ~18 mediocre frames). Two kinds:
+        #   * rotation-jump — rotation deviates from the SLERP of its neighbours
+        #     by > rot_deg (a solve spike that still fits its few lines, so
+        #     line-RMS misses it — this was the real kroupi/origi culprit).
+        #   * line-RMS — reprojection RMS >> the clip median (wrong-line lock).
+        # gberch has neither (max jump 0.33deg, max RMS ~5px) -> no-op there.
         if bool(cfg.get("line_extraction_outlier_rejection", True)):
+            from scipy.spatial.transform import Rotation, Slerp
+
             from src.utils.camera_projection import project_world_to_image
             _odist = tuple(float(x) for x in sol.distortion[:2])
 
+            def _geo(A: np.ndarray, B: np.ndarray) -> float:
+                c = (np.trace(np.asarray(A).T @ np.asarray(B)) - 1.0) / 2.0
+                return float(np.degrees(np.arccos(max(-1.0, min(1.0, c)))))
+
+            def _slerp(a: int, b: int, w: float) -> np.ndarray:
+                return Slerp([0.0, 1.0], Rotation.from_matrix(
+                    [per_frame_R[a], per_frame_R[b]]))([w]).as_matrix()[0]
+
             def _frame_rms(fid: int) -> float | None:
                 lines = detected_lines_by_frame.get(fid)
-                if not lines or per_frame_K[fid] is None:
+                if not lines:
                     return None
                 K = per_frame_K[fid]; R = per_frame_R[fid]; t = per_frame_t[fid]
                 rs: list[float] = []
@@ -981,50 +994,64 @@ class CameraStage(BaseStage):
                         rs.append(abs(float(np.dot(np.array(ip) - pa, nrm))))
                 return float(np.sqrt(np.mean(np.square(rs)))) if rs else None
 
-            rms_map = {
-                i: _frame_rms(i)
-                for i in range(len(per_frame_K)) if per_frame_K[i] is not None
-            }
-            vals = np.array([v for v in rms_map.values() if v is not None])
-            if vals.size:
-                med = float(np.median(vals))
-                thr = max(
-                    float(cfg.get("line_extraction_outlier_max_rms", 8.0)),
-                    float(cfg.get("line_extraction_outlier_rel", 3.0)) * med,
-                )
+            # Iterate: a multi-frame seam block masks itself under immediate-
+            # neighbour comparison (both neighbours are in the block). Each pass
+            # bridges the most-deviant frame; once replaced it reads as good, so
+            # the next pass exposes the rest of the block. Converges in a few
+            # passes. The residual-vs-SLERP metric is fast-pan-safe (a linear
+            # pan has ~0 residual), so the low threshold never eats real motion.
+            rot_thr = float(cfg.get("line_extraction_outlier_rot_deg", 2.0))
+            rel = float(cfg.get("line_extraction_outlier_rel", 3.0))
+            abs_rms = float(cfg.get("line_extraction_outlier_max_rms", 8.0))
+            max_passes = int(cfg.get("line_extraction_outlier_passes", 6))
+            total_rejected, last_pass = 0, 0
+            for _pass in range(max_passes):
+                sset = [
+                    i for i in range(len(per_frame_R)) if per_frame_R[i] is not None
+                ]
+                if len(sset) < 3:
+                    break
+                rot_res = {}
+                for k in range(1, len(sset) - 1):
+                    i, a, b = sset[k], sset[k - 1], sset[k + 1]
+                    w = (i - a) / (b - a) if b > a else 0.5
+                    rot_res[i] = _geo(per_frame_R[i], _slerp(a, b, w))
+                rms_map = {i: _frame_rms(i) for i in sset}
+                rms_vals = np.array([v for v in rms_map.values() if v is not None])
+                rms_med = float(np.median(rms_vals)) if rms_vals.size else 0.0
+                rms_thr = max(abs_rms, rel * rms_med)
                 bad = sorted(
-                    i for i, v in rms_map.items() if v is not None and v > thr
+                    {i for i, r in rot_res.items() if r > rot_thr}
+                    | {i for i, v in rms_map.items() if v is not None and v > rms_thr}
                 )
-                good = np.array(sorted(
-                    i for i, v in rms_map.items()
-                    if v is not None and v <= thr and per_frame_R[i] is not None
-                ))
-                if bad and good.size >= 2:
-                    from scipy.spatial.transform import Rotation, Slerp
-                    for i in bad:
-                        lo = good[good < i]; hi = good[good > i]
-                        if lo.size and hi.size:
-                            a, b = int(lo[-1]), int(hi[0])
-                            w = (i - a) / (b - a)
-                            R = Slerp([0.0, 1.0], Rotation.from_matrix(
-                                [per_frame_R[a], per_frame_R[b]]))(
-                                [w]).as_matrix()[0]
-                            fx = (1 - w) * per_frame_K[a][0, 0] + w * per_frame_K[b][0, 0]
-                        else:
-                            j = int(lo[-1]) if lo.size else int(hi[0])
-                            R = per_frame_R[j]; fx = float(per_frame_K[j][0, 0])
-                        K = per_frame_K[i].copy()
-                        K[0, 0] = fx; K[1, 1] = fx
-                        per_frame_K[i] = K
-                        per_frame_R[i] = R
-                        per_frame_t[i] = -R @ C
-                        per_frame_conf[i] = 0.4
-                        detected_lines_by_frame.pop(i, None)
-                    logger.info(
-                        "static line solve: outlier-rejected %d frame(s) "
-                        "(line-RMS > %.1f px), replaced by neighbour interp",
-                        len(bad), thr,
-                    )
+                good = np.array([i for i in sset if i not in set(bad)])
+                if not bad or good.size < 2:
+                    break
+                for i in bad:
+                    lo = good[good < i]; hi = good[good > i]
+                    if lo.size and hi.size:
+                        a, b = int(lo[-1]), int(hi[0])
+                        w = (i - a) / (b - a)
+                        R = _slerp(a, b, w)
+                        fx = (1 - w) * per_frame_K[a][0, 0] + w * per_frame_K[b][0, 0]
+                    else:
+                        j = int(lo[-1]) if lo.size else int(hi[0])
+                        R = per_frame_R[j]; fx = float(per_frame_K[j][0, 0])
+                    K = per_frame_K[i].copy()
+                    K[0, 0] = fx; K[1, 1] = fx
+                    per_frame_K[i] = K
+                    per_frame_R[i] = R
+                    per_frame_t[i] = -R @ C
+                    per_frame_conf[i] = 0.4
+                    detected_lines_by_frame.pop(i, None)
+                total_rejected += len(bad)
+                last_pass = _pass + 1
+            if total_rejected:
+                logger.info(
+                    "static line solve: outlier-rejected %d frame(s) over %d "
+                    "pass(es) (rot > %.1f deg or line-RMS > clip-median x %.1f), "
+                    "neighbour interp", total_rejected, last_pass, rot_thr, rel,
+                )
 
         # Optional temporal smoothing of the per-frame (rotation, focal)
         # trajectory. Removes the seam steps where line-solved frames meet

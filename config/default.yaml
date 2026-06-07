@@ -178,7 +178,7 @@ camera:
   # Temporal smoothing window for the final per-frame (rotation, focal)
   # trajectory after the static-line solve. 0 disables it. ~7-11 removes the
   # seam steps where line-solved frames meet interpolated gap frames.
-  line_extraction_smooth_window: 9
+  line_extraction_smooth_window: 0
   # Clip-adaptive detection bootstrap. The static-line solve normally bootstraps
   # detection from the anchor-interpolated camera. On clips where the anchors
   # are sparse/partial (PnLCalib only cold-started part of the clip), that
@@ -211,6 +211,8 @@ camera:
   # clip-median) are bad per-frame solves; replace them with neighbour
   # interpolation. abs=8px keeps gberch's well-fit frames untouched.
   line_extraction_outlier_rejection: true
+  line_extraction_outlier_rot_deg: 2.0    # rotation-jump vs neighbour SLERP
+  line_extraction_outlier_passes: 6       # iterate to bridge multi-frame seam blocks
   line_extraction_outlier_max_rms: 8.0
   line_extraction_outlier_rel: 3.0
   # ORB is the only detector currently implemented in feature_propagator.

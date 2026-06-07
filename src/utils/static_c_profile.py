@@ -22,8 +22,8 @@ import cv2
 import numpy as np
 from scipy.optimize import least_squares
 
-from src.schemas.anchor import LineObservation
-from src.utils.anchor_solver import _make_K
+from src.schemas.anchor import LandmarkObservation, LineObservation
+from src.utils.anchor_solver import _make_K, _point_residuals_distorted
 from src.utils.static_line_solver import _dist5, _line_residuals_distorted
 
 logger = logging.getLogger(__name__)
@@ -64,9 +64,11 @@ def _solve_frame_at_fixed_c(
     fx_seed: float,
     *,
     fx_rel: float | None = None,
+    circle_obs: list[LandmarkObservation] | None = None,
+    circle_weight: float = 0.3,
 ) -> tuple[np.ndarray, float, float]:
     """LM-solve one frame's ``(rvec, fx)`` with C pinned. Returns
-    ``(rvec, fx, line_rms)``.
+    ``(rvec, fx, reprojection_rms)``.
 
     ``fx_rel`` tightens the focal bounds to ``fx_seed * (1 ± fx_rel)`` (default
     None → the wide 0.5–2× range). Use a small value (e.g. 0.05) on sparse-line
@@ -75,14 +77,26 @@ def _solve_frame_at_fixed_c(
     ~0px yet leave the pitch metres off. The seed focal (velocity-extrapolated
     from a covered neighbour) is reliable, so a tight band keeps the few lines
     over-determining rotation while still letting focal track real zoom.
+
+    ``circle_obs`` adds detected centre-circle points as weighted reprojection
+    constraints (``circle_weight``) — a strong, well-spread feature that pins
+    rotation+focal where straight lines are sparse (the propagation lever for
+    featureless spans). The returned RMS is over lines + circle, unweighted.
     """
+    circ = circle_obs or []
+    d2 = (float(dist5[0]), float(dist5[1]))
+
     def res(p: np.ndarray) -> np.ndarray:
         rvec = p[0:3]
         fx = float(np.clip(p[3], 50.0, 1e5))
         R, _ = cv2.Rodrigues(rvec)
         t = -R @ C
         K = _make_K(fx, cx, cy)
-        return _line_residuals_distorted(lines, K, rvec, t, dist5)
+        parts = [_line_residuals_distorted(lines, K, rvec, t, dist5)]
+        if circ:
+            parts.append(
+                circle_weight * _point_residuals_distorted(circ, K, rvec, t, d2))
+        return np.concatenate(parts)
 
     fx_lo = fx_seed * (1.0 - fx_rel) if fx_rel is not None else fx_seed * 0.5
     fx_hi = fx_seed * (1.0 + fx_rel) if fx_rel is not None else fx_seed * 2.0
@@ -99,6 +113,8 @@ def _solve_frame_at_fixed_c(
     t = -R @ C
     K = _make_K(fx, cx, cy)
     r = _line_residuals_distorted(lines, K, rvec, t, dist5)
+    if circ:
+        r = np.concatenate([r, _point_residuals_distorted(circ, K, rvec, t, d2)])
     rms = float(np.sqrt((r ** 2).mean())) if r.size else float("nan")
     return rvec, fx, rms
 

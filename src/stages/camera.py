@@ -803,6 +803,9 @@ class CameraStage(BaseStage):
         # circle-rescued frames (which the C-profile didn't see).
         seeds = {**bootstrap, **fine.per_frame_seeds}
         circle_weight = float(cfg.get("line_extraction_circle_weight", 0.3))
+        # The centre-circle lens refinement is a POST-propagation step (the
+        # circle lives on midfield frames covered only after propagation, and it
+        # only helps where the box-line lens is wrong) — see below.
         # Re-detecting under the static-C cameras (a per-frame compromise)
         # is not guaranteed to improve every round, so keep the best round
         # by mean line RMS rather than blindly taking the last.
@@ -963,12 +966,15 @@ class CameraStage(BaseStage):
         if bool(cfg.get("line_extraction_propagate_coverage", True)):
             from scipy.spatial.transform import Rotation, Slerp
 
+            from src.schemas.anchor import LandmarkObservation
+            from src.utils.circle_detector import detect_circle
             from src.utils.static_c_profile import _solve_frame_at_fixed_c
             from src.utils.static_line_solver import _dist5
             cx_p, cy_p = sol.principal_point
             dist5_p = _dist5(sol.distortion)
             prop_dist = tuple(float(x) for x in sol.distortion[:2])
             max_prop_rms = float(cfg.get("line_extraction_extend_max_rms", 4.0))
+            prop_circle = bool(cfg.get("line_extraction_propagate_circle", True))
             # Propagation can accept fewer lines than the cold main solve: it
             # has a strong per-frame seed (the covered neighbour), so a frame
             # with 3 well-conditioned box lines solves cleanly, and the rms gate
@@ -1003,24 +1009,52 @@ class CameraStage(BaseStage):
                 img = _read(i)
                 if img is None:
                     return False
+                seed_t = -seed_R @ C
                 seed_K = np.array(
                     [[seed_fx, 0.0, cx_p], [0.0, seed_fx, cy_p], [0.0, 0.0, 1.0]])
-                cams = {i: {"K": seed_K, "R": seed_R, "t": -seed_R @ C}}
                 det = detect_lines_for_frames(
-                    {i: img}, cams, prop_dist, det_cfg,
-                    min_confidence=det_min_confidence,
+                    {i: img}, {i: {"K": seed_K, "R": seed_R, "t": seed_t}},
+                    prop_dist, det_cfg, min_confidence=det_min_confidence,
                     min_n_samples=det_min_n_samples, min_lines=1,
                 )
                 lines = det.get(i, [])
-                if len(lines) < prop_min_lines:
+                # Centre circle: a strong, well-spread constraint where straight
+                # lines are sparse — lets propagation cross featureless spans and
+                # better-pins under-constrained frames. Detected under zero
+                # distortion (the catalogue-projection lesson).
+                circ_obs = None
+                circ_det = None
+                if prop_circle:
+                    circ_det = detect_circle(
+                        img, seed_K, seed_R, seed_t, (0.0, 0.0), det_cfg)
+                    if circ_det is not None:
+                        k = min(20, len(circ_det.image_points))
+                        idx = np.linspace(
+                            0, len(circ_det.image_points) - 1, k).astype(int)
+                        circ_obs = [
+                            LandmarkObservation(
+                                name=circ_det.name,
+                                image_xy=circ_det.image_points[j],
+                                world_xyz=circ_det.world_points[j])
+                            for j in idx
+                        ]
+                if len(lines) < prop_min_lines and not circ_obs:
                     return False
                 rv_seed, _ = cv2.Rodrigues(seed_R)
                 # Sparse frames: tight-band the focal around the (reliable) seed
-                # so the few lines can't fit a wrong rotation by drifting fx —
-                # the under-determined-edge fix (e.g. kroupi frame 0).
+                # so the few lines can't fit a wrong rotation by drifting fx.
                 rvec, fx, rms = _solve_frame_at_fixed_c(
                     lines, cx_p, cy_p, dist5_p, C, rv_seed.reshape(3), seed_fx,
-                    fx_rel=0.05 if len(lines) < 4 else None)
+                    fx_rel=0.05 if len(lines) < 4 else None, circle_obs=circ_obs)
+                if ((not np.isfinite(rms) or rms > max_prop_rms)
+                        and circ_obs and len(lines) >= prop_min_lines):
+                    # A bad/partial circle must NOT block a solvable frame:
+                    # retry lines-only (else propagation halts at the barrier —
+                    # this was collapsing origi02 coverage).
+                    rvec, fx, rms = _solve_frame_at_fixed_c(
+                        lines, cx_p, cy_p, dist5_p, C, rv_seed.reshape(3),
+                        seed_fx, fx_rel=0.05 if len(lines) < 4 else None)
+                    circ_det = None  # circle rejected -> don't draw it
                 if not np.isfinite(rms) or rms > max_prop_rms:
                     return False
                 R_e, _ = cv2.Rodrigues(rvec)
@@ -1029,7 +1063,7 @@ class CameraStage(BaseStage):
                 per_frame_R[i] = R_e
                 per_frame_t[i] = -R_e @ C
                 per_frame_conf[i] = max(0.3, min(1.0, 1.0 - rms / 6.0))
-                detected_lines_by_frame[i] = [
+                entries = [
                     {
                         "name": ln.name,
                         "image_segment": [list(ln.image_segment[0]),
@@ -1039,6 +1073,18 @@ class CameraStage(BaseStage):
                     }
                     for ln in lines
                 ]
+                if circ_det is not None:
+                    # write the circle as a polyline so the viewer's detected-
+                    # lines overlay renders it (consecutive detected points).
+                    ip = circ_det.image_points
+                    wp = circ_det.world_points
+                    for a in range(len(ip) - 1):
+                        entries.append({
+                            "name": "centre_circle",
+                            "image_segment": [list(ip[a]), list(ip[a + 1])],
+                            "world_segment": [list(wp[a]), list(wp[a + 1])],
+                        })
+                detected_lines_by_frame[i] = entries
                 return True
 
             def _bridge(lo: int, hi: int) -> None:
@@ -1100,6 +1146,112 @@ class CameraStage(BaseStage):
                     "static line solve: propagated coverage to %d additional "
                     "frame(s) (incl. bridged feature-poor barriers)", n_prop,
                 )
+
+        # Centre-circle global LENS refinement (post-propagation). The wide ring
+        # exposes distortion / principal-point error that central box lines can't
+        # constrain — on zoomed-out / midfield shots the box-line lens
+        # under-estimates distortion, so the circle + far lines project several
+        # px off. The circle lives on midfield frames covered only after
+        # propagation, so this runs here. GBERCH-SAFE: only refines when the
+        # circle is *significantly* mis-fit under the current lens — gberch's
+        # lens is already right (the circle fits) so it is skipped untouched.
+        if bool(cfg.get("line_extraction_circle_lens", True)):
+            import dataclasses
+
+            from src.schemas.anchor import LineObservation
+            from src.utils.ellipse_detector import detect_circle_ellipse
+            from src.utils.static_line_solver import _ellipse_residuals_distorted
+            cur_dist = tuple(float(x) for x in sol.distortion[:2])
+            cx_l, cy_l = sol.principal_point
+            band = float(cfg.get("line_extraction_circle_ellipse_band", 50.0))
+            covered_now = [
+                i for i in range(len(per_frame_K)) if per_frame_K[i] is not None
+            ]
+            ell: dict[int, tuple] = {}
+            for fid in covered_now[::max(1, len(covered_now) // 120)]:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, fid)
+                ok, img = cap.read()
+                if not ok:
+                    continue
+                ed = detect_circle_ellipse(
+                    img, per_frame_K[fid], per_frame_R[fid], per_frame_t[fid],
+                    cur_dist, det_cfg, band_px=band)
+                if ed is not None:
+                    ell[fid] = ed.ellipse
+            min_frames = int(cfg.get("line_extraction_circle_lens_min_frames", 4))
+            _mm = []
+            for fid, e in ell.items():
+                rv, _ = cv2.Rodrigues(per_frame_R[fid])
+                r = _ellipse_residuals_distorted(
+                    e, per_frame_K[fid], rv.reshape(3), per_frame_t[fid], cur_dist)
+                nz = r[r != 0]
+                if nz.size:
+                    _mm.append(float(np.median(np.abs(nz))))
+            logger.info(
+                "static line solve: centre-circle ellipse detected on %d "
+                "frame(s); median mis-fit %.1f px (refine if > %.1f)",
+                len(ell), float(np.median(_mm)) if _mm else 0.0,
+                float(cfg.get("line_extraction_circle_lens_min_misfit", 5.0)))
+            if len(ell) >= min_frames and _mm:
+                med_mis = float(np.median(_mm))
+                thr = float(cfg.get("line_extraction_circle_lens_min_misfit", 5.0))
+                if med_mis <= thr:
+                    logger.info(
+                        "static line solve: centre circle well-fit (misfit "
+                        "%.1f px <= %.1f) on %d frame(s) -> lens refinement "
+                        "skipped", med_mis, thr, len(ell))
+                else:
+                    pfl: dict[int, list] = {}
+                    pfs: dict[int, tuple] = {}
+                    for fid in covered_now:
+                        lns = [
+                            LineObservation(
+                                name=ln["name"],
+                                image_segment=(tuple(ln["image_segment"][0]),
+                                               tuple(ln["image_segment"][1])),
+                                world_segment=(tuple(ln["world_segment"][0]),
+                                               tuple(ln["world_segment"][1])))
+                            for ln in detected_lines_by_frame.get(fid, [])
+                            if "circle" not in ln["name"]
+                        ]
+                        if len(lns) >= 2:
+                            pfl[fid] = lns
+                            rv, _ = cv2.Rodrigues(per_frame_R[fid])
+                            pfs[fid] = (rv.reshape(3), float(per_frame_K[fid][0, 0]))
+                    ell2 = {fid: e for fid, e in ell.items() if fid in pfl}
+                    if pfl and ell2:
+                        sol_l = solve_static_camera_from_lines(
+                            pfl, anchors.image_size, c_seed=C,
+                            lens_seed=(cx_l, cy_l, cur_dist[0], cur_dist[1]),
+                            per_frame_seeds=pfs, per_frame_ellipses=ell2,
+                            lens_model=lens_model,
+                            ellipse_weight=float(
+                                cfg.get("line_extraction_circle_lens_weight", 1.0)),
+                        )
+                        C = np.asarray(sol_l.camera_centre, dtype=np.float64)
+                        cxn, cyn = sol_l.principal_point
+                        for fid, (K2, R2, t2) in sol_l.per_frame_KRt.items():
+                            per_frame_K[fid] = K2
+                            per_frame_R[fid] = R2
+                            per_frame_t[fid] = t2
+                        # re-derive frames the lens refinement didn't solve with
+                        # the new principal point + centre.
+                        for fid in covered_now:
+                            if fid not in sol_l.per_frame_KRt:
+                                K2 = per_frame_K[fid].copy()
+                                K2[0, 2] = cxn; K2[1, 2] = cyn
+                                per_frame_K[fid] = K2
+                                per_frame_t[fid] = -per_frame_R[fid] @ C
+                        sol = dataclasses.replace(
+                            sol, camera_centre=C,
+                            principal_point=sol_l.principal_point,
+                            distortion=sol_l.distortion)
+                        logger.info(
+                            "static line solve: centre-circle lens refinement on "
+                            "%d ellipse frame(s) (misfit %.1f px): distortion %s "
+                            "-> %s", len(ell2), med_mis,
+                            np.round(cur_dist, 3).tolist(),
+                            np.round(sol_l.distortion[:2], 3).tolist())
 
         # Outlier rejection: replace bad single-frame solves with a SLERP/LERP
         # interpolation from their nearest good neighbours, BEFORE smoothing —

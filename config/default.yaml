@@ -199,6 +199,11 @@ camera:
   # clips (origi01: mean 3.1 -> 5.0px). Enable to experiment; needs circle_weight
   # tuning to be a clear win. Camera stays smooth either way.
   line_extraction_detect_circle: false
+  line_extraction_circle_lens: true     # centre-circle ellipse pins global lens (distortion+principal point) on wide/midfield shots
+  line_extraction_circle_lens_min_misfit: 5.0   # px; only refine lens when circle this mis-fit (gberch's fits -> skipped)
+  line_extraction_circle_lens_min_frames: 4
+  line_extraction_circle_ellipse_band: 50.0
+  line_extraction_circle_lens_weight: 1.0
   line_extraction_circle_min_lines: 2     # need >=this many straight lines too
   line_extraction_circle_points: 20       # circle samples fed to the solve
   line_extraction_circle_weight: 0.3      # residual weight vs straight lines
@@ -214,6 +219,7 @@ camera:
   line_extraction_propagate_passes: 4
   line_extraction_propagate_max_bridge: 8   # jump feature-poor barriers up to this many frames
   line_extraction_propagate_min_lines: 2     # seed prior + rms gate + outlier rejection make 2 perpendicular lines safe
+  line_extraction_propagate_circle: false   # per-frame circle in propagation regresses line-RMS; the circle is used via the global lens refinement instead
   # Outlier rejection: frames whose per-frame line-RMS exceeds max(abs, rel x
   # clip-median) are bad per-frame solves; replace them with neighbour
   # interpolation. abs=8px keeps gberch's well-fit frames untouched.

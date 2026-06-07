@@ -31,10 +31,41 @@ from scipy.sparse import lil_matrix
 
 from src.schemas.anchor import LandmarkObservation, LineObservation
 from src.utils.anchor_solver import _make_K, _point_residuals_distorted
+from src.utils.circle_detector import CENTRE_CIRCLE_CENTRE, CENTRE_CIRCLE_RADIUS
+from src.utils.ellipse_detector import _ellipse_distance
 
 logger = logging.getLogger(__name__)
 
 LensModel = Literal["pinhole_k1k2", "brown_conrady"]
+
+# Fixed world samples on the centre circle, for the ellipse-distance constraint.
+_CIRCLE_M = 60
+_CIRCLE_TH = np.linspace(0.0, 2.0 * np.pi, _CIRCLE_M, endpoint=False)
+_CIRCLE_WORLD = np.stack([
+    CENTRE_CIRCLE_CENTRE[0] + CENTRE_CIRCLE_RADIUS * np.cos(_CIRCLE_TH),
+    CENTRE_CIRCLE_CENTRE[1] + CENTRE_CIRCLE_RADIUS * np.sin(_CIRCLE_TH),
+    np.full(_CIRCLE_M, CENTRE_CIRCLE_CENTRE[2]),
+], axis=1)
+
+
+def _ellipse_residuals_distorted(ellipse, K, rvec, t, dist2):
+    """Distance of each projected centre-circle sample to the detected image
+    ellipse (rotation-invariant — the circle has no per-point correspondence).
+    Behind-camera samples contribute 0 so the per-frame count stays ``_CIRCLE_M``
+    for the sparse Jacobian. This is what pins distortion + principal point: the
+    ring spans the image where central box lines don't."""
+    R, _ = cv2.Rodrigues(rvec)
+    cam_z = _CIRCLE_WORLD @ R[2] + t[2]
+    out = np.zeros(_CIRCLE_M)
+    in_front = cam_z > 0.1
+    if in_front.sum() >= 5:
+        dist = np.array([dist2[0], dist2[1], 0.0, 0.0, 0.0], dtype=np.float64)
+        proj, _ = cv2.projectPoints(
+            _CIRCLE_WORLD[in_front].reshape(-1, 1, 3),
+            np.asarray(rvec, np.float64).reshape(3, 1),
+            np.asarray(t, np.float64).reshape(3, 1), K.astype(np.float64), dist)
+        out[in_front] = _ellipse_distance(proj.reshape(-1, 2), ellipse)
+    return out
 
 # How many distortion coefficients are *free parameters* per lens model.
 _N_FREE_DIST: dict[str, int] = {"pinhole_k1k2": 2, "brown_conrady": 5}
@@ -136,9 +167,11 @@ def solve_static_camera_from_lines(
     per_frame_seeds: dict[int, tuple[np.ndarray, float]],
     point_hints: dict[int, list[LandmarkObservation]] | None = None,
     circle_points: dict[int, list[LandmarkObservation]] | None = None,
+    per_frame_ellipses: dict[int, tuple] | None = None,
     lens_model: LensModel = "pinhole_k1k2",
     point_hint_weight: float = 0.05,
     circle_weight: float = 0.3,
+    ellipse_weight: float = 1.0,
     max_nfev: int = 600,
 ) -> StaticCameraSolution:
     """Solve one fixed camera centre across all frames in
@@ -210,6 +243,7 @@ def solve_static_camera_from_lines(
 
     hints = point_hints or {}
     circles = circle_points or {}
+    ellipses = per_frame_ellipses or {}
 
     def _unpack_shared(p: np.ndarray):
         cx, cy = float(p[0]), float(p[1])
@@ -247,6 +281,14 @@ def solve_static_camera_from_lines(
                         circ, K_i, rvec, t_i, (dist[0], dist[1])
                     )
                 )
+            ell = ellipses.get(fid)
+            if ell is not None:
+                parts.append(
+                    ellipse_weight
+                    * _ellipse_residuals_distorted(
+                        ell, K_i, rvec, t_i, (dist[0], dist[1])
+                    )
+                )
         return np.concatenate(parts) if parts else np.empty(0)
 
     # Sparse Jacobian: each frame's residuals touch SHARED cols + its PER cols.
@@ -257,6 +299,8 @@ def solve_static_camera_from_lines(
             n_res += 2 * len(hints[fid])
         if fid in circles:
             n_res += 2 * len(circles[fid])
+        if fid in ellipses:
+            n_res += _CIRCLE_M
         n_res_per_frame.append(n_res)
     total_res = sum(n_res_per_frame)
     total_par = SHARED + PER * n

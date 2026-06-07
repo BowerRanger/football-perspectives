@@ -212,6 +212,8 @@ camera:
   # reaches spans PnLCalib never cold-started. gberch is full -> no-op.
   line_extraction_propagate_coverage: true
   line_extraction_propagate_passes: 4
+  line_extraction_propagate_max_bridge: 8   # jump feature-poor barriers up to this many frames
+  line_extraction_propagate_min_lines: 3     # seed prior makes 3 well-conditioned lines enough
   # Outlier rejection: frames whose per-frame line-RMS exceeds max(abs, rel x
   # clip-median) are bad per-frame solves; replace them with neighbour
   # interpolation. abs=8px keeps gberch's well-fit frames untouched.

@@ -961,7 +961,7 @@ class CameraStage(BaseStage):
         # reaches spans PnLCalib never cold-started (e.g. origi02 0-246). gberch
         # is already full-coverage -> nothing to propagate.
         if bool(cfg.get("line_extraction_propagate_coverage", True)):
-            from scipy.spatial.transform import Rotation
+            from scipy.spatial.transform import Rotation, Slerp
 
             from src.utils.static_c_profile import _solve_frame_at_fixed_c
             from src.utils.static_line_solver import _dist5
@@ -969,6 +969,12 @@ class CameraStage(BaseStage):
             dist5_p = _dist5(sol.distortion)
             prop_dist = tuple(float(x) for x in sol.distortion[:2])
             max_prop_rms = float(cfg.get("line_extraction_extend_max_rms", 4.0))
+            # Propagation can accept fewer lines than the cold main solve: it
+            # has a strong per-frame seed (the covered neighbour), so a frame
+            # with 3 well-conditioned box lines solves cleanly, and the rms gate
+            # + post-hoc rotation-outlier rejection guard against any
+            # under-determined drift.
+            prop_min_lines = int(cfg.get("line_extraction_propagate_min_lines", 3))
             n_total = len(per_frame_K)
             _cache: dict[int, np.ndarray | None] = {}
 
@@ -979,24 +985,24 @@ class CameraStage(BaseStage):
                     _cache[i] = fr if ok else None
                 return _cache[i]
 
-            def _try_propagate(i: int, nb1: int, nb2: int | None) -> bool:
+            def _seed(nb1: int, nb2: int, steps: int) -> tuple[np.ndarray, float]:
+                """Velocity-extrapolate ``steps`` pan-steps beyond nb1 using the
+                nb2->nb1 delta (tracks the pan so detection still finds lines)."""
+                R1 = per_frame_R[nb1]
+                fx1 = float(per_frame_K[nb1][0, 0])
+                if (0 <= nb2 < n_total and per_frame_R[nb2] is not None):
+                    D = Rotation.from_matrix(R1 @ np.asarray(per_frame_R[nb2]).T)
+                    Dk = Rotation.from_rotvec(D.as_rotvec() * steps)
+                    seed_R = (Dk * Rotation.from_matrix(R1)).as_matrix()
+                    dfx = fx1 - float(per_frame_K[nb2][0, 0])
+                    seed_fx = float(np.clip(fx1 + dfx * steps, 0.7 * fx1, 1.3 * fx1))
+                    return seed_R, seed_fx
+                return R1, fx1
+
+            def _solve_at(i: int, seed_R: np.ndarray, seed_fx: float) -> bool:
                 img = _read(i)
                 if img is None:
                     return False
-                R1 = per_frame_R[nb1]
-                fx1 = float(per_frame_K[nb1][0, 0])
-                if (nb2 is not None and 0 <= nb2 < n_total
-                        and per_frame_R[nb2] is not None):
-                    # velocity-extrapolate one pan-step beyond nb1 (tracks the
-                    # pan so detection still finds the lines on faster pans —
-                    # copying one neighbour drifts >strip on a ~1deg/frame pan).
-                    D = Rotation.from_matrix(R1 @ np.asarray(per_frame_R[nb2]).T)
-                    seed_R = (D * Rotation.from_matrix(R1)).as_matrix()
-                    fx2 = float(per_frame_K[nb2][0, 0])
-                    seed_fx = float(np.clip(2 * fx1 - fx2, 0.7 * fx1, 1.3 * fx1))
-                else:
-                    seed_R = R1
-                    seed_fx = fx1
                 seed_K = np.array(
                     [[seed_fx, 0.0, cx_p], [0.0, seed_fx, cy_p], [0.0, 0.0, 1.0]])
                 cams = {i: {"K": seed_K, "R": seed_R, "t": -seed_R @ C}}
@@ -1006,7 +1012,7 @@ class CameraStage(BaseStage):
                     min_n_samples=det_min_n_samples, min_lines=1,
                 )
                 lines = det.get(i, [])
-                if len(lines) < min_lines:
+                if len(lines) < prop_min_lines:
                     return False
                 rv_seed, _ = cv2.Rodrigues(seed_R)
                 rvec, fx, rms = _solve_frame_at_fixed_c(
@@ -1031,23 +1037,64 @@ class CameraStage(BaseStage):
                 ]
                 return True
 
+            def _bridge(lo: int, hi: int) -> None:
+                """SLERP/LERP-fill the (feature-poor) frames strictly between two
+                solved brackets lo and hi — interpolated, lower confidence."""
+                slerp = Slerp([float(lo), float(hi)], Rotation.from_matrix(
+                    [per_frame_R[lo], per_frame_R[hi]]))
+                fxlo = float(per_frame_K[lo][0, 0])
+                fxhi = float(per_frame_K[hi][0, 0])
+                for m in range(lo + 1, hi):
+                    if per_frame_K[m] is not None:
+                        continue
+                    Rm = slerp([float(m)]).as_matrix()[0]
+                    w = (m - lo) / (hi - lo)
+                    fxm = (1 - w) * fxlo + w * fxhi
+                    per_frame_K[m] = np.array(
+                        [[fxm, 0.0, cx_p], [0.0, fxm, cy_p], [0.0, 0.0, 1.0]])
+                    per_frame_R[m] = Rm
+                    per_frame_t[m] = -Rm @ C
+                    per_frame_conf[m] = 0.35
+
+            max_bridge = int(cfg.get("line_extraction_propagate_max_bridge", 8))
             n_prop = 0
-            for _ in range(int(cfg.get("line_extraction_propagate_passes", 4))):
-                changed = False
-                for i in range(n_total - 2, -1, -1):       # down, seed from i+1
-                    if per_frame_K[i] is None and per_frame_K[i + 1] is not None:
-                        if _try_propagate(i, i + 1, i + 2):
-                            changed = True; n_prop += 1
-                for i in range(1, n_total):                # up, seed from i-1
-                    if per_frame_K[i] is None and per_frame_K[i - 1] is not None:
-                        if _try_propagate(i, i - 1, i - 2):
-                            changed = True; n_prop += 1
-                if not changed:
-                    break
+            progress = True
+            while progress:
+                progress = False
+                for direction in (-1, +1):
+                    order = (range(n_total) if direction > 0
+                             else range(n_total - 1, -1, -1))
+                    for f in order:
+                        if per_frame_K[f] is None:
+                            continue
+                        i = f + direction
+                        if not (0 <= i < n_total) or per_frame_K[i] is not None:
+                            continue
+                        nb2 = f - direction
+                        # 1) direct solve one step out
+                        sR, sfx = _seed(f, nb2, 1)
+                        if _solve_at(i, sR, sfx):
+                            n_prop += 1; progress = True
+                            continue
+                        # 2) barrier: look outward up to max_bridge for a frame
+                        #    that re-acquires; if found, bridge the gap between.
+                        reacq = None
+                        for k in range(2, max_bridge + 2):
+                            j = f + direction * k
+                            if not (0 <= j < n_total) or per_frame_K[j] is not None:
+                                continue
+                            sRk, sfxk = _seed(f, nb2, k)
+                            if _solve_at(j, sRk, sfxk):
+                                reacq = j
+                                break
+                        if reacq is not None:
+                            lo, hi = (reacq, f) if reacq < f else (f, reacq)
+                            _bridge(lo, hi)
+                            n_prop += 1; progress = True
             if n_prop:
                 logger.info(
                     "static line solve: propagated coverage to %d additional "
-                    "frame(s) by neighbour seeding", n_prop,
+                    "frame(s) (incl. bridged feature-poor barriers)", n_prop,
                 )
 
         # Outlier rejection: replace bad single-frame solves with a SLERP/LERP

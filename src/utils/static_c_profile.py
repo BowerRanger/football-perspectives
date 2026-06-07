@@ -62,10 +62,20 @@ def _solve_frame_at_fixed_c(
     C: np.ndarray,
     rvec_seed: np.ndarray,
     fx_seed: float,
+    *,
+    fx_rel: float | None = None,
 ) -> tuple[np.ndarray, float, float]:
-    """LM-solve one frame's (rvec, fx) with C pinned. Returns
-    ``(rvec, fx, line_rms)``."""
+    """LM-solve one frame's ``(rvec, fx)`` with C pinned. Returns
+    ``(rvec, fx, line_rms)``.
 
+    ``fx_rel`` tightens the focal bounds to ``fx_seed * (1 ± fx_rel)`` (default
+    None → the wide 0.5–2× range). Use a small value (e.g. 0.05) on sparse-line
+    frames where (rvec, fx) are jointly under-determined and the LM would
+    otherwise drift focal to fit a wrong rotation — a 2-line frame can fit at
+    ~0px yet leave the pitch metres off. The seed focal (velocity-extrapolated
+    from a covered neighbour) is reliable, so a tight band keeps the few lines
+    over-determining rotation while still letting focal track real zoom.
+    """
     def res(p: np.ndarray) -> np.ndarray:
         rvec = p[0:3]
         fx = float(np.clip(p[3], 50.0, 1e5))
@@ -74,9 +84,11 @@ def _solve_frame_at_fixed_c(
         K = _make_K(fx, cx, cy)
         return _line_residuals_distorted(lines, K, rvec, t, dist5)
 
+    fx_lo = fx_seed * (1.0 - fx_rel) if fx_rel is not None else fx_seed * 0.5
+    fx_hi = fx_seed * (1.0 + fx_rel) if fx_rel is not None else fx_seed * 2.0
     p0 = np.array([*np.asarray(rvec_seed, float).reshape(3), float(fx_seed)])
-    lower = np.array([-np.pi, -np.pi, -np.pi, fx_seed * 0.5])
-    upper = np.array([np.pi, np.pi, np.pi, fx_seed * 2.0])
+    lower = np.array([-np.pi, -np.pi, -np.pi, fx_lo])
+    upper = np.array([np.pi, np.pi, np.pi, fx_hi])
     result = least_squares(
         res, p0, bounds=(lower, upper),
         method="trf", loss="huber", f_scale=2.0, max_nfev=80,

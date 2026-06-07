@@ -1015,8 +1015,12 @@ class CameraStage(BaseStage):
                 if len(lines) < prop_min_lines:
                     return False
                 rv_seed, _ = cv2.Rodrigues(seed_R)
+                # Sparse frames: tight-band the focal around the (reliable) seed
+                # so the few lines can't fit a wrong rotation by drifting fx —
+                # the under-determined-edge fix (e.g. kroupi frame 0).
                 rvec, fx, rms = _solve_frame_at_fixed_c(
-                    lines, cx_p, cy_p, dist5_p, C, rv_seed.reshape(3), seed_fx)
+                    lines, cx_p, cy_p, dist5_p, C, rv_seed.reshape(3), seed_fx,
+                    fx_rel=0.05 if len(lines) < 4 else None)
                 if not np.isfinite(rms) or rms > max_prop_rms:
                     return False
                 R_e, _ = cv2.Rodrigues(rvec)
@@ -1139,6 +1143,42 @@ class CameraStage(BaseStage):
                         rs.append(abs(float(np.dot(np.array(ip) - pa, nrm))))
                 return float(np.sqrt(np.mean(np.square(rs)))) if rs else None
 
+            from src.utils.static_c_profile import _solve_frame_at_fixed_c
+            from src.utils.static_line_solver import _dist5 as _dist5_fn
+            cx_o, cy_o = sol.principal_point
+            _dist5_o = _dist5_fn(sol.distortion)
+
+            def _resolve(i: int, R_seed: np.ndarray, fx_seed: float):
+                """Re-detect + line-solve a rejected frame from a CLEAN seed.
+                Returns (R, fx, lines) when it fits and stays near the seed, else
+                None — so a frame rejected for a transient bad solve recovers its
+                line-accurate camera instead of a flickery pure interpolation."""
+                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+                ok, img = cap.read()
+                if not ok:
+                    return None
+                seed_K = np.array(
+                    [[fx_seed, 0.0, cx_o], [0.0, fx_seed, cy_o], [0.0, 0.0, 1.0]])
+                det = detect_lines_for_frames(
+                    {i: img}, {i: {"K": seed_K, "R": R_seed, "t": -R_seed @ C}},
+                    _odist, det_cfg, min_confidence=det_min_confidence,
+                    min_n_samples=det_min_n_samples, min_lines=1)
+                lines = det.get(i, [])
+                if len(lines) < min_lines:
+                    return None
+                rv, _ = cv2.Rodrigues(R_seed)
+                rvec, fx, rms = _solve_frame_at_fixed_c(
+                    lines, cx_o, cy_o, _dist5_o, C, rv.reshape(3), fx_seed,
+                    fx_rel=0.05 if len(lines) < 4 else None)
+                if not np.isfinite(rms) or rms > 4.0:
+                    return None
+                R_e, _ = cv2.Rodrigues(rvec)
+                # only accept if it stays near the clean interp seed (a far jump
+                # would be a wrong-line lock re-admitting the rejected error)
+                if _geo(R_e, R_seed) > rot_thr:
+                    return None
+                return R_e, float(fx), lines
+
             # Iterate: a multi-frame seam block masks itself under immediate-
             # neighbour comparison (both neighbours are in the block). Each pass
             # bridges the most-deviant frame; once replaced it reads as good, so
@@ -1182,13 +1222,30 @@ class CameraStage(BaseStage):
                     else:
                         j = int(lo[-1]) if lo.size else int(hi[0])
                         R = per_frame_R[j]; fx = float(per_frame_K[j][0, 0])
+                    # try to recover a line-accurate camera from the clean seed
+                    rs = _resolve(i, R, float(fx))
+                    used_lines = None
+                    if rs is not None:
+                        R, fx, used_lines = rs
                     K = per_frame_K[i].copy()
                     K[0, 0] = fx; K[1, 1] = fx
                     per_frame_K[i] = K
                     per_frame_R[i] = R
                     per_frame_t[i] = -R @ C
-                    per_frame_conf[i] = 0.4
-                    detected_lines_by_frame.pop(i, None)
+                    per_frame_conf[i] = 0.6 if used_lines else 0.4
+                    if used_lines:
+                        detected_lines_by_frame[i] = [
+                            {
+                                "name": ln.name,
+                                "image_segment": [list(ln.image_segment[0]),
+                                                  list(ln.image_segment[1])],
+                                "world_segment": [list(ln.world_segment[0]),
+                                                  list(ln.world_segment[1])],
+                            }
+                            for ln in used_lines
+                        ]
+                    else:
+                        detected_lines_by_frame.pop(i, None)
                 total_rejected += len(bad)
                 last_pass = _pass + 1
             if total_rejected:

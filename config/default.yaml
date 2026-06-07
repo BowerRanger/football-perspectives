@@ -207,6 +207,11 @@ camera:
   # adds frames; full-coverage clips are unaffected.
   line_extraction_extend_coverage: true
   line_extraction_extend_max_rms: 4.0     # px; reject extended frames above this
+  # Propagating coverage extension: fill uncovered frames by seeding each from
+  # its covered neighbour (static camera -> locked C applies). Sweeps outward;
+  # reaches spans PnLCalib never cold-started. gberch is full -> no-op.
+  line_extraction_propagate_coverage: true
+  line_extraction_propagate_passes: 4
   # Outlier rejection: frames whose per-frame line-RMS exceeds max(abs, rel x
   # clip-median) are bad per-frame solves; replace them with neighbour
   # interpolation. abs=8px keeps gberch's well-fit frames untouched.

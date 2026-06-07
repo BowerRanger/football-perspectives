@@ -952,6 +952,104 @@ class CameraStage(BaseStage):
                         "beyond the anchor span", n_ext,
                     )
 
+        # Propagating coverage extension: fill remaining uncovered frames where
+        # the pitch is still visible by seeding each from its nearest COVERED
+        # neighbour. The camera is static, so the locked C applies everywhere;
+        # consecutive frames differ by ~one pan step, so the neighbour is a good
+        # detection seed. Sweep down then up, repeat until stable. Each frame is
+        # line-solved against its OWN detected lines, so seeds don't drift. This
+        # reaches spans PnLCalib never cold-started (e.g. origi02 0-246). gberch
+        # is already full-coverage -> nothing to propagate.
+        if bool(cfg.get("line_extraction_propagate_coverage", True)):
+            from scipy.spatial.transform import Rotation
+
+            from src.utils.static_c_profile import _solve_frame_at_fixed_c
+            from src.utils.static_line_solver import _dist5
+            cx_p, cy_p = sol.principal_point
+            dist5_p = _dist5(sol.distortion)
+            prop_dist = tuple(float(x) for x in sol.distortion[:2])
+            max_prop_rms = float(cfg.get("line_extraction_extend_max_rms", 4.0))
+            n_total = len(per_frame_K)
+            _cache: dict[int, np.ndarray | None] = {}
+
+            def _read(i: int):
+                if i not in _cache:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+                    ok, fr = cap.read()
+                    _cache[i] = fr if ok else None
+                return _cache[i]
+
+            def _try_propagate(i: int, nb1: int, nb2: int | None) -> bool:
+                img = _read(i)
+                if img is None:
+                    return False
+                R1 = per_frame_R[nb1]
+                fx1 = float(per_frame_K[nb1][0, 0])
+                if (nb2 is not None and 0 <= nb2 < n_total
+                        and per_frame_R[nb2] is not None):
+                    # velocity-extrapolate one pan-step beyond nb1 (tracks the
+                    # pan so detection still finds the lines on faster pans —
+                    # copying one neighbour drifts >strip on a ~1deg/frame pan).
+                    D = Rotation.from_matrix(R1 @ np.asarray(per_frame_R[nb2]).T)
+                    seed_R = (D * Rotation.from_matrix(R1)).as_matrix()
+                    fx2 = float(per_frame_K[nb2][0, 0])
+                    seed_fx = float(np.clip(2 * fx1 - fx2, 0.7 * fx1, 1.3 * fx1))
+                else:
+                    seed_R = R1
+                    seed_fx = fx1
+                seed_K = np.array(
+                    [[seed_fx, 0.0, cx_p], [0.0, seed_fx, cy_p], [0.0, 0.0, 1.0]])
+                cams = {i: {"K": seed_K, "R": seed_R, "t": -seed_R @ C}}
+                det = detect_lines_for_frames(
+                    {i: img}, cams, prop_dist, det_cfg,
+                    min_confidence=det_min_confidence,
+                    min_n_samples=det_min_n_samples, min_lines=1,
+                )
+                lines = det.get(i, [])
+                if len(lines) < min_lines:
+                    return False
+                rv_seed, _ = cv2.Rodrigues(seed_R)
+                rvec, fx, rms = _solve_frame_at_fixed_c(
+                    lines, cx_p, cy_p, dist5_p, C, rv_seed.reshape(3), seed_fx)
+                if not np.isfinite(rms) or rms > max_prop_rms:
+                    return False
+                R_e, _ = cv2.Rodrigues(rvec)
+                per_frame_K[i] = np.array(
+                    [[fx, 0.0, cx_p], [0.0, fx, cy_p], [0.0, 0.0, 1.0]])
+                per_frame_R[i] = R_e
+                per_frame_t[i] = -R_e @ C
+                per_frame_conf[i] = max(0.3, min(1.0, 1.0 - rms / 6.0))
+                detected_lines_by_frame[i] = [
+                    {
+                        "name": ln.name,
+                        "image_segment": [list(ln.image_segment[0]),
+                                          list(ln.image_segment[1])],
+                        "world_segment": [list(ln.world_segment[0]),
+                                          list(ln.world_segment[1])],
+                    }
+                    for ln in lines
+                ]
+                return True
+
+            n_prop = 0
+            for _ in range(int(cfg.get("line_extraction_propagate_passes", 4))):
+                changed = False
+                for i in range(n_total - 2, -1, -1):       # down, seed from i+1
+                    if per_frame_K[i] is None and per_frame_K[i + 1] is not None:
+                        if _try_propagate(i, i + 1, i + 2):
+                            changed = True; n_prop += 1
+                for i in range(1, n_total):                # up, seed from i-1
+                    if per_frame_K[i] is None and per_frame_K[i - 1] is not None:
+                        if _try_propagate(i, i - 1, i - 2):
+                            changed = True; n_prop += 1
+                if not changed:
+                    break
+            if n_prop:
+                logger.info(
+                    "static line solve: propagated coverage to %d additional "
+                    "frame(s) by neighbour seeding", n_prop,
+                )
+
         # Outlier rejection: replace bad single-frame solves with a SLERP/LERP
         # interpolation from their nearest good neighbours, BEFORE smoothing —
         # so the smoother never spreads a spike across its window (a single 60deg

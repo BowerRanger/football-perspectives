@@ -1304,3 +1304,32 @@ def test_smpl_model_includes_shapedirs_when_present(client, monkeypatch, tmp_pat
     assert len(body["shapedirs"][0]) == 3
     assert len(body["shapedirs"][0][0]) == n_betas
     assert len(body["joint_shapedirs"]) == n_joints
+
+
+def test_camera_metrics_endpoint(tmp_path):
+    """The shot-summary metrics endpoint returns the honest dashboard signals."""
+    import json as _json
+    from fastapi.testclient import TestClient
+    from src.web.server import create_app
+
+    cam = tmp_path / "camera"
+    cam.mkdir()
+    frames = [
+        {"frame": i, "K": [[1000, 0, 960], [0, 1000, 540], [0, 0, 1]],
+         "R": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "t": [0, 0, 50],
+         "confidence": 0.9, "is_anchor": i == 0}
+        for i in range(5)
+    ]
+    (cam / "shot1_camera_track.json").write_text(_json.dumps(
+        {"clip_id": "shot1", "fps": 30.0, "image_size": [1920, 1080],
+         "t_world": [0, 0, 50], "distortion": [0.0, 0.0], "frames": frames}))
+    client = TestClient(create_app(tmp_path))
+    r = client.get("/api/camera/metrics?shot=shot1")
+    assert r.status_code == 200
+    m = r.json()
+    assert m["available"] is True
+    assert m["covered"] == 5 and m["span"] == [0, 4]
+    assert "line_rms_mean" in m and "jitter_p95" in m and "circle" in m
+    assert r.headers["cache-control"] == "no-store"
+    assert client.get("/api/camera/metrics?shot=..%2Fetc").status_code in (400, 404)
+    assert client.get("/api/camera/metrics?shot=missing").json()["available"] is False

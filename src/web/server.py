@@ -1943,6 +1943,30 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                 detail=f"Failed to load detected lines: {exc}",
             )
 
+    @app.get("/api/camera/metrics")
+    def get_camera_metrics(response: Response, shot: str):
+        """Honest per-shot camera quality dashboard for the dashboard card.
+
+        Returns the independent signals line-RMS alone hides — coverage,
+        jitter, HELD-OUT centre-circle misfit (detected in the image, not the
+        line solve), and geometric Δ vs the manual track. The circle check
+        reads the clip video + runs detection, so this is slower than the plain
+        track fetch (a few seconds) — the card loads it lazily.
+        """
+        response.headers["Cache-Control"] = "no-store"
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
+            raise HTTPException(status_code=400, detail="Invalid shot id")
+        base = str(output_dir / "camera" / shot)
+        try:
+            from scripts._clip_eval import compute_camera_metrics
+            metrics = compute_camera_metrics(base)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to compute camera metrics: {exc}")
+        if metrics is None:
+            return {"available": False}
+        return {"available": True, **metrics}
+
     @app.get("/tracking/shots")
     def list_tracked_shots():
         tracks_dir = output_dir / "tracks"

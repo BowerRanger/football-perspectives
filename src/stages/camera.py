@@ -1407,34 +1407,39 @@ class CameraStage(BaseStage):
                     "neighbour interp", total_rejected, last_pass, rot_thr, rel,
                 )
 
-        # Optional temporal smoothing of the per-frame (rotation, focal)
-        # trajectory. Removes the seam steps where line-solved frames meet
-        # interpolated gap frames (a few degrees of rotation / tens of px of
-        # focal). Re-derives t = -R @ C so the camera body stays fixed.
-        # window < 3 disables it (default).
-        smooth_window = int(cfg.get("line_extraction_smooth_window", 0))
-        # Include coverage-extended frames (beyond ``covered``) in the smooth.
+        # Pin-and-smooth temporal smoothing of the per-frame rotation. The
+        # dominant jitter is the seam step where a line-solved frame meets an
+        # interpolated gap frame (the SLERP fill is velocity-discontinuous). A
+        # uniform smooth removes it but drags the *correct* line-solved frames
+        # off their painted lines. Instead we PIN the line-solved frames and let
+        # only the interpolated frames relax onto a smooth path between them — so
+        # seam jitter drops at zero cost to the solved frames, and an already-
+        # solved/smooth clip (gberch) is untouched. Re-derives t = -R @ C so the
+        # camera body stays fixed. window < 3 disables.
+        smooth_window = int(cfg.get("line_extraction_smooth_window", 9))
+        smooth_iters = int(cfg.get("line_extraction_smooth_iters", 4))
         ordered = [i for i in range(len(per_frame_R)) if per_frame_R[i] is not None]
         if smooth_window >= 3 and len(ordered) >= smooth_window:
-            from src.utils.temporal_smoothing import quat_savgol, savgol_axis
+            from src.utils.temporal_smoothing import pin_and_smooth_quat
             Rs = np.stack([per_frame_R[i] for i in ordered])
-            fxs = np.array([float(per_frame_K[i][0, 0]) for i in ordered])
-            fys = np.array([float(per_frame_K[i][1, 1]) for i in ordered])
-            Rs_s = quat_savgol(Rs, window=smooth_window, order=2)
-            fxs_s = savgol_axis(fxs, window=smooth_window, order=2)
-            fys_s = savgol_axis(fys, window=smooth_window, order=2)
+            # "solved" = has >=2 detected straight lines -> trustworthy, pinned.
+            solved_mask = [
+                sum(1 for ln in detected_lines_by_frame.get(i, [])
+                    if "circle" not in ln["name"]) >= 2
+                for i in ordered
+            ]
+            Rs_s = pin_and_smooth_quat(
+                Rs, solved_mask, window=smooth_window, iters=smooth_iters)
+            n_moved = 0
             for j, i in enumerate(ordered):
-                R = Rs_s[j]
-                K = per_frame_K[i].copy()
-                K[0, 0] = float(fxs_s[j])
-                K[1, 1] = float(fys_s[j])
-                per_frame_K[i] = K
-                per_frame_R[i] = R
-                per_frame_t[i] = -R @ C
+                if not np.allclose(Rs_s[j], per_frame_R[i], atol=1e-9):
+                    n_moved += 1
+                per_frame_R[i] = Rs_s[j]
+                per_frame_t[i] = -Rs_s[j] @ C
             logger.info(
-                "static line solve: temporal-smoothed %d frames (window=%d)",
-                len(ordered), smooth_window,
-            )
+                "static line solve: pin-and-smoothed %d/%d interp frame(s) "
+                "(window=%d, %d solved pinned)", n_moved, len(ordered),
+                smooth_window, sum(solved_mask))
 
         rms_arr = np.array(
             [v for v in sol.per_frame_line_rms.values() if np.isfinite(v)]

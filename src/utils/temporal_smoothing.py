@@ -41,6 +41,39 @@ def quat_savgol(Rs: np.ndarray, *, window: int, order: int = 2) -> np.ndarray:
     return Rotation.from_quat(qs).as_matrix()
 
 
+def pin_and_smooth_quat(
+    Rs: np.ndarray, solved_mask, *, window: int, iters: int = 4, order: int = 2
+) -> np.ndarray:
+    """Smooth the rotation track while PINNING the trustworthy (line-solved)
+    frames in place.
+
+    The dominant jitter is the seam step where a line-solved frame meets an
+    interpolated gap frame, because the SLERP gap-fill has a velocity
+    discontinuity. A uniform smooth removes it but drags the *correct*
+    line-solved frames off their painted lines (they sit on a trajectory the
+    interp neighbours pull crooked). Instead: each pass savgol-smooths the whole
+    sequence, then resets the line-solved frames to their original value — so
+    only the interpolated frames relax onto a smooth path between the solved
+    frames that bracket them. Reduces seam jitter at ZERO cost to the
+    line-solved frames (they are never moved), and is a no-op on a fully solved,
+    already-smooth clip.
+    """
+    Rs = np.asarray(Rs, dtype=float)
+    n = Rs.shape[0]
+    if n < window or window < 3:
+        return Rs
+    solved = np.asarray(solved_mask, dtype=bool)
+    if solved.all() or (~solved).sum() == 0:
+        return Rs
+    out = Rs.copy()
+    pinned = Rs[solved].copy()
+    for _ in range(max(1, iters)):
+        sm = quat_savgol(out, window=window, order=order)
+        out[~solved] = sm[~solved]
+        out[solved] = pinned
+    return out
+
+
 def slerp_window(Rs: np.ndarray, *, window: int) -> np.ndarray:
     """SLERP-smooth a sequence of rotations using a sliding centred window."""
     n = Rs.shape[0]

@@ -217,6 +217,10 @@ camera:
   # its covered neighbour (static camera -> locked C applies). Sweeps outward;
   # reaches spans PnLCalib never cold-started. gberch is full -> no-op.
   line_extraction_propagate_coverage: true
+  line_extraction_cold_start: true            # orientation-sweep cold-start for the uncovered (wide) start of clips
+  line_extraction_cold_start_max_rms: 12.0     # accept lens-limited wide-field rms (the lens refinement then fixes it)
+  line_extraction_cold_start_min_lines: 3
+  line_extraction_cold_start_max_dev_deg: 25.0 # reject cold-starts more than this far from the covered boundary
   line_extraction_propagate_passes: 4
   line_extraction_propagate_max_bridge: 8   # jump feature-poor barriers up to this many frames
   line_extraction_propagate_min_lines: 2     # seed prior + rms gate + outlier rejection make 2 perpendicular lines safe

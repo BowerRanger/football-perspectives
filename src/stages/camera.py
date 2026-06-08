@@ -1147,6 +1147,179 @@ class CameraStage(BaseStage):
                     "frame(s) (incl. bridged feature-poor barriers)", n_prop,
                 )
 
+        # Cold-start bootstrap for the uncovered START of the clip (runs AFTER
+        # propagation, so the reference orientation is the midfield boundary
+        # frame, not the box-end where the clip is anchored). Clips pan from a
+        # wide/midfield start to the box; the start is reached only by a long,
+        # degrading propagation, and a disconnected start (where the backward
+        # velocity-seed diverges and PnLCalib couldn't cold-start) never gets
+        # covered. With C + lens already solved, a start frame needs only
+        # orientation: recover it by an ORIENTATION SWEEP around the covered
+        # boundary's orientation (sweep pan/tilt, detect+solve, iteratively
+        # refine), keep the consistent solves as seeds, then cascade-fill the
+        # small gaps between them. The post-propagation lens refinement then uses
+        # the now-covered WIDE start (its lines + circle) to better-calibrate the
+        # global lens.
+        if bool(cfg.get("line_extraction_cold_start", True)):
+            from scipy.spatial.transform import Rotation as _CSRot
+
+            from src.utils.static_c_profile import _solve_frame_at_fixed_c as _cs_solve_frame
+            from src.utils.static_line_solver import _dist5 as _cs_dist5
+            _csc = [i for i in range(len(per_frame_K)) if per_frame_K[i] is not None]
+            start_end = min(_csc) if _csc else 0
+            if start_end > 0:
+                cs_cx, cs_cy = sol.principal_point
+                cs_d5 = _cs_dist5(sol.distortion)
+                cs_dist = tuple(float(x) for x in sol.distortion[:2])
+                _csf = sorted(_csc)
+                _ax = [
+                    _CSRot.from_matrix(
+                        per_frame_R[b] @ np.asarray(per_frame_R[a]).T).as_rotvec()
+                    for a, b in zip(_csf, _csf[1:]) if b - a == 1
+                ]
+                _ax = [v for v in _ax if np.linalg.norm(v) > 1e-4]
+                if _ax:
+                    pan_ax = np.mean([v / np.linalg.norm(v) for v in _ax], axis=0)
+                    pan_ax /= np.linalg.norm(pan_ax)
+                    R_ref = np.asarray(per_frame_R[start_end])
+                    fx_ref = float(per_frame_K[start_end][0, 0])
+                    tilt_ax = np.cross(pan_ax, R_ref[2])
+                    tilt_ax /= np.linalg.norm(tilt_ax)
+                    cs_max_rms = float(cfg.get("line_extraction_cold_start_max_rms", 12.0))
+                    cs_min_lines = int(cfg.get("line_extraction_cold_start_min_lines", 3))
+
+                    def _cs_solve_at(img, fid, R, fx, strip):
+                        sK = np.array([[fx, 0, cs_cx], [0, fx, cs_cy], [0, 0, 1.0]])
+                        det = detect_lines_for_frames(
+                            {fid: img}, {fid: {"K": sK, "R": R, "t": -R @ C}},
+                            cs_dist, DetectorConfig(
+                                search_strip_px=strip, min_gradient=10.0),
+                            min_confidence=det_min_confidence,
+                            min_n_samples=det_min_n_samples, min_lines=1).get(fid, [])
+                        if len(det) < cs_min_lines:
+                            return None
+                        rv, _ = cv2.Rodrigues(R)
+                        rvec, fx2, rms = _cs_solve_frame(
+                            det, cs_cx, cs_cy, cs_d5, C, rv.reshape(3), fx,
+                            fx_rel=0.05 if len(det) < 4 else None)
+                        if not np.isfinite(rms):
+                            return None
+                        Re, _ = cv2.Rodrigues(rvec)
+                        return Re, fx2, rms, det
+
+                    def _cs_commit(f, Re, fx, det):
+                        per_frame_K[f] = np.array(
+                            [[fx, 0, cs_cx], [0, fx, cs_cy], [0, 0, 1.0]])
+                        per_frame_R[f] = Re
+                        per_frame_t[f] = -Re @ C
+                        per_frame_conf[f] = 0.4
+                        detected_lines_by_frame[f] = [
+                            {"name": ln.name,
+                             "image_segment": [list(ln.image_segment[0]),
+                                               list(ln.image_segment[1])],
+                             "world_segment": [list(ln.world_segment[0]),
+                                               list(ln.world_segment[1])]}
+                            for ln in det
+                        ]
+
+                    _cs_imgs: dict[int, np.ndarray | None] = {}
+
+                    def _cs_read(f):
+                        if f not in _cs_imgs:
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, f)
+                            ok, im = cap.read()
+                            _cs_imgs[f] = im if ok else None
+                        return _cs_imgs[f]
+
+                    def _cold_start_one(fid):
+                        img = _cs_read(fid)
+                        if img is None:
+                            return None
+                        best = None
+                        for dp in np.arange(-24, 25, 4):
+                            for dt in np.arange(-10, 11, 5):
+                                Rc = (_CSRot.from_rotvec(pan_ax * np.radians(dp))
+                                      * _CSRot.from_rotvec(tilt_ax * np.radians(dt))
+                                      ).as_matrix() @ R_ref
+                                r = _cs_solve_at(img, fid, Rc, fx_ref, 40)
+                                if r is None:
+                                    continue
+                                if best is None or (len(r[3]), -r[2]) > (
+                                        len(best[3]), -best[2]):
+                                    best = r
+                        if best is None:
+                            return None
+                        Re, fx, rms, det = best
+                        for _ in range(4):  # iterative refine: re-detect under the solve
+                            r = _cs_solve_at(img, fid, Re, fx, 30)
+                            if r is None:
+                                break
+                            Re, fx, rms, det = r
+                        if rms > cs_max_rms:
+                            return None
+                        return Re, fx, det
+
+                    # Cold-start a handful of evenly-spaced start frames.
+                    cs_seeds: dict[int, tuple] = {}
+                    cs_step = max(1, start_end // 8)
+                    for fid in range(0, start_end, cs_step):
+                        out = _cold_start_one(fid)
+                        if out is not None:
+                            cs_seeds[fid] = out
+
+                    def _csgeo(a, b):
+                        c = (np.trace(np.asarray(a).T @ np.asarray(b)) - 1) / 2
+                        return float(np.degrees(np.arccos(max(-1.0, min(1.0, c)))))
+
+                    n_cs = 0
+                    if len(cs_seeds) >= 2:
+                        # Keep cold-starts within a bounded pan of the covered
+                        # boundary — rejects gross false orientation locks.
+                        cs_max_dev = float(
+                            cfg.get("line_extraction_cold_start_max_dev_deg", 25.0))
+                        keep = [f for f in sorted(cs_seeds)
+                                if _csgeo(cs_seeds[f][0], R_ref) < cs_max_dev]
+                        for f in keep:
+                            Re, fx, det = cs_seeds[f]
+                            _cs_commit(f, Re, fx, det)
+                            n_cs += 1
+                        # Cascade-fill the gaps between the cold-started seeds and
+                        # the covered boundary: each uncovered start frame is
+                        # re-solved from a covered neighbour (a strong seed now),
+                        # bridging the thin barriers the boundary cascade can't
+                        # cross from outside.
+                        if n_cs:
+                            fillprog = True
+                            while fillprog:
+                                fillprog = False
+                                for f in range(start_end):
+                                    if per_frame_K[f] is not None:
+                                        continue
+                                    nb = None
+                                    if f - 1 >= 0 and per_frame_K[f - 1] is not None:
+                                        nb = f - 1
+                                    elif (f + 1 < len(per_frame_K)
+                                          and per_frame_K[f + 1] is not None):
+                                        nb = f + 1
+                                    if nb is None:
+                                        continue
+                                    img = _cs_read(f)
+                                    if img is None:
+                                        continue
+                                    r = _cs_solve_at(
+                                        img, f, np.asarray(per_frame_R[nb]),
+                                        float(per_frame_K[nb][0, 0]), 30)
+                                    if r is not None and r[2] <= cs_max_rms:
+                                        _cs_commit(f, r[0], r[1], r[3])
+                                        fillprog = True
+                    if n_cs:
+                        n_filled = sum(1 for i in range(start_end)
+                                       if per_frame_K[i] is not None)
+                        logger.info(
+                            "static line solve: cold-started %d seed(s) + "
+                            "cascade-filled the start to %d/%d covered frame(s)",
+                            n_cs, n_filled, start_end)
+
         # Centre-circle global LENS refinement (post-propagation). The wide ring
         # exposes distortion / principal-point error that central box lines can't
         # constrain — on zoomed-out / midfield shots the box-line lens

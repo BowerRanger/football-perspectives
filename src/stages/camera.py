@@ -1119,7 +1119,7 @@ class CameraStage(BaseStage):
 
             def _solve_at(
                 i: int, seed_R: np.ndarray, seed_fx: float,
-                use_circle: bool = True,
+                use_circle: bool = True, fx0: float | None = None,
             ) -> bool:
                 img = _read(i)
                 if img is None:
@@ -1173,21 +1173,56 @@ class CameraStage(BaseStage):
                         "propagation: f%d rejected — %d line(s), no circle",
                         i, len(lines))
                     return False
+                # Sparse line sets without angular spread (a near-PARALLEL
+                # pair — far touchline + an 18yd edge in origi01's f296-342
+                # dead zone) fit at ~0 rms while fx slides along the line
+                # direction. They may still solve (origi02's short marches
+                # rely on them and are correct) but they cannot MEASURE fx,
+                # so they get a much tighter fx envelope below.
+                parallel_only = False
+                if len(lines) < min_lines:
+                    angs = []
+                    for ln in lines:
+                        d = (np.asarray(ln.image_segment[1], float)
+                             - np.asarray(ln.image_segment[0], float))
+                        angs.append(np.arctan2(d[1], d[0]) % np.pi)
+                    spread = 0.0
+                    for ai in range(len(angs)):
+                        for bi in range(ai + 1, len(angs)):
+                            d = abs(angs[ai] - angs[bi])
+                            spread = max(spread, min(d, np.pi - d))
+                    parallel_only = np.degrees(spread) < 20.0
                 rv_seed, _ = cv2.Rodrigues(seed_R)
-                # Sparse frames: tight-band the focal around the (reliable) seed
-                # so the few lines can't fit a wrong rotation by drifting fx.
+                # Sparse frames: tight-band the focal around the (reliable)
+                # seed so the few lines can't fit a wrong rotation by drifting
+                # fx. Parallel-only sets WITHOUT a circle cannot measure fx at
+                # all — clamp to ~the seed (1 %/step): slow real zoom still
+                # tracks across a march (origi02's span drifts 0.07 %/frame)
+                # while a drift-into-rotation failure (kroupi's tail,
+                # 1.7 %/frame) cannot follow its fx and fails the rms gate
+                # instead. A detected circle DOES pin fx (its projected size
+                # is proportional to it), so circle-aided frames keep the
+                # normal band — clamping them starves the circle commits the
+                # lens refinement depends on.
+                _fxr = (0.01 if (parallel_only and not circ_obs)
+                        else (0.05 if len(lines) < 4 else None))
                 rvec, fx, rms = _solve_frame_at_fixed_c(
                     lines, cx_p, cy_p, dist5_p, C, rv_seed.reshape(3), seed_fx,
-                    fx_rel=0.05 if len(lines) < 4 else None, circle_obs=circ_obs)
+                    fx_rel=_fxr, circle_obs=circ_obs)
                 if ((not np.isfinite(rms) or rms > max_prop_rms)
                         and circ_obs and len(lines) >= prop_min_lines):
                     # A bad/partial circle must NOT block a solvable frame:
                     # retry lines-only (else propagation halts at the barrier —
-                    # this was collapsing origi02 coverage).
+                    # this was collapsing origi02 coverage). The retry is
+                    # lines-only by construction, so a parallel-only set gets
+                    # the seed-clamped fx band here too.
                     rvec, fx, rms = _solve_frame_at_fixed_c(
                         lines, cx_p, cy_p, dist5_p, C, rv_seed.reshape(3),
-                        seed_fx, fx_rel=0.05 if len(lines) < 4 else None)
+                        seed_fx,
+                        fx_rel=(0.01 if parallel_only
+                                else (0.05 if len(lines) < 4 else None)))
                     circ_det = None  # circle rejected -> don't draw it
+                    circ_obs = None
                 rms_gate = circle_max_rms if circ_det is not None else max_prop_rms
                 if not np.isfinite(rms) or rms > rms_gate:
                     logger.debug(
@@ -1204,6 +1239,24 @@ class CameraStage(BaseStage):
                             "pulled %.1f deg from the seed (> %.1f)",
                             i, dev, circle_max_dev)
                         return False
+                # Origin-anchored fx bound for SPREAD-sparse solves: per-step
+                # bands (±5%) cannot stop a long march of exactly-determined
+                # 2-3-line solves from random-walking fx (origi01's f296-342
+                # dead zone walked 4800 -> 2893 over ~47 frames and the
+                # overlay wobbled). Every march inherits the fx of the SOLID
+                # frame it started from; no solve may leave a generous zoom
+                # envelope of it. Parallel-only frames are exempt — their fx
+                # is seed-clamped above, and an origin envelope would reject
+                # the slow REAL zoom their long marches legitimately carry
+                # (origi02's 70-251 span).
+                if (fx0 is not None and len(lines) < 4
+                        and not (parallel_only and circ_obs is None)
+                        and not (0.75 * fx0 <= fx <= 1.3 * fx0)):
+                    logger.debug(
+                        "propagation: f%d rejected — fx %.0f left the march "
+                        "origin envelope [%.0f, %.0f]", i, fx,
+                        0.75 * fx0, 1.3 * fx0)
+                    return False
                 R_e, _ = cv2.Rodrigues(rvec)
                 per_frame_K[i] = np.array(
                     [[fx, 0.0, cx_p], [0.0, fx, cy_p], [0.0, 0.0, 1.0]])
@@ -1257,6 +1310,11 @@ class CameraStage(BaseStage):
 
             def _run_propagation(use_circle: bool) -> int:
                 n_prop = 0
+                # fx of the SOLID frame each march started from — frames
+                # covered before this call are their own origin; propagated
+                # frames inherit. Bounds the cumulative fx walk of long
+                # marches of exactly-determined sparse solves.
+                fx_origin: dict[int, float] = {}
                 progress = True
                 while progress:
                     progress = False
@@ -1269,10 +1327,13 @@ class CameraStage(BaseStage):
                             i = f + direction
                             if not (0 <= i < n_total) or per_frame_K[i] is not None:
                                 continue
+                            fx0 = fx_origin.get(
+                                f, float(per_frame_K[f][0, 0]))
                             nb2 = f - direction
                             # 1) direct solve one step out
                             sR, sfx = _seed(f, nb2, 1)
-                            if _solve_at(i, sR, sfx, use_circle):
+                            if _solve_at(i, sR, sfx, use_circle, fx0):
+                                fx_origin[i] = fx0
                                 n_prop += 1; progress = True
                                 continue
                             # 1b) circle pass: the velocity extrapolation can
@@ -1281,7 +1342,8 @@ class CameraStage(BaseStage):
                             # retry with the plain neighbour camera.
                             if use_circle and _solve_at(
                                     i, np.asarray(per_frame_R[f]),
-                                    float(per_frame_K[f][0, 0]), True):
+                                    float(per_frame_K[f][0, 0]), True, fx0):
+                                fx_origin[i] = fx0
                                 n_prop += 1; progress = True
                                 continue
                             # 2) barrier: look outward up to max_bridge for a
@@ -1293,7 +1355,8 @@ class CameraStage(BaseStage):
                                 if not (0 <= j < n_total) or per_frame_K[j] is not None:
                                     continue
                                 sRk, sfxk = _seed(f, nb2, k)
-                                if _solve_at(j, sRk, sfxk, use_circle):
+                                if _solve_at(j, sRk, sfxk, use_circle, fx0):
+                                    fx_origin[j] = fx0
                                     reacq = j
                                     break
                             if reacq is not None:

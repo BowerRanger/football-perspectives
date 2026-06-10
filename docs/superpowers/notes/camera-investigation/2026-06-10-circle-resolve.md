@@ -127,6 +127,41 @@ of a CORRECT Huber-solved lock, so circle frames gate on the median
 relax to 6° for sweep/refine (coarse-grid candidates legitimately pull that
 far toward truth; 3° stays for adjacent-seed cascade fills).
 
+## User-reported issues (post-milestone) + next lever
+
+1. **Cross-image streaks (origi02 f215+, viewer)** — DISPLAY bug: catalogue
+   points beyond the distortion polynomial's monotonic radius (fold at
+   r=1.10 normalized for k1=0.22) fold back INSIDE the image. Fixed with a
+   fold-radius clip in anchor_editor.html (`distortionFoldR2`) and
+   dump_overlay_frames.py. The solver was never affected.
+2. **Far-field 1-2 m error (origi02 pre-box span; kroupi f123+)** — the far
+   touchline is essentially never DETECTED (low contrast under the bright
+   boards; a 1-2 m camera error puts it outside the ±25 px strip), so nothing
+   pins the far field. Confirmed visually: kroupi f123's projected far
+   touchline lands ON the advertising boards while detections sit on paint.
+3. **origi01 f289-354 wobble** — three stacked causes, found by peeling:
+   (a) circle-dominant partial-arc solves (arc 0.3-0.5 in view) wobble →
+   require arc fraction >= 0.5 when < 2 straight lines; (b) near-PARALLEL
+   sparse line pairs fit at ~0 rms while fx slides → angular-spread gate
+   (>= 20 deg) on sparse lines-only solves, applied to the fallback path too
+   (the first version leaked through it); (c) the killer: a 47-frame march of
+   exactly-determined 2-line solves random-walks fx (4800 -> 2893) even with
+   good spread and per-step bands — fixed with an ORIGIN-ANCHORED envelope:
+   every march inherits the fx of the solid frame it started from and no
+   solve may leave [0.75, 1.3]x of it. Result: the dead zone falls to smooth
+   SLERP between the f286 island and the box bracket — steady drift instead
+   of jumping. Per-frame ACCURACY there awaits the hoardings constraint
+   (the boards are crisp in exactly those frames).
+
+**Next lever — advertising hoardings as a static scene line (user idea)**:
+board base = line parallel to the far touchline at unknown per-clip (offset d,
+height h), solved once in the global bundle, then a per-frame constraint
+wherever visible (= everywhere, incl. origi01's start and dead zone). Highest-
+contrast feature in exactly the starved zone; also disambiguates the far
+touchline (search below the solved board line). Prefer this over further
+circle tuning — it addresses origi02 far field, kroupi tail, and origi01
+start/dead-zone at once.
+
 **origi01 result: 100 % coverage (506/506) for the first time.** Clicks:
 box 6.6-10.5 px, midfield 14.5-22.5 px, start 30.8-158.9 px (lens-limited —
 degrades toward f0 because the circle-LENS refinement silently skipped:

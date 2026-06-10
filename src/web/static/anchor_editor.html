@@ -901,9 +901,27 @@ function drawLandmarkLabels(ctx) {
   }
 }
 
+function distortionFoldR2(k1, k2) {
+  // Largest r^2 where r*(1 + k1 r^2 + k2 r^4) is still increasing — beyond
+  // it the polynomial folds back and pulls far-outside points INSIDE the
+  // image (they render as confident-looking streaks across the frame).
+  // d/dr = 1 + 3 k1 r^2 + 5 k2 r^4 = 0, a quadratic in r^2.
+  if (Math.abs(k2) < 1e-12) {
+    return k1 >= 0 ? Infinity : -1 / (3 * k1);
+  }
+  const a = 5 * k2, b = 3 * k1, c = 1;
+  const disc = b * b - 4 * a * c;
+  if (disc < 0) return Infinity;
+  const sq = Math.sqrt(disc);
+  const roots = [(-b + sq) / (2 * a), (-b - sq) / (2 * a)].filter((r) => r > 0);
+  return roots.length ? Math.min(...roots) : Infinity;
+}
+
 function applyRadialDistortion(uv, distortion, K) {
   // OpenCV-compatible 2-coefficient radial distortion. Returns the
-  // distorted pixel (u', v') given the linear-pinhole projection (u, v).
+  // distorted pixel (u', v') given the linear-pinhole projection (u, v),
+  // or null when the point lies beyond the polynomial's monotonic range
+  // (its distorted position is meaningless — the fold-back streak bug).
   // Used to make the projected pitch overlay match the raw video frame
   // when the camera has non-zero radial distortion.
   if (!distortion || (distortion[0] === 0 && distortion[1] === 0)) return uv;
@@ -913,6 +931,7 @@ function applyRadialDistortion(uv, distortion, K) {
   const y = (uv[1] - cy) / fy;
   const r2 = x * x + y * y;
   const k1 = distortion[0], k2 = distortion[1];
+  if (r2 > 0.9 * distortionFoldR2(k1, k2)) return null;
   const factor = 1 + k1 * r2 + k2 * r2 * r2;
   return [cx + fx * x * factor, cy + fy * y * factor];
 }
@@ -929,6 +948,10 @@ function projectPoint(p, K, R, t, distortion) {
   const u = (K[0][0]*cx + K[0][1]*cy + K[0][2]*cz) / cz;
   const v = (K[1][0]*cx + K[1][1]*cy + K[1][2]*cz) / cz;
   const distorted = applyRadialDistortion([u, v], distortion, K);
+  // applyRadialDistortion returns null beyond the distortion fold radius
+  // (such points pull back INSIDE the image with small coordinates that
+  // slip the magnitude guard below — the cross-image streak bug).
+  if (!distorted) return null;
   // Grazing incidence: cz > 0.05 passes the behind-camera guard above, but
   // a far-off-axis point near the camera horizon projects to a moderately
   // large pixel coord that radial distortion then amplifies to millions

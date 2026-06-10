@@ -33,6 +33,36 @@ def _angle_between(R1: np.ndarray, R2: np.ndarray) -> float:
     return float(np.degrees(np.arccos(cos_t)))
 
 
+def _circle_in_view_fraction(
+    K: np.ndarray, R: np.ndarray, t: np.ndarray, image_size: tuple[int, int],
+) -> float:
+    """Fraction of the catalogue centre circle that projects inside the image
+    under (K, R, t). Gate for circle-aided solves: when the true circle is
+    mostly out of view, the circle detector strip-searches over unrelated
+    painted ridges (box lines, the D-arc) and hallucinates a lock that yanks
+    the solve (origi02's behind-goal start)."""
+    from src.utils.circle_detector import (
+        CENTRE_CIRCLE_CENTRE,
+        CENTRE_CIRCLE_RADIUS,
+    )
+    ang = np.linspace(0.0, 2 * np.pi, 72, endpoint=False)
+    world = np.stack([
+        CENTRE_CIRCLE_CENTRE[0] + CENTRE_CIRCLE_RADIUS * np.cos(ang),
+        CENTRE_CIRCLE_CENTRE[1] + CENTRE_CIRCLE_RADIUS * np.sin(ang),
+        np.zeros_like(ang),
+    ], axis=1)
+    cam = world @ np.asarray(R).T + np.asarray(t)
+    in_front = cam[:, 2] > 0.1
+    if not in_front.any():
+        return 0.0
+    pix = cam[in_front] @ np.asarray(K).T
+    uv = pix[:, :2] / pix[:, 2:3]
+    w, h = image_size
+    inside = ((uv[:, 0] >= 0) & (uv[:, 0] < w)
+              & (uv[:, 1] >= 0) & (uv[:, 1] < h))
+    return float(inside.sum()) / len(ang)
+
+
 def _generate_auto_anchors(shot_id, clip_path, cfg):
     """Run the PnLCalib auto-anchor pipeline for one shot. Returns an
     AnchorSet or None. Heavy imports are local so the camera stage has no
@@ -881,10 +911,71 @@ class CameraStage(BaseStage):
                 for ln in per_frame_lines.get(fid, [])
             ]
 
-        # One-C consistency: frames the solve skipped still share C.
-        for i in covered:
-            if i not in sol.per_frame_KRt and per_frame_R[i] is not None:
-                per_frame_t[i] = -per_frame_R[i] @ C
+        # Frames the bundle skipped (no/too-few straight lines) carry rotations
+        # solved under the PRE-bundle geometry (anchor-stage C / principal
+        # point). Keeping that R while re-deriving t against the bundle's C
+        # silently shifts their projections by metres (origi01's midfield sat
+        # ~330 px off the user's clicks). Demote them to UNCOVERED so the
+        # propagation / cold-start passes below re-solve them against their own
+        # detected lines (+ centre circle) at the final locked geometry; frames
+        # nothing can re-solve are SLERP-filled between solved neighbours at
+        # the end — interpolation between consistent frames, not stale poses.
+        # gberch (every frame bundle-solved) demotes nothing.
+        anchor_resolved_frames: set[int] = set()
+        if bool(cfg.get("line_extraction_resolve_underlined", True)):
+            from src.utils.static_c_profile import (
+                _solve_frame_at_fixed_c as _dm_solve,
+            )
+            from src.utils.static_line_solver import _dist5 as _dm_d5
+            dm_d5 = _dm_d5(sol.distortion)
+            dm_cx, dm_cy = sol.principal_point
+            dm_gate = float(cfg.get("line_extraction_anchor_resolve_max_rms", 30.0))
+            demoted = [
+                i for i in covered
+                if i not in sol.per_frame_KRt and per_frame_R[i] is not None
+            ]
+            n_anchor_resolved = 0
+            for i in demoted:
+                # Anchor frames carry real constraints (their landmark points
+                # — PnLCalib or manual): re-solve (rvec, fx) against them at
+                # the LOCKED geometry instead of discarding. These become
+                # solved islands inside otherwise feature-poor spans, which
+                # the propagation pass then fills between (origi01's midfield
+                # circle span is unreachable from the box end without them).
+                lms = anchor_landmarks.get(i)
+                if lms and len(lms) >= 4:
+                    rv, _ = cv2.Rodrigues(np.asarray(per_frame_R[i]))
+                    fx0 = float(per_frame_K[i][0, 0])
+                    rvec, fx, rms = _dm_solve(
+                        [], dm_cx, dm_cy, dm_d5, C, rv.reshape(3), fx0,
+                        circle_obs=lms, circle_weight=1.0)
+                    if np.isfinite(rms) and rms <= dm_gate:
+                        R2, _ = cv2.Rodrigues(rvec)
+                        per_frame_K[i] = np.array(
+                            [[fx, 0.0, dm_cx], [0.0, fx, dm_cy],
+                             [0.0, 0.0, 1.0]])
+                        per_frame_R[i] = R2
+                        per_frame_t[i] = -R2 @ C
+                        per_frame_conf[i] = 0.5
+                        n_anchor_resolved += 1
+                        anchor_resolved_frames.add(i)
+                        continue
+                per_frame_K[i] = None
+                per_frame_R[i] = None
+                per_frame_t[i] = None
+                per_frame_conf[i] = 0.0
+            if demoted:
+                logger.info(
+                    "static line solve: demoted %d pre-bundle interp frame(s) "
+                    "for re-solve at the locked geometry (%d anchor frame(s) "
+                    "point-re-solved in place)",
+                    len(demoted), n_anchor_resolved,
+                )
+        else:
+            # One-C consistency: frames the solve skipped still share C.
+            for i in covered:
+                if i not in sol.per_frame_KRt and per_frame_R[i] is not None:
+                    per_frame_t[i] = -per_frame_R[i] @ C
 
         # Q2 — coverage extension. Solve frames BEYOND the anchor span where
         # PnLCalib gives a plausible camera and lines are detectable (e.g. the
@@ -895,8 +986,17 @@ class CameraStage(BaseStage):
         if bool(cfg.get("line_extraction_extend_coverage", True)):
             from src.utils.static_c_profile import _solve_frame_at_fixed_c
             from src.utils.static_line_solver import _dist5
+            # Only frames BEYOND the solved span: interior frames (incl. the
+            # demoted pre-bundle ones) are the propagation pass's job and
+            # don't warrant a per-frame PnLCalib inference here.
+            _solved_now = [
+                i for i in range(len(per_frame_K)) if per_frame_K[i] is not None
+            ]
+            _lo = min(_solved_now) if _solved_now else 0
+            _hi = max(_solved_now) if _solved_now else -1
             uncovered = [
-                i for i in range(len(per_frame_K)) if per_frame_K[i] is None
+                i for i in range(len(per_frame_K))
+                if per_frame_K[i] is None and not (_lo < i < _hi)
             ]
             ext_bgr: dict[int, np.ndarray] = {}
             for i in uncovered:
@@ -975,6 +1075,18 @@ class CameraStage(BaseStage):
             prop_dist = tuple(float(x) for x in sol.distortion[:2])
             max_prop_rms = float(cfg.get("line_extraction_extend_max_rms", 4.0))
             prop_circle = bool(cfg.get("line_extraction_propagate_circle", True))
+            # Circle-aided sparse frames sit on the wide/midfield end where a
+            # still-imperfect global lens inflates the residual (the same
+            # lens-limited acceptance the cold-start uses); the post-
+            # propagation circle-lens refinement then corrects the lens.
+            circle_max_rms = float(
+                cfg.get("line_extraction_propagate_circle_max_rms", 12.0))
+            # A CORRECT circle refines the (adjacent-frame) velocity seed by a
+            # fraction of a degree; a FALSE lock (wrong ridge under a wrong
+            # pre-refinement lens — origi02's wide start) yanks it. Bound the
+            # pull so false locks can't poison the propagation boundary.
+            circle_max_dev = float(
+                cfg.get("line_extraction_propagate_circle_max_dev_deg", 3.0))
             # Propagation can accept fewer lines than the cold main solve: it
             # has a strong per-frame seed (the covered neighbour), so a frame
             # with 3 well-conditioned box lines solves cleanly, and the rms gate
@@ -1005,7 +1117,10 @@ class CameraStage(BaseStage):
                     return seed_R, seed_fx
                 return R1, fx1
 
-            def _solve_at(i: int, seed_R: np.ndarray, seed_fx: float) -> bool:
+            def _solve_at(
+                i: int, seed_R: np.ndarray, seed_fx: float,
+                use_circle: bool = True,
+            ) -> bool:
                 img = _read(i)
                 if img is None:
                     return False
@@ -1021,12 +1136,27 @@ class CameraStage(BaseStage):
                 # Centre circle: a strong, well-spread constraint where straight
                 # lines are sparse — lets propagation cross featureless spans and
                 # better-pins under-constrained frames. Detected under zero
-                # distortion (the catalogue-projection lesson).
+                # distortion (the catalogue-projection lesson). Only consulted
+                # when the frame is line-SPARSE (< the under-determined
+                # threshold): well-lined frames solve from lines alone, so the
+                # circle can never trade away their straight-line fit (the
+                # regression that originally got propagate_circle disabled).
                 circ_obs = None
                 circ_det = None
-                if prop_circle:
+                if (use_circle and prop_circle and len(lines) < min_lines
+                        and _circle_in_view_fraction(
+                            seed_K, seed_R, seed_t,
+                            anchors.image_size) >= 0.3):
+                    # The circle gets a wider search strip than lines: it has
+                    # no adjacent-parallel-feature to mis-lock onto, and at
+                    # long focal a fraction of a degree of seed error already
+                    # displaces its projection by the line strip width.
                     circ_det = detect_circle(
-                        img, seed_K, seed_R, seed_t, (0.0, 0.0), det_cfg)
+                        img, seed_K, seed_R, seed_t, (0.0, 0.0),
+                        DetectorConfig(
+                            search_strip_px=max(
+                                50, det_cfg.search_strip_px),
+                            min_gradient=det_cfg.min_gradient))
                     if circ_det is not None:
                         k = min(20, len(circ_det.image_points))
                         idx = np.linspace(
@@ -1039,6 +1169,9 @@ class CameraStage(BaseStage):
                             for j in idx
                         ]
                 if len(lines) < prop_min_lines and not circ_obs:
+                    logger.debug(
+                        "propagation: f%d rejected — %d line(s), no circle",
+                        i, len(lines))
                     return False
                 rv_seed, _ = cv2.Rodrigues(seed_R)
                 # Sparse frames: tight-band the focal around the (reliable) seed
@@ -1055,8 +1188,22 @@ class CameraStage(BaseStage):
                         lines, cx_p, cy_p, dist5_p, C, rv_seed.reshape(3),
                         seed_fx, fx_rel=0.05 if len(lines) < 4 else None)
                     circ_det = None  # circle rejected -> don't draw it
-                if not np.isfinite(rms) or rms > max_prop_rms:
+                rms_gate = circle_max_rms if circ_det is not None else max_prop_rms
+                if not np.isfinite(rms) or rms > rms_gate:
+                    logger.debug(
+                        "propagation: f%d rejected — rms %.2f > %.2f "
+                        "(%d line(s), circle=%s)", i, rms, rms_gate,
+                        len(lines), circ_obs is not None)
                     return False
+                if circ_det is not None:
+                    R_chk, _ = cv2.Rodrigues(rvec)
+                    dev = _angle_between(np.asarray(seed_R), R_chk)
+                    if dev > circle_max_dev:
+                        logger.debug(
+                            "propagation: f%d rejected — circle-aided solve "
+                            "pulled %.1f deg from the seed (> %.1f)",
+                            i, dev, circle_max_dev)
+                        return False
                 R_e, _ = cv2.Rodrigues(rvec)
                 per_frame_K[i] = np.array(
                     [[fx, 0.0, cx_p], [0.0, fx, cy_p], [0.0, 0.0, 1.0]])
@@ -1107,45 +1254,69 @@ class CameraStage(BaseStage):
                     per_frame_conf[m] = 0.35
 
             max_bridge = int(cfg.get("line_extraction_propagate_max_bridge", 8))
-            n_prop = 0
-            progress = True
-            while progress:
-                progress = False
-                for direction in (-1, +1):
-                    order = (range(n_total) if direction > 0
-                             else range(n_total - 1, -1, -1))
-                    for f in order:
-                        if per_frame_K[f] is None:
-                            continue
-                        i = f + direction
-                        if not (0 <= i < n_total) or per_frame_K[i] is not None:
-                            continue
-                        nb2 = f - direction
-                        # 1) direct solve one step out
-                        sR, sfx = _seed(f, nb2, 1)
-                        if _solve_at(i, sR, sfx):
-                            n_prop += 1; progress = True
-                            continue
-                        # 2) barrier: look outward up to max_bridge for a frame
-                        #    that re-acquires; if found, bridge the gap between.
-                        reacq = None
-                        for k in range(2, max_bridge + 2):
-                            j = f + direction * k
-                            if not (0 <= j < n_total) or per_frame_K[j] is not None:
+
+            def _run_propagation(use_circle: bool) -> int:
+                n_prop = 0
+                progress = True
+                while progress:
+                    progress = False
+                    for direction in (-1, +1):
+                        order = (range(n_total) if direction > 0
+                                 else range(n_total - 1, -1, -1))
+                        for f in order:
+                            if per_frame_K[f] is None:
                                 continue
-                            sRk, sfxk = _seed(f, nb2, k)
-                            if _solve_at(j, sRk, sfxk):
-                                reacq = j
-                                break
-                        if reacq is not None:
-                            lo, hi = (reacq, f) if reacq < f else (f, reacq)
-                            _bridge(lo, hi)
-                            n_prop += 1; progress = True
+                            i = f + direction
+                            if not (0 <= i < n_total) or per_frame_K[i] is not None:
+                                continue
+                            nb2 = f - direction
+                            # 1) direct solve one step out
+                            sR, sfx = _seed(f, nb2, 1)
+                            if _solve_at(i, sR, sfx, use_circle):
+                                n_prop += 1; progress = True
+                                continue
+                            # 1b) circle pass: the velocity extrapolation can
+                            # be poisoned where two solve regimes meet (an
+                            # anchor island next to a circle-solved frame);
+                            # retry with the plain neighbour camera.
+                            if use_circle and _solve_at(
+                                    i, np.asarray(per_frame_R[f]),
+                                    float(per_frame_K[f][0, 0]), True):
+                                n_prop += 1; progress = True
+                                continue
+                            # 2) barrier: look outward up to max_bridge for a
+                            #    frame that re-acquires; if found, bridge the
+                            #    gap between.
+                            reacq = None
+                            for k in range(2, max_bridge + 2):
+                                j = f + direction * k
+                                if not (0 <= j < n_total) or per_frame_K[j] is not None:
+                                    continue
+                                sRk, sfxk = _seed(f, nb2, k)
+                                if _solve_at(j, sRk, sfxk, use_circle):
+                                    reacq = j
+                                    break
+                            if reacq is not None:
+                                lo, hi = (reacq, f) if reacq < f else (f, reacq)
+                                _bridge(lo, hi)
+                                n_prop += 1; progress = True
+                return n_prop
+
+            # PASS 1 — line-only. Circle-aided solves are lens-limited
+            # (accepted at a relaxed rms while the global lens is still
+            # imperfect); letting them march past the clean line boundary
+            # accumulates drift and walks fx, poisoning the boundary frame the
+            # cold-start uses as its reference (origi02's start). Lines first,
+            # cold-start from the clean boundary, circle pass after.
+            n_prop = _run_propagation(use_circle=False)
             if n_prop:
                 logger.info(
                     "static line solve: propagated coverage to %d additional "
                     "frame(s) (incl. bridged feature-poor barriers)", n_prop,
                 )
+            circle_propagation = _run_propagation if prop_circle else None
+        else:
+            circle_propagation = None
 
         # Cold-start bootstrap for the uncovered START of the clip (runs AFTER
         # propagation, so the reference orientation is the midfield boundary
@@ -1163,8 +1334,13 @@ class CameraStage(BaseStage):
         if bool(cfg.get("line_extraction_cold_start", True)):
             from scipy.spatial.transform import Rotation as _CSRot
 
+            from src.schemas.anchor import LandmarkObservation
+            from src.utils.circle_detector import detect_circle as _cs_detect_circle
             from src.utils.static_c_profile import _solve_frame_at_fixed_c as _cs_solve_frame
             from src.utils.static_line_solver import _dist5 as _cs_dist5
+            from src.utils.static_line_solver import (
+                _line_residuals_distorted as _cs_lres,
+            )
             _csc = [i for i in range(len(per_frame_K)) if per_frame_K[i] is not None]
             start_end = min(_csc) if _csc else 0
             if start_end > 0:
@@ -1186,9 +1362,18 @@ class CameraStage(BaseStage):
                     tilt_ax = np.cross(pan_ax, R_ref[2])
                     tilt_ax /= np.linalg.norm(tilt_ax)
                     cs_max_rms = float(cfg.get("line_extraction_cold_start_max_rms", 12.0))
+                    # Circle-aided start frames gate on the MEDIAN residual,
+                    # which under a still-wrong wide-field lens is dominated by
+                    # global lens error across the circle's full arc (origi01:
+                    # 13-37 px median at the start under the box-solved lens).
+                    # Accept lens-limited locks — the post-propagation circle-
+                    # lens refinement + post-lens re-solve then correct them.
+                    cs_circle_max_rms = float(cfg.get(
+                        "line_extraction_cold_start_circle_max_rms", 40.0))
                     cs_min_lines = int(cfg.get("line_extraction_cold_start_min_lines", 3))
 
-                    def _cs_solve_at(img, fid, R, fx, strip):
+                    def _cs_solve_at(img, fid, R, fx, strip,
+                                     allow_circle=False, max_pull=3.0):
                         sK = np.array([[fx, 0, cs_cx], [0, fx, cs_cy], [0, 0, 1.0]])
                         det = detect_lines_for_frames(
                             {fid: img}, {fid: {"K": sK, "R": R, "t": -R @ C}},
@@ -1196,24 +1381,79 @@ class CameraStage(BaseStage):
                                 search_strip_px=strip, min_gradient=10.0),
                             min_confidence=det_min_confidence,
                             min_n_samples=det_min_n_samples, min_lines=1).get(fid, [])
+                        # Line-sparse start frames (e.g. a parallel 18yd pair,
+                        # or halfway line only) are under-determined from
+                        # straight lines — the centre circle disambiguates
+                        # them, exactly as in propagation. The circle gets a
+                        # much wider strip than lines: the sweep grid is
+                        # 4-5 deg coarse, which at broadcast focal displaces
+                        # the projected circle by >100 px; the iterative
+                        # refine converges true locks while the rms + pull +
+                        # boundary-deviation gates reject false ones.
+                        circ_obs = None
+                        circ_det = None
                         if len(det) < cs_min_lines:
-                            return None
+                            if (allow_circle
+                                    and _circle_in_view_fraction(
+                                        sK, R, -R @ C,
+                                        anchors.image_size) >= 0.3):
+                                circ_det = _cs_detect_circle(
+                                    img, sK, R, -R @ C, (0.0, 0.0),
+                                    DetectorConfig(
+                                        search_strip_px=max(100, 2 * strip),
+                                        min_gradient=10.0))
+                            if circ_det is None:
+                                return None
+                            k = min(20, len(circ_det.image_points))
+                            idx = np.linspace(
+                                0, len(circ_det.image_points) - 1, k).astype(int)
+                            circ_obs = [
+                                LandmarkObservation(
+                                    name=circ_det.name,
+                                    image_xy=circ_det.image_points[j],
+                                    world_xyz=circ_det.world_points[j])
+                                for j in idx
+                            ]
                         rv, _ = cv2.Rodrigues(R)
                         rvec, fx2, rms = _cs_solve_frame(
                             det, cs_cx, cs_cy, cs_d5, C, rv.reshape(3), fx,
-                            fx_rel=0.05 if len(det) < 4 else None)
+                            fx_rel=0.05 if len(det) < 4 else None,
+                            circle_obs=circ_obs)
                         if not np.isfinite(rms):
                             return None
                         Re, _ = cv2.Rodrigues(rvec)
-                        return Re, fx2, rms, det
+                        if circ_obs is not None and _angle_between(
+                                np.asarray(R), Re) > max_pull:
+                            # false circle lock yanking away from the seed
+                            return None
+                        if circ_obs is not None:
+                            # The wide circle strip admits fat-tail outliers
+                            # (players, the D-arc) that inflate the RAW rms of
+                            # a correct, Huber-solved lock; gate circle-aided
+                            # frames on the MEDIAN absolute residual instead.
+                            from src.utils.anchor_solver import (
+                                _point_residuals_distorted as _cs_pres,
+                            )
+                            K2 = np.array([[fx2, 0, cs_cx], [0, fx2, cs_cy],
+                                           [0, 0, 1.0]])
+                            pr = np.asarray(_cs_pres(
+                                circ_obs, K2, rvec, -Re @ C,
+                                (float(cs_dist[0]), float(cs_dist[1]))))
+                            pn = np.linalg.norm(pr.reshape(-1, 2), axis=1)
+                            lr = _cs_lres(det, K2, rvec, -Re @ C, cs_d5)
+                            allr = np.concatenate(
+                                [pn, np.abs(np.asarray(lr).ravel())]
+                                if len(det) else [pn])
+                            rms = float(np.median(allr))
+                        return Re, fx2, rms, det, circ_det
 
-                    def _cs_commit(f, Re, fx, det):
+                    def _cs_commit(f, Re, fx, det, circ_det=None):
                         per_frame_K[f] = np.array(
                             [[fx, 0, cs_cx], [0, fx, cs_cy], [0, 0, 1.0]])
                         per_frame_R[f] = Re
                         per_frame_t[f] = -Re @ C
                         per_frame_conf[f] = 0.4
-                        detected_lines_by_frame[f] = [
+                        entries = [
                             {"name": ln.name,
                              "image_segment": [list(ln.image_segment[0]),
                                                list(ln.image_segment[1])],
@@ -1221,6 +1461,18 @@ class CameraStage(BaseStage):
                                                list(ln.world_segment[1])]}
                             for ln in det
                         ]
+                        if circ_det is not None:
+                            ip = circ_det.image_points
+                            wp = circ_det.world_points
+                            for a in range(len(ip) - 1):
+                                entries.append({
+                                    "name": "centre_circle",
+                                    "image_segment": [list(ip[a]),
+                                                      list(ip[a + 1])],
+                                    "world_segment": [list(wp[a]),
+                                                      list(wp[a + 1])],
+                                })
+                        detected_lines_by_frame[f] = entries
 
                     _cs_imgs: dict[int, np.ndarray | None] = {}
 
@@ -1241,31 +1493,60 @@ class CameraStage(BaseStage):
                                 Rc = (_CSRot.from_rotvec(pan_ax * np.radians(dp))
                                       * _CSRot.from_rotvec(tilt_ax * np.radians(dt))
                                       ).as_matrix() @ R_ref
-                                r = _cs_solve_at(img, fid, Rc, fx_ref, 40)
+                                # Circle allowed: with fx_ref taken from the
+                                # covered boundary each candidate solves
+                                # independently (no per-step fx walk — the
+                                # degeneracy that sinks circle-only
+                                # PROPAGATION marches), the ranking prefers
+                                # line-rich candidates, and clips whose start
+                                # detects >=cs_min_lines lines (origi02) never
+                                # consult the circle at all.
+                                r = _cs_solve_at(img, fid, Rc, fx_ref, 40,
+                                                 allow_circle=True,
+                                                 max_pull=6.0)
                                 if r is None:
                                     continue
                                 if best is None or (len(r[3]), -r[2]) > (
                                         len(best[3]), -best[2]):
                                     best = r
                         if best is None:
+                            logger.debug(
+                                "cold-start f%d: no sweep candidate", fid)
                             return None
-                        Re, fx, rms, det = best
+                        Re, fx, rms, det, circ = best
                         for _ in range(4):  # iterative refine: re-detect under the solve
-                            r = _cs_solve_at(img, fid, Re, fx, 30)
+                            r = _cs_solve_at(img, fid, Re, fx, 30,
+                                             allow_circle=True, max_pull=6.0)
                             if r is None:
                                 break
-                            Re, fx, rms, det = r
-                        if rms > cs_max_rms:
+                            Re, fx, rms, det, circ = r
+                        gate = (cs_circle_max_rms if circ is not None
+                                else cs_max_rms)
+                        if rms > gate:
+                            logger.debug(
+                                "cold-start f%d: rejected — refined rms %.1f "
+                                "> %.1f (%d lines, circle=%s)", fid, rms,
+                                gate, len(det), circ is not None)
                             return None
-                        return Re, fx, det
+                        return Re, fx, det, circ
 
                     # Cold-start a handful of evenly-spaced start frames.
                     cs_seeds: dict[int, tuple] = {}
                     cs_step = max(1, start_end // 8)
-                    for fid in range(0, start_end, cs_step):
+                    cs_tried = list(range(0, start_end, cs_step))
+                    for fid in cs_tried:
                         out = _cold_start_one(fid)
                         if out is not None:
                             cs_seeds[fid] = out
+                            logger.debug(
+                                "cold-start sweep: f%d seeded (%d lines, "
+                                "circle=%s)", fid, len(out[2]),
+                                out[3] is not None)
+                    logger.info(
+                        "static line solve: cold-start sweep tried %d start "
+                        "frame(s) -> %d seed(s)%s", len(cs_tried),
+                        len(cs_seeds),
+                        "" if len(cs_seeds) >= 2 else " (<2 -> start skipped)")
 
                     def _csgeo(a, b):
                         c = (np.trace(np.asarray(a).T @ np.asarray(b)) - 1) / 2
@@ -1280,8 +1561,8 @@ class CameraStage(BaseStage):
                         keep = [f for f in sorted(cs_seeds)
                                 if _csgeo(cs_seeds[f][0], R_ref) < cs_max_dev]
                         for f in keep:
-                            Re, fx, det = cs_seeds[f]
-                            _cs_commit(f, Re, fx, det)
+                            Re, fx, det, circ = cs_seeds[f]
+                            _cs_commit(f, Re, fx, det, circ)
                             n_cs += 1
                         # Cascade-fill the gaps between the cold-started seeds and
                         # the covered boundary: each uncovered start frame is
@@ -1308,9 +1589,13 @@ class CameraStage(BaseStage):
                                         continue
                                     r = _cs_solve_at(
                                         img, f, np.asarray(per_frame_R[nb]),
-                                        float(per_frame_K[nb][0, 0]), 30)
-                                    if r is not None and r[2] <= cs_max_rms:
-                                        _cs_commit(f, r[0], r[1], r[3])
+                                        float(per_frame_K[nb][0, 0]), 30,
+                                        allow_circle=True)
+                                    if r is not None and r[2] <= (
+                                            cs_circle_max_rms
+                                            if r[4] is not None
+                                            else cs_max_rms):
+                                        _cs_commit(f, r[0], r[1], r[3], r[4])
                                         fillprog = True
                     if n_cs:
                         n_filled = sum(1 for i in range(start_end)
@@ -1319,6 +1604,60 @@ class CameraStage(BaseStage):
                             "static line solve: cold-started %d seed(s) + "
                             "cascade-filled the start to %d/%d covered frame(s)",
                             n_cs, n_filled, start_end)
+
+        # PASS 2 — circle-aided propagation, AFTER the cold-start so its
+        # lens-limited solves can only fill spans neither lines nor the
+        # orientation sweep could reach (origi01's circle-only midfield and
+        # start, marching from the point-re-solved anchor islands). Clips the
+        # cold-start already completed (origi02) leave nothing to fill.
+        if circle_propagation is not None:
+            n_prop2 = circle_propagation(True)
+            if n_prop2:
+                logger.info(
+                    "static line solve: circle-aided propagation covered %d "
+                    "additional frame(s)", n_prop2,
+                )
+
+        # Final interior gap-fill: any frame still uncovered BETWEEN two solved
+        # frames (a demoted pre-bundle frame nothing could re-solve, or a
+        # featureless barrier longer than propagate_max_bridge) gets SLERP/LERP
+        # interpolation between its solved brackets — consistent with the
+        # locked geometry, unlike the stale pre-bundle pose it replaced. Head
+        # and tail gaps are left to cold-start / coverage extension. No
+        # interior gaps -> no-op (gberch). Re-run after the lens refinement,
+        # which may invalidate frames it could not re-solve.
+        def _fill_interior_gaps() -> int:
+            from scipy.spatial.transform import Rotation as _GRot
+            from scipy.spatial.transform import Slerp as _GSlerp
+            solved = [i for i in range(len(per_frame_K))
+                      if per_frame_K[i] is not None]
+            n_filled = 0
+            for a, b in zip(solved, solved[1:]):
+                if b - a <= 1:
+                    continue
+                slerp = _GSlerp([float(a), float(b)], _GRot.from_matrix(
+                    [per_frame_R[a], per_frame_R[b]]))
+                fxa = float(per_frame_K[a][0, 0])
+                fxb = float(per_frame_K[b][0, 0])
+                cxa, cya = float(per_frame_K[a][0, 2]), float(per_frame_K[a][1, 2])
+                for m in range(a + 1, b):
+                    Rm = slerp([float(m)]).as_matrix()[0]
+                    w = (m - a) / (b - a)
+                    fxm = (1 - w) * fxa + w * fxb
+                    per_frame_K[m] = np.array(
+                        [[fxm, 0.0, cxa], [0.0, fxm, cya], [0.0, 0.0, 1.0]])
+                    per_frame_R[m] = Rm
+                    per_frame_t[m] = -Rm @ C
+                    per_frame_conf[m] = 0.3
+                    n_filled += 1
+            return n_filled
+
+        n_gap_filled = _fill_interior_gaps()
+        if n_gap_filled:
+            logger.info(
+                "static line solve: SLERP-filled %d interior gap frame(s) "
+                "between solved brackets", n_gap_filled,
+            )
 
         # Centre-circle global LENS refinement (post-propagation). The wide ring
         # exposes distortion / principal-point error that central box lines can't
@@ -1331,7 +1670,7 @@ class CameraStage(BaseStage):
         if bool(cfg.get("line_extraction_circle_lens", True)):
             import dataclasses
 
-            from src.schemas.anchor import LineObservation
+            from src.schemas.anchor import LandmarkObservation, LineObservation
             from src.utils.ellipse_detector import detect_circle_ellipse
             from src.utils.static_line_solver import _ellipse_residuals_distorted
             cur_dist = tuple(float(x) for x in sol.distortion[:2])
@@ -1407,14 +1746,77 @@ class CameraStage(BaseStage):
                             per_frame_K[fid] = K2
                             per_frame_R[fid] = R2
                             per_frame_t[fid] = t2
-                        # re-derive frames the lens refinement didn't solve with
-                        # the new principal point + centre.
+                        # Frames the lens refinement didn't solve carry
+                        # rotations from the OLD geometry — patching pp/C
+                        # under them shifts their projections (the origi01
+                        # midfield bug in miniature). Re-solve each against
+                        # its own stored detections (lines + circle points)
+                        # under the NEW lens; frames with nothing to re-solve
+                        # against (or that fail the gate) are invalidated and
+                        # SLERP-filled between refined neighbours below.
+                        from src.utils.static_c_profile import (
+                            _solve_frame_at_fixed_c as _lr_solve,
+                        )
+                        from src.utils.static_line_solver import _dist5 as _lr_d5
+                        lr_d5 = _lr_d5(sol_l.distortion)
+                        lr_gate = float(cfg.get(
+                            "line_extraction_propagate_circle_max_rms", 12.0))
+                        n_lr_resolved = 0
                         for fid in covered_now:
-                            if fid not in sol_l.per_frame_KRt:
-                                K2 = per_frame_K[fid].copy()
-                                K2[0, 2] = cxn; K2[1, 2] = cyn
-                                per_frame_K[fid] = K2
-                                per_frame_t[fid] = -per_frame_R[fid] @ C
+                            if fid in sol_l.per_frame_KRt:
+                                continue
+                            entries = detected_lines_by_frame.get(fid, [])
+                            lns = [
+                                LineObservation(
+                                    name=ln["name"],
+                                    image_segment=(
+                                        tuple(ln["image_segment"][0]),
+                                        tuple(ln["image_segment"][1])),
+                                    world_segment=(
+                                        tuple(ln["world_segment"][0]),
+                                        tuple(ln["world_segment"][1])))
+                                for ln in entries
+                                if "circle" not in ln["name"]
+                            ]
+                            circ_obs = [
+                                LandmarkObservation(
+                                    name="centre_circle",
+                                    image_xy=tuple(ln["image_segment"][0]),
+                                    world_xyz=tuple(ln["world_segment"][0]))
+                                for ln in entries
+                                if "circle" in ln["name"]
+                            ] or None
+                            pt_weight = 0.3
+                            if not lns and not circ_obs and (
+                                    fid in anchor_resolved_frames):
+                                # Point-re-solved anchor frames: re-fit against
+                                # their landmark points under the new lens.
+                                circ_obs = anchor_landmarks.get(fid)
+                                pt_weight = 1.0
+                            solved = False
+                            if lns or circ_obs:
+                                rv, _ = cv2.Rodrigues(per_frame_R[fid])
+                                fx0 = float(per_frame_K[fid][0, 0])
+                                rvec, fx, rms = _lr_solve(
+                                    lns, cxn, cyn, lr_d5, C, rv.reshape(3),
+                                    fx0, fx_rel=0.05 if len(lns) < 4 else None,
+                                    circle_obs=circ_obs,
+                                    circle_weight=pt_weight)
+                                if np.isfinite(rms) and rms <= lr_gate:
+                                    R2, _ = cv2.Rodrigues(rvec)
+                                    per_frame_K[fid] = np.array(
+                                        [[fx, 0.0, cxn], [0.0, fx, cyn],
+                                         [0.0, 0.0, 1.0]])
+                                    per_frame_R[fid] = R2
+                                    per_frame_t[fid] = -R2 @ C
+                                    solved = True
+                                    n_lr_resolved += 1
+                            if not solved:
+                                per_frame_K[fid] = None
+                                per_frame_R[fid] = None
+                                per_frame_t[fid] = None
+                                per_frame_conf[fid] = 0.0
+                        n_refilled = _fill_interior_gaps()
                         sol = dataclasses.replace(
                             sol, camera_centre=C,
                             principal_point=sol_l.principal_point,
@@ -1422,9 +1824,11 @@ class CameraStage(BaseStage):
                         logger.info(
                             "static line solve: centre-circle lens refinement on "
                             "%d ellipse frame(s) (misfit %.1f px): distortion %s "
-                            "-> %s", len(ell2), med_mis,
+                            "-> %s; re-solved %d unrefined frame(s), SLERP-"
+                            "refilled %d", len(ell2), med_mis,
                             np.round(cur_dist, 3).tolist(),
-                            np.round(sol_l.distortion[:2], 3).tolist())
+                            np.round(sol_l.distortion[:2], 3).tolist(),
+                            n_lr_resolved, n_refilled)
 
         # Outlier rejection: replace bad single-frame solves with a SLERP/LERP
         # interpolation from their nearest good neighbours, BEFORE smoothing —
@@ -1595,12 +1999,22 @@ class CameraStage(BaseStage):
         if smooth_window >= 3 and len(ordered) >= smooth_window:
             from src.utils.temporal_smoothing import pin_and_smooth_quat
             Rs = np.stack([per_frame_R[i] for i in ordered])
-            # "solved" = has >=2 detected straight lines -> trustworthy, pinned.
-            solved_mask = [
-                sum(1 for ln in detected_lines_by_frame.get(i, [])
-                    if "circle" not in ln["name"]) >= 2
-                for i in ordered
-            ]
+
+            # "solved" = trustworthy enough to pin: >=2 detected straight
+            # lines, a detected centre circle (circle-aided solves pass the
+            # same rms gate), or a point-re-solved anchor frame. Without
+            # pinning, the smoother would drag the only real solves in a
+            # line-sparse span toward interpolation.
+            def _pinned(i: int) -> bool:
+                if i in anchor_resolved_frames:
+                    return True
+                entries = detected_lines_by_frame.get(i, [])
+                n_straight = sum(
+                    1 for ln in entries if "circle" not in ln["name"])
+                has_circle = any("circle" in ln["name"] for ln in entries)
+                return n_straight >= 2 or has_circle
+
+            solved_mask = [_pinned(i) for i in ordered]
             Rs_s = pin_and_smooth_quat(
                 Rs, solved_mask, window=smooth_window, iters=smooth_iters)
             n_moved = 0

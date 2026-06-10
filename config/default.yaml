@@ -217,14 +217,36 @@ camera:
   # its covered neighbour (static camera -> locked C applies). Sweeps outward;
   # reaches spans PnLCalib never cold-started. gberch is full -> no-op.
   line_extraction_propagate_coverage: true
+  # Frames the static bundle skipped (too few straight lines) keep rotations
+  # solved under the PRE-bundle geometry; re-deriving t against the bundle's C
+  # silently shifts their projections (origi01 midfield: ~330 px off the
+  # user's clicks). Demote them to uncovered so propagation re-solves them
+  # against their own lines (+ circle) at the locked geometry; anything
+  # unsolvable is SLERP-filled between solved neighbours. gberch: no-op.
+  line_extraction_resolve_underlined: true
+  # Anchor frames among the demoted are re-solved IN PLACE from their landmark
+  # points (PnLCalib/manual) at the locked geometry — solved islands inside
+  # feature-poor spans that propagation then fills between. Reject above this
+  # point-reprojection rms (PnLCalib keypoint noise is ~5-15 px).
+  line_extraction_anchor_resolve_max_rms: 30.0
   line_extraction_cold_start: true            # orientation-sweep cold-start for the uncovered (wide) start of clips
   line_extraction_cold_start_max_rms: 12.0     # accept lens-limited wide-field rms (the lens refinement then fixes it)
+  # Circle-aided start frames gate on the MEDIAN residual, dominated by global
+  # lens error across the circle's arc while the wide start is still solved
+  # under the box-derived lens (origi01: 13-37 px). The circle-lens refinement
+  # + post-lens re-solve correct accepted frames afterwards.
+  line_extraction_cold_start_circle_max_rms: 40.0
   line_extraction_cold_start_min_lines: 3
   line_extraction_cold_start_max_dev_deg: 25.0 # reject cold-starts more than this far from the covered boundary
   line_extraction_propagate_passes: 4
   line_extraction_propagate_max_bridge: 8   # jump feature-poor barriers up to this many frames
   line_extraction_propagate_min_lines: 2     # seed prior + rms gate + outlier rejection make 2 perpendicular lines safe
-  line_extraction_propagate_circle: false   # per-frame circle in propagation regresses line-RMS; the circle is used via the global lens refinement instead
+  # Per-frame centre circle during propagation/re-solve — consulted ONLY on
+  # line-sparse frames (< min_lines_per_frame straight lines), where it is the
+  # constraint that disambiguates a parallel line pair (origi01's midfield /
+  # start). Well-lined frames solve from lines alone, so the historical
+  # line-RMS regression (circle trading away straight-line fit) cannot recur.
+  line_extraction_propagate_circle: true
   # Outlier rejection: frames whose per-frame line-RMS exceeds max(abs, rel x
   # clip-median) are bad per-frame solves; replace them with neighbour
   # interpolation. abs=8px keeps gberch's well-fit frames untouched.

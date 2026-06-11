@@ -2056,11 +2056,28 @@ class CameraStage(BaseStage):
                         n_circ_res = sum(len(v) for v in circ2.values()) * 2
                         circ_w = min(0.3, 0.5 * n_line_res
                                      / max(1, n_circ_res))
+                        # Anchor keypoints (PnLCalib/manual) are the only
+                        # evidence NOT strip-searched around the current
+                        # cameras' projections, i.e. the only evidence that
+                        # cannot self-confirm a mis-identified (C, lens):
+                        # origi01's stored detections prefer the wrong C by
+                        # construction (med 2.98 px there vs 5.16 at the C
+                        # that fits the user's clicks). Feed them to the
+                        # refinement so C/lens settle on unbiased points
+                        # spanning both pitch ends.
+                        hints_l = {
+                            fid: list(anchor_landmarks[fid])
+                            for fid in pfl if anchor_landmarks.get(fid)
+                        }
                         sol_l = solve_static_camera_from_lines(
                             pfl, anchors.image_size, c_seed=C,
                             lens_seed=(cx_l, cy_l, cur_dist[0], cur_dist[1]),
                             per_frame_seeds=pfs, per_frame_ellipses=ell2,
                             circle_points=circ2, circle_weight=circ_w,
+                            point_hints=hints_l,
+                            point_hint_weight=float(cfg.get(
+                                "line_extraction_lens_point_hint_weight",
+                                0.5)),
                             lens_model=lens_model,
                             ellipse_weight=float(
                                 cfg.get("line_extraction_circle_lens_weight", 1.0)),
@@ -2173,6 +2190,7 @@ class CameraStage(BaseStage):
         # that actually have sparse spans — fully line-solved clips (gberch)
         # skip untouched.
         gp_ran = False
+        gp_touched: set[int] = set()
         if bool(cfg.get("line_extraction_global_polish", True)):
             from scipy.spatial.transform import Rotation as _GPRot
             from scipy.spatial.transform import Slerp as _GPSlerp
@@ -2290,6 +2308,7 @@ class CameraStage(BaseStage):
                              [0.0, 0.0, 1.0]])
                         per_frame_R[f] = np.asarray(R_new)
                         per_frame_t[f] = -np.asarray(R_new) @ C
+                        gp_touched.add(f)
                         n_polished += 1
                     if max_delta < 0.05:
                         break
@@ -2395,15 +2414,15 @@ class CameraStage(BaseStage):
             # pan has ~0 residual), so the low threshold never eats real motion.
             rot_thr = float(cfg.get("line_extraction_outlier_rot_deg", 2.0))
             # After the global polish, continuity was already optimised
-            # JOINTLY with each frame's constraints — a residual deviation
-            # from the neighbour SLERP is a frame's evidence overruling the
-            # prior, not a defect. The rot-jump criterion then degenerates
-            # into mass rejection of every honest sparse solve (188-212
-            # frames on origi01) followed by constraint DELETION and blind
-            # interpolation — the audited start/gap failure. Keep only the
-            # line-RMS criterion (wrong-line locks) when the polish ran.
-            if gp_ran:
-                rot_thr = float("inf")
+            # JOINTLY with each polished frame's constraints — a residual
+            # deviation from the neighbour SLERP there is evidence overruling
+            # the prior, not a defect, and the rot-jump criterion degenerates
+            # into mass rejection (188-212 frames on origi01) + constraint
+            # DELETION + blind interp. But frames the polish PINNED (>=3
+            # lines) were never balanced against continuity — rot-jump keeps
+            # its protective job for their wrong-line spikes (disabling it
+            # globally let a 7 deg spike survive on origi02). Exempt only
+            # the polished frames.
             rel = float(cfg.get("line_extraction_outlier_rel", 3.0))
             abs_rms = float(cfg.get("line_extraction_outlier_max_rms", 8.0))
             max_passes = int(cfg.get("line_extraction_outlier_passes", 6))
@@ -2417,6 +2436,8 @@ class CameraStage(BaseStage):
                 rot_res = {}
                 for k in range(1, len(sset) - 1):
                     i, a, b = sset[k], sset[k - 1], sset[k + 1]
+                    if gp_ran and i in gp_touched:
+                        continue
                     w = (i - a) / (b - a) if b > a else 0.5
                     rot_res[i] = _geo(per_frame_R[i], _slerp(a, b, w))
                 rms_map = {i: _frame_rms(i) for i in sset}

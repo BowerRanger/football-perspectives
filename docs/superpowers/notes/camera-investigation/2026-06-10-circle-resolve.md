@@ -240,3 +240,41 @@ ACROSS RUNS of the same code (cold-start / PnLCalib nondeterminism), which is
 the next investigation: stabilise the start solve (e.g. seed the sweep from
 several boundary references, or average sweeps) before any further lens or
 board work on that clip.
+
+## 2026-06-11 night — 1-foot push: audits, polish, and the origi01 triangulation
+
+Workflow audit (5 parallel analysts) localized every >0.3 m error: dominant
+mode = horizontal/pan at far field; origi01 start/gaps had ZERO stored
+constraints in the final track (the outlier pass mass-rejected honest sparse
+solves via BOTH criteria and deleted their entries), fx collapsing in anchor
+gaps; properly line-solved frames pass everywhere.
+
+Fixes landed: iterative circle-lens refinement with a broad-evidence stop;
+GLOBAL POLISH (per-frame constraints + continuity priors, Gauss-Seidel,
+strong frames pinned at >=3 lines); outlier pass de-fanged for polished
+frames only (scoped rot-exemption after a 7 deg spike on origi02 showed the
+pinned frames still need it) and median-stat for circle-bearing frames.
+
+The C experiments (scripts/probe_c_hypothesis.py): the stored detections
+PREFER the wrong C (self-confirming strip-search bias — med 2.98 px at the
+biased C vs 5.16 at the click-true C). Anchor-stage C fits midfield clicks
+(4-7 px) but degrades the box; bundle C the reverse. Anchor-point hints in
+the lens refinement at sane weight cannot steer C against thousands of
+biased line residuals.
+
+Anchor-set triangulation (the decisive experiment):
+- AUTO anchors: midfield 14-23 px, start 210-330 px, box 4-11 px
+- MANUAL anchors: start 12-21 px, midfield 102-181 px, box 4-12 px, jitter 0.78
+- AUGMENT (both): start 15-16 px, midfield 29-127 px, box 4-6 px
+No static-C + single-k1k2 configuration fits all three spans. origi01 zooms
+~1.5x through the clip; broadcast lens distortion is zoom-dependent — the
+documented frontier is a zoom-parameterised distortion model
+(k = k(fx), two extra globals) or relaxing the static-C assumption.
+
+FINAL per-clip states: origi02 = manual anchors + full stack — clicks med
+8.5 px / p90 19.7 px / max 46.5, circle held-out 3.6 px on 30 frames,
+vs-manual centre 0.29 m (at or near the 1-foot bar nearly everywhere).
+origi01 = manual anchors + full stack — start+box 4-21 px, jitter 0.78 deg,
+midfield span (f169-294) remains ~2 m pending the zoom-distortion model.
+kroupi (clicks 6.3 px med, jitter 0.75) and gberch (baseline) provably
+untouched by every change in this round (gates skip both).

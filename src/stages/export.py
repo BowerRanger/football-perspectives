@@ -138,9 +138,9 @@ def _per_shot_smpl_tracks(
         sync_map = (
             SyncMap.load(sync_path)
             if sync_path.exists()
-            else SyncMap(reference_shot="", alignments=[])
+            else SyncMap()
         )
-        offset = sync_map.offset_for(shot_id) if shot_id else 0
+        offset = sync_map.offset_for_shot(shot_id) if shot_id else 0
         out: list[SmplWorldTrack] = []
         for p in refined_files:
             r = RefinedPose.load(p)

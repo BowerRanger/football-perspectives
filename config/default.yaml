@@ -15,6 +15,54 @@ pitch:
 prepare_shots:
   expected_format: mp4
   output_fps: null
+  # auto  : split single inputs >= split.min_input_duration_s, else copy
+  # copy  : always treat inputs as pre-trimmed clips (legacy behaviour)
+  # split : always run highlights-reel ingestion on a single video input
+  mode: auto
+  split:
+    min_input_duration_s: 90
+    # adaptive tolerates broadcast pans/zooms better; content is the
+    # simple frame-diff threshold detector (better on synthetic/clean
+    # footage).
+    detector: adaptive
+    threshold: 27.0
+    adaptive_threshold: 3.0
+    adaptive_min_content_val: 15.0
+    min_scene_len_frames: 13
+    # Sub-second fragments are useless for reconstruction; very short
+    # neighbours are merged first (false cuts from whip pans), then
+    # anything still under min_shot_duration_s is dropped.
+    min_shot_duration_s: 1.0
+    merge_max_gap_s: 0.08
+    merge_short_shots_max_duration_s: 1.2
+  classify:
+    sample_points: [0.15, 0.3, 0.5, 0.7, 0.85]
+    # A shot is a crowd/bench "reaction" when the green-pitch fraction
+    # stays below these (median / peak over the sampled frames).
+    reaction_max_median_pitch_ratio: 0.12
+    reaction_max_peak_pitch_ratio: 0.20
+    # Scale bands on median pitch ratio (camera-distance proxy).
+    wide_min_pitch_ratio: 0.40
+    tight_max_pitch_ratio: 0.22
+    # Fade-to-black transition detection.
+    fade_black_frame_threshold: 0.18
+    fade_min_brightness_range: 0.25
+    # Shots whose zoom-invariant motion rate is this many times slower
+    # than the live-shot reference are replays (and get retimed to real
+    # time at extraction).
+    replay_min_speed_factor: 1.25
+  group:
+    # A source-time hole bigger than this between kept shots (i.e. a
+    # run of dropped reactions/transitions) starts a new highlight.
+    gap_boundary_s: 5.0
+  align:
+    enabled: true
+    curve_width_px: 192
+    smooth_sigma_frames: 2.0
+    min_overlap_s: 1.0
+    # NCC peaks below this are recorded as low_confidence with an
+    # align-ends fallback offset instead.
+    min_confidence: 0.5
 
 tracking:
   player_model: yolov8x.pt

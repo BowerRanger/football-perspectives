@@ -94,7 +94,7 @@ def iter_player_fbx_entries(
             root_R = np_mod.asarray(data["root_R"])
             root_t = np_mod.asarray(data["root_t"])
             for sid in contributing:
-                offset = sync.offset_for(sid) if (sync and sid) else 0
+                offset = sync.offset_for_shot(sid) if (sync and sid) else 0
                 yield {
                     "shot_id": sid,
                     "player_id": player_id,

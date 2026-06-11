@@ -52,7 +52,7 @@ def test_pipeline_refined_poses_end_to_end(tmp_path: Path) -> None:
     from src.schemas.refined_pose import RefinedPose
     from src.schemas.shots import Shot, ShotsManifest
     from src.schemas.smpl_world import SmplWorldTrack
-    from src.schemas.sync_map import Alignment, SyncMap
+    from src.schemas.sync_map import Alignment, GroupSync, SyncMap
 
     out = tmp_path
     (out / "shots").mkdir()
@@ -69,13 +69,14 @@ def test_pipeline_refined_poses_end_to_end(tmp_path: Path) -> None:
                  end_time=0.3, clip_file="shots/B.mp4", speed_factor=1.0),
         ],
     ).save(out / "shots" / "shots_manifest.json")
-    SyncMap(
+    SyncMap(groups=[GroupSync(
+        group_id="",
         reference_shot="A",
         alignments=[
             Alignment(shot_id="A", frame_offset=0),
             Alignment(shot_id="B", frame_offset=0),
         ],
-    ).save(out / "shots" / "sync_map.json")
+    )]).save(out / "shots" / "sync_map.json")
 
     n = 10
     frames = np.arange(n, dtype=np.int64)

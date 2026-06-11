@@ -17,7 +17,27 @@
 //   GET   /api/shots/{id}/thumb    thumbnail JPEG
 //   GET   /api/video/{id}          clip stream
 
+// The active sync editor owns window-level drag listeners, a rAF loop
+// and playing <video> elements. Whoever tears its DOM down (tab switch,
+// whole-panel refresh) must run this first or the listeners/rAF leak
+// across re-renders.
+let _activeSyncEditorCleanup = null;
+
+function _teardownActiveSyncEditor() {
+  if (_activeSyncEditorCleanup) {
+    try { _activeSyncEditorCleanup(); } catch {}
+    _activeSyncEditorCleanup = null;
+  }
+}
+
+// Drop-target dragleave fires when the cursor enters a child element;
+// only reset the highlight when the pointer actually left the target.
+function _trulyLeft(el, ev) {
+  return !(ev.relatedTarget && el.contains(ev.relatedTarget));
+}
+
 async function renderPrepareShots(panel) {
+  _teardownActiveSyncEditor();
   await renderMatchInfoForm(panel);
 
   const [manifest, features, sync] = await Promise.all([
@@ -180,7 +200,8 @@ function _renderIngestCard(panel, refresh) {
     zone.style.borderColor = "#6366f1";
     zone.style.background = "#11142a";
   });
-  zone.addEventListener("dragleave", () => {
+  zone.addEventListener("dragleave", (ev) => {
+    if (!_trulyLeft(zone, ev)) return;
     zone.style.borderColor = "#334155";
     zone.style.background = "transparent";
   });
@@ -385,6 +406,7 @@ function _shotTile(shot, opts) {
   info.appendChild(titleRow);
 
   const badgeRow = document.createElement("div");
+  badgeRow.dataset.role = "badges";
   badgeRow.style.cssText = "display:flex;gap:4px;flex-wrap:wrap;min-height:16px;";
   for (const b of _badgesFor(shot, opts.groupSync)) badgeRow.appendChild(b);
   info.appendChild(badgeRow);
@@ -483,7 +505,8 @@ function _renderGroupsBoard(panel, model, refresh) {
     newZone.style.borderColor = "#6366f1";
     newZone.style.background = "#11142a";
   });
-  newZone.addEventListener("dragleave", () => {
+  newZone.addEventListener("dragleave", (ev) => {
+    if (!_trulyLeft(newZone, ev)) return;
     newZone.style.borderColor = "#334155";
     newZone.style.background = "transparent";
   });
@@ -511,7 +534,10 @@ function _groupCard(group, model, refresh) {
     ev.preventDefault();
     card.style.borderColor = "#6366f1";
   });
-  card.addEventListener("dragleave", () => { card.style.borderColor = "#1f2937"; });
+  card.addEventListener("dragleave", (ev) => {
+    if (!_trulyLeft(card, ev)) return;
+    card.style.borderColor = "#1f2937";
+  });
   card.addEventListener("drop", (ev) => {
     ev.preventDefault();
     card.style.borderColor = "#1f2937";
@@ -713,7 +739,7 @@ function _renderDroppedTray(panel, model, refresh) {
     });
     tile.style.opacity = "0.75";
     // Reason badge on top of the standard ones.
-    const badgeRow = tile.querySelectorAll("div")[2];
+    const badgeRow = tile.querySelector('[data-role="badges"]');
     if (badgeRow) {
       badgeRow.prepend(_chip(
         shot.exclude_reason || "dropped", "#fecaca", "#450a0a",
@@ -778,6 +804,7 @@ function _renderGroupSyncEditor(panel, model, refresh) {
   }
 
   function renderEditor() {
+    _teardownActiveSyncEditor();
     editorHost.innerHTML = "";
     const group = editableGroups.find((g) => g.id === activeGid);
     if (group) editorHost.appendChild(_buildGroupSyncEditor(group));
@@ -1101,6 +1128,11 @@ function _buildGroupSyncEditor(group) {
   refreshSelectExclusion();
   refreshOffsetInput();
   rebuildTimeline();
+
+  _activeSyncEditorCleanup = () => {
+    stopPlay();
+    cleanupTimeline();
+  };
   return root;
 }
 

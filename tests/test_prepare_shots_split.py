@@ -90,13 +90,16 @@ def test_grouping_and_sync_map(split_run):
     assert g1.reference_shot == "s001"
 
 
-def test_slowmo_retimed_to_realtime(split_run):
+def test_slowmo_keeps_native_timing_with_factor_as_metadata(split_run):
+    """Retiming on noisy speed estimates proved destructive (real-reel
+    estimates hit the 0.3/4.0 clamps on most shots), so clips keep their
+    native timing; the estimated factor is metadata only."""
     m = _manifest(split_run)
     slow = [s for s in m.shots if s.speed_factor > 1.25]
     assert [s.id for s in slow] == ["s003"]
-    # the 3.0 s slow-mo segment shrinks by ~1/speed_factor after retime
+    # the 3.0 s slow-mo segment keeps its ~75 source frames
     n = slow[0].end_frame + 1
-    assert n < 3.0 * 25.0 * 0.85
+    assert abs(n - 3.0 * 25.0) <= 4
 
 
 def test_split_rerun_is_idempotent(split_run):

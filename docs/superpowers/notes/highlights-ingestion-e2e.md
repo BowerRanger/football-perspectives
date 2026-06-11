@@ -108,3 +108,28 @@ sheet: 12/12 wide/medium gameplay.
 - `align_curves` offsets for heavily-zoomed replays can exceed the
   plausible window; they arrive labelled `low_confidence`, amber on the
   timeline.
+
+## Iteration 5 (2026-06-11, native timing + fade exclusion + GT matcher)
+
+**Retiming removed**: 50/56 shots were being retimed on speed estimates
+that routinely hit the 0.3/4.0 clamps (a 46 s live shot came out 4x
+compressed — the "playback speed completely off" report). Clips now
+keep native timing; `speed_factor` is metadata only. Slow-mo replays
+play slow, as the operator expects.
+
+**Fades excluded entirely**: `dissolve_intervals` marks every blend
+frame; spans subtract those zones plus a 2-frame margin
+(`fade_trim_margin_frames`), so no clip starts or ends with artifacts
+of its neighbour. Verified: 10 fade dead-zones on the reel, all 8
+inspected post-fade first frames clean.
+
+**Ground-truth matcher** (`scripts/match_ground_truth.py`): locates
+hand-cut expected-output clips in their source by per-frame dHash.
+Validated on `cleaned_up/` vs `origi-vs-barcelona.mp4`: origi01 at
+hamming 0.0 (frame-perfect), origi02/04 at 6-9; clips from other
+matches rejected at 22+; origi03 (manually retimed during cleanup)
+correctly flagged unreliable. GT clips must be plain cuts — no
+retiming/grading.
+
+Reel: 50 shots, 12 kept / 26 closeup / 12 reaction, 7 groups, zero
+non-native-timing clips.

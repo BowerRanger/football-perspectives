@@ -57,6 +57,9 @@ prepare_shots:
       uniformity_min: 10.0
       flow_max: 1.25
       min_run_frames: 5
+      # Fade frames (plus this margin either side) belong to NO shot —
+      # extracted clips never start or end with blend artifacts.
+      fade_trim_margin_frames: 2
   classify:
     sample_points: [0.15, 0.3, 0.5, 0.7, 0.85]
     # A shot is a crowd/bench "reaction" when the green-pitch fraction

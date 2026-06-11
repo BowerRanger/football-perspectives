@@ -58,19 +58,22 @@ def detect_spans(
     dissolve_uniformity_min: float = 10.0,
     dissolve_flow_max: float = 1.25,
     dissolve_min_run_frames: int = 5,
+    fade_trim_margin_frames: int = 2,
 ) -> list[ShotSpan]:
     """Detect hard cuts in ``video_path`` and return shot spans.
 
     ``spike_rescue`` unions the detector's cuts with frame-diff outlier
-    cuts (see module docstring); ``dissolve_split`` additionally unions
-    cross-dissolve cuts (:func:`dissolve_cuts` — fades between clips
-    that neither the detector nor spike rescue can see). Cuts from
-    either pass closer than ``min_scene_len_frames`` to an existing cut
-    are discarded so the detector's placement wins. Spans shorter than
-    ``min_shot_duration_s`` are dropped (sub-second flashes are useless
-    for reconstruction). If no cuts are found at all, the whole video is
-    returned as a single span so the caller always has something to work
-    with.
+    cuts (see module docstring). ``dissolve_split`` finds cross-dissolve
+    *intervals* (:func:`dissolve_intervals` — fades between clips that
+    neither the detector nor spike rescue can see) and excludes them —
+    plus ``fade_trim_margin_frames`` either side — from every span, so
+    no extracted clip starts or ends with blend artifacts of its
+    neighbour. Rescued cuts closer than ``min_scene_len_frames`` to an
+    existing cut are discarded so the detector's placement wins. Spans
+    shorter than ``min_shot_duration_s`` are dropped (sub-second flashes
+    are useless for reconstruction). If no cuts are found at all, the
+    whole video is returned as a single span so the caller always has
+    something to work with.
     """
     video = open_video(str(video_path))
     manager = SceneManager()
@@ -106,14 +109,18 @@ def detect_spans(
             abs_min=spike_abs_min,
             window_frames=spike_window_frames,
         ))
+    fade_zones: list[tuple[int, int]] = []
     if dissolve_split:
-        extra_cuts.extend(dissolve_cuts(
-            video_path,
-            uniformity_min=dissolve_uniformity_min,
-            flow_max=dissolve_flow_max,
-            min_run_frames=dissolve_min_run_frames,
-            min_gap_frames=max(25, min_scene_len_frames),
-        ))
+        margin = max(0, fade_trim_margin_frames)
+        fade_zones = [
+            (max(0, lo - margin), min(total_frames - 1, hi + margin))
+            for lo, hi in dissolve_intervals(
+                video_path,
+                uniformity_min=dissolve_uniformity_min,
+                flow_max=dissolve_flow_max,
+                min_run_frames=dissolve_min_run_frames,
+            )
+        ]
     if extra_cuts:
         existing = [0, total_frames] + cut_frames
         for cut in sorted(extra_cuts):
@@ -123,11 +130,44 @@ def detect_spans(
         cut_frames.sort()
 
     spans = _spans_from_cuts(cut_frames, total_frames, fps)
+    if fade_zones:
+        spans = _subtract_intervals(spans, fade_zones, fps)
     if not spans:
         spans = [_whole_video_span(video_path)]
     if min_shot_duration_s > 0:
         spans = [s for s in spans if s.duration_s >= min_shot_duration_s]
     return spans
+
+
+def _subtract_intervals(
+    spans: list[ShotSpan],
+    zones: list[tuple[int, int]],
+    fps: float,
+) -> list[ShotSpan]:
+    """Remove inclusive frame ``zones`` (fade blends) from every span."""
+    out: list[ShotSpan] = []
+    for span in spans:
+        pieces = [(span.start_frame, span.end_frame)]
+        for lo, hi in zones:
+            next_pieces: list[tuple[int, int]] = []
+            for a, b in pieces:
+                if hi < a or lo > b:
+                    next_pieces.append((a, b))
+                    continue
+                if a < lo:
+                    next_pieces.append((a, lo - 1))
+                if hi < b:
+                    next_pieces.append((hi + 1, b))
+            pieces = next_pieces
+        for a, b in pieces:
+            if b >= a:
+                out.append(ShotSpan(
+                    start_frame=a,
+                    end_frame=b,
+                    start_s=a / fps,
+                    end_s=(b + 1) / fps,
+                ))
+    return out
 
 
 def _spans_from_cuts(
@@ -179,27 +219,27 @@ def _block_median_diff(
     return float(np.median(blocks))
 
 
-def dissolve_cuts(
+def dissolve_intervals(
     video_path: Path,
     *,
     width_px: int = 320,
     uniformity_min: float = 10.0,
     flow_max: float = 1.25,
     min_run_frames: int = 5,
-    min_gap_frames: int = 25,
-) -> list[int]:
-    """Cut candidates from cross-dissolves (fades between clips).
+) -> list[tuple[int, int]]:
+    """Frame intervals covered by cross-dissolves (fades between clips).
 
     A dissolve changes the *whole frame* steadily without anything
     moving. Two gates together isolate that: spatial uniformity of the
     change (block-median diff ≥ ``uniformity_min`` — rejects
     static-camera action, where change is localised to the players) and
     near-zero optical flow (median LK flow ≤ ``flow_max`` — rejects
-    pans, which change every block but carry real motion). Within each
-    dissolve run, cuts land on local maxima spaced ``min_gap_frames``
-    apart (default ≈1 s: one fade = one cut, while a continuously-
-    dissolving montage still yields one cut per chained fade). Returns
-    first-frame-of-new-shot indices.
+    pans, which change every block but carry real motion).
+
+    Returns inclusive ``(first_blend_frame, last_blend_frame)``
+    intervals. Every frame inside an interval contains a mix of both
+    shots — callers should exclude them from extracted clips entirely
+    rather than cutting through them.
     """
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -248,7 +288,7 @@ def dissolve_cuts(
     flow_arr = np.asarray(flows)
     mask = (diff_arr >= uniformity_min) & (flow_arr <= flow_max)
 
-    cuts: list[int] = []
+    intervals: list[tuple[int, int]] = []
     n = len(mask)
     i = 0
     while i < n:
@@ -259,16 +299,35 @@ def dissolve_cuts(
         while j < n and mask[j]:
             j += 1
         if j - i >= min_run_frames:
-            # Local diff maxima within the run, strongest first, spaced
-            # at least min_gap_frames apart.
-            order = sorted(range(i, j), key=lambda k: -diff_arr[k])
-            accepted: list[int] = []
-            for k in order:
-                if all(abs(k - a) >= min_gap_frames for a in accepted):
-                    accepted.append(k)
-            cuts.extend(k + 1 for k in accepted)  # new shot starts at k+1
+            # Diff index k = change between frames k and k+1, so blends
+            # live in frames i+1 .. j (frame j is the last partially-
+            # mixed one; frame j+1 is fully the new shot).
+            intervals.append((i + 1, j))
         i = j
-    return sorted(cuts)
+    return intervals
+
+
+def dissolve_cuts(
+    video_path: Path,
+    *,
+    width_px: int = 320,
+    uniformity_min: float = 10.0,
+    flow_max: float = 1.25,
+    min_run_frames: int = 5,
+) -> list[int]:
+    """Point-cut view of :func:`dissolve_intervals` (one cut per fade,
+    at the interval end — the first clean frame of the new shot).
+    Prefer the intervals for extraction so blend frames are excluded."""
+    return [
+        hi + 1
+        for lo, hi in dissolve_intervals(
+            video_path,
+            width_px=width_px,
+            uniformity_min=uniformity_min,
+            flow_max=flow_max,
+            min_run_frames=min_run_frames,
+        )
+    ]
 
 
 def diff_spike_cuts(

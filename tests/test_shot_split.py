@@ -115,13 +115,37 @@ def test_dissolve_cuts_ignores_pans(tmp_path: Path):
     assert dissolve_cuts(reel) == []
 
 
-def test_detect_spans_splits_at_dissolve(tmp_path: Path):
+def test_detect_spans_excludes_fade_frames_entirely(tmp_path: Path):
+    """Shot clips must contain no blend artifacts: the fade's frames
+    (plus a safety margin) belong to NO span — the old shot ends before
+    the fade starts, the new shot starts after it resolves."""
     reel = tmp_path / "reel.mp4"
-    build_reel(reel, [("green", 2.0), ("xfade:green:black", 0.32),
-                      ("black", 2.0)])
+    info = build_reel(reel, [("green", 2.0), ("xfade:green:black", 0.32),
+                             ("black", 2.0)])
+    fade = next(s for s in info["spans"] if s["kind"].startswith("xfade"))
     spans = detect_spans(reel, detector="content", threshold=255.0,
                          min_scene_len_frames=8, spike_rescue=False,
                          dissolve_split=True)
     assert len(spans) == 2
-    for a, b in zip(spans, spans[1:]):
-        assert b.start_frame == a.end_frame + 1
+    first, second = spans
+    # the fade region (with margin) is dead zone, not in either span
+    assert first.end_frame < fade["start_frame"]
+    assert second.start_frame > fade["end_frame"]
+    # and the spans still cover the clean content on both sides
+    assert first.start_frame == 0
+    assert second.end_frame == info["total_frames"] - 1
+
+
+def test_dissolve_intervals_cover_the_fade(tmp_path: Path):
+    from src.utils.shot_split import dissolve_intervals
+
+    reel = tmp_path / "reel.mp4"
+    info = build_reel(reel, [("green", 2.0), ("xfade:green:black", 0.32),
+                             ("black", 2.0)])
+    fade = next(s for s in info["spans"] if s["kind"].startswith("xfade"))
+    intervals = dissolve_intervals(reel)
+    assert len(intervals) == 1
+    lo, hi = intervals[0]
+    # interval spans the blend frames (within a couple of frames)
+    assert lo <= fade["start_frame"] + 2
+    assert hi >= fade["end_frame"] - 2

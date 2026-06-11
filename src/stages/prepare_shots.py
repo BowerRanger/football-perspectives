@@ -19,7 +19,8 @@ input (e.g. a full match-highlights reel) is automatically
    shots are marked ``excluded`` (still extracted, so the dashboard's
    dropped tray can preview + restore them),
 3. grouped into highlight events (``src/utils/highlight_grouping.py``),
-4. extracted frame-accurately (slow-mo replays retimed to real time),
+4. extracted frame-accurately at native timing (speed factors are
+   recorded as metadata; retiming on estimates proved destructive),
 5. auto-aligned within each group (motion-profile NCC,
    ``src/utils/shot_alignment.py``) into ``shots/sync_map.json``.
 
@@ -245,6 +246,9 @@ class PrepareShotsStage(BaseStage):
             dissolve_min_run_frames=int(
                 dissolve_cfg.get("min_run_frames", 5)
             ),
+            fade_trim_margin_frames=int(
+                dissolve_cfg.get("fade_trim_margin_frames", 2)
+            ),
         )
         spans = merge_short_spans(
             spans,
@@ -329,14 +333,15 @@ class PrepareShotsStage(BaseStage):
             sid = f"s{next_idx:03d}"
             next_idx += 1
             dest = shots_dir / f"{sid}.mp4"
-            # Retime only confident replays (or clearly sped-up spans):
-            # live shots carry ±0.2 estimation noise and must not be
-            # resampled on it.
-            retime = f.speed_factor >= replay_min or f.speed_factor <= 0.8
+            # Clips keep their native timing. The per-shot speed factor
+            # is recorded as metadata only: estimates on short/busy
+            # fragments routinely hit the clamp bounds, and retiming on
+            # a bad estimate destroys the footage (a 46 s live shot once
+            # came out 4x compressed). Slow-mo replays therefore play
+            # slow — which is what the operator expects to see.
             try:
                 extract_clip_reencode(
                     src, dest, f.span.start_s, f.span.end_s, fps=fps,
-                    speed_factor=f.speed_factor if retime else 1.0,
                 )
             except subprocess.CalledProcessError as exc:
                 logger.warning(

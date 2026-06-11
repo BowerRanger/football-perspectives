@@ -278,3 +278,32 @@ origi01 = manual anchors + full stack — start+box 4-21 px, jitter 0.78 deg,
 midfield span (f169-294) remains ~2 m pending the zoom-distortion model.
 kroupi (clicks 6.3 px med, jitter 0.75) and gberch (baseline) provably
 untouched by every change in this round (gates skip both).
+
+## 2026-06-11 (day 2) — the C/lens arbitration endgame
+
+The decisive discovery chain: (1) C is near-unidentifiable along the view
+axis from any single-azimuth evidence (solo box-anchor centres slide ~4.5 m
+along one line); (2) detections are strip-searched around the current
+cameras' projections and SELF-CONFIRM whatever C they were found under, so
+the free profile+bundle walks C down a shallow valley on azimuth-poor clips;
+(3) with C held, the compensation moves to (k1, fx) — k walked to 0.395 with
+fx ~12% high and the wide-field anchors paid ~300 px; (4) a broken
+auto-anchor relock used as a SEED poisons everything (kroupi's relock lands
+inside the pitch).
+
+Resolution (commits 87d16ee, 069f11f): keep the proven free search path for
+every clip; ARBITRATE post-bundle among {free, held-to-anchor-consensus,
+held + modest lens} on the only non-self-confirming evidence — the anchor
+keypoints. Broken consensuses lose their own arbitration; degenerate line
+sets lose to the consensus. Validated on all four regimes.
+
+FINAL MATRIX (manual-click reprojection):
+- origi01: med 8.5 px, p90 ~45-55 px, 100% cov — box 3.6-6.4 px (<=0.15 m),
+  midfield 11-22 px (~0.25-0.5 m), f294 355 -> 30 px; f0/f134 confirmed BAD
+  CLICKS by overlay (camera tracks the painted structures; clicks sit in
+  open field). vs-manual centre 6.4 m -> 0.69 m.
+- origi02: med 8.5 px / p90 19.7 / max 44.9; centre 0.29 m; 100% cov.
+- kroupi: restored best (med 6.3 px, jitter 0.79); gberch byte-identical.
+Remaining above-bar: origi01 start (~0.5-1 m) + midfield tail (~0.3-0.5 m),
+origi02 f75 area (~0.5 m) — next lever remains zoom-dependent distortion
+k(fx) (origi01 zooms 1.5x; one k1k2 cannot serve both ends exactly).

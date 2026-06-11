@@ -219,3 +219,24 @@ camera stage — is the lens-loop robustification: feed circle-point (and
 board) frames into solve_static_camera_from_lines' global lens refinement so
 it no longer starves on the >=2-straight-line pfl gate (validate against
 origi02's k~0.23, which must not regress).
+
+### Lens-loop robustification (2026-06-11)
+
+Stored circle POINTS (the ridge detections committed by cold-start /
+propagation solves) now serve as both a second refinement trigger and a
+refinement input: frames join the lens solve on >=2 straight lines OR their
+stored circle points (the solver consumes them as weighted point residuals;
+empty line lists are fine). Residual-budget balance is essential: origi01's
+261 circle frames x 20 points outvoted its 174 line frames wholesale and
+bent k1 to ~0 — the ring fit at 0.9 px held-out while the user's clicks got
+WORSE (fit-vs-truth trap); circle_weight is now capped so the circle's total
+residual count <= half the lines'.
+
+Results: origi02 k 0.123 -> 0.147 (toward the validated 0.23), vs-manual
+1.35 -> 1.09 m, jitter p95 0.40 -> 0.26, clicks tail p90 92 -> 73 px.
+origi01: neutral — its lens is no longer the binding constraint when refined
+(held-out ring 0.9-2.8 px); its START accuracy now varies 141-226 px at f0
+ACROSS RUNS of the same code (cold-start / PnLCalib nondeterminism), which is
+the next investigation: stabilise the start solve (e.g. seed the sweep from
+several boundary references, or average sweeps) before any further lens or
+board work on that clip.

@@ -1945,15 +1945,52 @@ class CameraStage(BaseStage):
                 nz = r[r != 0]
                 if nz.size:
                     _mm.append(float(np.median(np.abs(nz))))
+            # STORED circle points (the sub-pixel ridge detections committed by
+            # the cold-start / propagation solves) carry the wide-field lens
+            # signal on exactly the frames whose freshly-detected ellipses the
+            # band search misses (their cameras are lens-limited, so the
+            # projected ring sits outside the band). They serve as BOTH a
+            # second trigger signal and a refinement input — without them the
+            # refinement starves on the >=2-straight-line gate and the wide
+            # start stays lens-limited (origi01 30-160 px; origi02's k
+            # breathing 0.08-0.24 run-to-run).
+            from src.utils.anchor_solver import (
+                _point_residuals_distorted as _cl_pres,
+            )
+            circ_pts: dict[int, list] = {}
+            _cm = []
+            for fid in covered_now:
+                pts = [
+                    LandmarkObservation(
+                        name="centre_circle",
+                        image_xy=tuple(ln["image_segment"][0]),
+                        world_xyz=tuple(ln["world_segment"][0]))
+                    for ln in detected_lines_by_frame.get(fid, [])
+                    if "circle" in ln["name"]
+                ]
+                if len(pts) >= 8:
+                    circ_pts[fid] = pts
+                    rv, _ = cv2.Rodrigues(per_frame_R[fid])
+                    pr = np.asarray(_cl_pres(
+                        pts, per_frame_K[fid], rv.reshape(3),
+                        per_frame_t[fid], cur_dist))
+                    pn = np.linalg.norm(pr.reshape(-1, 2), axis=1)
+                    _cm.append(float(np.median(pn)))
+            med_circ = float(np.median(_cm)) if _cm else 0.0
             logger.info(
-                "static line solve: centre-circle ellipse detected on %d "
-                "frame(s); median mis-fit %.1f px (refine if > %.1f)",
+                "static line solve: centre-circle ellipse on %d frame(s) "
+                "(median mis-fit %.1f px) + stored circle points on %d "
+                "frame(s) (median mis-fit %.1f px); refine if > %.1f",
                 len(ell), float(np.median(_mm)) if _mm else 0.0,
+                len(circ_pts), med_circ,
                 float(cfg.get("line_extraction_circle_lens_min_misfit", 5.0)))
-            if len(ell) >= min_frames and _mm:
-                med_mis = float(np.median(_mm))
-                thr = float(cfg.get("line_extraction_circle_lens_min_misfit", 5.0))
-                if med_mis <= thr:
+            thr = float(cfg.get("line_extraction_circle_lens_min_misfit", 5.0))
+            ell_trigger = len(ell) >= min_frames and _mm and float(
+                np.median(_mm)) > thr
+            circ_trigger = len(circ_pts) >= min_frames and med_circ > thr
+            if (len(ell) >= min_frames and _mm) or circ_trigger:
+                med_mis = float(np.median(_mm)) if _mm else med_circ
+                if not (ell_trigger or circ_trigger):
                     logger.info(
                         "static line solve: centre circle well-fit (misfit "
                         "%.1f px <= %.1f) on %d frame(s) -> lens refinement "
@@ -1972,16 +2009,36 @@ class CameraStage(BaseStage):
                             for ln in detected_lines_by_frame.get(fid, [])
                             if "circle" not in ln["name"]
                         ]
-                        if len(lns) >= 2:
+                        # A frame joins the lens solve if its straight lines
+                        # alone determine it (>=2), or its stored circle
+                        # points do (the solver consumes them as weighted
+                        # point residuals; lines may even be empty).
+                        if len(lns) >= 2 or (
+                                fid in circ_pts
+                                and (lns or len(circ_pts[fid]) >= 12)):
                             pfl[fid] = lns
                             rv, _ = cv2.Rodrigues(per_frame_R[fid])
                             pfs[fid] = (rv.reshape(3), float(per_frame_K[fid][0, 0]))
                     ell2 = {fid: e for fid, e in ell.items() if fid in pfl}
-                    if pfl and ell2:
+                    circ2 = {fid: pts for fid, pts in circ_pts.items()
+                             if fid in pfl}
+                    if pfl and (ell2 or circ2):
+                        # Residual-budget balance: hundreds of circle frames x
+                        # 20 points can outvote the straight lines wholesale
+                        # (origi01: ~10k circle obs vs ~1.7k line obs bent k1
+                        # to ~0 — the ring fit at 0.9 px while the start
+                        # poses slid along the circle's degenerate direction
+                        # and the user's clicks got WORSE). Cap the circle's
+                        # total influence at half the lines'.
+                        n_line_res = sum(len(v) for v in pfl.values()) * 2
+                        n_circ_res = sum(len(v) for v in circ2.values()) * 2
+                        circ_w = min(0.3, 0.5 * n_line_res
+                                     / max(1, n_circ_res))
                         sol_l = solve_static_camera_from_lines(
                             pfl, anchors.image_size, c_seed=C,
                             lens_seed=(cx_l, cy_l, cur_dist[0], cur_dist[1]),
                             per_frame_seeds=pfs, per_frame_ellipses=ell2,
+                            circle_points=circ2, circle_weight=circ_w,
                             lens_model=lens_model,
                             ellipse_weight=float(
                                 cfg.get("line_extraction_circle_lens_weight", 1.0)),

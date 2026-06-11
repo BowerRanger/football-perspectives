@@ -224,6 +224,15 @@ camera:
   # against their own lines (+ circle) at the locked geometry; anything
   # unsolvable is SLERP-filled between solved neighbours. gberch: no-op.
   line_extraction_resolve_underlined: true
+  # Advertising-hoarding base line: a static scene line parallel to the far
+  # touchline (one lateral offset per clip; height fixed to 0 — with a static
+  # camera centre the (offset, height) family is projectively equivalent).
+  # Calibrated per clip from anchor/bundle frames, then injected as a line
+  # constraint into propagation / cold-start solves and the stored detections
+  # (so the lens refinement and outlier passes see it). The boards are the
+  # strongest feature in exactly the far field where pitch lines are starved.
+  # Clips whose boards are out of view (gberch) fail calibration -> no-op.
+  line_extraction_board_line: true
   # Anchor frames among the demoted are re-solved IN PLACE from their landmark
   # points (PnLCalib/manual) at the locked geometry — solved islands inside
   # feature-poor spans that propagation then fills between. Reject above this

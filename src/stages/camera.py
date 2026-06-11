@@ -1681,6 +1681,168 @@ class CameraStage(BaseStage):
                     "additional frame(s)", n_prop2,
                 )
 
+        # Advertising-hoarding base line — a STATIC SCENE LINE parallel to
+        # the far touchline (one offset per clip; h fixed at 0: with a static
+        # C the (d, h) family is projectively equivalent). The boards are the
+        # highest-contrast feature in exactly the far field where pitch lines
+        # are starved, so the calibrated edge constrains tilt + lens wherever
+        # it is visible. Runs AFTER propagation/cold-start: calibration needs
+        # solved cameras on frames that actually SEE the boards (calibrating
+        # on box-end bundle frames poisoned origi02's whole start), and it is
+        # applied as a gated RE-SOLVE of covered frames + stored detections
+        # for the lens refinement — never inside the coverage marches, where
+        # a mis-calibrated plane would propagate its own error.
+        board_model = None
+        if bool(cfg.get("line_extraction_board_line", True)):
+            from src.schemas.anchor import (
+                LandmarkObservation,
+                LineObservation,
+            )
+            from src.utils.hoarding_detector import (
+                calibrate_board_line,
+                detect_board_line,
+            )
+            _board_dist = tuple(float(x) for x in sol.distortion[:2])
+
+            def _far_touchline_vis(f: int) -> float:
+                """Fraction of the far touchline projecting in-image — the
+                d-independent proxy for 'this frame sees the board zone'."""
+                xs_v = np.linspace(0.0, 105.0, 36)
+                world = np.stack(
+                    [xs_v, np.full_like(xs_v, 68.0), np.zeros_like(xs_v)],
+                    axis=1)
+                cam_p = world @ np.asarray(per_frame_R[f]).T + per_frame_t[f]
+                ok_z = cam_p[:, 2] > 1.0
+                if not ok_z.any():
+                    return 0.0
+                from src.utils.camera_projection import (
+                    project_world_to_image,
+                )
+                pr = project_world_to_image(
+                    per_frame_K[f], per_frame_R[f], per_frame_t[f],
+                    _board_dist, world)
+                w_i, h_i = anchors.image_size
+                inside = (ok_z & np.isfinite(pr).all(axis=1)
+                          & (pr[:, 0] >= 0) & (pr[:, 0] < w_i)
+                          & (pr[:, 1] >= 0) & (pr[:, 1] < h_i))
+                return float(inside.sum()) / len(xs_v)
+
+            _covered_b = [i for i in range(len(per_frame_K))
+                          if per_frame_K[i] is not None]
+            _vis_ranked = sorted(
+                (f for f in _covered_b[::max(1, len(_covered_b) // 40)]),
+                key=_far_touchline_vis, reverse=True)
+            cal_fids = sorted(
+                f for f in _vis_ranked[:10] if _far_touchline_vis(f) >= 0.3)
+            cal_frames: dict[int, np.ndarray] = {}
+            for f in cal_fids:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, f)
+                ok, im = cap.read()
+                if ok:
+                    cal_frames[f] = im
+            if len(cal_frames) >= 3:
+                cal_cams = {
+                    f: {"K": per_frame_K[f], "R": per_frame_R[f],
+                        "t": per_frame_t[f]}
+                    for f in cal_frames
+                }
+                board_model = calibrate_board_line(
+                    cal_frames, cal_cams, _board_dist, det_cfg)
+            # d-spread <= 0.5 m: the board only ever acts where its per-frame
+            # calibration is demonstrably consistent (kroupi: 0.20 m, clear
+            # win). Clips whose cameras still wobble in the far field (origi:
+            # 0.7 m+) abstain — applying an uncertain plane there regressed
+            # origi01's start. As tracks improve, more clips qualify.
+            if board_model is not None and (
+                    board_model.frames < 3 or board_model.residual > 0.5
+                    or board_model.contrast < 20.0):
+                logger.info(
+                    "board line: rejected calibration (frames=%d, d-spread "
+                    "%.2f m, contrast %.0f)", board_model.frames,
+                    board_model.residual, board_model.contrast)
+                board_model = None
+            if board_model is not None:
+                logger.info(
+                    "board line: calibrated d=%.2f m (h=0 family) over %d "
+                    "frame(s), d-spread %.2f m, contrast %.0f",
+                    board_model.d, board_model.frames, board_model.residual,
+                    board_model.contrast)
+
+            if board_model is not None:
+                from src.utils.static_c_profile import (
+                    _solve_frame_at_fixed_c as _bd_solve,
+                )
+                from src.utils.static_line_solver import _dist5 as _bd_d5
+                bd_d5 = _bd_d5(sol.distortion)
+                bd_cx, bd_cy = sol.principal_point
+                n_bd_entries = 0
+                n_bd_resolved = 0
+                for f in _covered_b:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, f)
+                    ok, im = cap.read()
+                    if not ok:
+                        continue
+                    det_b = detect_board_line(
+                        im, per_frame_K[f], per_frame_R[f], per_frame_t[f],
+                        _board_dist, board_model.d, board_model.h, det_cfg)
+                    if det_b is None:
+                        continue
+                    bob = LineObservation(
+                        name="board_line",
+                        image_segment=det_b.image_segment,
+                        world_segment=det_b.world_segment)
+                    entries = detected_lines_by_frame.get(f) or []
+                    pitch_lns = [
+                        LineObservation(
+                            name=ln["name"],
+                            image_segment=(tuple(ln["image_segment"][0]),
+                                           tuple(ln["image_segment"][1])),
+                            world_segment=(tuple(ln["world_segment"][0]),
+                                           tuple(ln["world_segment"][1])))
+                        for ln in entries if "circle" not in ln["name"]
+                        and ln["name"] != "board_line"
+                    ]
+                    circ_obs_b = [
+                        LandmarkObservation(
+                            name="centre_circle",
+                            image_xy=tuple(ln["image_segment"][0]),
+                            world_xyz=tuple(ln["world_segment"][0]))
+                        for ln in entries if "circle" in ln["name"]
+                    ] or None
+                    # Gated re-solve: pitch features + board together. The
+                    # board may only ADJUST a frame, never replace it — a
+                    # solve that pulls far from the current camera loses
+                    # (mis-calibration protection).
+                    rv_b, _ = cv2.Rodrigues(np.asarray(per_frame_R[f]))
+                    fx_b = float(per_frame_K[f][0, 0])
+                    all_lns = pitch_lns + [bob]
+                    rvec_b, fx2_b, rms_b = _bd_solve(
+                        all_lns, bd_cx, bd_cy, bd_d5, C, rv_b.reshape(3),
+                        fx_b, fx_rel=0.05, circle_obs=circ_obs_b)
+                    R2b, _ = cv2.Rodrigues(rvec_b)
+                    if (np.isfinite(rms_b) and rms_b <= 12.0
+                            and _angle_between(
+                                np.asarray(per_frame_R[f]), R2b) <= 2.0):
+                        per_frame_K[f] = np.array(
+                            [[fx2_b, 0.0, bd_cx], [0.0, fx2_b, bd_cy],
+                             [0.0, 0.0, 1.0]])
+                        per_frame_R[f] = R2b
+                        per_frame_t[f] = -R2b @ C
+                        n_bd_resolved += 1
+                        entries.append({
+                            "name": "board_line",
+                            "image_segment": [list(bob.image_segment[0]),
+                                              list(bob.image_segment[1])],
+                            "world_segment": [list(bob.world_segment[0]),
+                                              list(bob.world_segment[1])],
+                        })
+                        detected_lines_by_frame[f] = entries
+                        n_bd_entries += 1
+                if n_bd_entries:
+                    logger.info(
+                        "board line: re-solved %d covered frame(s) with the "
+                        "far-field constraint", n_bd_resolved)
+
         # Final interior gap-fill: any frame still uncovered BETWEEN two solved
         # frames (a demoted pre-bundle frame nothing could re-solve, or a
         # featureless barrier longer than propagate_max_bridge) gets SLERP/LERP

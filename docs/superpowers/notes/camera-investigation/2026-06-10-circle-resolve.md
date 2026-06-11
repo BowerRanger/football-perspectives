@@ -169,3 +169,38 @@ its ellipse detection band (50 px) can't find the ring under the lens-limited
 start cameras, and/or too few ellipse frames intersect the >=2-straight-line
 pfl gate). Closing that lens loop is the remaining lever for a fully accurate
 start.
+
+## 2026-06-11 — Advertising-hoardings static scene line (user idea, implemented)
+
+`src/utils/hoarding_detector.py`: the LED board base modelled as `y = 68 + d,
+z = 0` (one `d` per clip — with a static C the (offset, height) family is
+projectively equivalent, so h is fixed at 0 and ONE parameter is solved).
+Detection = signed step kernel (bright band above, grass below) + RANSAC-style
+geometric consensus across perpendiculars (photometric gates alone are too
+brittle at far field: floodlit grass desaturates below any absolute threshold).
+Calibration = per-frame-median of independent per-frame d solves (immune to
+per-frame camera wobble; a joint LSQ smears d into the bound).
+
+ORDERING LESSON (cost: one poisoned origi02 run, clicks med 9.9 -> 82.6 px):
+calibrating right after the bundle uses box-end cameras that barely see the
+boards -> garbage d -> injecting that plane into propagation/cold-start drags
+whole spans into a wrong basin. The board must be calibrated AFTER coverage
+exists (post-propagation, on the ~10 covered frames with the highest far-
+touchline in-view fraction) and applied only as (a) a GATED RE-SOLVE of
+covered frames (pitch features + board jointly; accepted only within 2 deg /
+12 px of the current camera — adjust, never replace) and (b) stored
+`board_line` entries that the lens refinement / outlier passes consume.
+gberch: no covered frame passes the visibility gate -> calibration skipped ->
+untouched.
+
+### Hoardings result (final)
+
+- kroupi: board ACTIVE (d=3.44 m, spread 0.20 m) — 121 frames far-field
+  re-solved, clicks med 7.0 -> 6.3 px, the f123+ projected far field sits on
+  the paint (the user-reported symptom), jitter 0.79 deg.
+- origi01/origi02: calibration ABSTAINS (d-spread 0.7-0.9 m > the 0.5 m
+  trust gate — their far-field camera wobble is the very thing being
+  measured); tracks unchanged at their best states. Unlock path: better
+  cameras (or weighting calibration frames by anchor quality) shrinks the
+  spread below the gate.
+- gberch: visibility gate skips (no covered frame sees the board zone).

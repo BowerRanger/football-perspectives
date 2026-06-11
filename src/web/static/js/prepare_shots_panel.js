@@ -38,7 +38,9 @@ function _trulyLeft(el, ev) {
 
 async function renderPrepareShots(panel) {
   _teardownActiveSyncEditor();
-  await renderMatchInfoForm(panel);
+  // Match-info form intentionally not rendered for now — the panel is
+  // focused on shot review; re-add renderMatchInfoForm(panel) here when
+  // match metadata matters again.
 
   const [manifest, features, sync] = await Promise.all([
     fetchJsonOrNull("/api/shots/manifest"),

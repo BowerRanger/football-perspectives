@@ -1913,7 +1913,16 @@ class CameraStage(BaseStage):
         # propagation, so this runs here. GBERCH-SAFE: only refines when the
         # circle is *significantly* mis-fit under the current lens — gberch's
         # lens is already right (the circle fits) so it is skipped untouched.
-        if bool(cfg.get("line_extraction_circle_lens", True)):
+        # Iterative: each refinement improves the cameras, which lets the
+        # banded ellipse search find MORE wide-field rings next round (the
+        # cause of origi02's k "breathing" 0.08-0.24 across single-round
+        # runs). Loop until the distortion converges or a round refines
+        # nothing.
+        _lens_rounds = (
+            int(cfg.get("line_extraction_circle_lens_rounds", 3))
+            if bool(cfg.get("line_extraction_circle_lens", True)) else 0)
+        _lens_prev_circ: float | None = None
+        for _lens_round in range(_lens_rounds):
             import dataclasses
 
             from src.schemas.anchor import LandmarkObservation, LineObservation
@@ -1985,6 +1994,19 @@ class CameraStage(BaseStage):
                 len(circ_pts), med_circ,
                 float(cfg.get("line_extraction_circle_lens_min_misfit", 5.0)))
             thr = float(cfg.get("line_extraction_circle_lens_min_misfit", 5.0))
+            # The handful of banded ellipses can disagree with the broad
+            # stored-point evidence; iterating on the ellipses alone then
+            # WORSENS the wide field round over round (origi01: stored misfit
+            # 9.6 -> 10.9 -> 12.0 while k chased 12 midfield rings). Stop
+            # when the broad evidence degrades.
+            if (_lens_prev_circ is not None and _cm
+                    and med_circ > 1.1 * _lens_prev_circ):
+                logger.info(
+                    "static line solve: lens iteration stopped — stored "
+                    "circle misfit worsened (%.1f -> %.1f px)",
+                    _lens_prev_circ, med_circ)
+                break
+            _lens_prev_circ = med_circ if _cm else None
             ell_trigger = len(ell) >= min_frames and _mm and float(
                 np.median(_mm)) > thr
             circ_trigger = len(circ_pts) >= min_frames and med_circ > thr
@@ -2132,6 +2154,151 @@ class CameraStage(BaseStage):
                             np.round(cur_dist, 3).tolist(),
                             np.round(sol_l.distortion[:2], 3).tolist(),
                             n_lr_resolved, n_refilled)
+            # Converged (or nothing refined this round): |dk1| spans both the
+            # "skip paths left sol untouched" case (delta exactly 0) and true
+            # convergence.
+            if abs(float(sol.distortion[0]) - float(cur_dist[0])) < 0.005:
+                break
+
+        # GLOBAL POLISH — Gauss-Seidel sweeps where every covered frame
+        # re-solves (rvec, fx) at the locked C/lens against its OWN stored
+        # constraints (straight lines + board + circle points) PLUS soft
+        # continuity priors toward its neighbours. Data and smoothness are
+        # optimised JOINTLY, replacing the per-frame-greedy -> mass-outlier-
+        # rejection -> interpolation dance that left whole spans as
+        # constraint-free interp with collapsed fx (the audited origi01
+        # start/gap failure: 188-212 frames rejected, fx swinging +-32%).
+        # Sparse frames bend toward continuity unless their evidence
+        # disagrees; well-lined frames barely feel the prior. Gated to clips
+        # that actually have sparse spans — fully line-solved clips (gberch)
+        # skip untouched.
+        gp_ran = False
+        if bool(cfg.get("line_extraction_global_polish", True)):
+            from scipy.spatial.transform import Rotation as _GPRot
+            from scipy.spatial.transform import Slerp as _GPSlerp
+
+            from src.schemas.anchor import (
+                LandmarkObservation as _GPLm,
+            )
+            from src.schemas.anchor import (
+                LineObservation as _GPLn,
+            )
+            from src.utils.static_c_profile import (
+                _solve_frame_at_fixed_c as _gp_solve,
+            )
+            from src.utils.static_line_solver import _dist5 as _gp_d5
+            gp_covered = [i for i in range(len(per_frame_K))
+                          if per_frame_K[i] is not None]
+            gp_lines: dict[int, list] = {}
+            gp_circ: dict[int, list] = {}
+            n_sparse = 0
+            for f in gp_covered:
+                entries = detected_lines_by_frame.get(f) or []
+                lns = [
+                    _GPLn(name=ln["name"],
+                          image_segment=(tuple(ln["image_segment"][0]),
+                                         tuple(ln["image_segment"][1])),
+                          world_segment=(tuple(ln["world_segment"][0]),
+                                         tuple(ln["world_segment"][1])))
+                    for ln in entries if "circle" not in ln["name"]
+                ]
+                pts = [
+                    _GPLm(name="centre_circle",
+                          image_xy=tuple(ln["image_segment"][0]),
+                          world_xyz=tuple(ln["world_segment"][0]))
+                    for ln in entries if "circle" in ln["name"]
+                ]
+                if lns:
+                    gp_lines[f] = lns
+                if len(pts) >= 6:
+                    gp_circ[f] = pts
+                if len(lns) < int(cfg.get(
+                        "line_extraction_min_lines_per_frame", 4)):
+                    n_sparse += 1
+            gp_frac_sparse = n_sparse / max(1, len(gp_covered))
+            if gp_frac_sparse >= float(cfg.get(
+                    "line_extraction_global_polish_min_sparse", 0.05)):
+                gp_d5v = _gp_d5(sol.distortion)
+                gp_cx, gp_cy = sol.principal_point
+                w_pose = float(cfg.get(
+                    "line_extraction_global_polish_pose_weight", 100.0))
+                w_fx = float(cfg.get(
+                    "line_extraction_global_polish_fx_weight", 0.05))
+                max_sweeps = int(cfg.get(
+                    "line_extraction_global_polish_sweeps", 5))
+                n_polished = 0
+                for sweep in range(max_sweeps):
+                    order = (gp_covered if sweep % 2 == 0
+                             else gp_covered[::-1])
+                    max_delta = 0.0
+                    for f in order:
+                        nbs = [g for g in (f - 1, f + 1)
+                               if 0 <= g < len(per_frame_K)
+                               and per_frame_R[g] is not None]
+                        if not nbs:
+                            continue
+                        if len(nbs) == 2:
+                            prior_R = _GPSlerp(
+                                [0.0, 1.0], _GPRot.from_matrix(
+                                    [per_frame_R[nbs[0]],
+                                     per_frame_R[nbs[1]]]))([0.5]).as_matrix()[0]
+                            prior_fx = 0.5 * (
+                                float(per_frame_K[nbs[0]][0, 0])
+                                + float(per_frame_K[nbs[1]][0, 0]))
+                        else:
+                            prior_R = np.asarray(per_frame_R[nbs[0]])
+                            prior_fx = float(per_frame_K[nbs[0]][0, 0])
+                        lns = gp_lines.get(f, [])
+                        pts = gp_circ.get(f)
+                        n_str = sum(
+                            1 for ln in lns if ln.name != "board_line")
+                        if n_str >= 3:
+                            # Frames with a determined line solve were never
+                            # the failure mode (the audit's passing frames are
+                            # exactly these) — polishing them traded verified
+                            # accuracy for continuity on origi02's start.
+                            # (>=3: a 2-line frame can still be a degenerate
+                            # parallel pair.)
+                            continue
+                        if not lns and not pts:
+                            # constraint-free: pure chain relaxation
+                            R_new = prior_R
+                            fx_new = prior_fx
+                        else:
+                            # sparse frames bend toward continuity
+                            wp = w_pose
+                            wf = w_fx
+                            rv_pr, _ = cv2.Rodrigues(prior_R)
+                            rv_cur, _ = cv2.Rodrigues(
+                                np.asarray(per_frame_R[f]))
+                            rvec_n, fx_n, rms_n = _gp_solve(
+                                lns, gp_cx, gp_cy, gp_d5v, C,
+                                rv_cur.reshape(3),
+                                float(per_frame_K[f][0, 0]),
+                                circle_obs=pts,
+                                pose_prior=(rv_pr.reshape(3), wp),
+                                fx_prior=(prior_fx, wf))
+                            if not np.isfinite(rms_n):
+                                continue
+                            R_new, _ = cv2.Rodrigues(rvec_n)
+                            fx_new = float(fx_n)
+                        d = _angle_between(
+                            np.asarray(per_frame_R[f]), np.asarray(R_new))
+                        max_delta = max(max_delta, d)
+                        per_frame_K[f] = np.array(
+                            [[fx_new, 0.0, gp_cx], [0.0, fx_new, gp_cy],
+                             [0.0, 0.0, 1.0]])
+                        per_frame_R[f] = np.asarray(R_new)
+                        per_frame_t[f] = -np.asarray(R_new) @ C
+                        n_polished += 1
+                    if max_delta < 0.05:
+                        break
+                gp_ran = True
+                logger.info(
+                    "static line solve: global polish — %d sweep(s) over %d "
+                    "frame(s) (%.0f%% sparse), final max step %.2f deg",
+                    sweep + 1, len(gp_covered), 100 * gp_frac_sparse,
+                    max_delta)
 
         # Outlier rejection: replace bad single-frame solves with a SLERP/LERP
         # interpolation from their nearest good neighbours, BEFORE smoothing —
@@ -2173,7 +2340,16 @@ class CameraStage(BaseStage):
                     nrm = nrm / np.linalg.norm(nrm)
                     for ip in ln["image_segment"]:
                         rs.append(abs(float(np.dot(np.array(ip) - pa, nrm))))
-                return float(np.sqrt(np.mean(np.square(rs)))) if rs else None
+                if not rs:
+                    return None
+                # Circle-bearing frames: fat-tail detector outliers dominate
+                # the raw rms of an honest lock (the recurring lesson) — use
+                # the median so lens-limited circle solves aren't mass-
+                # rejected and stripped of their constraints (208 frames on
+                # origi01 fell to this even with the rot criterion off).
+                if any("circle" in ln["name"] for ln in lines):
+                    return float(np.median(np.abs(rs)))
+                return float(np.sqrt(np.mean(np.square(rs))))
 
             from src.utils.static_c_profile import _solve_frame_at_fixed_c
             from src.utils.static_line_solver import _dist5 as _dist5_fn
@@ -2218,6 +2394,16 @@ class CameraStage(BaseStage):
             # passes. The residual-vs-SLERP metric is fast-pan-safe (a linear
             # pan has ~0 residual), so the low threshold never eats real motion.
             rot_thr = float(cfg.get("line_extraction_outlier_rot_deg", 2.0))
+            # After the global polish, continuity was already optimised
+            # JOINTLY with each frame's constraints — a residual deviation
+            # from the neighbour SLERP is a frame's evidence overruling the
+            # prior, not a defect. The rot-jump criterion then degenerates
+            # into mass rejection of every honest sparse solve (188-212
+            # frames on origi01) followed by constraint DELETION and blind
+            # interpolation — the audited start/gap failure. Keep only the
+            # line-RMS criterion (wrong-line locks) when the polish ran.
+            if gp_ran:
+                rot_thr = float("inf")
             rel = float(cfg.get("line_extraction_outlier_rel", 3.0))
             abs_rms = float(cfg.get("line_extraction_outlier_max_rms", 8.0))
             max_passes = int(cfg.get("line_extraction_outlier_passes", 6))

@@ -66,6 +66,8 @@ def _solve_frame_at_fixed_c(
     fx_rel: float | None = None,
     circle_obs: list[LandmarkObservation] | None = None,
     circle_weight: float = 0.3,
+    pose_prior: tuple[np.ndarray, float] | None = None,
+    fx_prior: tuple[float, float] | None = None,
 ) -> tuple[np.ndarray, float, float]:
     """LM-solve one frame's ``(rvec, fx)`` with C pinned. Returns
     ``(rvec, fx, reprojection_rms)``.
@@ -82,6 +84,11 @@ def _solve_frame_at_fixed_c(
     constraints (``circle_weight``) — a strong, well-spread feature that pins
     rotation+focal where straight lines are sparse (the propagation lever for
     featureless spans). The returned RMS is over lines + circle, unweighted.
+
+    ``pose_prior``/``fx_prior`` add soft continuity residuals toward a prior
+    ``(rvec, weight)`` / ``(fx, weight)`` — the global-polish chain term: a
+    sparse frame bends toward its neighbours unless its own evidence says
+    otherwise. Prior residuals are excluded from the returned RMS.
     """
     circ = circle_obs or []
     d2 = (float(dist5[0]), float(dist5[1]))
@@ -96,6 +103,12 @@ def _solve_frame_at_fixed_c(
         if circ:
             parts.append(
                 circle_weight * _point_residuals_distorted(circ, K, rvec, t, d2))
+        if pose_prior is not None:
+            pr, w = pose_prior
+            parts.append(w * (rvec - np.asarray(pr, float).reshape(3)))
+        if fx_prior is not None:
+            pf, wf = fx_prior
+            parts.append(np.array([wf * (fx - float(pf))]))
         return np.concatenate(parts)
 
     fx_lo = fx_seed * (1.0 - fx_rel) if fx_rel is not None else fx_seed * 0.5

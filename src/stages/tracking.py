@@ -183,7 +183,7 @@ class PlayerTrackingStage(BaseStage):
             manifest = ShotsManifest.load(manifest_path)
             return all(
                 (tracks_dir / f"{shot.id}_tracks.json").exists()
-                for shot in manifest.shots
+                for shot in manifest.active_shots()
             )
         except Exception:
             return False
@@ -229,7 +229,7 @@ class PlayerTrackingStage(BaseStage):
 
         manifest = ShotsManifest.load(self.output_dir / "shots" / "shots_manifest.json")
 
-        for shot in manifest.shots:
+        for shot in manifest.active_shots():
             # TODO(Phase 1c): once CameraStage produces camera_track.json,
             # load it here so per-frame pitch_position can be filled in.
             calibration = None

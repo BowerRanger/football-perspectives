@@ -223,7 +223,7 @@ class ExportStage(BaseStage):
         manifest = ShotsManifest.load(manifest_path)
         return all(
             (self.output_dir / "export" / "gltf" / f"{shot.id}_scene.glb").exists()
-            for shot in manifest.shots
+            for shot in manifest.active_shots()
         )
 
     # ------------------------------------------------------------------
@@ -363,7 +363,7 @@ class ExportStage(BaseStage):
             return [None]
         manifest = ShotsManifest.load(manifest_path)
         shot_filter = getattr(self, "shot_filter", None)
-        return [s.id for s in manifest.shots if shot_filter is None or s.id == shot_filter]
+        return [s.id for s in manifest.active_shots() if shot_filter is None or s.id == shot_filter]
 
     # ------------------------------------------------------------------
     # glTF
@@ -403,7 +403,7 @@ class ExportStage(BaseStage):
         # can pick up kit colours / score / venue without a second fetch.
         match_dict = _asdict(manifest.match) if manifest.match is not None else None
         shot_filter = getattr(self, "shot_filter", None)
-        for shot in manifest.shots:
+        for shot in manifest.active_shots():
             if shot_filter is not None and shot.id != shot_filter:
                 continue
             cam_path = self.output_dir / "camera" / f"{shot.id}_camera_track.json"

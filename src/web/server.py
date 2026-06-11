@@ -304,6 +304,11 @@ class RunRequest(BaseModel):
     # Other stages ignore this. Used by the dashboard's
     # /api/run-shot-player endpoint for fast iteration on one player.
     player_filter: str | None = None
+    # Pipeline input video (prepare_shots only). Set by the dashboard's
+    # reel-upload flow; must point inside ``output/source/`` — the run
+    # endpoints reject anything else so a request can't make the server
+    # read arbitrary paths.
+    input_path: str | None = None
 
 
 def _emit(job: Job, line: str) -> None:
@@ -361,6 +366,9 @@ def _run_job(job: Job, output_dir: Path, config_path: Path | None, params: RunRe
     _emit(job, f"[job {job.job_id}] starting stages={params.stages!r}")
     try:
         cfg = load_config(config_path)
+        extra_kwargs: dict = {}
+        if params.input_path:
+            extra_kwargs["video_path"] = Path(params.input_path)
         run_pipeline(
             output_dir=output_dir,
             stages=params.stages,
@@ -369,6 +377,7 @@ def _run_job(job: Job, output_dir: Path, config_path: Path | None, params: RunRe
             device=params.device,
             shot_filter=params.shot_filter,
             player_filter=params.player_filter,
+            **extra_kwargs,
         )
         job.status = "done"
     except Exception as exc:
@@ -598,8 +607,24 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     return j
         return None
 
+    def _validate_input_path(params: RunRequest) -> None:
+        """``input_path`` may only name a file under ``output/source/``."""
+        if not params.input_path:
+            return
+        source_dir = (output_dir / "source").resolve()
+        try:
+            resolved = Path(params.input_path).resolve()
+            resolved.relative_to(source_dir)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="input_path must point inside the output dir's "
+                       "source/ folder",
+            )
+
     @app.post("/api/run", status_code=202)
     def run_stages(params: RunRequest):
+        _validate_input_path(params)
         requested_stages = (params.stages or "").split(",")
         wants_hmr = "hmr_world" in requested_stages or params.stages == "all"
         if wants_hmr:
@@ -1853,6 +1878,71 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             daemon=True,
         ).start()
         return {"saved": saved, "skipped": skipped, "job_id": job_id}
+
+    @app.post("/api/shots/upload-reel")
+    async def upload_reel(file: UploadFile = File(...)):
+        """Save a full highlights reel to ``output/source/`` and spawn a
+        prepare_shots job that splits it into shots, groups them, and
+        auto-aligns each group (mode auto/split — see
+        ``prepare_shots.mode`` in config).
+        """
+        from src.schemas.shots import _sanitise_shot_id
+
+        raw_name = Path(file.filename or "").name
+        if not raw_name.lower().endswith(".mp4"):
+            await file.close()
+            raise HTTPException(
+                status_code=400, detail="reel must be an .mp4 file",
+            )
+        try:
+            stem = _sanitise_shot_id(Path(raw_name).stem)
+        except ValueError as exc:
+            await file.close()
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        source_dir = output_dir / "source"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        dest = source_dir / f"{stem}.mp4"
+        if dest.exists():
+            await file.close()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"source {dest.name!r} already exists — delete it from "
+                    "output/source/ (or rename the upload) to re-ingest"
+                ),
+            )
+        with dest.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+        await file.close()
+
+        params = RunRequest(
+            stages="prepare_shots",
+            from_stage="prepare_shots",
+            input_path=str(dest),
+        )
+        with _jobs_lock:
+            running_jobs = sum(
+                1 for j in _jobs.values() if j.status == "running"
+            )
+            if running_jobs >= _MAX_CONCURRENT_JOBS:
+                raise HTTPException(
+                    status_code=429, detail="Too many concurrent jobs",
+                )
+        job_id = str(uuid.uuid4())[:8]
+        job = Job(job_id=job_id, stages=params.stages)
+        with _jobs_lock:
+            _jobs[job_id] = job
+        Thread(
+            target=_run_job,
+            args=(job, output_dir, app.state.config_path, params),
+            daemon=True,
+        ).start()
+        return {"saved": stem, "source": str(dest), "job_id": job_id}
 
     @app.get("/camera/track")
     def get_camera_track(shot: str | None = None):

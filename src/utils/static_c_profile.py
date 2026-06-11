@@ -68,6 +68,8 @@ def _solve_frame_at_fixed_c(
     circle_weight: float = 0.3,
     pose_prior: tuple[np.ndarray, float] | None = None,
     fx_prior: tuple[float, float] | None = None,
+    anchor_obs: list[LandmarkObservation] | None = None,
+    anchor_weight: float = 1.0,
 ) -> tuple[np.ndarray, float, float]:
     """LM-solve one frame's ``(rvec, fx)`` with C pinned. Returns
     ``(rvec, fx, reprojection_rms)``.
@@ -103,6 +105,10 @@ def _solve_frame_at_fixed_c(
         if circ:
             parts.append(
                 circle_weight * _point_residuals_distorted(circ, K, rvec, t, d2))
+        if anchor_obs:
+            parts.append(
+                anchor_weight
+                * _point_residuals_distorted(anchor_obs, K, rvec, t, d2))
         if pose_prior is not None:
             pr, w = pose_prior
             parts.append(w * (rvec - np.asarray(pr, float).reshape(3)))

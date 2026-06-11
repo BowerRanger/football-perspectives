@@ -1063,6 +1063,38 @@ class CameraStage(BaseStage):
                 sol = best
         C = sol.camera_centre
 
+        def _anchor_click_checkpoint(stage: str) -> None:
+            """Per-stage anchor-click fit — locates which post-bundle pass
+            degrades the arbitrated solution (the bundle fits the good
+            anchors at ~8 px; the final track reads 11-22 px at the same
+            anchors)."""
+            if not bool(cfg.get("line_extraction_debug_anchor_fit", False)):
+                return
+            from src.utils.camera_projection import project_world_to_image
+            dist_dbg = tuple(float(x) for x in sol.distortion[:2])
+            per = []
+            for a in anchors.anchors:
+                if not a.landmarks or a.frame >= len(per_frame_K):
+                    continue
+                if per_frame_K[a.frame] is None:
+                    continue
+                rs = []
+                for lm in a.landmarks:
+                    p = project_world_to_image(
+                        per_frame_K[a.frame], per_frame_R[a.frame],
+                        per_frame_t[a.frame], dist_dbg,
+                        np.array([lm.world_xyz], dtype=float))[0]
+                    rs.append(float(np.linalg.norm(
+                        p - np.asarray(lm.image_xy))))
+                per.append((a.frame, float(np.median(rs))))
+            if per:
+                med = float(np.median([v for _, v in per]))
+                worst = sorted(per, key=lambda x: -x[1])[:3]
+                logger.info(
+                    "anchor-fit checkpoint [%s]: med %.1f px | worst %s",
+                    stage, med,
+                    ", ".join(f"f{f}={v:.0f}" for f, v in worst))
+
         # Write the solved cameras back in place.
         for fid, (K, R, t) in sol.per_frame_KRt.items():
             per_frame_K[fid] = K
@@ -1081,6 +1113,8 @@ class CameraStage(BaseStage):
                 }
                 for ln in per_frame_lines.get(fid, [])
             ]
+
+        _anchor_click_checkpoint("post-bundle+arbitration")
 
         # Frames the bundle skipped (no/too-few straight lines) carry rotations
         # solved under the PRE-bundle geometry (anchor-stage C / principal
@@ -1839,6 +1873,8 @@ class CameraStage(BaseStage):
                             "cascade-filled the start to %d/%d covered frame(s)",
                             n_cs, n_filled, start_end)
 
+        _anchor_click_checkpoint("post-coldstart")
+
         # PASS 2 — circle-aided propagation, AFTER the cold-start so its
         # lens-limited solves can only fill spans neither lines nor the
         # orientation sweep could reach (origi01's circle-only midfield and
@@ -2350,6 +2386,8 @@ class CameraStage(BaseStage):
             if abs(float(sol.distortion[0]) - float(cur_dist[0])) < 0.005:
                 break
 
+        _anchor_click_checkpoint("post-pass2+board")
+
         # GLOBAL POLISH — Gauss-Seidel sweeps where every covered frame
         # re-solves (rvec, fx) at the locked C/lens against its OWN stored
         # constraints (straight lines + board + circle points) PLUS soft
@@ -2451,7 +2489,16 @@ class CameraStage(BaseStage):
                             # (>=3: a 2-line frame can still be a degenerate
                             # parallel pair.)
                             continue
-                        if not lns and not pts:
+                        if f in anchor_resolved_frames:
+                            # Demotion ISLANDS were point-solved against
+                            # their landmarks at the locked geometry — the
+                            # best estimate a sparse anchor frame can have;
+                            # any blend moves f134-class frames 24 -> ~90 px
+                            # off their clicks. Ordinarily-covered anchor
+                            # frames (origi02's) keep the blend below.
+                            continue
+                        anch_obs = anchor_landmarks.get(f) or None
+                        if not lns and not pts and not anch_obs:
                             # constraint-free: pure chain relaxation
                             R_new = prior_R
                             fx_new = prior_fx
@@ -2467,6 +2514,8 @@ class CameraStage(BaseStage):
                                 rv_cur.reshape(3),
                                 float(per_frame_K[f][0, 0]),
                                 circle_obs=pts,
+                                anchor_obs=anch_obs,
+                                anchor_weight=3.0,
                                 pose_prior=(rv_pr.reshape(3), wp),
                                 fx_prior=(prior_fx, wf))
                             if not np.isfinite(rms_n):
@@ -2491,6 +2540,8 @@ class CameraStage(BaseStage):
                     "frame(s) (%.0f%% sparse), final max step %.2f deg",
                     sweep + 1, len(gp_covered), 100 * gp_frac_sparse,
                     max_delta)
+
+        _anchor_click_checkpoint("post-polish+lens")
 
         # Outlier rejection: replace bad single-frame solves with a SLERP/LERP
         # interpolation from their nearest good neighbours, BEFORE smoothing —
@@ -2667,6 +2718,8 @@ class CameraStage(BaseStage):
                     "neighbour interp", total_rejected, last_pass, rot_thr, rel,
                 )
 
+        _anchor_click_checkpoint("post-outlier")
+
         # Pin-and-smooth temporal smoothing of the per-frame rotation. The
         # dominant jitter is the seam step where a line-solved frame meets an
         # interpolated gap frame (the SLERP fill is velocity-discontinuous). A
@@ -2710,6 +2763,8 @@ class CameraStage(BaseStage):
                 "static line solve: pin-and-smoothed %d/%d interp frame(s) "
                 "(window=%d, %d solved pinned)", n_moved, len(ordered),
                 smooth_window, sum(solved_mask))
+
+        _anchor_click_checkpoint("final")
 
         rms_arr = np.array(
             [v for v in sol.per_frame_line_rms.values() if np.isfinite(v)]

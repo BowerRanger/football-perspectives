@@ -62,8 +62,9 @@ def extract_clip_reencode(
         if "-af" in cmd_noaudio:
             i = cmd_noaudio.index("-af")
             del cmd_noaudio[i:i + 2]
-        i = cmd_noaudio.index("-c:a")
-        del cmd_noaudio[i:i + 4]
+        if "-c:a" in cmd_noaudio:
+            i = cmd_noaudio.index("-c:a")
+            del cmd_noaudio[i:i + 4]
         cmd_noaudio += ["-an", str(out)]
         subprocess.run(cmd_noaudio, check=True, capture_output=True)
 

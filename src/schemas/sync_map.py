@@ -95,7 +95,10 @@ class SyncMap:
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(self), indent=2))
+        # Atomic write — readers must never observe a torn sync map.
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(asdict(self), indent=2))
+        tmp.replace(path)
 
     @classmethod
     def load(cls, path: Path) -> "SyncMap":

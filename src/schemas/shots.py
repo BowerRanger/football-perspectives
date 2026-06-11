@@ -134,7 +134,11 @@ class ShotsManifest:
     match: MatchInfo | None = None
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps(asdict(self), indent=2))
+        # Atomic write: a reader (dashboard thread, parallel stage) must
+        # never observe a torn manifest.
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(asdict(self), indent=2))
+        tmp.replace(path)
 
     @classmethod
     def load(cls, path: Path) -> "ShotsManifest":

@@ -368,7 +368,12 @@ def _run_job(job: Job, output_dir: Path, config_path: Path | None, params: RunRe
         cfg = load_config(config_path)
         extra_kwargs: dict = {}
         if params.input_path:
-            extra_kwargs["video_path"] = Path(params.input_path)
+            # Defence in depth: the run endpoints validate this too, but
+            # every path into run_pipeline must hold the same invariant —
+            # request-supplied inputs only ever come from output/source/.
+            resolved = Path(params.input_path).resolve()
+            resolved.relative_to((output_dir / "source").resolve())
+            extra_kwargs["video_path"] = resolved
         run_pipeline(
             output_dir=output_dir,
             stages=params.stages,
@@ -1404,13 +1409,17 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         alignments.sort(key=lambda a: a.shot_id)
 
         path = _sync_map_path()
-        sm = SyncMap.load(path) if path.exists() else SyncMap()
-        sm = sm.with_group(GroupSync(
-            group_id=payload.group_id,
-            reference_shot=payload.reference_shot,
-            alignments=alignments,
-        ))
-        sm.save(path)
+        # Same lock as the manifest editors: every sync_map read-modify-
+        # write cycle (here, /api/sync/auto, /api/shots/bulk) serialises
+        # on it so concurrent saves can't drop each other's groups.
+        with _match_manifest_lock:
+            sm = SyncMap.load(path) if path.exists() else SyncMap()
+            sm = sm.with_group(GroupSync(
+                group_id=payload.group_id,
+                reference_shot=payload.reference_shot,
+                alignments=alignments,
+            ))
+            sm.save(path)
         return {
             "saved": True,
             "path": str(path),
@@ -1618,25 +1627,32 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         )
         aligned = 0
         out_alignments = []
-        for sid, result in results.items():
-            if not payload.force and saved is not None:
-                prior = next(
-                    (a for a in saved.alignments if a.shot_id == sid), None,
+        # Re-load under the shared lock so a save that landed while the
+        # aligner was decoding video can't be dropped, and manual
+        # offsets are honoured against the freshest state.
+        with _match_manifest_lock:
+            sm = SyncMap.load(sync_path) if sync_path.exists() else SyncMap()
+            saved = sm.group(payload.group_id)
+            for sid, result in results.items():
+                if not payload.force and saved is not None:
+                    prior = next(
+                        (a for a in saved.alignments if a.shot_id == sid),
+                        None,
+                    )
+                    if prior is not None and prior.method == "manual":
+                        continue
+                alignment = Alignment(
+                    shot_id=sid,
+                    frame_offset=result.frame_offset,
+                    method=result.method,
+                    confidence=result.confidence,
                 )
-                if prior is not None and prior.method == "manual":
-                    continue
-            alignment = Alignment(
-                shot_id=sid,
-                frame_offset=result.frame_offset,
-                method=result.method,
-                confidence=result.confidence,
-            )
-            sm = sm.with_group_alignment(
-                payload.group_id, reference, alignment,
-            )
-            out_alignments.append(asdict(alignment))
-            aligned += 1
-        sm.save(sync_path)
+                sm = sm.with_group_alignment(
+                    payload.group_id, reference, alignment,
+                )
+                out_alignments.append(asdict(alignment))
+                aligned += 1
+            sm.save(sync_path)
         return {
             "group_id": payload.group_id,
             "reference_shot": reference,
@@ -2184,8 +2200,16 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         source_dir = output_dir / "source"
         source_dir.mkdir(parents=True, exist_ok=True)
         dest = source_dir / f"{stem}.mp4"
-        if dest.exists():
-            await file.close()
+        try:
+            # Exclusive create: two concurrent uploads of the same name
+            # can't both pass an exists() check and interleave writes.
+            with dest.open("xb") as out:
+                while True:
+                    chunk = await file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+        except FileExistsError:
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -2193,13 +2217,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     "output/source/ (or rename the upload) to re-ingest"
                 ),
             )
-        with dest.open("wb") as out:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                out.write(chunk)
-        await file.close()
+        finally:
+            await file.close()
 
         params = RunRequest(
             stages="prepare_shots",

@@ -123,8 +123,11 @@ def _build_shot(shot_id: str, clip_dest: Path, output_dir: Path) -> tuple[Shot, 
     return shot, effective_fps, frame_count
 
 
-def _next_sequential_id(existing_ids: set[str], prefix: str, width: int) -> int:
-    """First free index for ids shaped ``{prefix}{NNN}`` (1-based)."""
+def _next_sequential_id(existing_ids: set[str], prefix: str) -> int:
+    """First free index for ids shaped ``{prefix}{NNN}`` (1-based).
+
+    Zero-padding is the caller's concern when formatting the id.
+    """
     pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
     taken = [int(m.group(1)) for sid in existing_ids
              if (m := pattern.match(sid))]
@@ -280,7 +283,7 @@ class PrepareShotsStage(BaseStage):
 
         # 3. Extract clips + thumbnails, build Shot rows.
         existing_ids = {s.id for s in existing.shots}
-        next_idx = _next_sequential_id(existing_ids, "s", 3)
+        next_idx = _next_sequential_id(existing_ids, "s")
         thumbs_dir = shots_dir / "thumbs"
         new_shots: list[Shot] = []
         kept_features = []  # (shot_id, ShotFeatures) for grouping/sidecar
@@ -352,9 +355,7 @@ class PrepareShotsStage(BaseStage):
             gap_boundary_s=float(group_cfg.get("gap_boundary_s", 5.0)),
             replay_min_speed_factor=replay_min,
         )
-        group_idx = _next_sequential_id(
-            {g.id for g in existing.groups}, "g", 2,
-        )
+        group_idx = _next_sequential_id({g.id for g in existing.groups}, "g")
         new_groups: list[HighlightGroup] = []
         group_id_by_shot: dict[str, str] = {}
         reference_by_group: dict[str, str] = {}

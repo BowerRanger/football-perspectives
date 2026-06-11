@@ -304,6 +304,47 @@ class CameraStage(BaseStage):
                 "t=%s across %d anchors",
                 np.round(sol.t_world, 3).tolist(), len(sol.per_anchor_KRt),
             )
+            # TRIMMED re-relock: C is near-unidentifiable along the viewing
+            # axis from any single-azimuth anchor subset (solo box-anchor
+            # centres slide ~4.5 m along one line), so the shared-C relock is
+            # the C estimator — but one or two wrong-basin anchors (origi01's
+            # f0/f108: implied focal 2.4x off every other anchor) drag it by
+            # metres. Drop anchors whose post-relock residual is grossly
+            # inconsistent and re-relock with the survivors; the downstream
+            # C-profile/bundle stay within the trust radius of the result.
+            for _trim in range(2):
+                res_by_frame: dict[int, float] = {}
+                for a in qualifying:
+                    got = sol.per_anchor_KRt.get(a.frame)
+                    if got is None or not a.landmarks:
+                        continue
+                    K_a, R_a, t_a = got
+                    res_by_frame[a.frame] = reprojection_residual_for_anchor(
+                        a, K_a, R_a, t_a, tuple(sol.distortion[:2]))
+                if len(res_by_frame) < 4:
+                    break
+                med_res = float(np.median(list(res_by_frame.values())))
+                thr_res = max(12.0, 3.0 * med_res)
+                keep = [a for a in qualifying
+                        if res_by_frame.get(a.frame, 0.0) <= thr_res]
+                if len(keep) == len(qualifying) or len(keep) < 3:
+                    break
+                dropped = sorted(
+                    a.frame for a in qualifying if a not in keep)
+                qualifying = keep
+                sol = solve_anchors_jointly(
+                    tuple(qualifying), image_size=anchors.image_size,
+                    lens_prior=lens_prior)
+                sol = refine_with_shared_translation(tuple(qualifying), sol)
+                logger.info(
+                    "static_camera=true: trimmed relock dropped anchor(s) %s "
+                    "(residual > %.1f px); C now %s over %d anchors",
+                    dropped, thr_res,
+                    np.round(-np.asarray(
+                        sol.per_anchor_KRt[qualifying[0].frame][1]).T
+                        @ sol.per_anchor_KRt[qualifying[0].frame][2],
+                        2).tolist(),
+                    len(qualifying))
         t_world_median = sol.t_world
         principal_point = sol.principal_point
         anchor_solutions: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = (
@@ -794,6 +835,25 @@ class CameraStage(BaseStage):
             _centre(f) for f in well_lined
         ]
         c_center = np.median(np.stack(seed_cs), axis=0)
+        # The anchor-stage shared-t relock C is the consensus over ALL anchor
+        # azimuths — the per-frame cameras at anchor frames still carry it
+        # verbatim. seed_cams-derived centres do NOT once the PnLCalib
+        # per-frame bootstrap replaced them (their ~5 m position scatter
+        # dragged the seed 1.25 m on origi01). Prefer the relock C whenever
+        # anchor frames are available.
+        _anchor_centres = [
+            -np.asarray(per_frame_R[a.frame]).T @ np.asarray(
+                per_frame_t[a.frame])
+            for a in anchors.anchors
+            if a.frame < len(per_frame_R) and per_frame_R[a.frame] is not None
+        ]
+        if len(_anchor_centres) >= 2:
+            c_center = np.median(np.stack(_anchor_centres), axis=0)
+        logger.info(
+            "static line solve: C seed=%s from %d anchor centre(s) "
+            "(%d seed-cam centre(s), rich∩well-lined=%d)",
+            np.round(c_center, 2).tolist(), len(_anchor_centres),
+            len(seed_cs), len([f for f in well_lined if f in rich]))
         cx0 = float(per_frame_K[covered[0]][0, 2])
         cy0 = float(per_frame_K[covered[0]][1, 2])
         # Seed the lens with zero distortion: the anchor-solve distortion
@@ -808,6 +868,17 @@ class CameraStage(BaseStage):
         # C-profile uses only the WELL-LINED frames so the shared centre is
         # found from well-constrained geometry; the circle-rescued midfield
         # frames join the final bundle solve (where the circle constrains them).
+        #
+        # C TRUST RADIUS: detected lines are strip-searched around the current
+        # cameras' projections and partially self-confirm whatever C they were
+        # found under — left free, origi01's profile+bundle walked C ~3 m onto
+        # its own detections, and per-frame fits at the anchor-consensus C
+        # showed EVERY span (start/midfield/box) fitting the hand clicks at
+        # 3-11 px simultaneously where the drifted C failed the midfield by
+        # metres. The anchor consensus (c_center) is the only C evidence not
+        # subject to that bias; the profile/bundle refine WITHIN its trust
+        # radius rather than wander.
+        c_trust = float(cfg.get("line_extraction_c_trust_m", 1.5))
         coarse = profile_camera_centre(
             well_lined, anchors.image_size,
             c_grid=make_c_grid(c_center, extent_m=7.5, n_steps=5),
@@ -829,6 +900,7 @@ class CameraStage(BaseStage):
             a.frame: list(a.landmarks) for a in anchors.anchors if a.landmarks
         }
         c_seed = fine.argmin_c
+        c_bound_bundle = 5.0
         # Refined seeds for well-lined frames; bootstrap seeds for the
         # circle-rescued frames (which the C-profile didn't see).
         seeds = {**bootstrap, **fine.per_frame_seeds}
@@ -851,6 +923,7 @@ class CameraStage(BaseStage):
                 circle_points=per_frame_circle,
                 lens_model=lens_model, point_hint_weight=point_hint_weight,
                 circle_weight=circle_weight,
+                c_bound_m=c_bound_bundle,
             )
             round_rms = np.array(
                 [v for v in sol.per_frame_line_rms.values() if np.isfinite(v)]
@@ -890,6 +963,56 @@ class CameraStage(BaseStage):
         assert best_sol is not None
         sol = best_sol
         per_frame_lines = best_lines
+
+        # C ARBITRATION on the only evidence that is NOT self-confirming.
+        # Detections are strip-searched around the cameras' own projections,
+        # so an azimuth-poor line set lets the free bundle WALK C metres down
+        # a shallow valley while its line-RMS keeps improving (origi01: ~3 m,
+        # every span's clicks paid). Conversely a clip whose anchor consensus
+        # is the noisy estimate must keep the free result (gberch: clamping
+        # cost 2.1 -> 5.4 px line-RMS). Arbiter: solve BOTH (free bundle vs
+        # bundle held to the anchor-consensus C) and keep whichever fits the
+        # ANCHOR KEYPOINTS better — clicks/PnLCalib points were placed
+        # independently of any camera.
+        def _anchor_fit(s: StaticCameraSolution) -> float:
+            res = []
+            for a in anchors.anchors:
+                if not a.landmarks:
+                    continue
+                got = s.per_frame_KRt.get(a.frame)
+                if got is None:
+                    continue
+                K_a, R_a, t_a = got
+                res.append(reprojection_residual_for_anchor(
+                    a, K_a, R_a, t_a, tuple(s.distortion[:2])))
+            return float(np.median(res)) if res else float("inf")
+
+        _gap = float(np.linalg.norm(
+            np.asarray(sol.camera_centre) - c_center))
+        if _gap > 0.75:
+            sol_held = solve_static_camera_from_lines(
+                per_frame_lines, anchors.image_size,
+                c_seed=c_center, lens_seed=lens_seed,
+                per_frame_seeds=seeds, point_hints=anchor_landmarks,
+                circle_points=per_frame_circle,
+                lens_model=lens_model,
+                point_hint_weight=point_hint_weight,
+                circle_weight=circle_weight,
+                c_bound_m=max(0.25, c_trust / 3.0),
+            )
+            fit_free = _anchor_fit(sol)
+            fit_held = _anchor_fit(sol_held)
+            logger.info(
+                "static line solve: C arbitration — free C=%s (anchor fit "
+                "%.1f px) vs held C=%s (%.1f px)",
+                np.round(sol.camera_centre, 2).tolist(), fit_free,
+                np.round(sol_held.camera_centre, 2).tolist(), fit_held)
+            if fit_held < fit_free:
+                sol = sol_held
+                # refresh the stored per-frame state from the held solution
+                logger.info(
+                    "static line solve: anchor evidence prefers the held C "
+                    "(%.1f < %.1f px) — keeping it", fit_held, fit_free)
         C = sol.camera_centre
 
         # Write the solved cameras back in place.
@@ -2081,6 +2204,8 @@ class CameraStage(BaseStage):
                             lens_model=lens_model,
                             ellipse_weight=float(
                                 cfg.get("line_extraction_circle_lens_weight", 1.0)),
+                            c_bound_m=float(cfg.get(
+                                "line_extraction_c_trust_m", 1.5)) / 2.0,
                         )
                         C = np.asarray(sol_l.camera_centre, dtype=np.float64)
                         cxn, cyn = sol_l.principal_point

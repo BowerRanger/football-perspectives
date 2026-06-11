@@ -173,6 +173,7 @@ def solve_static_camera_from_lines(
     circle_weight: float = 0.3,
     ellipse_weight: float = 1.0,
     max_nfev: int = 600,
+    c_bound_m: float = 5.0,
 ) -> StaticCameraSolution:
     """Solve one fixed camera centre across all frames in
     ``per_frame_lines``.
@@ -226,8 +227,13 @@ def solve_static_camera_from_lines(
         upper[2 + j] = dist_hi[j]
     c_base = 2 + n_dist
     p0[c_base : c_base + 3] = c_seed
-    lower[c_base : c_base + 3] = np.asarray(c_seed) - 5.0
-    upper[c_base : c_base + 3] = np.asarray(c_seed) + 5.0
+    # Detected lines are strip-searched around the CURRENT cameras'
+    # projections, so they partially self-confirm whatever C they were found
+    # under — the caller passes a tight ``c_bound_m`` when it has trustworthy
+    # independent C evidence (the anchor-stage consensus; origi01's bundle
+    # drifted C ~3 m onto its own detections and every span paid for it).
+    lower[c_base : c_base + 3] = np.asarray(c_seed) - c_bound_m
+    upper[c_base : c_base + 3] = np.asarray(c_seed) + c_bound_m
 
     for i, fid in enumerate(fids):
         if fid not in per_frame_seeds:

@@ -915,9 +915,26 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
 
     @app.get("/api/output/shots")
     def list_shots():
+        """Shot ids for the per-shot pickers (tracking/camera/viewer).
+
+        Manifest-aware: excluded shots (dropped reactions/transitions)
+        are hidden from every downstream picker. Falls back to globbing
+        ``shots/*.mp4`` when no manifest exists yet. The Prepare Shots
+        panel reads the full manifest instead, so the dropped tray still
+        sees everything.
+        """
         shots_dir = output_dir / "shots"
         if not shots_dir.exists():
             return {"shots": []}
+        manifest_path = shots_dir / "shots_manifest.json"
+        if manifest_path.exists():
+            from src.schemas.shots import ShotsManifest
+
+            try:
+                manifest = ShotsManifest.load(manifest_path)
+                return {"shots": [s.id for s in manifest.active_shots()]}
+            except Exception:
+                pass  # unreadable manifest → glob fallback below
         ids = sorted(p.stem for p in shots_dir.glob("*.mp4"))
         return {"shots": ids}
 
@@ -1400,6 +1417,270 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             "group_id": payload.group_id,
             "count": len(alignments),
         }
+
+    # ------------------------------------------------------------------
+    # Highlight groups: bulk shot edits + auto re-alignment + sidecars
+    # ------------------------------------------------------------------
+
+    _GROUP_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+    class ShotUpdate(BaseModel):
+        shot_id: str
+        excluded: bool | None = None
+        exclude_reason: str | None = None
+        group_id: str | None = None
+
+    class BulkShotsPayload(BaseModel):
+        updates: list[ShotUpdate]
+
+    class SyncAutoPayload(BaseModel):
+        group_id: str
+        force: bool = False
+
+    @app.patch("/api/shots/bulk")
+    def patch_shots_bulk(payload: BulkShotsPayload):
+        """Apply shot-level edits (discard/restore/regroup) atomically.
+
+        One endpoint covers the whole groups-board UX: discard a shot
+        (``excluded=true``), restore from the dropped tray, move a shot
+        between groups (``group_id``), merge groups (move every member),
+        split a group (move the tail to a fresh id) and discard a group
+        (exclude every member). Afterwards ``manifest.groups`` is
+        reconciled from the shots' ``group_id`` values — emptied groups
+        are dropped, brand-new ids get a ``manual`` group record — and
+        sync-map alignments of shots that left a group are pruned.
+        """
+        from dataclasses import replace as dc_replace
+
+        from src.schemas.shots import HighlightGroup, ShotsManifest
+        from src.schemas.sync_map import GroupSync, SyncMap
+
+        manifest_path = _match_manifest_path()
+        if not manifest_path.exists():
+            raise HTTPException(status_code=404, detail="no shots manifest")
+        with _match_manifest_lock:
+            manifest = ShotsManifest.load(manifest_path)
+            by_id = {s.id: s for s in manifest.shots}
+            for u in payload.updates:
+                if u.shot_id not in by_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"unknown shot_id {u.shot_id!r}",
+                    )
+                if (u.group_id is not None and u.group_id != ""
+                        and not _GROUP_ID_PATTERN.match(u.group_id)):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"invalid group_id {u.group_id!r}",
+                    )
+
+            for u in payload.updates:
+                shot = by_id[u.shot_id]
+                changes: dict = {}
+                if u.excluded is not None:
+                    changes["excluded"] = u.excluded
+                    if not u.excluded and u.exclude_reason is None:
+                        changes["exclude_reason"] = ""
+                if u.exclude_reason is not None:
+                    changes["exclude_reason"] = u.exclude_reason
+                if u.group_id is not None:
+                    changes["group_id"] = u.group_id
+                by_id[u.shot_id] = dc_replace(shot, **changes)
+
+            shots = [by_id[s.id] for s in manifest.shots]
+
+            # Reconcile groups from the shots' group_id values: original
+            # order for surviving groups, new ids appended in first-
+            # appearance order, emptied groups dropped.
+            members: dict[str, list[str]] = {}
+            for s in shots:
+                if s.group_id:
+                    members.setdefault(s.group_id, []).append(s.id)
+            existing_groups = {g.id: g for g in manifest.groups}
+            groups: list[HighlightGroup] = []
+            for g in manifest.groups:
+                if g.id in members:
+                    groups.append(dc_replace(g, shot_ids=members[g.id]))
+            for gid, ids in members.items():
+                if gid not in existing_groups:
+                    groups.append(HighlightGroup(
+                        id=gid,
+                        label=f"Highlight {len(groups) + 1}",
+                        shot_ids=ids,
+                        boundary_rule="manual",
+                        boundary_confidence=1.0,
+                    ))
+
+            manifest = ShotsManifest(
+                source_file=manifest.source_file,
+                fps=manifest.fps,
+                total_frames=manifest.total_frames,
+                shots=shots,
+                groups=groups,
+                match=manifest.match,
+            )
+            manifest.save(manifest_path)
+
+            # Prune sync alignments for shots that left their group.
+            sync_path = _sync_map_path()
+            if sync_path.exists():
+                try:
+                    sm = SyncMap.load(sync_path)
+                except Exception:
+                    sm = None
+                if sm is not None:
+                    group_of = {s.id: s.group_id for s in shots}
+                    pruned: list[GroupSync] = []
+                    changed = False
+                    for gs in sm.groups:
+                        kept = [a for a in gs.alignments
+                                if group_of.get(a.shot_id) == gs.group_id]
+                        if len(kept) != len(gs.alignments):
+                            changed = True
+                        if not kept:
+                            changed = True
+                            continue
+                        reference = gs.reference_shot
+                        if all(a.shot_id != reference for a in kept):
+                            reference = kept[0].shot_id
+                            changed = True
+                        pruned.append(GroupSync(
+                            group_id=gs.group_id,
+                            reference_shot=reference,
+                            alignments=kept,
+                        ))
+                    if changed:
+                        SyncMap(groups=pruned).save(sync_path)
+
+        return asdict(manifest)
+
+    @app.post("/api/sync/auto")
+    def sync_auto(payload: SyncAutoPayload):
+        """Re-run the motion-profile aligner for one group.
+
+        ``force=false`` keeps operator-saved ``manual`` offsets;
+        ``force=true`` recomputes every member.
+        """
+        from src.schemas.shots import ShotsManifest
+        from src.schemas.sync_map import Alignment, SyncMap
+        from src.utils.shot_alignment import align_group
+
+        manifest_path = _match_manifest_path()
+        if not manifest_path.exists():
+            raise HTTPException(status_code=404, detail="no shots manifest")
+        manifest = ShotsManifest.load(manifest_path)
+        group = next(
+            (g for g in manifest.groups if g.id == payload.group_id), None,
+        )
+        if group is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"unknown group {payload.group_id!r}",
+            )
+        shots_by_id = {s.id: s for s in manifest.shots}
+        member_clips = {
+            sid: output_dir / shots_by_id[sid].clip_file
+            for sid in group.shot_ids
+            if sid in shots_by_id
+            and not shots_by_id[sid].excluded
+            and (output_dir / shots_by_id[sid].clip_file).exists()
+        }
+        if len(member_clips) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="group needs at least two active shots to align",
+            )
+
+        sync_path = _sync_map_path()
+        sm = SyncMap.load(sync_path) if sync_path.exists() else SyncMap()
+        saved = sm.group(payload.group_id)
+        reference = (
+            saved.reference_shot
+            if saved is not None and saved.reference_shot in member_clips
+            else next(iter(member_clips))
+        )
+
+        align_cfg = (
+            load_config(app.state.config_path)
+            .get("prepare_shots", {})
+            .get("align", {})
+        )
+        fps = manifest.fps or 25.0
+        results = align_group(
+            member_clips,
+            reference_id=reference,
+            width_px=int(align_cfg.get("curve_width_px", 192)),
+            smooth_sigma=float(align_cfg.get("smooth_sigma_frames", 2.0)),
+            min_overlap_frames=max(
+                2, int(float(align_cfg.get("min_overlap_s", 1.0)) * fps),
+            ),
+            min_confidence=float(align_cfg.get("min_confidence", 0.5)),
+        )
+        aligned = 0
+        out_alignments = []
+        for sid, result in results.items():
+            if not payload.force and saved is not None:
+                prior = next(
+                    (a for a in saved.alignments if a.shot_id == sid), None,
+                )
+                if prior is not None and prior.method == "manual":
+                    continue
+            alignment = Alignment(
+                shot_id=sid,
+                frame_offset=result.frame_offset,
+                method=result.method,
+                confidence=result.confidence,
+            )
+            sm = sm.with_group_alignment(
+                payload.group_id, reference, alignment,
+            )
+            out_alignments.append(asdict(alignment))
+            aligned += 1
+        sm.save(sync_path)
+        return {
+            "group_id": payload.group_id,
+            "reference_shot": reference,
+            "aligned": aligned,
+            "alignments": out_alignments,
+        }
+
+    @app.get("/api/shots/features")
+    def get_shot_features():
+        """Per-shot classification diagnostics written by split mode
+        (``shots/shot_features.json``). ``{}`` when absent."""
+        path = output_dir / "shots" / "shot_features.json"
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text())
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to load shot features: {exc}",
+            )
+
+    @app.get("/api/shots/{shot_id}/thumb")
+    def get_shot_thumbnail(shot_id: str):
+        """Shot thumbnail JPEG (generated at split time; lazily created
+        for clips that predate thumbnails)."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", shot_id):
+            raise HTTPException(status_code=400, detail="Invalid shot id")
+        thumb = output_dir / "shots" / "thumbs" / f"{shot_id}.jpg"
+        if not thumb.exists():
+            clip = output_dir / "shots" / f"{shot_id}.mp4"
+            if not clip.exists():
+                raise HTTPException(status_code=404, detail="Unknown shot")
+            from src.stages.prepare_shots import _video_metadata
+            from src.utils.ffmpeg import extract_thumbnail
+
+            fps, frames = _video_metadata(clip)
+            midpoint = (frames / fps / 2.0) if fps > 0 and frames > 0 else 0.0
+            try:
+                extract_thumbnail(clip, thumb, midpoint)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500, detail=f"thumbnail failed: {exc}",
+                )
+        return FileResponse(str(thumb), media_type="image/jpeg")
 
     @app.get("/landmarks")
     def get_landmarks():

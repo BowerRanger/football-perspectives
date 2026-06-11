@@ -149,3 +149,42 @@ def test_dissolve_intervals_cover_the_fade(tmp_path: Path):
     # interval spans the blend frames (within a couple of frames)
     assert lo <= fade["start_frame"] + 2
     assert hi >= fade["end_frame"] - 2
+
+
+def test_fade_dip_intervals_find_moving_crossfade(tmp_path: Path):
+    """Gameplay-to-gameplay fades carry real motion, so the long-
+    dissolve detector's flow gate rejects them. The dip detector finds
+    them by blend structure: contrast V-dip + scene change across the
+    dip + the centre frame being the average of its sides."""
+    from src.utils.shot_split import dissolve_intervals, fade_dip_intervals
+    from tests.fixtures.synthetic_reel import build_reel_with_moving_fade
+
+    reel = tmp_path / "reel.mp4"
+    info = build_reel_with_moving_fade(reel)
+    assert dissolve_intervals(reel) == []  # flow gate rejects, by design
+    intervals = fade_dip_intervals(reel)
+    assert len(intervals) == 1
+    lo, hi = intervals[0]
+    assert lo <= info["fade_start"] + 4
+    assert hi >= info["fade_end"] - 4
+
+
+def test_fade_dip_intervals_ignore_plain_pan(tmp_path: Path):
+    from src.utils.shot_split import fade_dip_intervals
+
+    reel = tmp_path / "reel.mp4"
+    build_reel(reel, [("pan", 4.0)])
+    assert fade_dip_intervals(reel) == []
+
+
+def test_detect_spans_excludes_moving_fade(tmp_path: Path):
+    from tests.fixtures.synthetic_reel import build_reel_with_moving_fade
+
+    reel = tmp_path / "reel.mp4"
+    info = build_reel_with_moving_fade(reel)
+    spans = detect_spans(reel, detector="content", threshold=255.0,
+                         min_scene_len_frames=8, spike_rescue=False,
+                         dissolve_split=True)
+    assert len(spans) == 2
+    assert spans[0].end_frame < info["fade_start"]
+    assert spans[1].start_frame > info["fade_end"]

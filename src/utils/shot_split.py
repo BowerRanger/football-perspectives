@@ -112,14 +112,15 @@ def detect_spans(
     fade_zones: list[tuple[int, int]] = []
     if dissolve_split:
         margin = max(0, fade_trim_margin_frames)
+        raw_zones = dissolve_intervals(
+            video_path,
+            uniformity_min=dissolve_uniformity_min,
+            flow_max=dissolve_flow_max,
+            min_run_frames=dissolve_min_run_frames,
+        ) + fade_dip_intervals(video_path)
         fade_zones = [
             (max(0, lo - margin), min(total_frames - 1, hi + margin))
-            for lo, hi in dissolve_intervals(
-                video_path,
-                uniformity_min=dissolve_uniformity_min,
-                flow_max=dissolve_flow_max,
-                min_run_frames=dissolve_min_run_frames,
-            )
+            for lo, hi in raw_zones
         ]
     if extra_cuts:
         existing = [0, total_frames] + cut_frames
@@ -328,6 +329,188 @@ def dissolve_cuts(
             min_run_frames=min_run_frames,
         )
     ]
+
+
+def _dhash64(gray: np.ndarray) -> np.ndarray:
+    thumb = cv2.resize(gray, (9, 8), interpolation=cv2.INTER_AREA)
+    return (thumb[:, 1:] > thumb[:, :-1]).reshape(-1)
+
+
+def fade_dip_intervals(
+    video_path: Path,
+    *,
+    width_px: int = 320,
+    dip_min: float = 3.0,
+    wide_min: int = 22,
+    blend_ratio_max: float = 0.60,
+    blend_primary_max: float = 0.55,
+    blend_primary_min_run: int = 3,
+    side_frames: int = 8,
+    side_gap: int = 5,
+    hash_baseline: int = 6,
+) -> list[tuple[int, int]]:
+    """Short cross-fade intervals via blend structure (GT-tuned).
+
+    Fast gameplay-to-gameplay fades (~0.3 s) defeat both the long-
+    dissolve detector (their content moves, so the flow gate rejects)
+    and spike rescue (no per-frame outlier). Blend-frame properties
+    isolate them — thresholds tuned on the Bournemouth 1-1 Man City
+    ground truth (20 hand-labelled fades; 19/20 recall with zero false
+    events inside kept shots, the 20th being a graphic wipe whose hard
+    edge the base detector catches):
+
+    1. *contrast V-dip*: averaging two scenes provably drops the frame
+       std ~30% at fade centre (fades ≥ 3.7 p10, in-shot frames ≤ 1.8
+       p99) — but fast motion blur also dips contrast, hence the dip
+       path requires *blend confirmation* (≤ ``blend_ratio_max``;
+       motion-blur dips measure ≥ 0.68 — a smear is not an average).
+    2. *blend-primary*: contrast trends across a fade can swamp the
+       V-dip entirely, so frames that are outright blend-like
+       (ratio ≤ ``blend_primary_max`` for ``blend_primary_min_run``
+       consecutive frames) count even without a dip.
+    Both paths require the scene to actually change across the frame:
+    dHash distance at ±``hash_baseline`` ≥ ``wide_min``.
+
+    Returns inclusive blend-frame intervals to exclude from spans.
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return []
+    stds: list[float] = []
+    hashes: list[np.ndarray] = []
+    small: list[np.ndarray] = []
+    graphic: list[float] = []
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            h, w = frame.shape[:2]
+            scale = width_px / max(1, w)
+            gray = cv2.cvtColor(
+                cv2.resize(frame, (width_px, max(1, int(h * scale))),
+                           interpolation=cv2.INTER_AREA),
+                cv2.COLOR_BGR2GRAY,
+            )
+            stds.append(float(gray.std()))
+            hashes.append(_dhash64(gray))
+            # Blend thumbnails come from the FULL-RES frame: the
+            # detail surviving one 80px downscale is what the tuned
+            # blend-ratio thresholds were measured on — thumbnailing
+            # the already-downscaled gray smooths motion-blur frames
+            # under the gates.
+            small.append(cv2.resize(
+                cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (80, 45),
+                interpolation=cv2.INTER_AREA,
+            ))
+            # Graphic-ness: saturated non-green pixel fraction.
+            # League wipes / intro cards are saturated purples and
+            # blues; the pitch is green-saturated. Gameplay frames
+            # measure ~0.03 p50 / 0.19 max on the GT reel.
+            hsv = cv2.cvtColor(cv2.resize(frame, (160, 90)),
+                               cv2.COLOR_BGR2HSV)
+            sat = (hsv[:, :, 1] >= 120) & (hsv[:, :, 2] >= 60)
+            green = (hsv[:, :, 0] >= 35) & (hsv[:, :, 0] <= 95)
+            graphic.append(float((sat & ~green).mean()))
+    finally:
+        cap.release()
+
+    n = len(stds)
+    if n < 2 * (side_frames + side_gap) + 1:
+        return []
+    std_arr = np.asarray(stds)
+    H = np.stack(hashes)
+
+    def dip(t: int) -> float:
+        left = std_arr[max(0, t - side_gap - side_frames):
+                       max(1, t - side_gap)].mean()
+        right = std_arr[min(n - 1, t + side_gap):
+                        min(n, t + side_gap + side_frames)].mean()
+        return float(min(left, right) - std_arr[t])
+
+    def wide(t: int) -> int:
+        return int(np.sum(H[max(0, t - hash_baseline)]
+                          != H[min(n - 1, t + hash_baseline)]))
+
+    def blend_ratio(t: int, gap: int = 6) -> float:
+        left = small[max(0, t - gap)].astype(np.float32)
+        right = small[min(n - 1, t + gap)].astype(np.float32)
+        mid = small[t].astype(np.float32)
+        side_diff = float(np.abs(left - right).mean())
+        if side_diff < 2.0:
+            return 1.0  # sides identical: nothing is fading
+        residual = float(np.abs(mid - (left + right) / 2.0).mean())
+        return residual / side_diff
+
+    dips = np.array([dip(t) for t in range(n)])
+    wides = np.array([wide(t) for t in range(n)])
+    blends = np.array([blend_ratio(t) for t in range(n)])
+
+    def cluster(mask: np.ndarray, min_len: int = 1) -> list[list[int]]:
+        out: list[list[int]] = []
+        for t in np.where(mask)[0]:
+            if out and t - out[-1][-1] <= 4:
+                out[-1].append(int(t))
+            else:
+                out.append([int(t)])
+        return [e for e in out if len(e) >= min_len]
+
+    graphics = np.asarray(graphic)
+
+    def event_graphic(e: list[int]) -> float:
+        return float(np.median(graphics[e]))
+
+    # Graphic transitions (league wipes, intro cards) are not linear
+    # blends, so the blend gate alone rejects them — but their frames
+    # carry saturated non-green overlays that gameplay never sustains
+    # (GT: wipe events median 0.144, motion-blur events 0.015). A dip
+    # event in graphic context is admitted on that evidence instead.
+    dip_events = [
+        e for e in cluster((dips >= dip_min) & (wides >= wide_min))
+        if min(blends[t] for t in e) <= blend_ratio_max
+        or event_graphic(e) >= 0.10
+    ]
+    # Animated intro graphics defeat the static-blend model entirely
+    # (the graphic side moves while fading); strongly graphic frames
+    # with a scene change across them are transition content outright.
+    graphic_events = cluster(
+        (graphics >= 0.30) & (wides >= wide_min), min_len=3,
+    )
+    # The blend-primary path needs a stronger scene-change gate than
+    # the dip path: slow pans sit at blend ratio ~0.45 with wide
+    # drifting into the low 20s, while real fade cores measure >= 28.
+    # Frames bracketing a clean hard cut can also read blend-like
+    # (|A-(A+B)/2| = |A-B|/2); the resulting tiny intervals merely trim
+    # a few frames around an already-detected cut, which the fade-free
+    # edge guarantee prefers anyway.
+    blend_events = cluster(
+        (blends <= blend_primary_max) & (wides >= wide_min + 6),
+        min_len=blend_primary_min_run,
+    )
+
+    intervals: list[tuple[int, int]] = []
+    for event in dip_events + blend_events:
+        # The gated event frames cover the fade core; a fixed pad
+        # absorbs the shallow onset/tail frames (alpha near 0/1 barely
+        # dents any signal). Fixed and bounded beats signal-driven
+        # expansion here — trend regions kept dragging adaptive
+        # expansion across clean frames.
+        intervals.append((max(0, event[0] - 4), min(n - 1, event[-1] + 4)))
+    for event in graphic_events:
+        # Graphic fades decay asymmetrically: the overlay's saturation
+        # drops below the gate while a faint ghost is still blending
+        # out, so the tail side gets a longer pad.
+        intervals.append((max(0, event[0] - 4), min(n - 1, event[-1] + 10)))
+
+    # The two event paths can flag the same fade — merge overlaps.
+    intervals.sort()
+    merged: list[tuple[int, int]] = []
+    for lo, hi in intervals:
+        if merged and lo <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
 
 
 def diff_spike_cuts(

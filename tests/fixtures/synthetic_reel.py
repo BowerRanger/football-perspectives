@@ -79,3 +79,27 @@ def build_reel(path: Path, segments: list[tuple[str, float]]) -> dict:
         frame_idx += n
     writer.release()
     return {"fps": FPS, "total_frames": frame_idx, "spans": spans}
+
+
+def build_reel_with_moving_fade(path: Path) -> dict:
+    """green gameplay -> 0.32 s cross-fade -> crowd, with BOTH layers
+    moving during the blend (like broadcast gameplay-to-gameplay fades).
+    Sustained-motion fades defeat the flow gate of the long-dissolve
+    detector; only blend-structure detection can find them."""
+    rng = np.random.RandomState(7).rand(H, W, 3) * 255
+    writer = cv2.VideoWriter(
+        str(path), cv2.VideoWriter_fourcc(*"mp4v"), FPS, (W, H),
+    )
+    n_a, n_fade, n_b = int(2.0 * FPS), 8, int(2.0 * FPS)
+    for t in range(n_a):
+        writer.write(_frame("pan", t, rng))
+    for i in range(n_fade):
+        alpha = (i + 1) / (n_fade + 1)
+        a = _frame("pan", n_a + i, rng).astype(np.float32)
+        b = _frame("crowd", i, rng).astype(np.float32)
+        writer.write(((1 - alpha) * a + alpha * b).astype(np.uint8))
+    for t in range(n_b):
+        writer.write(_frame("crowd", t, rng))
+    writer.release()
+    return {"fps": FPS, "fade_start": n_a, "fade_end": n_a + n_fade - 1,
+            "total_frames": n_a + n_fade + n_b}

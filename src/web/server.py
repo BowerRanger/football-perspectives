@@ -1192,7 +1192,10 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         method: str = "manual"
         confidence: float = 1.0
 
-    class SyncMapPayload(BaseModel):
+    class GroupSyncPayload(BaseModel):
+        # One group's sync state per POST — the dashboard's editor is
+        # group-scoped, so saves never touch other groups' offsets.
+        group_id: str = ""
         reference_shot: str
         alignments: list[SyncAlignmentPayload]
 
@@ -1206,19 +1209,43 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         # mid-bootstrap (e.g. before the first prepare_shots run).
         return _manifest_shot_ids(output_dir)
 
+    def _manifest_group_members() -> dict[str, list[str]]:
+        """Map ``group_id`` → member shot ids (manifest shot order).
+
+        Shots with ``group_id == ""`` form the ungrouped bucket under
+        key ``""`` (manually-added clips). Returns {} when no manifest.
+        """
+        from src.schemas.shots import ShotsManifest
+
+        manifest_path = output_dir / "shots" / "shots_manifest.json"
+        if not manifest_path.exists():
+            return {}
+        try:
+            manifest = ShotsManifest.load(manifest_path)
+        except Exception:
+            return {}
+        members: dict[str, list[str]] = {}
+        for s in manifest.shots:
+            members.setdefault(s.group_id, []).append(s.id)
+        return members
+
     @app.get("/api/sync")
     def get_sync_map():
-        """Return the SyncMap JSON (operator-edited shot offsets).
+        """Return the group-scoped SyncMap JSON (v2).
 
-        On disk: ``output/shots/sync_map.json``. When absent, return a
-        fresh default with every shot at ``frame_offset=0`` so the
-        dashboard's editor can render one row per shot before the
-        operator has saved anything.
+        On disk: ``output/shots/sync_map.json`` (v1 files migrate on
+        read). Every manifest group is topped up with default
+        ``frame_offset=0`` rows for members missing from the saved map,
+        so the editor renders a full row set without an explicit save
+        first. Alignments for shots that left a group are hidden (the
+        bulk shot editor prunes them on write).
         """
-        from src.schemas.sync_map import SyncMap, default_sync_map
+        from src.schemas.sync_map import (
+            Alignment, GroupSync, SyncMap, default_group_sync,
+        )
 
         path = _sync_map_path()
-        manifest_ids = _manifest_shot_ids_or_empty()
+        sm = SyncMap()
         if path.exists():
             try:
                 sm = SyncMap.load(path)
@@ -1226,44 +1253,65 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                 raise HTTPException(
                     status_code=500, detail=f"Failed to load sync_map: {exc}",
                 )
-            saved_ids = {a.shot_id for a in sm.alignments}
-            # If new shots were added since the last save, append them
-            # at offset=0 so the editor surfaces every current shot
-            # without forcing the operator to re-save first.
-            from src.schemas.sync_map import Alignment
-            for sid in manifest_ids:
-                if sid not in saved_ids:
-                    sm.alignments.append(
-                        Alignment(shot_id=sid, frame_offset=0)
-                    )
-            sm.alignments.sort(key=lambda a: a.shot_id)
+
+        members = _manifest_group_members()
+        if not members:
+            # No manifest: present whatever was saved, untouched.
             return asdict(sm)
-        if not manifest_ids:
-            return {"reference_shot": "", "alignments": []}
-        return asdict(
-            default_sync_map(reference_shot=manifest_ids[0], shot_ids=manifest_ids)
-        )
+
+        groups: list[GroupSync] = []
+        for gid in sorted(members):
+            ids = members[gid]
+            saved = sm.group(gid)
+            if saved is None:
+                groups.append(default_group_sync(gid, ids[0], ids))
+                continue
+            id_set = set(ids)
+            alignments = [a for a in saved.alignments if a.shot_id in id_set]
+            present = {a.shot_id for a in alignments}
+            alignments.extend(
+                Alignment(shot_id=sid, frame_offset=0)
+                for sid in ids if sid not in present
+            )
+            alignments.sort(key=lambda a: a.shot_id)
+            reference = (
+                saved.reference_shot
+                if saved.reference_shot in id_set else ids[0]
+            )
+            groups.append(GroupSync(
+                group_id=gid, reference_shot=reference, alignments=alignments,
+            ))
+        return asdict(SyncMap(groups=groups))
 
     @app.post("/api/sync")
-    def post_sync_map(payload: SyncMapPayload):
-        """Persist a SyncMap. The reference shot must appear in the
-        alignments with ``frame_offset=0``; the dashboard enforces this
-        UX-side too but we re-validate for safety."""
+    def post_sync_map(payload: GroupSyncPayload):
+        """Persist one group's sync state. The reference shot must appear
+        in the alignments with ``frame_offset=0``; the dashboard enforces
+        this UX-side too but we re-validate for safety."""
         from src.schemas.sync_map import (
-            Alignment, SyncMap, validate_method,
+            Alignment, GroupSync, SyncMap, validate_method,
         )
 
-        manifest_ids = set(_manifest_shot_ids_or_empty())
+        members = _manifest_group_members()
+        group_ids = set(members.get(payload.group_id, []))
+        if members and not group_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"group_id {payload.group_id!r} has no shots in the "
+                    "manifest"
+                ),
+            )
         if not payload.reference_shot:
             raise HTTPException(
                 status_code=400, detail="reference_shot is required",
             )
-        if manifest_ids and payload.reference_shot not in manifest_ids:
+        if group_ids and payload.reference_shot not in group_ids:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"reference_shot {payload.reference_shot!r} is not in"
-                    " the shots manifest"
+                    f"reference_shot {payload.reference_shot!r} is not a "
+                    f"member of group {payload.group_id!r}"
                 ),
             )
         seen: set[str] = set()
@@ -1275,11 +1323,12 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     detail=f"duplicate shot_id {a.shot_id!r} in alignments",
                 )
             seen.add(a.shot_id)
-            if manifest_ids and a.shot_id not in manifest_ids:
+            if group_ids and a.shot_id not in group_ids:
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        f"shot_id {a.shot_id!r} is not in the shots manifest"
+                        f"shot_id {a.shot_id!r} is not a member of group "
+                        f"{payload.group_id!r}"
                     ),
                 )
             try:
@@ -1311,11 +1360,21 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                 ),
             )
         alignments.sort(key=lambda a: a.shot_id)
-        sm = SyncMap(
-            reference_shot=payload.reference_shot, alignments=alignments,
-        )
-        sm.save(_sync_map_path())
-        return {"saved": True, "path": str(_sync_map_path()), "count": len(alignments)}
+
+        path = _sync_map_path()
+        sm = SyncMap.load(path) if path.exists() else SyncMap()
+        sm = sm.with_group(GroupSync(
+            group_id=payload.group_id,
+            reference_shot=payload.reference_shot,
+            alignments=alignments,
+        ))
+        sm.save(path)
+        return {
+            "saved": True,
+            "path": str(path),
+            "group_id": payload.group_id,
+            "count": len(alignments),
+        }
 
     @app.get("/landmarks")
     def get_landmarks():

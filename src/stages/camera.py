@@ -1727,13 +1727,34 @@ class CameraStage(BaseStage):
                           & (pr[:, 1] >= 0) & (pr[:, 1] < h_i))
                 return float(inside.sum()) / len(xs_v)
 
+            def _board_cal_quality(f: int) -> float:
+                """How much to trust frame f's camera for calibrating d. The
+                d-estimate error tracks the frame's FAR-FIELD accuracy:
+                circle-constrained frames are the best available reference
+                (the ring spans midfield depth; held-out misfit ~3-4 px),
+                line-rich solves next, point-re-solved anchor islands next —
+                lens-limited cold-start fills (which dominated the old
+                visibility-only selection and blew the d-spread past the
+                trust gate on the origi clips) score lowest.
+                """
+                entries = detected_lines_by_frame.get(f) or []
+                n_straight = sum(
+                    1 for ln in entries if "circle" not in ln["name"])
+                has_circle = any("circle" in ln["name"] for ln in entries)
+                return ((2.0 if has_circle else 0.0)
+                        + min(n_straight, 4)
+                        + (1.0 if f in anchor_resolved_frames else 0.0))
+
             _covered_b = [i for i in range(len(per_frame_K))
                           if per_frame_K[i] is not None]
-            _vis_ranked = sorted(
-                (f for f in _covered_b[::max(1, len(_covered_b) // 40)]),
-                key=_far_touchline_vis, reverse=True)
-            cal_fids = sorted(
-                f for f in _vis_ranked[:10] if _far_touchline_vis(f) >= 0.3)
+            _cands_b = [
+                f for f in _covered_b[::max(1, len(_covered_b) // 60)]
+                if _far_touchline_vis(f) >= 0.3 and _board_cal_quality(f) >= 2.0
+            ]
+            _cands_b.sort(
+                key=lambda f: (_board_cal_quality(f), _far_touchline_vis(f)),
+                reverse=True)
+            cal_fids = sorted(_cands_b[:10])
             cal_frames: dict[int, np.ndarray] = {}
             for f in cal_fids:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, f)

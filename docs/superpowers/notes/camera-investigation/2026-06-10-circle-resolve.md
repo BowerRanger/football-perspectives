@@ -204,3 +204,18 @@ untouched.
   cameras (or weighting calibration frames by anchor quality) shrinks the
   spread below the gate.
 - gberch: visibility gate skips (no covered frame sees the board zone).
+
+### Quality-first calibration selection (2026-06-11, follow-up)
+
+Calibration frames are now chosen by CAMERA QUALITY among board-visible
+frames (circle entries +2, straight lines up to +4, anchor island +1; need
+score >= 2), not visibility alone. kroupi: d-spread 0.20 -> 0.07 m (applies,
+clicks hold at 6.3 px). origi01: 0.77 m, origi02: 0.90 m — UNCHANGED by
+selection, i.e. the spread is LENS-BOUND, not selection-bound: the board
+lives in a different image zone (above the far touchline) than the circle
+that pins their midfield, and the unrefined wide-field lens tilts between
+the zones. Their unlock — and the single deepest remaining lever for the
+camera stage — is the lens-loop robustification: feed circle-point (and
+board) frames into solve_static_camera_from_lines' global lens refinement so
+it no longer starves on the >=2-straight-line pfl gate (validate against
+origi02's k~0.23, which must not regress).

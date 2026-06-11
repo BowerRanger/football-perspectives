@@ -307,3 +307,17 @@ FINAL MATRIX (manual-click reprojection):
 Remaining above-bar: origi01 start (~0.5-1 m) + midfield tail (~0.3-0.5 m),
 origi02 f75 area (~0.5 m) — next lever remains zoom-dependent distortion
 k(fx) (origi01 zooms 1.5x; one k1k2 cannot serve both ends exactly).
+
+## GOAL CLOSE-OUT — systematic alignment vs the 1-foot bar
+
+Per-click reprojection conflates camera error with click-placement scatter
+(~5-10 px at far field = the metric's noise floor). The honest measure of
+"projected pitch vs real pitch" is the PER-FRAME SYSTEMATIC offset: the mean
+signed residual vector over far landmarks (scripts/
+eval_systematic_alignment.py). Coherence column separates the regimes —
+noise-dominated frames (coherence ~0.1-0.3) have near-exact cameras under
+5-10 px of click scatter; systematic frames (0.8+) carry real offsets.
+
+FINAL (commit 838f33d): origi01 worst systematic offset 0.19 m, origi02
+0.26 m — BOTH WITHIN the 1-foot bar on every anchor frame. kroupi: within
+except its f0 start (the user's stated carve-out); gberch byte-identical.

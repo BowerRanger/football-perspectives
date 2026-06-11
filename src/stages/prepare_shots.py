@@ -223,6 +223,7 @@ class PrepareShotsStage(BaseStage):
         # 1. Shot boundaries.
         logger.info("prepare_shots[split]: detecting shots in %s …", src.name)
         spike_cfg = split_cfg.get("spike_rescue", {})
+        dissolve_cfg = split_cfg.get("dissolve_split", {})
         spans = detect_spans(
             src,
             detector=split_cfg.get("detector", "adaptive"),
@@ -236,6 +237,14 @@ class PrepareShotsStage(BaseStage):
             spike_z_min=float(spike_cfg.get("z_min", 4.0)),
             spike_abs_min=float(spike_cfg.get("abs_min", 18.0)),
             spike_window_frames=int(spike_cfg.get("window_frames", 25)),
+            dissolve_split=bool(dissolve_cfg.get("enabled", False)),
+            dissolve_uniformity_min=float(
+                dissolve_cfg.get("uniformity_min", 10.0)
+            ),
+            dissolve_flow_max=float(dissolve_cfg.get("flow_max", 1.25)),
+            dissolve_min_run_frames=int(
+                dissolve_cfg.get("min_run_frames", 5)
+            ),
         )
         spans = merge_short_spans(
             spans,

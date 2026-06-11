@@ -54,13 +54,19 @@ def detect_spans(
     spike_z_min: float = 4.0,
     spike_abs_min: float = 18.0,
     spike_window_frames: int = 25,
+    dissolve_split: bool = False,
+    dissolve_uniformity_min: float = 10.0,
+    dissolve_flow_max: float = 1.25,
+    dissolve_min_run_frames: int = 5,
 ) -> list[ShotSpan]:
     """Detect hard cuts in ``video_path`` and return shot spans.
 
     ``spike_rescue`` unions the detector's cuts with frame-diff outlier
-    cuts (see module docstring) — rescued cuts closer than
-    ``min_scene_len_frames`` to an existing cut are discarded so the
-    detector's placement wins. Spans shorter than
+    cuts (see module docstring); ``dissolve_split`` additionally unions
+    cross-dissolve cuts (:func:`dissolve_cuts` — fades between clips
+    that neither the detector nor spike rescue can see). Cuts from
+    either pass closer than ``min_scene_len_frames`` to an existing cut
+    are discarded so the detector's placement wins. Spans shorter than
     ``min_shot_duration_s`` are dropped (sub-second flashes are useless
     for reconstruction). If no cuts are found at all, the whole video is
     returned as a single span so the caller always has something to work
@@ -92,15 +98,25 @@ def detect_spans(
     )
     cut_frames = sorted(s[0].get_frames() for s in scenes[1:])
 
+    extra_cuts: list[int] = []
     if spike_rescue:
-        rescued = diff_spike_cuts(
+        extra_cuts.extend(diff_spike_cuts(
             video_path,
             z_min=spike_z_min,
             abs_min=spike_abs_min,
             window_frames=spike_window_frames,
-        )
+        ))
+    if dissolve_split:
+        extra_cuts.extend(dissolve_cuts(
+            video_path,
+            uniformity_min=dissolve_uniformity_min,
+            flow_max=dissolve_flow_max,
+            min_run_frames=dissolve_min_run_frames,
+            min_gap_frames=max(25, min_scene_len_frames),
+        ))
+    if extra_cuts:
         existing = [0, total_frames] + cut_frames
-        for cut in rescued:
+        for cut in sorted(extra_cuts):
             if all(abs(cut - c) >= min_scene_len_frames for c in existing):
                 cut_frames.append(cut)
                 existing.append(cut)
@@ -136,6 +152,123 @@ def _spans_from_cuts(
             end_s=(end + 1) / fps,
         ))
     return spans
+
+
+def _block_median_diff(
+    prev_gray: np.ndarray,
+    gray: np.ndarray,
+    grid: tuple[int, int] = (4, 8),
+) -> float:
+    """Median per-block mean |diff| — how *uniformly* the frame changed.
+
+    A cross-dissolve changes every block by a similar amount (the whole
+    image fades), so the median block diff stays high. Localised change
+    (players moving in front of a static camera) leaves most blocks
+    untouched, so the median stays low even when the frame-mean diff is
+    large. Measured on the Liverpool reel: dissolve frames ≥ 9.5 (p10),
+    static-camera action ≤ 7.3 (p50), pans ≈ 8.
+    """
+    d = np.abs(gray.astype(np.float32) - prev_gray.astype(np.float32))
+    gh, gw = grid
+    h, w = d.shape
+    blocks = [
+        float(d[i * h // gh:(i + 1) * h // gh,
+                j * w // gw:(j + 1) * w // gw].mean())
+        for i in range(gh) for j in range(gw)
+    ]
+    return float(np.median(blocks))
+
+
+def dissolve_cuts(
+    video_path: Path,
+    *,
+    width_px: int = 320,
+    uniformity_min: float = 10.0,
+    flow_max: float = 1.25,
+    min_run_frames: int = 5,
+    min_gap_frames: int = 25,
+) -> list[int]:
+    """Cut candidates from cross-dissolves (fades between clips).
+
+    A dissolve changes the *whole frame* steadily without anything
+    moving. Two gates together isolate that: spatial uniformity of the
+    change (block-median diff ≥ ``uniformity_min`` — rejects
+    static-camera action, where change is localised to the players) and
+    near-zero optical flow (median LK flow ≤ ``flow_max`` — rejects
+    pans, which change every block but carry real motion). Within each
+    dissolve run, cuts land on local maxima spaced ``min_gap_frames``
+    apart (default ≈1 s: one fade = one cut, while a continuously-
+    dissolving montage still yields one cut per chained fade). Returns
+    first-frame-of-new-shot indices.
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return []
+    uniformity: list[float] = []
+    flows: list[float] = []
+    prev: np.ndarray | None = None
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            h, w = frame.shape[:2]
+            scale = width_px / max(1, w)
+            small = cv2.resize(
+                frame, (width_px, max(1, int(h * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            if prev is not None:
+                uniformity.append(_block_median_diff(prev, gray))
+                # Median LK flow over tracked corners. With very few
+                # corners (flat content — fade endpoints, blank frames)
+                # LK emits garbage displacements, and motion can't be
+                # claimed from a handful of points anyway: treat as no
+                # flow. Pans always track hundreds of corners.
+                flow = 0.0
+                corners = cv2.goodFeaturesToTrack(
+                    prev, maxCorners=120, qualityLevel=0.01, minDistance=7,
+                )
+                if corners is not None and len(corners):
+                    nxt, status, _ = cv2.calcOpticalFlowPyrLK(
+                        prev, gray, corners, None,
+                    )
+                    tracked = status.reshape(-1) == 1
+                    if tracked.sum() >= 15:
+                        flow = float(np.median(np.linalg.norm(
+                            (nxt - corners).reshape(-1, 2)[tracked], axis=1,
+                        )))
+                flows.append(flow)
+            prev = gray
+    finally:
+        cap.release()
+
+    diff_arr = np.asarray(uniformity)
+    flow_arr = np.asarray(flows)
+    mask = (diff_arr >= uniformity_min) & (flow_arr <= flow_max)
+
+    cuts: list[int] = []
+    n = len(mask)
+    i = 0
+    while i < n:
+        if not mask[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and mask[j]:
+            j += 1
+        if j - i >= min_run_frames:
+            # Local diff maxima within the run, strongest first, spaced
+            # at least min_gap_frames apart.
+            order = sorted(range(i, j), key=lambda k: -diff_arr[k])
+            accepted: list[int] = []
+            for k in order:
+                if all(abs(k - a) >= min_gap_frames for a in accepted):
+                    accepted.append(k)
+            cuts.extend(k + 1 for k in accepted)  # new shot starts at k+1
+        i = j
+    return sorted(cuts)
 
 
 def diff_spike_cuts(

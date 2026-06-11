@@ -65,14 +65,38 @@ celebrations.
 reaction. Visual review: 10/11 kept are clean wide gameplay; all 29
 drops correct except one borderline (person-height 0.51, restorable).
 
+## Iteration 4 (2026-06-11, dissolve splitting + non-gameplay drops)
+
+**Dissolve splitting** (`dissolve_cuts`): cross-fades change the whole
+frame without anything moving. Two gates: spatial uniformity
+(block-median diff ≥ 10 — true dissolves ≥ 9.5 p10, static-camera
+action ≤ 7.3 p50, the confound that a frame-mean threshold could not
+reject: first attempt produced 16 false splits inside gameplay) and
+median LK flow ≤ 1.25 (rejects pans, which change every block but
+carry motion; flow with < 15 tracked corners is treated as 0 — flat
+fade endpoints emit garbage LK). 27 dissolve cuts on the reel, all
+spot-verified as real transitions (montage fades, replay wipes,
+graphic dissolves).
+
+**Ball-visibility gate — tested and rejected (again, properly)**: with
+the purpose-built WASB detector, every kept gameplay shot shows the
+ball (2–5/5 sampled frames) but so do 23/29 correctly-dropped shots
+(balls in the net during celebrations + false fires). Not a usable
+discard signal at shot level.
+
+**Result**: 56 shots, 12 kept gameplay / 32 closeup / 12 reaction, 7
+groups. The pre-match montage now splits and auto-drops: tunnel walk
+(person-height 0.94), lineup (0.81), handshakes/anthem (0.57). Kept
+sheet: 12/12 wide/medium gameplay.
+
 ## Known limitations (operator-correctable in the UI)
 
-- **Dissolve montages don't split**: the reel's pre-match montage
-  (tunnel/lineups/benches, 4–26 s) uses dissolves — no hard cuts, no
-  diff spikes — so it stays fused with the opening gameplay as s002. A
-  plateau detector would confuse dissolves with camera pans (both are
-  sustained diff elevation); disambiguating needs optical flow.
-  One-click manual trim/discard for now.
+- The opening broadcast take (17.9–40.7 s) starts on crowd/bench and
+  pans down to kickoff — one continuous camera shot, so it stays one
+  span (correctly, but its first seconds aren't gameplay).
+- Two dissolve cuts (151.0 s, 292.8 s) are uncertain — both sit inside
+  content that is either gameplay→gameplay (benign split) or dropped
+  celebrations.
 
 - Speed-factor estimation is noisy on calm wide shots — a couple of
   real-time shots carry REPLAY badges (sf ≈ 1.3–1.5) and get retimed.

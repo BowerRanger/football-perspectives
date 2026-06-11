@@ -46,6 +46,17 @@ prepare_shots:
       z_min: 4.0
       abs_min: 18.0
       window_frames: 25
+    # Cross-dissolve splitting (fades between clips, montage intros):
+    # sustained frame-diff with near-zero optical flow. Pans carry real
+    # flow and are rejected (Liverpool reel: dissolves at flow 1.0-1.2,
+    # pans 1.4-8.6).
+    dissolve_split:
+      enabled: true
+      # Block-median frame change: a fade alters every block equally
+      # (>= ~10); static-camera action only alters player blocks (<= ~7).
+      uniformity_min: 10.0
+      flow_max: 1.25
+      min_run_frames: 5
   classify:
     sample_points: [0.15, 0.3, 0.5, 0.7, 0.85]
     # A shot is a crowd/bench "reaction" when the green-pitch fraction

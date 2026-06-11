@@ -85,3 +85,43 @@ def test_spike_rescue_does_not_duplicate_detector_cuts(tmp_path: Path):
                            min_scene_len_frames=8, spike_rescue=True)
     # detector already finds both cuts; rescue must not add near-dupes
     assert [s.start_frame for s in rescued] == [s.start_frame for s in normal]
+
+
+def test_dissolve_cuts_finds_crossfade(tmp_path: Path):
+    """Cross-dissolves have high frame-diff but ~zero optical flow —
+    invisible to both the content detector (per-frame delta too small)
+    and spike rescue (no isolated outlier). The dissolve pass must
+    split them."""
+    from src.utils.shot_split import dissolve_cuts
+
+    reel = tmp_path / "reel.mp4"
+    # green->black maximises blend contrast so the per-frame change
+    # during the 0.32 s fade clears the uniformity floor with margin,
+    # like real broadcast dissolves do (reel fades measure 12-27).
+    build_reel(reel, [("green", 2.0), ("xfade:green:black", 0.32),
+                      ("black", 2.0)])
+    cuts = dissolve_cuts(reel)
+    fade_mid = int(2.16 * FPS)
+    assert any(abs(c - fade_mid) <= 6 for c in cuts), cuts
+
+
+def test_dissolve_cuts_ignores_pans(tmp_path: Path):
+    """Fast pans also produce sustained diff — the flow gate must
+    reject them."""
+    from src.utils.shot_split import dissolve_cuts
+
+    reel = tmp_path / "reel.mp4"
+    build_reel(reel, [("pan", 4.0)])
+    assert dissolve_cuts(reel) == []
+
+
+def test_detect_spans_splits_at_dissolve(tmp_path: Path):
+    reel = tmp_path / "reel.mp4"
+    build_reel(reel, [("green", 2.0), ("xfade:green:black", 0.32),
+                      ("black", 2.0)])
+    spans = detect_spans(reel, detector="content", threshold=255.0,
+                         min_scene_len_frames=8, spike_rescue=False,
+                         dissolve_split=True)
+    assert len(spans) == 2
+    for a, b in zip(spans, spans[1:]):
+        assert b.start_frame == a.end_frame + 1

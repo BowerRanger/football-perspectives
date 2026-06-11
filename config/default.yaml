@@ -78,21 +78,26 @@ prepare_shots:
     # than the live-shot reference are replays (and get retimed to real
     # time at extraction).
     replay_min_speed_factor: 1.25
-    # Player close-up discard (celebrations, head-and-shoulders cuts):
-    # YOLO person detection on the sampled frames; a shot whose tallest
-    # person's median height fraction exceeds the threshold is excluded
-    # as 'closeup'. Liverpool-reel separation: wide gameplay <= 0.17,
-    # close-ups >= 0.51. Stage default is off (tests/light envs); this
-    # config turns it on for real runs.
-    closeup_max_person_height: 0.5
+    # Player close-up discard (celebration close-ups): a shot whose
+    # tallest person's median height fraction exceeds the threshold is
+    # excluded as 'closeup'. Bournemouth GT: the operator KEEPS medium
+    # replay shots up to ~0.74; celebration close-ups sit higher. Shots
+    # with pitch but ZERO detected persons drop as 'ambient'. Stage
+    # default is off (tests/light envs); this config turns it on.
+    closeup_max_person_height: 0.78
     person_check:
       enabled: true
       model: yolov8n.pt
       confidence: 0.35
   group:
-    # A source-time hole bigger than this between kept shots (i.e. a
-    # run of dropped reactions/transitions) starts a new highlight.
-    gap_boundary_s: 5.0
+    # One group per attack passage: a new group starts at each long
+    # wide live shot (small players = true wide framing). Derived from
+    # the Bournemouth GT: group-initial shots are >= 6 s with person
+    # height <= 0.19; replays are shorter/closer. Hard-cut
+    # continuations (gap ~0) never start a group.
+    live_wide_max_person_height: 0.25
+    live_wide_min_duration_s: 5.7
+    continuation_max_gap_s: 0.1
   align:
     enabled: true
     curve_width_px: 192

@@ -187,7 +187,11 @@ def compute_span_features(
             )
             f = replace(
                 f,
-                kind=classify_kind(f, **kind_kwargs),
+                kind=classify_kind(
+                    f,
+                    person_checked=person_height_fn is not None,
+                    **kind_kwargs,
+                ),
                 scale=classify_scale(f, **scale_kwargs),
             )
             features.append(f)
@@ -239,9 +243,10 @@ def classify_kind(
     fade_black_frame_threshold: float = 0.18,
     fade_min_brightness_range: float = 0.25,
     transition_max_duration_s: float = 2.0,
-    closeup_max_person_height: float = 0.5,
+    closeup_max_person_height: float = 0.78,
+    person_checked: bool = False,
 ) -> str:
-    """gameplay | reaction | transition | closeup for one span's features."""
+    """gameplay | reaction | transition | closeup | ambient."""
     # Broadcast fades/wipes last around a second — a long span that
     # merely samples one dark frame (shadowed close-up, replay graphic)
     # is gameplay, not a transition.
@@ -257,11 +262,16 @@ def classify_kind(
         return "reaction"
     # Player close-ups (celebrations, head-and-shoulders cuts): a person
     # dominates the frame even though grass keeps the pitch ratio high.
-    # Unreconstructable (no pitch landmarks at that zoom) → excluded by
-    # default; the dashboard tray restores exceptions.
+    # Threshold from the Bournemouth GT: the operator keeps medium
+    # replay shots up to ~0.74; celebration close-ups measure higher.
     if (f.max_person_height > 0
             and f.max_person_height >= closeup_max_person_height):
         return "closeup"
+    # Pitch visible but NOT A SINGLE person detected across the samples
+    # (intro stadium scenics, empty-pitch beauty shots): nothing to
+    # reconstruct. Only meaningful when the person check actually ran.
+    if person_checked and f.max_person_height == 0.0:
+        return "ambient"
     return "gameplay"
 
 

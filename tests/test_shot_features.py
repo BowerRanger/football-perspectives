@@ -183,3 +183,37 @@ def test_speed_reference_pool_excludes_closeups(tmp_path: Path):
     out = estimate_speed_factors(feats)
     # reference pool = the one wide gameplay shot -> its factor ~1.0
     assert out[0].speed_factor == pytest.approx(1.0, abs=0.15)
+
+
+def test_medium_replay_shots_stay_gameplay():
+    """Bournemouth GT: the operator KEEPS medium/close replay shots up
+    to person-height ~0.74; only outright celebration close-ups (0.8+)
+    drop. The old 0.5 threshold was tuned on unlabelled Liverpool data
+    and over-dropped."""
+    from src.utils.shot_features import ShotFeatures
+    from src.utils.shot_split import ShotSpan
+
+    replay = ShotFeatures(
+        span=ShotSpan(0, 99, 0.0, 4.0),
+        pitch_ratio_median=0.42, pitch_ratio_peak=0.6,
+        brightness_min=0.4, brightness_range=0.1,
+        motion_rate=0.05, max_person_height=0.74,
+    )
+    assert classify_kind(replay) == "gameplay"
+
+
+def test_pitch_without_players_is_ambient():
+    """A wide pitch shot with ZERO person detections (intro stadium
+    shots, empty-pitch scenics) is not reconstructable gameplay."""
+    from src.utils.shot_features import ShotFeatures
+    from src.utils.shot_split import ShotSpan
+
+    scenic = ShotFeatures(
+        span=ShotSpan(0, 99, 0.0, 4.0),
+        pitch_ratio_median=0.32, pitch_ratio_peak=0.5,
+        brightness_min=0.4, brightness_range=0.1,
+        motion_rate=0.05, max_person_height=0.0,
+    )
+    assert classify_kind(scenic, person_checked=True) == "ambient"
+    # without the person check the signal is absent, not zero
+    assert classify_kind(scenic, person_checked=False) == "gameplay"

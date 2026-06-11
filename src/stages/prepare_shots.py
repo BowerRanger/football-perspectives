@@ -389,13 +389,21 @@ class PrepareShotsStage(BaseStage):
                 speed_factor=f.speed_factor,
                 source_start_s=f.span.start_s,
                 source_end_s=f.span.end_s,
+                max_person_height=f.max_person_height,
             )
             for sid, f in kept_features
         ]
         grouped = group_shots(
             grouping_inputs,
-            gap_boundary_s=float(group_cfg.get("gap_boundary_s", 5.0)),
-            replay_min_speed_factor=replay_min,
+            live_wide_max_person_height=float(
+                group_cfg.get("live_wide_max_person_height", 0.25)
+            ),
+            live_wide_min_duration_s=float(
+                group_cfg.get("live_wide_min_duration_s", 5.7)
+            ),
+            continuation_max_gap_s=float(
+                group_cfg.get("continuation_max_gap_s", 0.1)
+            ),
         )
         group_idx = _next_sequential_id({g.id for g in existing.groups}, "g")
         new_groups: list[HighlightGroup] = []

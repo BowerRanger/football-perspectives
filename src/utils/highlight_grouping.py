@@ -1,25 +1,28 @@
-"""Group reel-ordered shots into highlight events.
+"""Group reel-ordered shots into highlight events (attack passages).
 
-A highlights reel interleaves each event's live footage with replays
-from other angles, separated by transitions/reactions. With reaction
-and transition shots dropped, a highlight is a contiguous run of
-gameplay shots; the rules below decide where one run ends and the next
-begins. Every boundary records which rule fired and a confidence so the
-dashboard can flag uncertain groupings for operator review.
+Rules derived from operator-annotated ground truth (Bournemouth 1-1
+Man City, groups A-H over 20 kept shots): every group begins with the
+**live wide build-up shot** of a new passage — long (the broadcast
+follows the move develop) with small players (true wide framing) —
+and collects everything that follows until the next one: replay shots
+(shorter, closer framing), goal-mouth angles, and live continuations.
 
-Boundary rules (checked in order, first hit wins) — a new group opens
-before gameplay shot *i* when:
+Measured separations on that ground truth:
 
-- R1 ``transition``        : a transition shot (fade/graphic) sits
-  between *i-1* and *i* in the reel. Broadcast packaging wraps replay
-  sequences in transitions, so this is the strongest signal (0.9).
-- R2 ``gap``               : the source-time hole between kept shots
-  exceeds ``gap_boundary_s`` — several dropped shots in a row usually
-  means the reel moved on (0.6, the weakest rule: a long crowd
-  celebration mid-highlight can also produce a gap).
-- R3 ``live_after_replay`` : *i* is a wide real-time shot and the
-  current group already contains a replay — "replays finished, back to
-  live action" (0.75).
+- group-initial shots: trimmed duration >= 5.7 s, max-person-height
+  0.15-0.19
+- non-initial shots: duration 1.6-7.8 s (one 7.8 s live continuation),
+  most with person height >= 0.5 (replay framing)
+- hard-cut continuations (gap ~0 s) are always the same passage,
+  whatever their stats
+- dropped-content holes do NOT mark passage boundaries (an 8.7 s
+  celebration sits INSIDE the goal event, while several passages are
+  separated by a 0.4 s fade alone)
+
+Known limit: two consecutive live passages with no replay between them
+(GT groups A|B) need event semantics no pixel statistic carries — the
+rule splits them into their live shots and the dashboard's merge
+control resolves it (never wrongly attaching replays).
 """
 
 from __future__ import annotations
@@ -28,9 +31,7 @@ from dataclasses import dataclass, field
 
 _RULE_CONFIDENCE = {
     "start": 1.0,
-    "transition": 0.9,
-    "gap": 0.6,
-    "live_after_replay": 0.75,
+    "live_wide": 0.85,
 }
 
 
@@ -44,6 +45,12 @@ class GroupingInput:
     speed_factor: float
     source_start_s: float
     source_end_s: float
+    # Median max-person-height from the classifier (0.0 = unmeasured).
+    max_person_height: float = 0.0
+
+    @property
+    def duration_s(self) -> float:
+        return max(0.0, self.source_end_s - self.source_start_s)
 
 
 @dataclass
@@ -59,63 +66,58 @@ class GroupedHighlight:
 def group_shots(
     shots: list[GroupingInput],
     *,
-    gap_boundary_s: float = 5.0,
-    replay_min_speed_factor: float = 1.25,
+    live_wide_max_person_height: float = 0.25,
+    live_wide_min_duration_s: float = 5.7,
+    continuation_max_gap_s: float = 0.1,
 ) -> list[GroupedHighlight]:
-    """Partition gameplay shots into highlight groups (reel order).
+    """Partition gameplay shots into one group per attack passage."""
 
-    Non-gameplay shots are never members: transitions mark a pending
-    boundary, reactions are skipped outright (their absence shows up in
-    the R2 source-time gap instead).
-    """
+    def is_live_wide(s: GroupingInput) -> bool:
+        person_ok = (
+            s.max_person_height <= live_wide_max_person_height
+            if s.max_person_height > 0
+            else s.scale == "wide"  # person check disabled: scale proxy
+        )
+        return (s.scale == "wide" and person_ok
+                and s.duration_s >= live_wide_min_duration_s)
+
     groups: list[GroupedHighlight] = []
     members: list[GroupingInput] = []
     open_rule = "start"
-    transition_pending = False
     prev_kept: GroupingInput | None = None
-
-    def _is_replay(s: GroupingInput) -> bool:
-        return s.speed_factor >= replay_min_speed_factor
 
     def _close_group() -> None:
         nonlocal members
         if not members:
             return
-        gid = f"g{len(groups) + 1:02d}"
+        idx = len(groups) + 1
         groups.append(GroupedHighlight(
-            id=gid,
-            label=f"Highlight {len(groups) + 1}",
+            id=f"g{idx:02d}",
+            label=f"Highlight {idx}",
             shot_ids=[m.shot_id for m in members],
             boundary_rule=open_rule,
             boundary_confidence=_RULE_CONFIDENCE.get(open_rule, 1.0),
-            reference_shot=_pick_reference(members, replay_min_speed_factor),
+            reference_shot=_pick_reference(
+                members, live_wide_max_person_height,
+                live_wide_min_duration_s,
+            ),
         ))
         members = []
 
     for shot in shots:
-        if shot.kind == "transition":
-            transition_pending = True
-            continue
         if shot.kind != "gameplay":
             continue
-
-        rule = None
-        if members:
-            if transition_pending:
-                rule = "transition"
-            elif (prev_kept is not None
-                  and shot.source_start_s - prev_kept.source_end_s
-                  > gap_boundary_s):
-                rule = "gap"
-            elif (shot.scale == "wide" and not _is_replay(shot)
-                  and any(_is_replay(m) for m in members)):
-                rule = "live_after_replay"
-
-        if rule is not None:
+        starts_new = False
+        if members and is_live_wide(shot):
+            gap = (shot.source_start_s - prev_kept.source_end_s
+                   if prev_kept is not None else 0.0)
+            # A hard-cut continuation (gap ~0) is the same passage —
+            # the broadcast cut to another live angle mid-move.
+            starts_new = gap > continuation_max_gap_s
+        if starts_new:
             _close_group()
-            open_rule = rule
+            open_rule = "live_wide"
         members.append(shot)
-        transition_pending = False
         prev_kept = shot
 
     _close_group()
@@ -124,16 +126,19 @@ def group_shots(
 
 def _pick_reference(
     members: list[GroupingInput],
-    replay_min_speed_factor: float,
+    live_wide_max_person_height: float,
+    live_wide_min_duration_s: float,
 ) -> str:
-    """First wide real-time member, else the longest member.
-
-    The reference anchors the group's sync timeline at offset 0; a wide
-    live shot is the natural choice because every replay re-covers a
-    subset of its time range.
-    """
+    """First live-wide member (the passage's build-up shot), else the
+    longest member."""
     for m in members:
-        if m.scale == "wide" and m.speed_factor < replay_min_speed_factor:
+        person_ok = (
+            m.max_person_height <= live_wide_max_person_height
+            if m.max_person_height > 0
+            else m.scale == "wide"
+        )
+        if (m.scale == "wide" and person_ok
+                and m.duration_s >= live_wide_min_duration_s):
             return m.shot_id
-    longest = max(members, key=lambda m: m.source_end_s - m.source_start_s)
+    longest = max(members, key=lambda m: m.duration_s)
     return longest.shot_id

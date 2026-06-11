@@ -133,3 +133,38 @@ retiming/grading.
 
 Reel: 50 shots, 12 kept / 26 closeup / 12 reaction, 7 groups, zero
 non-native-timing clips.
+
+## Iteration 6 (2026-06-11, full GT loop — Bournemouth 1-1 Man City)
+
+Ground truth: the operator separated all 53 segments in CapCut (read
+directly from the draft via `scripts/capcut_ground_truth.py`), then
+deleted drops/fades leaving 20 keeps, and annotated groups A-H.
+
+**Final scores** (`scripts/score_against_ground_truth.py score_keeps`):
+- clip reproduction **20/20** — every hand-cut keep maps to exactly one
+  pipeline shot, no fade ghosts (early-start bound 2 frames), trim
+  within 12 frames
+- keep/drop: **0 false-negatives** (no wanted clip dropped), 2 false
+  positives (extra kept shots; one tray-click each)
+- grouping: **6/8 exact**; A splits into its two live shots (two
+  consecutive live passages — semantics no pixel statistic carries;
+  one merge click), H carries one extra member (the keep/drop FP)
+
+**What it took** (each step measured on GT, no blind tuning):
+- fade detection rebuilt around blend structure: contrast V-dip +
+  blend-ratio confirmation (motion-blur dips are smears, not
+  averages), blend-primary path for trend-swamped fades (wide>=28
+  rejects slow pans), graphic admissions for league wipes/intro cards
+  (saturated non-green fraction; 10x separation from blur)
+- a production/offline measurement-chain parity bug (blend thumbnails
+  must downscale from full-res frames) caused days^Whours of
+  threshold oscillation — scorers must run against production code
+- closeup threshold 0.5 -> 0.78: the operator KEEPS medium replay
+  shots (person-height to 0.74); only celebration close-ups drop. New
+  'ambient' kind: pitch with zero detected players (intro scenics)
+- grouping rules rewritten: one group per attack passage, opened by
+  each long (>=5.7 s trimmed) wide live shot (person-height <= 0.25);
+  hard-cut continuations stay; dropped-content holes do NOT split
+  (an 8.7 s celebration sits inside goal-event C)
+- TransNetV2 evaluated for fades and rejected: 90 false events inside
+  keeps at usable recall (PyTorch port, sports content)

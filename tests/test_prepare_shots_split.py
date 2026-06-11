@@ -28,12 +28,13 @@ CFG = {"prepare_shots": {
               "min_confidence": 0.5},
 }}
 
-SEGMENTS = [("green", 3.0), ("crowd", 2.0), ("green_slow", 3.0),
-            ("black", 1.2), ("green", 3.0)]
-# Expected shots: s001 green live | s002 crowd -> reaction (excluded)
-# s003 slow replay | s004 black -> transition (excluded) | s005 green live
-# Groups: g01=[s001,s003] (replay extends the live shot's group),
-#         g02=[s005] (transition boundary).
+SEGMENTS = [("green", 7.0), ("crowd", 2.0), ("green_slow", 3.0),
+            ("black", 1.2), ("green", 7.0)]
+# Expected shots: s001 green live (7 s = live-wide) | s002 crowd ->
+# reaction (excluded) | s003 slow replay (3 s, too short to open a
+# group) | s004 black -> transition (excluded) | s005 green live (7 s).
+# Groups: g01=[s001,s003] (the replay joins the live shot's passage),
+#         g02=[s005] (next live-wide build-up).
 
 
 @pytest.fixture(scope="module")
@@ -71,7 +72,7 @@ def test_source_span_recorded(split_run):
     m = _manifest(split_run)
     s1 = m.shots[0]
     assert s1.source_start_s == pytest.approx(0.0, abs=0.2)
-    assert s1.source_end_s == pytest.approx(3.0, abs=0.4)
+    assert s1.source_end_s == pytest.approx(7.0, abs=0.4)
 
 
 def test_grouping_and_sync_map(split_run):

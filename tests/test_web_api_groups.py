@@ -30,10 +30,10 @@ CFG = {"prepare_shots": {
               "min_confidence": 0.5},
 }}
 
-SEGMENTS = [("green", 3.0), ("crowd", 2.0), ("green_slow", 3.0),
-            ("black", 1.2), ("green", 3.0)]
-# Produces: s001 live | s002 reaction (excluded) | s003 replay |
-#           s004 transition (excluded) | s005 live
+SEGMENTS = [("green", 7.0), ("crowd", 2.0), ("green_slow", 3.0),
+            ("black", 1.2), ("green", 7.0)]
+# Produces: s001 live-wide (7 s) | s002 reaction (excluded) | s003
+# replay (3 s) | s004 transition (excluded) | s005 live-wide (7 s)
 # Groups: g01=[s001,s003], g02=[s005]
 
 

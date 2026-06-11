@@ -322,3 +322,75 @@ def test_quality_report_omits_match_when_unset(tmp_path: Path) -> None:
     write_quality_report(tmp_path)
     report = json.loads((tmp_path / "quality_report.json").read_text())
     assert "match" not in report
+
+
+@pytest.mark.unit
+def test_quality_report_prepare_shots_section(tmp_path: Path) -> None:
+    """Manifest with groups/exclusions + sync map → ingestion summary."""
+    from src.schemas.shots import HighlightGroup, Shot
+    from src.schemas.sync_map import Alignment, GroupSync, SyncMap
+
+    def _shot(sid, **kw):
+        base = dict(id=sid, start_frame=0, end_frame=49, start_time=0.0,
+                    end_time=2.0, clip_file=f"shots/{sid}.mp4")
+        base.update(kw)
+        return Shot(**base)
+
+    manifest = ShotsManifest(
+        source_file="reel.mp4", fps=25.0, total_frames=250,
+        shots=[
+            _shot("s001", group_id="g01"),
+            _shot("s002", kind="reaction", excluded=True,
+                  exclude_reason="reaction"),
+            _shot("s003", group_id="g01", speed_factor=1.8),
+            _shot("s004", kind="transition", excluded=True,
+                  exclude_reason="transition"),
+            _shot("s005", group_id="g02"),
+        ],
+        groups=[
+            HighlightGroup(id="g01", label="Highlight 1",
+                           shot_ids=["s001", "s003"],
+                           boundary_rule="start", boundary_confidence=1.0),
+            HighlightGroup(id="g02", label="Highlight 2",
+                           shot_ids=["s005"],
+                           boundary_rule="transition",
+                           boundary_confidence=0.9),
+        ],
+    )
+    (tmp_path / "shots").mkdir()
+    manifest.save(tmp_path / "shots" / "shots_manifest.json")
+    SyncMap(groups=[GroupSync(
+        group_id="g01", reference_shot="s001",
+        alignments=[
+            Alignment("s001", 0, "motion_profile", 1.0),
+            Alignment("s003", 12, "low_confidence", 0.3),
+        ],
+    )]).save(tmp_path / "shots" / "sync_map.json")
+
+    write_quality_report(tmp_path)
+    report = json.loads((tmp_path / "quality_report.json").read_text())
+    sec = report["prepare_shots"]
+    assert sec["total_shots"] == 5
+    assert sec["active_shots"] == 3
+    assert sec["excluded"] == {"reaction": 1, "transition": 1}
+    assert sec["group_count"] == 2
+    g01 = next(g for g in sec["groups"] if g["id"] == "g01")
+    assert g01["shots"] == 2
+    assert g01["alignment"]["min_confidence"] == 0.3
+    assert "low_confidence" in g01["alignment"]["methods"]
+    assert sec["low_confidence_groups"] == ["g01"]
+
+
+@pytest.mark.unit
+def test_quality_report_no_prepare_section_without_groups(
+    tmp_path: Path,
+) -> None:
+    """Flat copy-mode manifests (no groups, nothing excluded) skip the
+    ingestion section — there is nothing to review."""
+    manifest = ShotsManifest(source_file="x", fps=25.0, total_frames=0,
+                             shots=[])
+    (tmp_path / "shots").mkdir()
+    manifest.save(tmp_path / "shots" / "shots_manifest.json")
+    write_quality_report(tmp_path)
+    report = json.loads((tmp_path / "quality_report.json").read_text())
+    assert "prepare_shots" not in report

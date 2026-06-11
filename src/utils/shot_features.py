@@ -45,6 +45,12 @@ class ShotFeatures:
     brightness_min: float
     brightness_range: float
     motion_rate: float
+    # Median over sampled frames of the tallest detected person's height
+    # as a fraction of frame height. 0.0 = not measured (person check
+    # disabled). On broadcast football, wide gameplay sits <= ~0.17 and
+    # player close-ups >= ~0.5 — pitch ratio cannot separate them
+    # (grass fills the background of a celebration close-up too).
+    max_person_height: float = 0.0
     kind: str = "gameplay"
     scale: str = "medium"
     speed_factor: float = 1.0
@@ -105,6 +111,7 @@ def compute_span_features(
     *,
     sample_points: list[float],
     motion_samples: int = 3,
+    person_height_fn=None,
     **classify_kwargs,
 ) -> list[ShotFeatures]:
     """Sample each span at ``sample_points`` fractions and build features.
@@ -113,6 +120,11 @@ def compute_span_features(
     :func:`classify_scale` (threshold overrides via ``classify_kwargs``,
     split by function signature); ``speed_factor`` stays 1.0 until
     :func:`estimate_speed_factors` runs over the whole feature list.
+
+    ``person_height_fn`` (frame_bgr -> tallest-person height fraction,
+    e.g. :func:`make_yolo_person_height_fn`) enables the close-up
+    classification; ``None`` leaves ``max_person_height`` at 0.0 and the
+    closeup rule dormant.
     """
     kind_kwargs = {k: v for k, v in classify_kwargs.items()
                    if k in _KIND_THRESHOLDS}
@@ -135,12 +147,15 @@ def compute_span_features(
             })
             ratios: list[float] = []
             brightness: list[float] = []
+            person_heights: list[float] = []
             for idx in sample_idxs:
                 frame = _read_frame(cap, idx)
                 if frame is None:
                     continue
                 ratios.append(pitch_ratio(frame))
                 brightness.append(_brightness(frame))
+                if person_height_fn is not None:
+                    person_heights.append(float(person_height_fn(frame)))
 
             rates: list[float] = []
             stride = max(1, len(sample_idxs) // max(1, motion_samples))
@@ -166,6 +181,9 @@ def compute_span_features(
                 brightness_min=float(min(brightness)),
                 brightness_range=float(max(brightness) - min(brightness)),
                 motion_rate=float(np.median(rates)) if rates else 0.0,
+                max_person_height=(
+                    float(np.median(person_heights)) if person_heights else 0.0
+                ),
             )
             f = replace(
                 f,
@@ -184,7 +202,32 @@ _KIND_THRESHOLDS = {
     "fade_black_frame_threshold",
     "fade_min_brightness_range",
     "transition_max_duration_s",
+    "closeup_max_person_height",
 }
+
+
+def make_yolo_person_height_fn(model_path: str, confidence: float = 0.35):
+    """Per-frame tallest-person height fraction via a YOLO person model.
+
+    Heavy import kept lazy: ultralytics/torch only load when the person
+    check is enabled. The model auto-downloads if ``model_path`` names a
+    stock checkpoint (e.g. ``yolov8n.pt``) that isn't on disk.
+    """
+    from ultralytics import YOLO
+
+    model = YOLO(model_path)
+
+    def person_height(frame_bgr: np.ndarray) -> float:
+        height = frame_bgr.shape[0]
+        result = model.predict(
+            frame_bgr, classes=[0], conf=confidence, verbose=False,
+        )[0]
+        if not len(result.boxes):
+            return 0.0
+        boxes = result.boxes.xyxy.cpu().numpy()
+        return float(max((b[3] - b[1]) / height for b in boxes))
+
+    return person_height
 _SCALE_THRESHOLDS = {"wide_min_pitch_ratio", "tight_max_pitch_ratio"}
 
 
@@ -196,8 +239,9 @@ def classify_kind(
     fade_black_frame_threshold: float = 0.18,
     fade_min_brightness_range: float = 0.25,
     transition_max_duration_s: float = 2.0,
+    closeup_max_person_height: float = 0.5,
 ) -> str:
-    """gameplay | reaction | transition for one span's features."""
+    """gameplay | reaction | transition | closeup for one span's features."""
     # Broadcast fades/wipes last around a second — a long span that
     # merely samples one dark frame (shadowed close-up, replay graphic)
     # is gameplay, not a transition.
@@ -211,6 +255,13 @@ def classify_kind(
     if (f.pitch_ratio_median < reaction_max_median_pitch_ratio
             and f.pitch_ratio_peak < reaction_max_peak_pitch_ratio):
         return "reaction"
+    # Player close-ups (celebrations, head-and-shoulders cuts): a person
+    # dominates the frame even though grass keeps the pitch ratio high.
+    # Unreconstructable (no pitch landmarks at that zoom) → excluded by
+    # default; the dashboard tray restores exceptions.
+    if (f.max_person_height > 0
+            and f.max_person_height >= closeup_max_person_height):
+        return "closeup"
     return "gameplay"
 
 

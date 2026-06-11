@@ -48,3 +48,40 @@ def test_merge_short_spans_keeps_distinct_long_spans():
     merged = merge_short_spans([a, b], max_short_duration_s=1.2,
                                max_gap_s=0.08)
     assert len(merged) == 2
+
+
+def test_spike_cuts_finds_hard_cut(tmp_path: Path):
+    from src.utils.shot_split import diff_spike_cuts
+
+    reel = tmp_path / "reel.mp4"
+    build_reel(reel, [("green", 3.0), ("crowd", 2.0)])
+    cuts = diff_spike_cuts(reel)
+    assert any(abs(c - int(3.0 * FPS)) <= 2 for c in cuts)
+
+
+def test_spike_rescue_recovers_cut_the_detector_missed(tmp_path: Path):
+    # threshold=255 blinds the content detector; only spike rescue can
+    # split the reel.
+    reel = tmp_path / "reel.mp4"
+    info = build_reel(reel, [("green", 3.0), ("crowd", 2.0), ("green", 3.0)])
+    blind = detect_spans(reel, detector="content", threshold=255.0,
+                         min_scene_len_frames=8, spike_rescue=False)
+    assert len(blind) == 1
+    rescued = detect_spans(reel, detector="content", threshold=255.0,
+                           min_scene_len_frames=8, spike_rescue=True)
+    assert len(rescued) == 3
+    assert rescued[-1].end_frame == info["total_frames"] - 1
+    # spans stay contiguous
+    for a, b in zip(rescued, rescued[1:]):
+        assert b.start_frame == a.end_frame + 1
+
+
+def test_spike_rescue_does_not_duplicate_detector_cuts(tmp_path: Path):
+    reel = tmp_path / "reel.mp4"
+    build_reel(reel, [("green", 3.0), ("crowd", 2.0), ("green", 3.0)])
+    normal = detect_spans(reel, detector="content", threshold=27.0,
+                          min_scene_len_frames=8, spike_rescue=False)
+    rescued = detect_spans(reel, detector="content", threshold=27.0,
+                           min_scene_len_frames=8, spike_rescue=True)
+    # detector already finds both cuts; rescue must not add near-dupes
+    assert [s.start_frame for s in rescued] == [s.start_frame for s in normal]

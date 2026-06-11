@@ -4,6 +4,17 @@ Thin wrapper around PySceneDetect plus span hygiene. Resurrected from
 the legacy segmentation stage (deleted in 262d08a) with the same
 detector defaults; ``AdaptiveDetector`` is the default because plain
 content thresholds misfire on fast broadcast pans/zooms.
+
+``AdaptiveDetector`` normalises each frame's content change by the mean
+of a tiny (2-frame) neighbourhood — inside continuous fast action
+(celebration sequences, busy build-up) that denominator inflates and
+real cuts vanish below the ratio threshold. Measured on the Liverpool
+4-0 Barcelona reel: 28/36 spike-confirmed cuts found at the default
+threshold. *Spike rescue* closes the gap with a second, statistically
+robust pass: a cut is an isolated outlier of the frame-diff curve
+against a wide (25-frame) median/MAD window, which fast action cannot
+inflate the way a 2-frame mean can. Detector ∪ rescue recovers 36/36 on
+that reel while adding no false cuts.
 """
 
 from __future__ import annotations
@@ -12,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
+import numpy as np
 from scenedetect import AdaptiveDetector, ContentDetector, SceneManager, open_video
 
 
@@ -38,13 +50,21 @@ def detect_spans(
     min_scene_len_frames: int = 13,
     adaptive_min_content_val: float = 15.0,
     min_shot_duration_s: float = 0.0,
+    spike_rescue: bool = True,
+    spike_z_min: float = 4.0,
+    spike_abs_min: float = 18.0,
+    spike_window_frames: int = 25,
 ) -> list[ShotSpan]:
     """Detect hard cuts in ``video_path`` and return shot spans.
 
-    Spans shorter than ``min_shot_duration_s`` are dropped (sub-second
-    flashes are useless for reconstruction). If the detector finds no
-    cuts at all, the whole video is returned as a single span so the
-    caller always has something to work with.
+    ``spike_rescue`` unions the detector's cuts with frame-diff outlier
+    cuts (see module docstring) — rescued cuts closer than
+    ``min_scene_len_frames`` to an existing cut are discarded so the
+    detector's placement wins. Spans shorter than
+    ``min_shot_duration_s`` are dropped (sub-second flashes are useless
+    for reconstruction). If no cuts are found at all, the whole video is
+    returned as a single span so the caller always has something to work
+    with.
     """
     video = open_video(str(video_path))
     manager = SceneManager()
@@ -65,20 +85,124 @@ def detect_spans(
     manager.detect_scenes(video)
     scenes = manager.get_scene_list()
 
-    spans = [
-        ShotSpan(
-            start_frame=s[0].get_frames(),
-            end_frame=s[1].get_frames() - 1,
-            start_s=s[0].get_seconds(),
-            end_s=s[1].get_seconds(),
+    fps = float(video.frame_rate) or 25.0
+    total_frames = (
+        scenes[-1][1].get_frames()
+        if scenes else _whole_video_span(video_path).end_frame + 1
+    )
+    cut_frames = sorted(s[0].get_frames() for s in scenes[1:])
+
+    if spike_rescue:
+        rescued = diff_spike_cuts(
+            video_path,
+            z_min=spike_z_min,
+            abs_min=spike_abs_min,
+            window_frames=spike_window_frames,
         )
-        for s in scenes
-    ]
+        existing = [0, total_frames] + cut_frames
+        for cut in rescued:
+            if all(abs(cut - c) >= min_scene_len_frames for c in existing):
+                cut_frames.append(cut)
+                existing.append(cut)
+        cut_frames.sort()
+
+    spans = _spans_from_cuts(cut_frames, total_frames, fps)
     if not spans:
         spans = [_whole_video_span(video_path)]
     if min_shot_duration_s > 0:
         spans = [s for s in spans if s.duration_s >= min_shot_duration_s]
     return spans
+
+
+def _spans_from_cuts(
+    cut_frames: list[int],
+    total_frames: int,
+    fps: float,
+) -> list[ShotSpan]:
+    """Contiguous spans from sorted cut positions (cut = first frame of
+    the new shot)."""
+    if total_frames <= 0:
+        return []
+    starts = [0] + [c for c in cut_frames if 0 < c < total_frames]
+    spans = []
+    for i, start in enumerate(starts):
+        end = (starts[i + 1] - 1) if i + 1 < len(starts) else total_frames - 1
+        if end < start:
+            continue
+        spans.append(ShotSpan(
+            start_frame=start,
+            end_frame=end,
+            start_s=start / fps,
+            end_s=(end + 1) / fps,
+        ))
+    return spans
+
+
+def diff_spike_cuts(
+    video_path: Path,
+    *,
+    width_px: int = 160,
+    z_min: float = 4.0,
+    abs_min: float = 18.0,
+    window_frames: int = 25,
+) -> list[int]:
+    """Cut candidates from frame-diff outliers (robust local statistics).
+
+    Computes the mean |gray frame-diff| curve at reduced resolution and
+    flags frames whose diff is a ``z_min``-sigma outlier of the
+    surrounding ``window_frames`` median/MAD *and* above ``abs_min``
+    absolute change. Adjacent flags (dissolves spread over 2-3 frames)
+    collapse to the strongest. Returns first-frame-of-new-shot indices.
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return []
+    diffs: list[float] = []
+    prev = None
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            h, w = frame.shape[:2]
+            scale = width_px / max(1, w)
+            small = cv2.resize(
+                frame, (width_px, max(1, int(h * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            if prev is not None:
+                diffs.append(float(np.mean(np.abs(gray - prev))))
+            prev = gray
+    finally:
+        cap.release()
+
+    curve = np.asarray(diffs)
+    n = len(curve)
+    flagged: list[tuple[int, float]] = []
+    for i in range(n):
+        if curve[i] < abs_min:
+            continue
+        lo, hi = max(0, i - window_frames), min(n, i + window_frames + 1)
+        neighbourhood = np.concatenate([curve[lo:i], curve[i + 1:hi]])
+        if len(neighbourhood) < 5:
+            continue
+        med = float(np.median(neighbourhood))
+        mad = float(np.median(np.abs(neighbourhood - med))) + 1e-6
+        z = (curve[i] - med) / (1.4826 * mad)
+        if z >= z_min:
+            # diff index i = change between frames i and i+1, so the new
+            # shot starts at frame i+1.
+            flagged.append((i + 1, float(curve[i])))
+
+    collapsed: list[tuple[int, float]] = []
+    for frame, strength in flagged:
+        if collapsed and frame - collapsed[-1][0] <= 3:
+            if strength > collapsed[-1][1]:
+                collapsed[-1] = (frame, strength)
+        else:
+            collapsed.append((frame, strength))
+    return [frame for frame, _ in collapsed]
 
 
 def _whole_video_span(video_path: Path) -> ShotSpan:

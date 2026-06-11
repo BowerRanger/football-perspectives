@@ -35,9 +35,10 @@ class Shot:
     clip_file: str
     speed_factor: float = 1.0
     # Highlights-ingestion fields. ``kind`` is what the classifier saw
-    # (gameplay | reaction | transition); ``excluded`` shots stay in the
-    # manifest (and on disk, for the dashboard's dropped tray) but are
-    # skipped by every pipeline stage via ``ShotsManifest.active_shots()``.
+    # (gameplay | reaction | transition | closeup); ``excluded`` shots
+    # stay in the manifest (and on disk, for the dashboard's dropped
+    # tray) but are skipped by every pipeline stage via
+    # ``ShotsManifest.active_shots()``.
     # ``source_start_s``/``source_end_s`` locate the shot in the original
     # reel; -1.0 = unknown (manually added clip).
     kind: str = "gameplay"

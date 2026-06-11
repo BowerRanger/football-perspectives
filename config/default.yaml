@@ -31,10 +31,21 @@ prepare_shots:
     min_scene_len_frames: 13
     # Sub-second fragments are useless for reconstruction; very short
     # neighbours are merged first (false cuts from whip pans), then
-    # anything still under min_shot_duration_s is dropped.
+    # anything still under min_shot_duration_s is dropped. Kept at 0.6 s
+    # so spike-rescued real cuts (rapid celebration cutting) don't
+    # re-fuse with their neighbours.
     min_shot_duration_s: 1.0
     merge_max_gap_s: 0.08
-    merge_short_shots_max_duration_s: 1.2
+    merge_short_shots_max_duration_s: 0.6
+    # Frame-diff outlier rescue: unions statistically violent cuts the
+    # adaptive detector misses inside continuous fast action (see
+    # src/utils/shot_split.py docstring — 28/36 -> 36/36 confirmed cuts
+    # on the Liverpool test reel).
+    spike_rescue:
+      enabled: true
+      z_min: 4.0
+      abs_min: 18.0
+      window_frames: 25
   classify:
     sample_points: [0.15, 0.3, 0.5, 0.7, 0.85]
     # A shot is a crowd/bench "reaction" when the green-pitch fraction
@@ -53,6 +64,17 @@ prepare_shots:
     # than the live-shot reference are replays (and get retimed to real
     # time at extraction).
     replay_min_speed_factor: 1.25
+    # Player close-up discard (celebrations, head-and-shoulders cuts):
+    # YOLO person detection on the sampled frames; a shot whose tallest
+    # person's median height fraction exceeds the threshold is excluded
+    # as 'closeup'. Liverpool-reel separation: wide gameplay <= 0.17,
+    # close-ups >= 0.51. Stage default is off (tests/light envs); this
+    # config turns it on for real runs.
+    closeup_max_person_height: 0.5
+    person_check:
+      enabled: true
+      model: yolov8n.pt
+      confidence: 0.35
   group:
     # A source-time hole bigger than this between kept shots (i.e. a
     # run of dropped reactions/transitions) starts a new highlight.

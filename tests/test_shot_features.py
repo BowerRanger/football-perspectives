@@ -104,3 +104,82 @@ def test_speed_factor_static_scene_defaults_to_one(tmp_path: Path):
     feats = estimate_speed_factors(feats)
     # black span has ~zero texture and flow -> guard returns 1.0
     assert feats[1].speed_factor == pytest.approx(1.0)
+
+
+def test_person_dominant_shot_classified_closeup():
+    """Celebration/player close-ups: big person, pitch still visible
+    behind them — pitch ratio alone keeps them, person dominance must
+    not. (Liverpool reel: wide gameplay max-person-height <= 0.17,
+    close-ups >= 0.51.)"""
+    from src.utils.shot_features import ShotFeatures
+    from src.utils.shot_split import ShotSpan
+
+    closeup = ShotFeatures(
+        span=ShotSpan(0, 99, 0.0, 4.0),
+        pitch_ratio_median=0.6, pitch_ratio_peak=0.8,
+        brightness_min=0.4, brightness_range=0.1,
+        motion_rate=0.05, max_person_height=0.85,
+    )
+    assert classify_kind(closeup) == "closeup"
+
+    wide = ShotFeatures(
+        span=ShotSpan(0, 99, 0.0, 4.0),
+        pitch_ratio_median=0.7, pitch_ratio_peak=0.9,
+        brightness_min=0.4, brightness_range=0.1,
+        motion_rate=0.05, max_person_height=0.15,
+    )
+    assert classify_kind(wide) == "gameplay"
+
+
+def test_reaction_takes_precedence_over_closeup():
+    """Crowd close-ups have no pitch at all — keep the more specific
+    'reaction' label."""
+    from src.utils.shot_features import ShotFeatures
+    from src.utils.shot_split import ShotSpan
+
+    crowd = ShotFeatures(
+        span=ShotSpan(0, 99, 0.0, 4.0),
+        pitch_ratio_median=0.02, pitch_ratio_peak=0.05,
+        brightness_min=0.4, brightness_range=0.1,
+        motion_rate=0.05, max_person_height=0.9,
+    )
+    assert classify_kind(crowd) == "reaction"
+
+
+def test_person_height_fn_feeds_features(tmp_path: Path):
+    """compute_span_features aggregates the injected per-frame person
+    measurement as a median; kind flips to closeup when dominant."""
+    reel = tmp_path / "reel.mp4"
+    info = build_reel(reel, [("green", 2.0)])
+    feats = compute_span_features(
+        reel, _spans_from(info), sample_points=[0.2, 0.5, 0.8],
+        person_height_fn=lambda frame: 0.8,
+    )
+    assert feats[0].max_person_height == pytest.approx(0.8)
+    assert feats[0].kind == "closeup"
+
+
+def test_no_person_fn_means_no_closeup_classification(tmp_path: Path):
+    reel = tmp_path / "reel.mp4"
+    info = build_reel(reel, [("green", 2.0)])
+    feats = compute_span_features(reel, _spans_from(info),
+                                  sample_points=[0.2, 0.5, 0.8])
+    assert feats[0].max_person_height == 0.0
+    assert feats[0].kind == "gameplay"
+
+
+def test_speed_reference_pool_excludes_closeups(tmp_path: Path):
+    """Close-ups have inflated apparent motion; they must not drag the
+    real-time reference rate (pool already filters kind == gameplay)."""
+    reel = tmp_path / "reel.mp4"
+    info = build_reel(reel, [("green", 3.0), ("green_slow", 3.0)])
+    feats = compute_span_features(
+        reel, _spans_from(info), sample_points=[0.2, 0.5, 0.8],
+        # mark the SLOW span as a closeup via a frame-dependent stub:
+        person_height_fn=None,
+    )
+    from dataclasses import replace
+    feats = [feats[0], replace(feats[1], kind="closeup")]
+    out = estimate_speed_factors(feats)
+    # reference pool = the one wide gameplay shot -> its factor ~1.0
+    assert out[0].speed_factor == pytest.approx(1.0, abs=0.15)

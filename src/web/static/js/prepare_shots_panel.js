@@ -741,13 +741,14 @@ function _renderDroppedTray(panel, model, refresh) {
     // Reason badge on top of the standard ones.
     const badgeRow = tile.querySelector('[data-role="badges"]');
     if (badgeRow) {
+      const reasonTips = {
+        reaction: "Classified as a crowd/bench reaction shot",
+        transition: "Classified as a fade/graphic transition",
+        closeup: "Classified as a player close-up (celebration / tight cut — person dominates the frame)",
+      };
       badgeRow.prepend(_chip(
         shot.exclude_reason || "dropped", "#fecaca", "#450a0a",
-        shot.kind === "reaction"
-          ? "Classified as a crowd/bench reaction shot"
-          : shot.kind === "transition"
-            ? "Classified as a fade/graphic transition"
-            : "Manually discarded",
+        reasonTips[shot.kind] || "Manually discarded",
       ));
     }
     strip.appendChild(tile);

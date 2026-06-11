@@ -222,6 +222,7 @@ class PrepareShotsStage(BaseStage):
 
         # 1. Shot boundaries.
         logger.info("prepare_shots[split]: detecting shots in %s …", src.name)
+        spike_cfg = split_cfg.get("spike_rescue", {})
         spans = detect_spans(
             src,
             detector=split_cfg.get("detector", "adaptive"),
@@ -231,6 +232,10 @@ class PrepareShotsStage(BaseStage):
             adaptive_min_content_val=float(
                 split_cfg.get("adaptive_min_content_val", 15.0)
             ),
+            spike_rescue=bool(spike_cfg.get("enabled", True)),
+            spike_z_min=float(spike_cfg.get("z_min", 4.0)),
+            spike_abs_min=float(spike_cfg.get("abs_min", 18.0)),
+            spike_window_frames=int(spike_cfg.get("window_frames", 25)),
         )
         spans = merge_short_spans(
             spans,
@@ -250,8 +255,31 @@ class PrepareShotsStage(BaseStage):
 
         # 2. Features + classification + speed factors.
         replay_min = float(classify_cfg.get("replay_min_speed_factor", 1.25))
+        person_cfg = classify_cfg.get("person_check", {})
+        person_height_fn = None
+        if bool(person_cfg.get("enabled", False)):
+            from src.utils.shot_features import make_yolo_person_height_fn
+
+            try:
+                person_height_fn = make_yolo_person_height_fn(
+                    str(person_cfg.get("model", "yolov8n.pt")),
+                    confidence=float(person_cfg.get("confidence", 0.35)),
+                )
+                logger.info(
+                    "prepare_shots[split]: person check enabled (%s)",
+                    person_cfg.get("model", "yolov8n.pt"),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "prepare_shots[split]: person check unavailable (%s) — "
+                    "close-up classification disabled for this run", exc,
+                )
         features = compute_span_features(
             src, spans,
+            person_height_fn=person_height_fn,
+            closeup_max_person_height=float(
+                classify_cfg.get("closeup_max_person_height", 0.5)
+            ),
             sample_points=list(
                 classify_cfg.get("sample_points", [0.15, 0.3, 0.5, 0.7, 0.85])
             ),
@@ -479,6 +507,7 @@ class PrepareShotsStage(BaseStage):
                 "brightness_min": round(f.brightness_min, 4),
                 "brightness_range": round(f.brightness_range, 4),
                 "motion_rate": round(f.motion_rate, 6),
+                "max_person_height": round(f.max_person_height, 3),
                 "speed_factor": round(f.speed_factor, 3),
                 "kind": f.kind,
                 "scale": f.scale,

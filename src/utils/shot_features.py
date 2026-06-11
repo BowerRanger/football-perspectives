@@ -183,6 +183,7 @@ _KIND_THRESHOLDS = {
     "reaction_max_peak_pitch_ratio",
     "fade_black_frame_threshold",
     "fade_min_brightness_range",
+    "transition_max_duration_s",
 }
 _SCALE_THRESHOLDS = {"wide_min_pitch_ratio", "tight_max_pitch_ratio"}
 
@@ -194,10 +195,16 @@ def classify_kind(
     reaction_max_peak_pitch_ratio: float = 0.20,
     fade_black_frame_threshold: float = 0.18,
     fade_min_brightness_range: float = 0.25,
+    transition_max_duration_s: float = 2.0,
 ) -> str:
     """gameplay | reaction | transition for one span's features."""
+    # Broadcast fades/wipes last around a second — a long span that
+    # merely samples one dark frame (shadowed close-up, replay graphic)
+    # is gameplay, not a transition.
+    short_enough = f.span.duration_s <= transition_max_duration_s
     dips_to_black = f.brightness_min <= fade_black_frame_threshold
-    fades = dips_to_black and f.brightness_range >= fade_min_brightness_range
+    fades = (short_enough and dips_to_black
+             and f.brightness_range >= fade_min_brightness_range)
     hard_black = f.brightness_min + f.brightness_range < 0.06
     if fades or hard_black:
         return "transition"

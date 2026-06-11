@@ -44,9 +44,11 @@ prepare_shots:
     # Scale bands on median pitch ratio (camera-distance proxy).
     wide_min_pitch_ratio: 0.40
     tight_max_pitch_ratio: 0.22
-    # Fade-to-black transition detection.
+    # Fade-to-black transition detection. Real fades/wipes are short —
+    # longer spans that merely sample one dark frame stay gameplay.
     fade_black_frame_threshold: 0.18
     fade_min_brightness_range: 0.25
+    transition_max_duration_s: 2.0
     # Shots whose zoom-invariant motion rate is this many times slower
     # than the live-shot reference are replays (and get retimed to real
     # time at extraction).

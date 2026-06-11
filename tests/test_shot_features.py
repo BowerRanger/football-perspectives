@@ -49,6 +49,31 @@ def test_fade_classified_as_transition(tmp_path: Path):
     assert classify_kind(feats[0]) == "transition"
 
 
+def test_long_span_with_dark_dip_is_not_a_transition():
+    """Broadcast fades last ~a second. A 40 s gameplay span that happens
+    to sample one dark frame (shadowed close-up, wipe graphic) must NOT
+    be killed by the fade rule — that's how the Liverpool reel lost its
+    entire first-goal sequence (s002, 4–48 s)."""
+    from src.utils.shot_features import ShotFeatures
+    from src.utils.shot_split import ShotSpan
+
+    long_gameplay = ShotFeatures(
+        span=ShotSpan(100, 1200, 4.0, 48.0),
+        pitch_ratio_median=0.56, pitch_ratio_peak=0.7,
+        brightness_min=0.12, brightness_range=0.4,
+        motion_rate=0.05,
+    )
+    assert classify_kind(long_gameplay) == "gameplay"
+
+    short_fade = ShotFeatures(
+        span=ShotSpan(100, 130, 4.0, 5.2),
+        pitch_ratio_median=0.2, pitch_ratio_peak=0.3,
+        brightness_min=0.12, brightness_range=0.4,
+        motion_rate=0.05,
+    )
+    assert classify_kind(short_fade) == "transition"
+
+
 def test_scale_bands():
     class F:  # minimal stand-in: classify_scale reads pitch_ratio_median
         def __init__(self, m):

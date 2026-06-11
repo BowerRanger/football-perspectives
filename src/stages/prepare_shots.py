@@ -264,6 +264,9 @@ class PrepareShotsStage(BaseStage):
             fade_min_brightness_range=float(
                 classify_cfg.get("fade_min_brightness_range", 0.25)
             ),
+            transition_max_duration_s=float(
+                classify_cfg.get("transition_max_duration_s", 2.0)
+            ),
             wide_min_pitch_ratio=float(
                 classify_cfg.get("wide_min_pitch_ratio", 0.40)
             ),

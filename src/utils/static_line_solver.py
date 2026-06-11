@@ -174,6 +174,7 @@ def solve_static_camera_from_lines(
     ellipse_weight: float = 1.0,
     max_nfev: int = 600,
     c_bound_m: float = 5.0,
+    dist_bound: float = 0.5,
 ) -> StaticCameraSolution:
     """Solve one fixed camera centre across all frames in
     ``per_frame_lines``.
@@ -217,10 +218,18 @@ def solve_static_camera_from_lines(
     p0[0], p0[1] = cx_s, cy_s
     lower[0], upper[0] = W / 2 - 150, W / 2 + 150
     lower[1], upper[1] = H / 2 - 150, H / 2 + 150
-    # distortion seeds + bounds
-    dist_seed = [k1_s, k2_s, 0.0, 0.0, 0.0][:n_dist]
-    dist_lo = [-0.5, -0.5, -0.1, -0.1, -0.5][:n_dist]
-    dist_hi = [0.5, 0.5, 0.1, 0.1, 0.5][:n_dist]
+    # Distortion seeds + bounds. ``dist_bound`` lets the caller pose a
+    # modest-lens candidate: with the centre held, an azimuth-poor line set
+    # compensates through (k1, fx) instead and walks the distortion to the
+    # bound (origi01: k1 0.395 paired with fx ~12% high — the wide-field
+    # anchors paid 300 px); the anchor-fit arbitration picks between it and
+    # the free-lens solution.
+    db = float(dist_bound)
+    dist_seed = [
+        float(np.clip(v, -db, db)) for v in (k1_s, k2_s, 0.0, 0.0, 0.0)
+    ][:n_dist]
+    dist_lo = [-db, -db, -0.1, -0.1, -db][:n_dist]
+    dist_hi = [db, db, 0.1, 0.1, db][:n_dist]
     for j in range(n_dist):
         p0[2 + j] = dist_seed[j]
         lower[2 + j] = dist_lo[j]

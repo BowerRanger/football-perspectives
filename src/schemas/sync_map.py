@@ -133,6 +133,16 @@ class SyncMap:
         g = self.group(group_id)
         return g.offset_for(shot_id) if g is not None else 0
 
+    def offset_for_shot(self, shot_id: str) -> int:
+        """Saved frame_offset for ``shot_id`` in whichever group holds it
+        (0 if no group does). Convenience for consumers that key by shot
+        alone, e.g. the refined-poses preview endpoint."""
+        for g in self.groups:
+            for a in g.alignments:
+                if a.shot_id == shot_id:
+                    return a.frame_offset
+        return 0
+
     def with_group(self, group_sync: GroupSync) -> "SyncMap":
         """Return a new SyncMap with ``group_sync`` upserted by group_id."""
         kept = [g for g in self.groups if g.group_id != group_sync.group_id]

@@ -2294,7 +2294,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
 
                 sync_path = output_dir / "shots" / "sync_map.json"
                 if sync_path.exists():
-                    offset = SyncMap.load(sync_path).offset_for(shot)
+                    offset = SyncMap.load(sync_path).offset_for_shot(shot)
                     if offset:
                         frames = frames + offset
             payload = {

@@ -1021,7 +1021,7 @@ def test_refined_poses_preview_applies_shot_offset(client) -> None:
     import numpy as np
 
     from src.schemas.refined_pose import RefinedPose
-    from src.schemas.sync_map import Alignment, SyncMap
+    from src.schemas.sync_map import Alignment, GroupSync, SyncMap
 
     c, tmp = client
     rp_dir = tmp / "refined_poses"
@@ -1039,13 +1039,14 @@ def test_refined_poses_preview_applies_shot_offset(client) -> None:
     ).save(rp_dir / "P001_refined.npz")
 
     (tmp / "shots").mkdir(exist_ok=True)
-    SyncMap(
+    SyncMap(groups=[GroupSync(
+        group_id="",
         reference_shot="A",
         alignments=[
             Alignment(shot_id="A", frame_offset=0, method="manual", confidence=1.0),
             Alignment(shot_id="B", frame_offset=5, method="manual", confidence=1.0),
         ],
-    ).save(tmp / "shots" / "sync_map.json")
+    )]).save(tmp / "shots" / "sync_map.json")
 
     # Without shot: reference timeline frames passed through.
     r = c.get("/refined_poses/preview?player_id=P001")

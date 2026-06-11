@@ -96,6 +96,17 @@ def test_with_group_alignment_upserts() -> None:
 
 
 @pytest.mark.unit
+def test_offset_for_shot_searches_all_groups() -> None:
+    sm = SyncMap(groups=[
+        GroupSync("g01", "a", [Alignment("a", 0), Alignment("b", 7)]),
+        GroupSync("g02", "c", [Alignment("c", 0), Alignment("d", -3)]),
+    ])
+    assert sm.offset_for_shot("d") == -3
+    assert sm.offset_for_shot("b") == 7
+    assert sm.offset_for_shot("zz") == 0
+
+
+@pytest.mark.unit
 def test_default_group_sync_zeroes_every_shot() -> None:
     gs = default_group_sync("g01", "alpha", ["beta", "alpha"])
     assert gs.group_id == "g01"

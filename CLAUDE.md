@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Python CLI tool (`recon.py`) that reconstructs 3D player animations and ball trajectories from a single broadcast football camera. It takes a manually-trimmed clip, runs a 6-stage ML pipeline, and exports glTF (for a browser viewer) and FBX (for Unreal Engine 5).
+A Python CLI tool (`recon.py`) that reconstructs 3D player animations and ball trajectories from a single broadcast football camera. It takes a manually-trimmed clip **or a full highlights reel**, runs a 6-stage ML pipeline, and exports glTF (for a browser viewer) and FBX (for Unreal Engine 5).
 
 The full technical design is in `docs/football-reconstruction-pipeline-design.md`.
 
@@ -23,8 +23,12 @@ python recon.py run --input clip.mp4 --output ./output/ --stages tracking,camera
 # Wipe legacy output dirs from earlier pipeline versions
 python recon.py run --input clip.mp4 --output ./output/ --clean
 
-# Web dashboard (anchor editor + 3D viewer)
-python recon.py serve --output ./output/
+# Ingest a full highlights reel (auto split/classify/group/align —
+# inputs ≥ prepare_shots.split.min_input_duration_s take this path)
+python recon.py run --input highlights.mp4 --output ./output/ --stages prepare_shots
+
+# Web dashboard (anchor editor + 3D viewer); --port for a second instance
+python recon.py serve --output ./output/ --port 8001
 ```
 
 ## Pipeline Architecture
@@ -33,7 +37,7 @@ The pipeline has 6 sequential stages. Each stage reads from previous stage outpu
 
 | # | Stage | Input | Output |
 |---|-------|-------|--------|
-| 1 | `prepare_shots` | trimmed clip | `shots/clip.mp4` + manifest |
+| 1 | `prepare_shots` | trimmed clip(s) or full highlights reel | `shots/*.mp4` + manifest (+ groups, `sync_map.json`, `shot_features.json`, thumbs) |
 | 2 | `tracking` | shots | `tracks/PXXX_track.json` + `tracks/ball_track.json` |
 | 3 | `camera` | shots + anchors | `camera/camera_track.json` + debug |
 | 4 | `hmr_world` | tracks + camera | `hmr_world/PXXX_smpl_world.npz` + `hmr_world/PXXX_kp2d.json` |
@@ -47,6 +51,8 @@ The 2D pose stage was collapsed into `hmr_world` (decision D15): GVHMR runs ViTP
 **Pitch coordinate system**: The football pitch is the ground plane (z=0), FIFA standard 105m × 68m. The x axis runs along the nearside touchline; y points across the pitch toward the far touchline; z is up. All 3D positions are in pitch-metres.
 
 **Single camera per clip**: One broadcast camera, manually trimmed to a single uninterrupted shot. The camera body is assumed fixed (broadcast pan-tilt-zoom rig), so translation `t` is solved once and held constant; only `R` and focal length vary per frame.
+
+**Highlights ingestion** (`prepare_shots.mode: auto|copy|split`): a single input ≥ `split.min_input_duration_s` (default 90 s) is auto-split with PySceneDetect, each shot classified from sampled frames (pitch-green ratio → reaction shots, brightness → fade transitions, zoom-invariant motion rate → slow-mo replays, which are retimed to real time at extraction). Reaction/transition shots stay in the manifest but are `excluded` (every stage iterates `manifest.active_shots()`); the dashboard's dropped tray restores them. Contiguous gameplay shots are grouped into highlight events (rules: transition between shots / source-time gap / wide live shot after a replay) and each group is auto-aligned by motion-energy NCC into the group-scoped `shots/sync_map.json` (operator `manual` offsets always win). Review UX lives in the dashboard's Prepare Shots panel (`src/web/static/js/prepare_shots_panel.js`): groups board with drag-to-regroup, dropped tray, and a per-group sync timeline.
 
 **Camera tracking**: Keyframe-anchored. The user marks pitch landmarks on a sparse set of keyframes via the web anchor editor; the camera stage solves anchor frames first, then propagates between them with bidirectional optical-flow feature tracking and a smoother. Per-frame confidence is reported so uncertain spans surface as candidates for additional anchors.
 

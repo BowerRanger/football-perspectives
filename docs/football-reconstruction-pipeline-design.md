@@ -50,7 +50,7 @@ Seven stages, single mode, no `pipeline.mode` switch.
 
 | # | Stage | Purpose |
 |---|-------|---------|
-| 1 | `prepare_shots` | Treats input as one already-trimmed clip; no auto-segmentation. |
+| 1 | `prepare_shots` | Pre-trimmed clips are copied as-is; a full highlights reel is auto-split, reaction shots dropped, shots grouped per highlight and auto-aligned (see `docs/superpowers/specs/2026-06-11-highlights-ingestion-design.md`). |
 | 2 | `tracking` | YOLOv8x + ByteTrack for players, YOLOv8 ball model for ball. Manual dedupe UI kept. |
 | 3 | `camera` | **NEW.** Per-frame K, R, t in pitch metres via keyframe-anchored propagation. |
 | 4 | `pose_2d` | ViTPose, COCO 17. Used for foot anchoring and overlays; not for 3D joint positions. |

@@ -21,7 +21,10 @@ def _frame(kind: str, t: int, rng: np.ndarray) -> np.ndarray:
     if kind == "black":
         return np.zeros((H, W, 3), np.uint8)
     if kind == "crowd":
-        return (rng * 0.5 + 64).astype(np.uint8)
+        # Grayscale noise: zero saturation keeps it out of the green
+        # HSV band, like real crowd/bench close-ups are.
+        grey = (rng[:, :, 0] * 0.5 + 64).astype(np.uint8)
+        return np.dstack([grey, grey, grey])
     frame = np.zeros((H, W, 3), np.uint8)
     frame[:, :] = (40, 140, 60)  # BGR pitch green
     frame = frame + (rng * 0.08).astype(np.uint8)  # mow-stripe-ish texture

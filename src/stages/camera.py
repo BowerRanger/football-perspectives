@@ -1018,6 +1018,87 @@ class CameraStage(BaseStage):
         _gap = float(np.linalg.norm(
             np.asarray(sol.camera_centre) - c_anchor_consensus))
         if _gap > 0.75:
+            # CLICK-SCAN along the C valley: the held candidate's seed is the
+            # 1-D optimum of the anchor-click fit (fast per-anchor point
+            # solves) along the free-C -> consensus direction, extended past
+            # the consensus. The clicks are the only evidence immune to the
+            # detections' self-confirmation, and their optimum can lie BEYOND
+            # the consensus (origi01: 2.2 m past the trust ball, where the
+            # halfway-line angle finally fits). A clip whose consensus is
+            # broken scores best at s~0 and the held candidate collapses to
+            # the free C — arbitration then keeps free, unchanged.
+            from src.utils.static_c_profile import (
+                _solve_frame_at_fixed_c as _cs_scan_solve,
+            )
+            from src.utils.static_line_solver import _dist5 as _scan_d5
+            _sd5 = _scan_d5(sol.distortion)
+            _scx, _scy = sol.principal_point
+            _free_C = np.asarray(sol.camera_centre, dtype=np.float64)
+            _vdir = c_anchor_consensus - _free_C
+            _vn = float(np.linalg.norm(_vdir))
+            _vdir = _vdir / max(1e-9, _vn)
+
+            def _click_fit_at(C_cand: np.ndarray) -> float:
+                fits = []
+                for a in anchors.anchors:
+                    if len(a.landmarks) < 4:
+                        continue
+                    if (a.frame >= len(per_frame_R)
+                            or per_frame_R[a.frame] is None):
+                        continue
+                    rv_s, _ = cv2.Rodrigues(np.asarray(per_frame_R[a.frame]))
+                    fx_s = float(per_frame_K[a.frame][0, 0])
+                    rvec_s, fx_o, _rms = _cs_scan_solve(
+                        [], _scx, _scy, _sd5, C_cand, rv_s.reshape(3), fx_s,
+                        circle_obs=list(a.landmarks), circle_weight=1.0)
+                    R_o, _ = cv2.Rodrigues(rvec_s)
+                    t_o = -R_o @ C_cand
+                    K_o = np.array([[fx_o, 0, _scx], [0, fx_o, _scy],
+                                    [0, 0, 1.0]])
+                    from src.utils.camera_projection import (
+                        project_world_to_image,
+                    )
+                    rs = []
+                    for lm in a.landmarks:
+                        pmt = project_world_to_image(
+                            K_o, R_o, t_o,
+                            tuple(float(x) for x in sol.distortion[:2]),
+                            np.array([lm.world_xyz], dtype=float))[0]
+                        rs.append(float(np.linalg.norm(
+                            pmt - np.asarray(lm.image_xy, dtype=float))))
+                    if rs:
+                        fits.append(float(np.median(rs)))
+                return float(np.median(fits)) if fits else float("inf")
+
+            _scan = []
+            for s_ in np.arange(0.0, _vn + 3.01, 0.5):
+                C_cand = _free_C + s_ * _vdir
+                _scan.append((_click_fit_at(C_cand), s_, C_cand))
+            _scan_fit, _scan_s, _scan_C = min(_scan, key=lambda x: x[0])
+            _fit_at_cons = min(
+                _scan, key=lambda x: abs(x[1] - _vn))[0]
+            # Significance gate: a FLAT scan (few exact clicks fit anywhere
+            # via rvec/fx compensation) carries no C information — the
+            # optimum must beat the fit AT the consensus by a real margin or
+            # the consensus stands.
+            if (_scan_s > 0.5
+                    and _scan_fit < _fit_at_cons
+                    - max(0.5, 0.15 * _fit_at_cons)):
+                # s ~ 0 means the scan prefers the free C — which the FREE
+                # candidate already represents (and the scan scores under
+                # the free bundle's lens, biasing it that way); collapsing
+                # the consensus onto it would erase the second opinion.
+                logger.info(
+                    "static line solve: click-scan optimum at s=%.1f m "
+                    "(of %.1f m to consensus): C=%s fit=%.2f px (consensus "
+                    "fit %.2f) — adopting", _scan_s, _vn,
+                    np.round(_scan_C, 2).tolist(), _scan_fit, _fit_at_cons)
+                c_anchor_consensus = _scan_C
+            else:
+                logger.info(
+                    "static line solve: click-scan flat/insignificant "
+                    "(best %.2f vs consensus %.2f px) — keeping consensus",
+                    _scan_fit, _fit_at_cons)
             sol_held = solve_static_camera_from_lines(
                 per_frame_lines, anchors.image_size,
                 c_seed=c_anchor_consensus, lens_seed=lens_seed,
@@ -1413,7 +1494,8 @@ class CameraStage(BaseStage):
                         else (0.05 if len(lines) < 4 else None))
                 rvec, fx, rms = _solve_frame_at_fixed_c(
                     lines, cx_p, cy_p, dist5_p, C, rv_seed.reshape(3), seed_fx,
-                    fx_rel=_fxr, circle_obs=circ_obs)
+                    fx_rel=_fxr, circle_obs=circ_obs,
+                    roll_prior=(rv_seed.reshape(3), float(cfg.get("line_extraction_roll_prior_weight", 120.0))))
                 if ((not np.isfinite(rms) or rms > max_prop_rms)
                         and circ_obs and len(lines) >= prop_min_lines):
                     # A bad/partial circle must NOT block a solvable frame:
@@ -1425,7 +1507,8 @@ class CameraStage(BaseStage):
                         lines, cx_p, cy_p, dist5_p, C, rv_seed.reshape(3),
                         seed_fx,
                         fx_rel=(0.01 if parallel_only
-                                else (0.05 if len(lines) < 4 else None)))
+                                else (0.05 if len(lines) < 4 else None)),
+                        roll_prior=(rv_seed.reshape(3), float(cfg.get("line_extraction_roll_prior_weight", 120.0))))
                     circ_det = None  # circle rejected -> don't draw it
                     circ_obs = None
                 rms_gate = circle_max_rms if circ_det is not None else max_prop_rms
@@ -1686,7 +1769,8 @@ class CameraStage(BaseStage):
                         rvec, fx2, rms = _cs_solve_frame(
                             det, cs_cx, cs_cy, cs_d5, C, rv.reshape(3), fx,
                             fx_rel=0.05 if len(det) < 4 else None,
-                            circle_obs=circ_obs)
+                            circle_obs=circ_obs,
+                            roll_prior=(rv.reshape(3), float(cfg.get("line_extraction_roll_prior_weight", 120.0))))
                         if not np.isfinite(rms):
                             return None
                         Re, _ = cv2.Rodrigues(rvec)
@@ -2352,7 +2436,8 @@ class CameraStage(BaseStage):
                                     lns, cxn, cyn, lr_d5, C, rv.reshape(3),
                                     fx0, fx_rel=0.05 if len(lns) < 4 else None,
                                     circle_obs=circ_obs,
-                                    circle_weight=pt_weight)
+                                    circle_weight=pt_weight,
+                                    roll_prior=(rv.reshape(3), float(cfg.get("line_extraction_roll_prior_weight", 120.0))))
                                 if np.isfinite(rms) and rms <= lr_gate:
                                     R2, _ = cv2.Rodrigues(rvec)
                                     per_frame_K[fid] = np.array(
@@ -2517,7 +2602,8 @@ class CameraStage(BaseStage):
                                 anchor_obs=anch_obs,
                                 anchor_weight=3.0,
                                 pose_prior=(rv_pr.reshape(3), wp),
-                                fx_prior=(prior_fx, wf))
+                                fx_prior=(prior_fx, wf),
+                                roll_prior=(rv_pr.reshape(3), float(cfg.get("line_extraction_roll_prior_weight", 120.0))))
                             if not np.isfinite(rms_n):
                                 continue
                             R_new, _ = cv2.Rodrigues(rvec_n)
@@ -2719,6 +2805,81 @@ class CameraStage(BaseStage):
                 )
 
         _anchor_click_checkpoint("post-outlier")
+
+        # ANCHOR SNAP — final per-anchor-frame re-solve at the final
+        # geometry: landmarks (weight 1.0) + stored straight lines + roll
+        # prior, accepted only when it improves that frame's click fit. The
+        # bundle's point hints are deliberately weak (0.05-0.3) so biased
+        # detections can't be overruled globally, but that lets an anchor
+        # frame inside a feature-poor span drift off its own clicks
+        # (origi01 f255: 45 px while every neighbour fits at ~5 px).
+        if bool(cfg.get("line_extraction_anchor_snap", True)):
+            from src.schemas.anchor import LineObservation as _ASLn
+            from src.utils.camera_projection import (
+                project_world_to_image as _as_proj,
+            )
+            from src.utils.static_c_profile import (
+                _solve_frame_at_fixed_c as _as_solve,
+            )
+            from src.utils.static_line_solver import _dist5 as _as_d5
+            as_d5 = _as_d5(sol.distortion)
+            as_cx, as_cy = sol.principal_point
+            as_dist = tuple(float(x) for x in sol.distortion[:2])
+            n_snapped = 0
+            for a in anchors.anchors:
+                if len(a.landmarks) < 4 or a.frame >= len(per_frame_K):
+                    continue
+                if all(lm.name.startswith("pnl_") for lm in a.landmarks):
+                    # Auto-generated PnLCalib anchors are ~5-15 px noisy and
+                    # already shaped the solve via point hints — snapping to
+                    # them trades verified line crispness for keypoint noise
+                    # (gberch paid 2.14 -> 2.31 px). Snap only to USER clicks.
+                    continue
+                f = a.frame
+                if per_frame_K[f] is None:
+                    continue
+
+                def _click_fit(K_, R_, t_) -> float:
+                    rs = []
+                    for lm in a.landmarks:
+                        p_ = _as_proj(K_, R_, t_, as_dist,
+                                      np.array([lm.world_xyz], float))[0]
+                        rs.append(float(np.linalg.norm(
+                            p_ - np.asarray(lm.image_xy, float))))
+                    return float(np.median(rs))
+
+                fit_before = _click_fit(
+                    per_frame_K[f], per_frame_R[f], per_frame_t[f])
+                lns = [
+                    _ASLn(name=ln["name"],
+                          image_segment=(tuple(ln["image_segment"][0]),
+                                         tuple(ln["image_segment"][1])),
+                          world_segment=(tuple(ln["world_segment"][0]),
+                                         tuple(ln["world_segment"][1])))
+                    for ln in (detected_lines_by_frame.get(f) or [])
+                    if "circle" not in ln["name"]
+                ]
+                rv_a, _ = cv2.Rodrigues(np.asarray(per_frame_R[f]))
+                rvec_a, fx_a, _r = _as_solve(
+                    lns, as_cx, as_cy, as_d5, C, rv_a.reshape(3),
+                    float(per_frame_K[f][0, 0]),
+                    anchor_obs=list(a.landmarks), anchor_weight=1.0,
+                    roll_prior=(rv_a.reshape(3), float(cfg.get(
+                        "line_extraction_roll_prior_weight", 120.0))))
+                R_a, _ = cv2.Rodrigues(rvec_a)
+                K_a = np.array([[fx_a, 0, as_cx], [0, fx_a, as_cy],
+                                [0, 0, 1.0]])
+                t_a = -R_a @ C
+                if _click_fit(K_a, R_a, t_a) < fit_before:
+                    per_frame_K[f] = K_a
+                    per_frame_R[f] = R_a
+                    per_frame_t[f] = t_a
+                    anchor_resolved_frames.add(f)
+                    n_snapped += 1
+            if n_snapped:
+                logger.info(
+                    "static line solve: anchor snap improved %d anchor "
+                    "frame(s)", n_snapped)
 
         # Pin-and-smooth temporal smoothing of the per-frame rotation. The
         # dominant jitter is the seam step where a line-solved frame meets an

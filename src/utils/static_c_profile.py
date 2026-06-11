@@ -70,6 +70,7 @@ def _solve_frame_at_fixed_c(
     fx_prior: tuple[float, float] | None = None,
     anchor_obs: list[LandmarkObservation] | None = None,
     anchor_weight: float = 1.0,
+    roll_prior: tuple[np.ndarray, float] | None = None,
 ) -> tuple[np.ndarray, float, float]:
     """LM-solve one frame's ``(rvec, fx)`` with C pinned. Returns
     ``(rvec, fx, reprojection_rms)``.
@@ -112,6 +113,20 @@ def _solve_frame_at_fixed_c(
         if pose_prior is not None:
             pr, w = pose_prior
             parts.append(w * (rvec - np.asarray(pr, float).reshape(3)))
+        if roll_prior is not None:
+            # Anisotropic continuity: the rotation component about the VIEW
+            # axis (roll) is rig-fixed up to a smooth pan-coupled trend, but
+            # the centre circle is rotationally symmetric about its own
+            # centre — circle-dominant solves have a free roll mode that
+            # swings the halfway line degrees left/right between anchors.
+            # Penalize roll deviation from the reference pose heavily while
+            # leaving pan/tilt to the data.
+            rr, wr = roll_prior
+            rr = np.asarray(rr, float).reshape(3)
+            R_ref, _ = cv2.Rodrigues(rr)
+            view = R_ref[2]
+            parts.append(np.array([
+                wr * float(np.dot(rvec - rr, view))]))
         if fx_prior is not None:
             pf, wf = fx_prior
             parts.append(np.array([wf * (fx - float(pf))]))

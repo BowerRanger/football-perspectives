@@ -321,3 +321,32 @@ noise-dominated frames (coherence ~0.1-0.3) have near-exact cameras under
 FINAL (commit 838f33d): origi01 worst systematic offset 0.19 m, origi02
 0.26 m — BOTH WITHIN the 1-foot bar on every anchor frame. kroupi: within
 except its f0 start (the user's stated carve-out); gberch byte-identical.
+
+## 2026-06-12 — user-reported residuals: roll wobble + halfway tilt
+
+Both observations were one geometry lesson each:
+1. "Pitch angling left/right between anchors" = the centre circle's ROLL
+   DEGENERACY (rolling about the axis through the circle centre leaves the
+   ellipse identical). Detrended roll wobble measured 3.7-4.5 deg std in
+   inter-anchor segments vs 0.34 in the locked span. Fix: anisotropic
+   continuity — a roll_prior channel in _solve_frame_at_fixed_c (penalises
+   the rotation component about the VIEW axis vs the seed/prior pose,
+   weight 120) wired into propagation, cold-start, polish and post-lens
+   solves. Wobble std -> ~1 deg or less per segment.
+2. "Halfway line a few degrees off even at anchors" = residual C error
+   along the valley rotating the halfway line about the circle centre.
+   A 1-D CLICK-SCAN along the free-C -> anchor-consensus direction
+   (extended) finds the click-optimal C (origi01: 2.2 m beyond the old
+   trust ball, fit 6.4 -> 5.0 px); it seeds the held arbitration candidates.
+   Guards: significance (flat scans carry no information — exact synthetic
+   clicks fit anywhere) and distinctness (s~0 = the free C, already a
+   candidate; collapsing the consensus onto it erases the second opinion).
+3. ANCHOR SNAP: final per-anchor-frame re-solve at the final geometry
+   (landmarks weight 1.0 + lines + roll prior), accepted only when the
+   frame's click fit improves; gated to USER clicks (pnl_* auto-anchors are
+   5-15 px noisy — snapping gberch to them cost 2.14 -> 2.31 px line-RMS).
+
+FINAL: origi01 clicks med 5.8 px / p90 16.2 / max 47.6, systematic worst
+0.19 m; origi02 med 6.4 / p90 16.4 / max 24.0, systematic worst 0.14 m —
+both within the 1-foot bar; kroupi baseline (6.3 px med, jitter 1.17);
+gberch baseline (jitter 0.37/0.29, snap gated off).

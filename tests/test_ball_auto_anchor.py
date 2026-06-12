@@ -247,6 +247,57 @@ class TestGroundedSampling:
         )
         assert len(anchors_compat) > 0
 
+    @pytest.mark.unit
+    def test_second_pass_event_frame_produces_no_anchor(self):
+        """An event candidate (bounce) on a second-pass frame must be filtered
+        BEFORE `taken` is computed so it never suppresses nearby grounded
+        candidates.  The same event with source='detector' produces an anchor."""
+        worlds, pixels, steps = _rolling_scene()
+        n = len(worlds)
+        Ks, Rs, ts = per_frame_cams(n)
+        conf = {i: 0.9 for i in range(n)}
+        cfg = AutoAnchorCfg(grounded_interval=25)
+        bounce_frame = 20
+        events = (BallEvent(frame=bounce_frame, kind="bounce", score=0.8),)
+
+        # With source "second_pass" on the bounce frame -> no bounce anchor.
+        sources_sp = {bounce_frame: "second_pass"}
+        anchors_sp = generate_auto_anchors(
+            events=events,
+            steps=steps,
+            confidences=conf,
+            player_ctx=FakePlayerContext(),
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0),
+            fps=FPS,
+            pitch_cfg=PITCH_CFG,
+            cfg=cfg,
+            sources=sources_sp,
+        )
+        assert not any(a.frame == bounce_frame and a.state == "bounce"
+                       for a in anchors_sp), (
+            "bounce on a second_pass frame must not produce an anchor"
+        )
+
+        # With source "detector" on the same frame -> bounce anchor is present.
+        sources_det = {bounce_frame: "detector"}
+        anchors_det = generate_auto_anchors(
+            events=events,
+            steps=steps,
+            confidences=conf,
+            player_ctx=FakePlayerContext(),
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0),
+            fps=FPS,
+            pitch_cfg=PITCH_CFG,
+            cfg=cfg,
+            sources=sources_det,
+        )
+        assert any(a.frame == bounce_frame and a.state == "bounce"
+                   for a in anchors_det), (
+            "bounce on a detector frame should produce an anchor"
+        )
+
 
 class TestValidationGates:
     def test_unreachable_neighbor_dropped(self):

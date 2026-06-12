@@ -74,6 +74,15 @@ from src.utils.camera_projection import (
     project_point_onto_pixel_ray,
     project_world_to_image,
 )
+from src.utils.ball_second_pass import (
+    SecondPassCfg,
+    SecondPassDetection,
+    apparent_ball_px,
+    best_gated_candidate,
+    corridor_predictions,
+    find_gap_runs,
+    map_crop_candidates,
+)
 from src.utils.foot_anchor import ankle_ray_to_pitch
 from src.utils.goal_geometry import GoalGeometry, resolve_goal_impact_world
 
@@ -368,6 +377,20 @@ def _resmooth_observations(
     return steps
 
 
+def _second_pass_cfg(cfg: dict) -> SecondPassCfg:
+    sp = cfg.get("second_pass", {})
+    base = SecondPassCfg()
+    return SecondPassCfg(
+        enabled=bool(sp.get("enabled", base.enabled)),
+        candidate_min_score=float(sp.get("candidate_min_score", base.candidate_min_score)),
+        top_k=int(sp.get("top_k", base.top_k)),
+        corridor_sigma=float(sp.get("corridor_sigma", base.corridor_sigma)),
+        accept_min=float(sp.get("accept_min", base.accept_min)),
+        zoom_min_ball_px=float(sp.get("zoom_min_ball_px", base.zoom_min_ball_px)),
+        zoom_crop_px=int(sp.get("zoom_crop_px", base.zoom_crop_px)),
+    )
+
+
 def _auto_event_cfg(auto_cfg: dict) -> AutoEventCfg:
     base = AutoEventCfg()
     return AutoEventCfg(
@@ -641,6 +664,114 @@ class BallStage(BaseStage):
             cap.release()
         return steps, raw_confidences, sources
 
+    def _second_pass_loop(
+        self,
+        clip_path: Path,
+        gap_runs: list[tuple[int, int]],
+        corridors: dict[int, tuple[np.ndarray, np.ndarray]],
+        per_frame_K: dict[int, np.ndarray],
+        per_frame_R: dict[int, np.ndarray],
+        per_frame_t: dict[int, np.ndarray],
+        distortion: tuple[float, float],
+        detector: BallDetector,
+        sp_cfg: SecondPassCfg,
+        ball_radius: float,
+    ) -> list[SecondPassDetection]:
+        """Revisit evidence gaps with corridor-gated candidate detection.
+
+        Full-frame pass first (run-grouped so the detector's temporal
+        buffer is primed once per run), then a zoom retry on frames where
+        nothing cleared the gate and the predicted ball is small.
+        """
+        accepted: list[SecondPassDetection] = []
+        zoom_targets: list[int] = []
+        prime_offset = getattr(detector, "_frames_in", 3) - 1
+        cap = cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open clip: {clip_path}")
+        try:
+            for start, end in gap_runs:
+                prime = max(0, start - prime_offset)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, prime)
+                detector.reset()
+                for f in range(prime, end + 1):
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    cands = detector.detect_candidates(
+                        frame, sp_cfg.candidate_min_score, sp_cfg.top_k,
+                    )
+                    if f < start or f not in corridors:
+                        continue
+                    mean, cov = corridors[f]
+                    best = best_gated_candidate(cands, mean, cov, sp_cfg)
+                    if best is not None:
+                        accepted.append(SecondPassDetection(
+                            frame=f, uv=best[0],
+                            combined_score=best[1], used_zoom=False,
+                        ))
+                        continue
+                    K = per_frame_K.get(f)
+                    if K is None:
+                        continue
+                    size = apparent_ball_px(
+                        K, per_frame_R[f], per_frame_t[f],
+                        (float(mean[0]), float(mean[1])),
+                        ball_radius, distortion,
+                    )
+                    if size is not None and size < sp_cfg.zoom_min_ball_px:
+                        zoom_targets.append(f)
+            for f in zoom_targets:
+                mean, cov = corridors[f]
+                best = self._zoom_detect(cap, f, mean, cov, detector, sp_cfg)
+                if best is not None:
+                    accepted.append(SecondPassDetection(
+                        frame=f, uv=best[0],
+                        combined_score=best[1], used_zoom=True,
+                    ))
+        finally:
+            detector.reset()
+            cap.release()
+        accepted.sort(key=lambda d: d.frame)
+        return accepted
+
+    def _zoom_detect(
+        self,
+        cap: "cv2.VideoCapture",
+        frame_idx: int,
+        mean: np.ndarray,
+        cov: np.ndarray,
+        detector: BallDetector,
+        sp_cfg: SecondPassCfg,
+    ) -> tuple[tuple[float, float], float] | None:
+        """Crop around the corridor and re-detect; the detector's own
+        letterbox upscales the crop, magnifying a small ball."""
+        half = sp_cfg.zoom_crop_px // 2
+        prime_offset = getattr(detector, "_frames_in", 3) - 1
+        prime = max(0, frame_idx - prime_offset)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, prime)
+        detector.reset()
+        best: tuple[tuple[float, float], float] | None = None
+        for f in range(prime, frame_idx + 1):
+            ret, frame = cap.read()
+            if not ret:
+                return None
+            h, w = frame.shape[:2]
+            x0 = int(np.clip(mean[0] - half, 0, max(0, w - sp_cfg.zoom_crop_px)))
+            y0 = int(np.clip(mean[1] - half, 0, max(0, h - sp_cfg.zoom_crop_px)))
+            crop = frame[y0:y0 + sp_cfg.zoom_crop_px, x0:x0 + sp_cfg.zoom_crop_px]
+            if crop.size == 0:
+                return None
+            cands = detector.detect_candidates(
+                crop, sp_cfg.candidate_min_score, sp_cfg.top_k,
+            )
+            if f == frame_idx:
+                best = best_gated_candidate(
+                    map_crop_candidates(cands, x0, y0), mean, cov, sp_cfg,
+                )
+        detector.reset()
+        return best
+
     def _run_shot(
         self,
         shot_id: str,
@@ -684,6 +815,58 @@ class BallStage(BaseStage):
             logger.warning("ball stage: clip %s contained no frames", clip_path)
             return
         n_frames = max(n_frames, steps[-1].frame + 1)
+
+        # --- 1b. Second pass over evidence gaps -------------------------
+        sp_cfg = _second_pass_cfg(cfg)
+        n_clip = steps[-1].frame + 1
+        outliers = {s.frame for s in steps if s.is_outlier}
+        # Pass-1 raw observations ONLY (feedback-loop guard): the corridor
+        # that admits a second-pass detection is never built from
+        # second-pass output.
+        pass1_uv: dict[int, tuple[float, float] | None] = {
+            s.frame: (
+                s.uv if (s.frame in sources and not s.is_outlier) else None
+            )
+            for s in steps
+        }
+        n_second_pass = 0
+        if sp_cfg.enabled:
+            gap_runs = find_gap_runs(sources, outliers, n_clip)
+            if gap_runs:
+                corridors = corridor_predictions(
+                    pass1_uv, n_clip,
+                    tracker_factory=lambda: _build_tracker(
+                        cfg, max_gap_frames=10 ** 6),
+                )
+                sp_dets = self._second_pass_loop(
+                    clip_path, gap_runs, corridors, per_frame_K, per_frame_R,
+                    per_frame_t, distortion, detector, sp_cfg, ball_radius,
+                )
+                if sp_dets:
+                    n_second_pass = len(sp_dets)
+                    logger.info(
+                        "ball: second pass recovered %d/%d gap frames for %s",
+                        n_second_pass,
+                        sum(e - s + 1 for s, e in gap_runs),
+                        shot_id or "(legacy)",
+                    )
+                    merged_uv = dict(pass1_uv)
+                    for d in sp_dets:
+                        merged_uv[d.frame] = d.uv
+                        raw_confidences[d.frame] = d.combined_score
+                        sources[d.frame] = "second_pass"
+                    steps = _resmooth_observations(merged_uv, n_clip, cfg)
+
+        # Coverage counts ACCEPTED evidence: pass1 counts frames whose raw
+        # observation survived gating (outlier-rejected frames are not
+        # covered even though their source reads "detector").
+        n_pass1 = sum(1 for v in pass1_uv.values() if v is not None)
+        detection_coverage = {
+            "pass1": n_pass1 / n_clip,
+            "second_pass": n_second_pass / n_clip,
+            "total": (n_pass1 + n_second_pass) / n_clip,
+        }
+
         try:
             _write_observations_sidecar(
                 ball_out_path.with_name(ball_out_path.name.replace(
@@ -1008,4 +1191,5 @@ class BallStage(BaseStage):
                 "merged": len(anchor_by_frame),
                 "nodes": len(nodes),
             },
+            "detection_coverage": detection_coverage,
         }, indent=2))

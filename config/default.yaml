@@ -443,6 +443,23 @@ ball:
   # than this from the user's clicked pixel is snapped onto the clicked ray
   # (keeping fitted depth). Makes the user's click authoritative for lateral.
   ray_faithful_tolerance_px: 3.0
+  # Second-pass detection: frames with no accepted pass-1 detection are
+  # revisited with low-threshold candidate detection, gated by a corridor
+  # predicted from forward/backward IMM smoothing of pass-1 observations
+  # only (second-pass output never steers its own corridor, and runs
+  # exactly once). Accepted frames carry source="second_pass" in the
+  # observations sidecar; they densify solver evidence but never mint
+  # auto-anchors. zoom: when nothing clears the gate and the predicted
+  # apparent ball diameter is below zoom_min_ball_px, a crop around the
+  # corridor is re-detected (the detector's letterbox upscales it).
+  second_pass:
+    enabled: true
+    candidate_min_score: 0.05
+    top_k: 5
+    corridor_sigma: 3.0
+    accept_min: 0.25
+    zoom_min_ball_px: 8.0
+    zoom_crop_px: 320
   # Automatic anchoring (camera auto-anchor analogy): velocity breaks on
   # the pixel track are classified as player touches / bounces / goal
   # impacts using the players' FK contact joints and the goal geometry,

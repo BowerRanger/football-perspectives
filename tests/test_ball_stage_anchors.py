@@ -81,6 +81,7 @@ def _minimal_cfg() -> dict:
             "appearance_bridge": {"enabled": False, "max_gap_frames": 8, "template_size_px": 32,
                                   "search_radius_px": 64, "min_ncc": 0.6,
                                   "template_max_age_frames": 30, "template_update_confidence": 0.5},
+            "second_pass": {"enabled": False},
         },
         "pitch": {"length_m": 105.0, "width_m": 68.0},
     }

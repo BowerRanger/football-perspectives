@@ -332,6 +332,10 @@ def generate_auto_anchors(
     cfg = cfg or AutoAnchorCfg()
     if not cfg.enabled:
         return ()
+
+    def _not_second_pass(c: _Candidate) -> bool:
+        return sources is None or sources.get(c.anchor.frame) != "second_pass"
+
     steps_by_frame: dict[int, tuple[float, float]] = {
         s.frame: s.uv for s in steps if s.uv is not None
     }
@@ -339,15 +343,17 @@ def generate_auto_anchors(
         events, steps_by_frame, player_ctx,
         per_frame_K, per_frame_R, per_frame_t, distortion, cfg,
     )
-    taken = {c.anchor.frame for c in candidates}
-    candidates.extend(_grounded_candidates(steps, confidences, taken, cfg))
+    # Second-pass detections densify solver evidence but never mint
+    # constraints (ball v2 design, Phase 1). Filter event candidates BEFORE
+    # computing `taken` so a filtered-out second-pass event never suppresses
+    # nearby grounded candidates.
     if sources is not None:
-        # Second-pass detections densify solver evidence but never mint
-        # constraints (ball v2 design, Phase 1).
-        candidates = [
-            c for c in candidates
-            if sources.get(c.anchor.frame) != "second_pass"
-        ]
+        candidates = [c for c in candidates if _not_second_pass(c)]
+    taken = {c.anchor.frame for c in candidates}
+    grounded = _grounded_candidates(steps, confidences, taken, cfg)
+    if sources is not None:
+        grounded = [c for c in grounded if _not_second_pass(c)]
+    candidates.extend(grounded)
     gated = _apply_gates(
         candidates, per_frame_K, per_frame_R, per_frame_t,
         distortion, player_ctx, fps, pitch_cfg, cfg,

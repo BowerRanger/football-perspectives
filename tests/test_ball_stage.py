@@ -135,7 +135,8 @@ def test_ball_stage_bridges_bracketed_gap_and_marks_trailing_missing(tmp_path: P
     stage = BallStage(
         config={"ball": {"detector": "fake", "max_gap_frames": 3,
                          "auto_anchors": {"enabled": True,
-                                          "grounded_interval": 8}}},
+                                          "grounded_interval": 8},
+                         "second_pass": {"enabled": False}}},
         output_dir=tmp_path,
         ball_detector=FakeBallDetector(detections),
     )

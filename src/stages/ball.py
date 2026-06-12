@@ -338,10 +338,22 @@ def _auto_event_cfg(auto_cfg: dict) -> AutoEventCfg:
             "event_window_frames", base.event_window_frames)),
         merge_window_frames=int(auto_cfg.get(
             "merge_window_frames", base.merge_window_frames)),
+        min_break_speed_px=float(auto_cfg.get(
+            "min_break_speed_px", base.min_break_speed_px)),
+        bounce_min_vy_px=float(auto_cfg.get(
+            "bounce_min_vy_px", base.bounce_min_vy_px)),
+        stationary_max_speed_px=float(auto_cfg.get(
+            "stationary_max_speed_px", base.stationary_max_speed_px)),
+        stationary_min_frames=int(auto_cfg.get(
+            "stationary_min_frames", base.stationary_min_frames)),
+        stationary_min_conf=float(auto_cfg.get(
+            "stationary_min_conf", base.stationary_min_conf)),
         goal_line_tolerance_m=float(auto_cfg.get(
             "goal_line_tolerance_m", base.goal_line_tolerance_m)),
         goal_net_speed_drop_ratio=float(auto_cfg.get(
             "goal_net_speed_drop_ratio", base.goal_net_speed_drop_ratio)),
+        goal_min_direction_change_deg=float(auto_cfg.get(
+            "goal_min_direction_change_deg", base.goal_min_direction_change_deg)),
     )
 
 
@@ -361,6 +373,14 @@ def _auto_anchor_cfg(auto_cfg: dict, ball_radius: float) -> AutoAnchorCfg:
             "shot_speed_px", base.shot_speed_px)),
         suppress_radius_frames=int(auto_cfg.get(
             "suppress_radius_frames", base.suppress_radius_frames)),
+        post_event_suppress_frames=int(auto_cfg.get(
+            "post_event_suppress_frames", base.post_event_suppress_frames)),
+        grounded_max_p_flight=float(auto_cfg.get(
+            "grounded_max_p_flight", base.grounded_max_p_flight)),
+        max_speed_m_s=float(auto_cfg.get(
+            "max_speed_m_s", base.max_speed_m_s)),
+        max_ground_speed_m_s=float(auto_cfg.get(
+            "max_ground_speed_m_s", base.max_ground_speed_m_s)),
         ball_radius_m=ball_radius,
     )
 
@@ -378,6 +398,12 @@ def _solver_cfg(cfg: dict, ball_radius: float) -> SolverCfg:
             "rolling_max_residual_px", base.rolling_max_residual_px)),
         rolling_decel_max_m_s2=float(physics.get(
             "rolling_decel_max_m_s2", base.rolling_decel_max_m_s2)),
+        rolling_max_speed_m_s=float(physics.get(
+            "rolling_max_speed_m_s", base.rolling_max_speed_m_s)),
+        max_arc_seconds=float(physics.get(
+            "max_arc_seconds", base.max_arc_seconds)),
+        open_span_min_apex_m=float(physics.get(
+            "open_span_min_apex_m", base.open_span_min_apex_m)),
         flight_max_residual_px=float(cfg.get(
             "flight_max_residual_px", base.flight_max_residual_px)),
         max_splits_per_span=int(physics.get(

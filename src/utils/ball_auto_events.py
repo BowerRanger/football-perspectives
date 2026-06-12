@@ -285,6 +285,7 @@ def _stationary_spans(
         contiguous = prev_frame is not None and f == prev_frame + 1
         if nxt is None:
             if run_start is not None:
+                confs.append(float(confidences.get(f, 0.5)))
                 _flush(f)
             prev_frame = f
             continue

@@ -324,3 +324,32 @@ class TestContinuityAndOpenSpans:
             got = result.world_by_frame.get(f)
             assert got is not None
             assert np.linalg.norm(np.asarray(got[0]) - truth[f]) <= 0.10
+
+class TestMagnusArcConsistency:
+    def test_end_velocity_and_eval_share_magnus_dynamics(self):
+        # A spinning arc's terminal velocity must come from the same
+        # dynamics as its positions: finite-differencing eval() near the
+        # end frame has to agree with end_velocity(), and both must
+        # differ from the no-spin formula for a strong sideways Magnus.
+        from src.utils.ball_piecewise_solver import _Arc
+        from src.utils.ball_physics import parabola_end_velocity
+
+        fps = 25.0
+        arc = _Arc(
+            fa=0, fb=25,
+            p0=np.array([50.0, 30.0, 0.11]),
+            v0=np.array([15.0, 0.0, 5.0]),
+            residual_px=0.5, n_obs=10,
+            omega_world=np.array([0.0, 0.0, 40.0]),
+            drag_k_over_m=0.01,
+        )
+        v_end = arc.end_velocity(fps)
+        eps_frames = 0.01
+        p_hi = arc.eval(25, fps)
+        p_lo = arc.eval(25 - eps_frames, fps)
+        v_fd = (p_hi - p_lo) / (eps_frames / fps)
+        np.testing.assert_allclose(v_end, v_fd, atol=0.05)
+        plain = parabola_end_velocity(arc.v0, 1.0)
+        assert np.linalg.norm(v_end - plain) > 0.5, (
+            "Magnus end velocity should differ from the no-spin formula"
+        )

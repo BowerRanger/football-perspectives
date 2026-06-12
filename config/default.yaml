@@ -467,9 +467,16 @@ ball:
     min_event_score: 0.25
     grounded_interval: 25
     grounded_min_conf: 0.55
+    grounded_max_p_flight: 0.3
     contact_max_gap_m: 0.6
     shot_speed_px: 12.0
     suppress_radius_frames: 3
+    # No grounded sampling for this long after a touch/bounce/impact —
+    # the ball is likely airborne and the IMM posterior lags the launch.
+    post_event_suppress_frames: 8
+    # Reachability caps: ground-level anchor pairs use the rolling cap.
+    max_speed_m_s: 45.0
+    max_ground_speed_m_s: 35.0
   # Piecewise-physical solver: rolling friction cap, residual gates and
   # the bounce restitution envelope (violations are flagged in the
   # diagnostics/quality report, never silently corrected).
@@ -477,9 +484,15 @@ ball:
     ground_z_tol_m: 0.35
     rolling_max_residual_px: 8.0
     rolling_decel_max_m_s2: 6.0
+    # A roll faster than any ground pass is a lob in disguise.
+    rolling_max_speed_m_s: 35.0
     max_splits_per_span: 3
     restitution_min: 0.5
     restitution_max: 0.85
+    # Longest credible single ballistic arc (bounds launch-arc searches);
+    # open-span arcs whose apex stays below the minimum are ground passes.
+    max_arc_seconds: 2.5
+    open_span_min_apex_m: 0.5
   wasb:
     checkpoint: third_party/wasb_sbdt/pretrained_weights/wasb_soccer_best.pth.tar
     confidence: 0.3

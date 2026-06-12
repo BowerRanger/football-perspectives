@@ -140,6 +140,32 @@ class SolveResult:
     diagnostics: dict
 
 
+def _magnus_end_velocity(
+    v0: np.ndarray,
+    omega: np.ndarray,
+    drag_k_over_m: float,
+    duration_s: float,
+    substeps_per_frame_s: float = 1.0 / 100.0,
+) -> np.ndarray:
+    """Terminal velocity of a Magnus arc (RK4 on dv/dt = g + k·(ω × v)),
+    mirroring ``_integrate_magnus_positions``'s dynamics."""
+    v = np.asarray(v0, dtype=float).copy()
+    omega = np.asarray(omega, dtype=float)
+    n = max(1, int(np.ceil(duration_s / substeps_per_frame_s)))
+    h = duration_s / n
+
+    def accel(vv: np.ndarray) -> np.ndarray:
+        return G_VEC + drag_k_over_m * np.cross(omega, vv)
+
+    for _ in range(n):
+        k1 = accel(v)
+        k2 = accel(v + 0.5 * h * k1)
+        k3 = accel(v + 0.5 * h * k2)
+        k4 = accel(v + h * k3)
+        v = v + (h / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+    return v
+
+
 @dataclass(frozen=True)
 class _Arc:
     """One ballistic arc, parameterised at its own start frame."""
@@ -154,19 +180,25 @@ class _Arc:
     spin_axis: list | None = None
     spin_omega: float | None = None
     spin_confidence: float | None = None
+    drag_k_over_m: float = 0.005
 
     def eval(self, frame: int, fps: float) -> np.ndarray:
         dt = (frame - self.fa) / fps
         if self.omega_world is not None:
             pts = _integrate_magnus_positions(
                 self.p0, self.v0, self.omega_world, G_VEC,
-                0.005, np.array([0.0, max(dt, 0.0)]),
+                self.drag_k_over_m, np.array([0.0, max(dt, 0.0)]),
             )
             return pts[-1]
         return eval_parabola(self.p0, self.v0, np.array([dt]))[0]
 
     def end_velocity(self, fps: float) -> np.ndarray:
-        return parabola_end_velocity(self.v0, (self.fb - self.fa) / fps)
+        duration_s = (self.fb - self.fa) / fps
+        if self.omega_world is not None:
+            return _magnus_end_velocity(
+                self.v0, self.omega_world, self.drag_k_over_m, duration_s,
+            )
+        return parabola_end_velocity(self.v0, duration_s)
 
 
 @dataclass
@@ -435,6 +467,7 @@ class _Solver:
             fa=arc.fa, fb=arc.fb, p0=np.asarray(mp0, float),
             v0=np.asarray(mv0, float), residual_px=0.0, n_obs=arc.n_obs,
             omega_world=np.asarray(momega, float),
+            drag_k_over_m=cfg.drag_k_over_m,
         )
         # Continuity guard: spin must not pull the arc off its end node.
         end_err = float(np.linalg.norm(candidate.eval(arc.fb, self.fps) - b))
@@ -456,6 +489,7 @@ class _Solver:
             fa=arc.fa, fb=arc.fb, p0=candidate.p0, v0=candidate.v0,
             residual_px=float(resid), n_obs=arc.n_obs,
             omega_world=candidate.omega_world,
+            drag_k_over_m=cfg.drag_k_over_m,
             spin_axis=list((momega / omega_mag).astype(float)),
             spin_omega=omega_mag,
             spin_confidence=float(
@@ -511,8 +545,8 @@ class _Solver:
             and splits_left > 0
         ):
             split = self._split_frame_for(fa, fb, used_splits)
-            if split is not None:
-                ground = self._ground_raycast(split)
+            ground = self._ground_raycast(split) if split is not None else None
+            if split is not None and ground is not None:
                 left = self._ballistic_span(
                     a, ground, fa, split, spin_preset,
                     splits_left - 1, used_splits | {split},
@@ -837,7 +871,7 @@ class _Solver:
                     runs.append((start, prev))
                 start = f
             elif not in_flight and start is not None:
-                runs.append((start, prev if contiguous else prev))
+                runs.append((start, prev))
                 start = None
             prev = f
         if start is not None and prev is not None:

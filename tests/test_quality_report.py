@@ -442,6 +442,7 @@ def test_quality_report_ball_per_shot_with_diag(tmp_path: Path) -> None:
              "bone": None, "goal_element": None, "end_frame": None},
         ],
         "anchors": {"manual": 1, "auto_generated": 4, "merged": 5, "nodes": 5},
+        "detection_coverage": {"pass1": 0.8, "second_pass": 0.1, "total": 0.9},
     }))
 
     write_quality_report(tmp_path)
@@ -457,3 +458,6 @@ def test_quality_report_ball_per_shot_with_diag(tmp_path: Path) -> None:
     assert shot["flagged_bounces"][0]["frame"] == 9
     assert shot["max_contact_gap_m"] == pytest.approx(0.31)
     assert shot["splits"] == 1
+    assert shot["detection_coverage"] == {
+        "pass1": 0.8, "second_pass": 0.1, "total": 0.9,
+    }

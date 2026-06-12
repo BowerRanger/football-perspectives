@@ -282,3 +282,18 @@ physics:
   track with flight segments and no >2 m frame jumps; origi01/kroupi
   segment residuals ≤ 8 px; no teleports at segment boundaries; manual
   anchors still within 10 cm.
+
+## Validation results (2026-06-12, WASB re-runs vs committed tracks)
+
+| metric | kroupi01 old → new | origi01 old → new | origi02 (no manual anchors) old → new |
+|---|---|---|---|
+| max frame-to-frame jump | 138.4 m → **1.5 m** | 44.2 m → **3.0 m** | 73.2 m → **7.1 m** |
+| jumps > 2 m | 3 → **0** | 11 → 13 (all inside flagged spans) | 44 → 26 (low-conf open spans) |
+| max accepted-segment residual | 95 px → **5.1 px** | 242 px → **7.9 px** | n/a (0 segs) → **0.0 px** |
+| flight segments | 2 | 9 → 43 spans (33 clean) | 0 → 6 |
+| auto anchors generated | 10 | 21 (beside 60 manual) | 3 |
+| flagged spans (operator to-do) | 2 | 9 | 2 (+1 flagged bounce) |
+
+Anchor-accuracy harness (10 cm, 3 clips): green before and after.
+origi02 remains detector-limited (51/238 WASB detections ≥ 0.55 conf);
+the flags, not fabricated positions, carry that information now.

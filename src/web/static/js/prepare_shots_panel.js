@@ -42,30 +42,68 @@ async function renderPrepareShots(panel) {
   // focused on shot review; re-add renderMatchInfoForm(panel) here when
   // match metadata matters again.
 
-  const [manifest, features, sync] = await Promise.all([
-    fetchJsonOrNull("/api/shots/manifest"),
-    fetchJsonOrNull("/api/shots/features"),
-    fetchJsonOrNull("/api/sync"),
-  ]);
-
-  const refresh = async () => {
-    panel.innerHTML = "";
-    await renderPrepareShots(panel);
+  const state = {
+    manifest: null,
+    features: {},
+    sync: { groups: [] },
   };
 
-  _renderIngestCard(panel, refresh);
-
-  const shots = (manifest && manifest.shots) || [];
-  if (shots.length === 0) {
-    emptyNote(panel, "No shots yet — drop a full highlights reel above to auto-split it, use Add Shots for pre-trimmed clips, or pass --input to recon.py.");
-    return;
+  async function loadAll() {
+    const [manifest, features, sync] = await Promise.all([
+      fetchJsonOrNull("/api/shots/manifest"),
+      fetchJsonOrNull("/api/shots/features"),
+      fetchJsonOrNull("/api/sync"),
+    ]);
+    state.manifest = manifest;
+    state.features = features || {};
+    state.sync = sync || { groups: [] };
   }
 
-  const model = _buildShotModel(manifest, features || {}, sync || { groups: [] });
-  _renderGroupsBoard(panel, model, refresh);
-  _renderDroppedTray(panel, model, refresh);
-  await renderMultiShotStatus(panel, model.activeIds);
-  _renderGroupSyncEditor(panel, model, refresh);
+  // Scoped refresh: mutations re-render only the dynamic sections
+  // (board, tray, status, sync editor) inside their stable hosts — the
+  // ingest card, scroll position and the rest of the page stay put.
+  // PATCH /api/shots/bulk already returns the updated manifest, so a
+  // mutation only needs one extra fetch (the pruned sync map).
+  const refresh = async (updatedManifest) => {
+    const scroller = document.scrollingElement;
+    const scrollTop = scroller ? scroller.scrollTop : 0;
+    if (updatedManifest) {
+      state.manifest = updatedManifest;
+      state.sync = (await fetchJsonOrNull("/api/sync")) || { groups: [] };
+    } else {
+      await loadAll();
+    }
+    renderDynamic();
+    if (scroller) scroller.scrollTop = scrollTop;
+  };
+
+  await loadAll();
+  _renderIngestCard(panel, refresh);
+
+  const hosts = {
+    board: document.createElement("div"),
+    tray: document.createElement("div"),
+    status: document.createElement("div"),
+    syncEditor: document.createElement("div"),
+  };
+  panel.append(hosts.board, hosts.tray, hosts.status, hosts.syncEditor);
+
+  function renderDynamic() {
+    _teardownActiveSyncEditor();
+    for (const host of Object.values(hosts)) host.innerHTML = "";
+    const shots = (state.manifest && state.manifest.shots) || [];
+    if (shots.length === 0) {
+      emptyNote(hosts.board, "No shots yet — drop a full highlights reel above to auto-split it, use Add Shots for pre-trimmed clips, or pass --input to recon.py.");
+      return;
+    }
+    const model = _buildShotModel(state.manifest, state.features, state.sync);
+    _renderGroupsBoard(hosts.board, model, refresh);
+    _renderDroppedTray(hosts.tray, model, refresh);
+    renderMultiShotStatus(hosts.status, model.activeIds);  // async fill-in
+    _renderGroupSyncEditor(hosts.syncEditor, model, refresh);
+  }
+
+  renderDynamic();
 }
 
 // ── Model ────────────────────────────────────────────────────────────
@@ -141,9 +179,9 @@ function _toast(msg, ok = true) {
 
 async function _mutateShots(updates, okMsg, refresh) {
   try {
-    await _patchShots(updates);
+    const manifest = await _patchShots(updates);
     if (okMsg) _toast(okMsg);
-    await refresh();
+    await refresh(manifest);  // scoped re-render, no page rebuild
   } catch (err) {
     _toast(`Failed: ${err.message || err}`, false);
   }

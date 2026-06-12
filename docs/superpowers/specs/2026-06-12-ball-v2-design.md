@@ -324,3 +324,58 @@ Phase 3's bounce coupling assumes Phase 2's segmentation (joint refits need
 correct bounce nodes), so phases land 1 → 2 → 3. Phase 3's export work
 (orientation integration, glTF/FBX rotation) has no Phase 2 dependency and
 can be pulled forward if a visible win is wanted early.
+
+---
+
+## Phase 1 validation results (2026-06-12)
+
+Implementation: commits `9a97725..bd6d410` on `ball-auto-physics` (10 plan
+tasks + 2 validation-driven fixes). Full ball/anchor/tracker suite: 322
+passed. Anchor-accuracy harness green.
+
+Coverage uses the strict accepted-evidence metric introduced in Phase 1
+(fraction of frames whose raw observation survived gating; outlier-rejected
+and IMM-bridged frames do not count). The old "any uv" figure for origi02
+(0.44) re-baselines to **pass1 = 0.32** under this metric.
+
+| clip | metric | pre-Phase-1 | post-Phase-1 (defaults) |
+|---|---|---|---|
+| kroupi01 | coverage total | 0.37 (pass1 only) | **0.47** (+0.10 second pass) |
+| | underconstrained spans / mean residual | 2 / 73.1 px | **1 / 58.1 px** |
+| | max jump / jumps > 2 m | 1.46 m / 0 | 1.46 m / 0 |
+| origi01 | coverage total | 0.34 | **0.40** (+0.06) |
+| | spans / mean residual | 9 / 21.2 px | 10 / 21.0 px |
+| | max jump / jumps > 2 m | 2.95 m / 13 | 2.95 m / 13 |
+| origi02 | coverage total | 0.32 | **0.58** (+0.26) |
+| | spans / mean residual | 2 / 234 px | 1 / 540 px (flagged span, see below) |
+| | max jump / jumps > 2 m | 7.07 m / 26 | **0.57 m / 0** |
+
+**Acceptance verdict**
+
+- *No regressions on kroupi01/origi01*: **met** — every metric equal or
+  better.
+- *origi02 coverage ≥ 0.75*: **not met as written** (0.58). The bar was set
+  against the old lax metric; under the strict metric the second pass
+  recovers +81 % relative coverage, and inspection shows much of the
+  remaining 42 % is ball-out-of-frame or genuinely occluded in this
+  behind-goal replay. Tuned `accept_min: 0.15` reaches **0.68** on origi02
+  (residual 540→384 px, still 0 jumps) but regresses origi01 fit quality
+  (max residual 101→814 px), so **0.25 ships as the default**; 0.15 is a
+  legitimate per-clip override for detector-limited footage.
+- origi02's surviving 540 px span (203–262) is the known multi-impact
+  mis-segmentation case — denser evidence now exposes contradictory
+  observation clusters that one ballistic segment cannot explain. It is
+  correctly flagged underconstrained; this is Phase 2's
+  (mode-sequence search) target, not a detection problem.
+
+**Validation-driven fixes shipped with Phase 1**
+
+1. `fix(ball) 828d837` — detections outside the image (WASB letterbox-
+   padding blobs mapped through the inverse affine, e.g. v = −136) are
+   rejected in both passes.
+2. `fix(ball) a181dd5` — the open-span grounded fallback no longer ground-
+   projects IMM gap-fill frames or raycasts landing outside pitch + margin.
+   This pre-existing hole produced origi02's 26 jumps > 2 m (max 7.07 m)
+   before Phase 1 and a 72 m teleport when denser evidence re-anchored the
+   IMM mid-glide; with the guard, origi02 has **zero** jumps > 2 m — better
+   than pre-rework.

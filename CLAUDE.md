@@ -78,6 +78,7 @@ The 2D pose stage was collapsed into `hmr_world` (decision D15): GVHMR runs ViTP
 - `camera.anchor_max_reprojection_px: 4.0` — anchor frames whose solver reprojection exceeds this are flagged
 - `hmr_world.foot_anchor_max_occlusion_frames: 10` — maximum gap during which the last anchored foot position is held
 - `ball.auto_anchors.*` — automatic event/anchor thresholds (touch radius, goal-impact tolerances, grounded sampling); `ball.physics.*` — solver gates (rolling friction/speed caps, restitution envelope)
+- `ball.second_pass.*` — corridor-gated second detection pass over evidence gaps (on by default; re-decodes gap spans, so the ball stage costs roughly one extra detector pass on gap-heavy clips). Accepted frames carry `source="second_pass"` in the observations sidecar and never mint auto-anchors; per-shot coverage lands in `detection_coverage` in the diag sidecar and quality report.
 
 The ankle-confidence cutoff for foot anchoring (formerly `pose_2d.min_confidence: 0.3`) is now a constant `_ANKLE_CONF_MIN = 0.3` inside `src/stages/hmr_world.py`.
 

@@ -37,6 +37,7 @@ def fit_parabola_to_image_observations(
     z_range_frames: dict[int, tuple[float, float]] | None = None,
     z_range_weight: float = 200.0,
     seed: tuple[np.ndarray, np.ndarray] | None = None,
+    world_fixes: list[tuple[int, np.ndarray, float]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Fit a 3D parabola to per-frame image observations.
 
@@ -80,6 +81,14 @@ def fit_parabola_to_image_observations(
             widths against pixel reprojection noise.
         seed: optional ``(p0, v0)`` warm start at the first observation
             frame, overriding the ground-projection seeding heuristic.
+        world_fixes: optional list of ``(frame_index, xyz, weight_px_per_m)``
+            triples. ``frame_index`` is in absolute clip-frame space (same
+            as ``observations``). For each fix, a 3-residual block
+            ``weight * (pos(t_fix) - xyz)`` is appended after the pixel
+            residuals, where ``pos`` is evaluated closed-form from the
+            parabola. Fixes whose frame falls outside the observation range
+            are still valid (extrapolation). ``None`` or ``[]`` leaves
+            the residual vector byte-identical to the unfixed call.
 
     Returns:
         ``(p0, v0, mean_residual_px)`` where ``mean_residual_px`` is
@@ -130,6 +139,12 @@ def fit_parabola_to_image_observations(
                 below = max(0.0, z_min - z_k)
                 above = max(0.0, z_k - z_max)
                 residuals.append(np.array([z_range_weight * (below + above)]))
+        if world_fixes:
+            for fix_frame, fix_xyz, fix_weight in world_fixes:
+                dt_f = (fix_frame - frame_idx[0]) / fps
+                pos_f = p0 + v0 * dt_f + 0.5 * (dt_f ** 2) * g_vec
+                target = np.asarray(fix_xyz, dtype=float)
+                residuals.append(fix_weight * (pos_f - target))
         return np.concatenate(residuals)
 
     # Seed from start/end image points -> ground projection (rough).
@@ -196,6 +211,12 @@ def fit_parabola_to_image_observations(
                     below = max(0.0, z_min - z_k)
                     above = max(0.0, z_k - z_max)
                     residuals.append(np.array([z_range_weight * (below + above)]))
+            if world_fixes:
+                for fix_frame, fix_xyz, fix_weight in world_fixes:
+                    dt_f = (fix_frame - frame_idx[0]) / fps
+                    pos_f = p0_pin + v0 * dt_f + 0.5 * (dt_f ** 2) * g_vec
+                    target = np.asarray(fix_xyz, dtype=float)
+                    residuals.append(fix_weight * (pos_f - target))
             return np.concatenate(residuals)
 
         result = least_squares(
@@ -278,6 +299,7 @@ def fit_magnus_trajectory(
     omega_axis_fixed: np.ndarray | None = None,
     omega_mag_bound: float | None = None,
     v0_abs_bound: float | None = None,
+    world_fixes: list[tuple[int, np.ndarray, float]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """Fit a Magnus-augmented 3D trajectory to per-frame image observations.
 
@@ -339,19 +361,62 @@ def fit_magnus_trajectory(
     if omega_seed is None:
         omega_seed = np.zeros(3)
 
+    # Build an augmented sample-times grid that includes fix times so
+    # the RK4 integrator visits each fix frame exactly once — no double
+    # integration required.  For each augmented time we track whether it
+    # is an observation slot (obs_indices) or a fix slot (fix_slots).
+    _active_fixes: list[tuple[float, np.ndarray, float]] = []  # (dt, xyz, w)
+    if world_fixes:
+        for fix_frame, fix_xyz, fix_weight in world_fixes:
+            _active_fixes.append((
+                (fix_frame - frame_idx[0]) / fps,
+                np.asarray(fix_xyz, dtype=float),
+                float(fix_weight),
+            ))
+
+    if _active_fixes:
+        # Merge obs dts and fix dts into a sorted unique grid.
+        # The grid must always start at 0.0 (= first obs dt) so that
+        # _integrate_magnus_positions initialises p0 at the correct time.
+        # Fix times before 0 are clamped to 0; those after last obs are
+        # appended and the integration naturally extrapolates.
+        _fix_dts_raw = [(fdt, fxyz, fw) for fdt, fxyz, fw in _active_fixes]
+        _fix_dts = [max(0.0, fdt) for fdt, _, _ in _fix_dts_raw]
+        _all_dts_set: list[float] = sorted(
+            set(list(dt)) | set(_fix_dts)
+        )
+        _aug_times = np.array(_all_dts_set)
+        # obs_indices[i] → position of dt[i] in the augmented grid.
+        _obs_indices = np.searchsorted(_aug_times, dt)
+        # fix_indices[j] → position of (clamped) fix_dts[j] in the grid.
+        _fix_indices = np.searchsorted(_aug_times, np.array(_fix_dts))
+        # Rebuild _active_fixes with clamped dts (so residual uses the
+        # clamped time, consistent with integration grid).
+        _active_fixes = [
+            (_fix_dts[j], fxyz, fw)
+            for j, (_, fxyz, fw) in enumerate(_fix_dts_raw)
+        ]
+    else:
+        _aug_times = dt
+        _obs_indices = np.arange(len(dt), dtype=int)
+        _fix_indices = np.empty(0, dtype=int)
+
     def _residuals(params: np.ndarray) -> np.ndarray:
         p0 = params[:3]
         v0 = params[3:6]
         omega = params[6:9]
         pts = _integrate_magnus_positions(
-            p0, v0, omega, g_vec, drag_k_over_m, dt,
+            p0, v0, omega, g_vec, drag_k_over_m, _aug_times,
         )
         residuals = []
         for i in range(n_obs):
-            cam = Rs[i] @ pts[i] + ts[i]
+            cam = Rs[i] @ pts[_obs_indices[i]] + ts[i]
             pix = Ks[i] @ cam
             uv = pix[:2] / pix[2]
             residuals.append(uv - obs_array[i])
+        for j, (_, fix_xyz, fix_weight) in enumerate(_active_fixes):
+            pos_f = pts[_fix_indices[j]]
+            residuals.append(fix_weight * (pos_f - fix_xyz))
         return np.concatenate(residuals)
 
     # Three parametrizations of the spin DOF, from most-to-least free:
@@ -410,14 +475,17 @@ def fit_magnus_trajectory(
             v0 = params[:3]
             omega = params[3:6]
             positions = _integrate_magnus_positions(
-                p0_pin, v0, omega, g_vec, drag_k_over_m, dt,
+                p0_pin, v0, omega, g_vec, drag_k_over_m, _aug_times,
             )
             residuals = []
             for i in range(n_obs):
-                cam = Rs[i] @ positions[i] + ts[i]
+                cam = Rs[i] @ positions[_obs_indices[i]] + ts[i]
                 pix = Ks[i] @ cam
                 uv = pix[:2] / pix[2]
                 residuals.append(uv - obs_array[i])
+            for j, (_, fix_xyz, fix_weight) in enumerate(_active_fixes):
+                pos_f = positions[_fix_indices[j]]
+                residuals.append(fix_weight * (pos_f - fix_xyz))
             return np.concatenate(residuals)
 
         x0 = np.concatenate([v0_seed, omega_seed])
@@ -440,14 +508,17 @@ def fit_magnus_trajectory(
                 v0 = params[3:6]
                 omega = params[6] * axis_unit
                 pts = _integrate_magnus_positions(
-                    p0, v0, omega, g_vec, drag_k_over_m, dt,
+                    p0, v0, omega, g_vec, drag_k_over_m, _aug_times,
                 )
                 residuals = []
                 for i in range(n_obs):
-                    cam = Rs[i] @ pts[i] + ts[i]
+                    cam = Rs[i] @ pts[_obs_indices[i]] + ts[i]
                     pix = Ks[i] @ cam
                     uv = pix[:2] / pix[2]
                     residuals.append(uv - obs_array[i])
+                for j, (_, fix_xyz, fix_weight) in enumerate(_active_fixes):
+                    pos_f = pts[_fix_indices[j]]
+                    residuals.append(fix_weight * (pos_f - fix_xyz))
                 return np.concatenate(residuals)
 
             x0 = np.concatenate([p0_seed, v0_seed, [scalar_seed]])
@@ -465,14 +536,17 @@ def fit_magnus_trajectory(
                 v0 = params[:3]
                 omega = params[3] * axis_unit
                 pts = _integrate_magnus_positions(
-                    p0_pin, v0, omega, g_vec, drag_k_over_m, dt,
+                    p0_pin, v0, omega, g_vec, drag_k_over_m, _aug_times,
                 )
                 residuals = []
                 for i in range(n_obs):
-                    cam = Rs[i] @ pts[i] + ts[i]
+                    cam = Rs[i] @ pts[_obs_indices[i]] + ts[i]
                     pix = Ks[i] @ cam
                     uv = pix[:2] / pix[2]
                     residuals.append(uv - obs_array[i])
+                for j, (_, fix_xyz, fix_weight) in enumerate(_active_fixes):
+                    pos_f = pts[_fix_indices[j]]
+                    residuals.append(fix_weight * (pos_f - fix_xyz))
                 return np.concatenate(residuals)
 
             x0 = np.concatenate([v0_seed, [scalar_seed]])

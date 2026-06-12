@@ -9,12 +9,14 @@ corridor. Pure logic: no video access, no torch (the stage owns I/O).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
 
 from src.utils.ball_tracker import BallTracker
+from src.utils.camera_projection import pixel_ray
 
 # Covariance floor (px²) so a corridor next to a confident observation
 # still admits detector-sized localisation error.
@@ -77,6 +79,13 @@ def corridor_predictions(
 
     Forward and backward IMM passes (the constant-velocity model is
     time-symmetric), fused where both are initialised.
+
+    Statistical invariant: the independent-product fusion (fuse_gaussians)
+    is valid because corridors are only *consumed* at gap frames, where
+    the forward pass has seen only pre-gap observations and the backward
+    pass only post-gap observations — making the two estimates genuinely
+    independent. At observed frames the fused covariance is optimistic,
+    but those frames are never queried by the second pass.
     """
     fwd = _run_pass(per_frame_uv, range(n_frames), tracker_factory)
     bwd = _run_pass(per_frame_uv, range(n_frames - 1, -1, -1), tracker_factory)
@@ -88,3 +97,90 @@ def corridor_predictions(
         elif a is not None or b is not None:
             out[f] = a if a is not None else b
     return out
+
+
+# ---------------------------------------------------------------------------
+# Sources that mean "pass 1 accepted evidence on this frame".
+# ---------------------------------------------------------------------------
+PASS1_SOURCES = ("detector", "anchor", "bridge")
+
+
+def find_gap_runs(
+    sources: dict[int, str],
+    outlier_frames: set[int],
+    n_frames: int,
+) -> list[tuple[int, int]]:
+    """Consecutive runs of frames with no accepted pass-1 detection."""
+    gap = [
+        f for f in range(n_frames)
+        if sources.get(f) not in PASS1_SOURCES or f in outlier_frames
+    ]
+    runs: list[tuple[int, int]] = []
+    for f in gap:
+        if runs and f == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], f)
+        else:
+            runs.append((f, f))
+    return runs
+
+
+def best_gated_candidate(
+    candidates: list[tuple[float, float, float]],
+    mean: np.ndarray,
+    cov: np.ndarray,
+    cfg: SecondPassCfg,
+) -> tuple[tuple[float, float], float] | None:
+    """Best corridor-gated candidate as ``((u, v), combined_score)``.
+
+    Gate: Mahalanobis² <= corridor_sigma². Score:
+    ``candidate_score * exp(-0.5 * d² / corridor_sigma²)``, accepted when
+    it clears ``accept_min``.
+    """
+    cov_f = cov + _COV_FLOOR_PX2 * np.eye(2)
+    inv = np.linalg.inv(cov_f)
+    best: tuple[tuple[float, float], float] | None = None
+    for u, v, score in candidates:
+        d = np.array([u, v], dtype=float) - mean
+        d2 = float(d @ inv @ d)
+        if d2 > cfg.corridor_sigma ** 2:
+            continue
+        combined = float(score) * math.exp(-0.5 * d2 / cfg.corridor_sigma ** 2)
+        if best is None or combined > best[1]:
+            best = ((float(u), float(v)), combined)
+    if best is None or best[1] < cfg.accept_min:
+        return None
+    return best
+
+
+def apparent_ball_px(
+    K: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    uv: tuple[float, float],
+    ball_radius_m: float,
+    distortion: tuple[float, float] = (0.0, 0.0),
+) -> float | None:
+    """Predicted apparent ball diameter (px) at a pixel's ground depth.
+
+    Ray-casts the pixel to the ball-centre plane ``z = ball_radius_m``;
+    None when the ray never reaches it (above-horizon prediction). A
+    ground-depth approximation — airborne balls are nearer the camera
+    and look bigger, so this under-zooms, never over-zooms.
+    """
+    C, d_hat = pixel_ray(uv, K, R, t, distortion)
+    dz = float(d_hat[2])
+    if abs(dz) < 1e-9:
+        return None
+    s = (ball_radius_m - float(C[2])) / dz
+    if s <= 0:
+        return None
+    return float(K[0][0]) * (2.0 * ball_radius_m) / s
+
+
+def map_crop_candidates(
+    candidates: list[tuple[float, float, float]],
+    x0: int,
+    y0: int,
+) -> list[tuple[float, float, float]]:
+    """Translate crop-space candidates back into full-frame pixels."""
+    return [(u + x0, v + y0, s) for u, v, s in candidates]

@@ -69,6 +69,100 @@ def _prepare_shots_section(output_dir: Path, manifest: ShotsManifest) -> dict:
     }
 
 
+def _ball_shot_entry(track_path: Path, shot_id: str) -> dict:
+    """Per-shot ball diagnostics: track stats + solver/anchoring sidecar."""
+    ball = BallTrack.load(track_path)
+    states = [f.state for f in ball.frames]
+    residuals = [s.fit_residual_px for s in ball.flight_segments]
+    spin_seg_ids = {
+        s.id for s in ball.flight_segments
+        if s.parabola.get("spin_omega_rad_s") is not None
+    }
+    flight_frames = [f for f in ball.frames if f.state == "flight"]
+    spin_frames = [
+        f for f in flight_frames if f.flight_segment_id in spin_seg_ids
+    ]
+    entry: dict = {
+        "shot_id": shot_id,
+        "grounded_frames": states.count("grounded"),
+        "flight_frames": states.count("flight"),
+        "missing_frames": states.count("missing"),
+        "flight_segments": len(ball.flight_segments),
+        "mean_flight_fit_residual_px": (
+            float(np.mean(residuals)) if residuals else 0.0
+        ),
+        "max_flight_fit_residual_px": (
+            float(np.max(residuals)) if residuals else 0.0
+        ),
+        "spin_coverage_pct": (
+            100.0 * len(spin_frames) / len(flight_frames)
+            if flight_frames else 0.0
+        ),
+    }
+    diag_path = track_path.with_name(
+        track_path.name.replace("ball_track", "ball_diag")
+    )
+    if diag_path.exists():
+        try:
+            diag = json.loads(diag_path.read_text())
+        except Exception:
+            diag = {}
+        events = diag.get("events", [])
+        event_counts: dict[str, int] = {}
+        for e in events:
+            event_counts[e.get("kind", "?")] = (
+                event_counts.get(e.get("kind", "?"), 0) + 1
+            )
+        contact_gaps = [g.get("gap_m", 0.0) for g in diag.get("contact_gaps", [])]
+        entry.update({
+            "anchors": diag.get("anchors", {}),
+            "events": event_counts,
+            "underconstrained_spans": diag.get("underconstrained_spans", []),
+            "flagged_bounces": [
+                b for b in diag.get("bounces", []) if b.get("flagged")
+            ],
+            "splits": diag.get("splits", 0),
+            "max_contact_gap_m": (
+                float(np.max(contact_gaps)) if contact_gaps else None
+            ),
+            "goal_impacts": [
+                e for e in events if e.get("kind") == "goal_impact"
+            ],
+        })
+    return entry
+
+
+def _ball_section(output_dir: Path, manifest: ShotsManifest | None) -> dict | None:
+    """Ball diagnostics across active shots (legacy single-track fallback)."""
+    shots: list[tuple[str, Path]] = []
+    if manifest is not None:
+        for shot in manifest.active_shots():
+            p = output_dir / "ball" / f"{shot.id}_ball_track.json"
+            if p.exists():
+                shots.append((shot.id, p))
+    if not shots:
+        legacy = output_dir / "ball" / "ball_track.json"
+        if legacy.exists():
+            shots.append(("", legacy))
+    if not shots:
+        return None
+    entries = [_ball_shot_entry(p, sid) for sid, p in shots]
+    return {
+        "shots": entries,
+        "flight_segments": sum(e["flight_segments"] for e in entries),
+        "missing_frames": sum(e["missing_frames"] for e in entries),
+        "max_flight_fit_residual_px": max(
+            e["max_flight_fit_residual_px"] for e in entries
+        ),
+        "underconstrained_span_count": sum(
+            len(e.get("underconstrained_spans", [])) for e in entries
+        ),
+        "flagged_bounce_count": sum(
+            len(e.get("flagged_bounces", [])) for e in entries
+        ),
+    }
+
+
 def write_quality_report(output_dir: Path) -> None:
     """Aggregate diagnostics from camera/, hmr_world/, ball/ into a single JSON."""
     report: dict = {}
@@ -193,46 +287,9 @@ def write_quality_report(output_dir: Path) -> None:
             "low_confidence_players": low_players,
         }
 
-    ball_path = output_dir / "ball" / "ball_track.json"
-    if ball_path.exists():
-        ball = BallTrack.load(ball_path)
-        states = [f.state for f in ball.frames]
-        residuals = [s.fit_residual_px for s in ball.flight_segments]
-        spin_seg_ids = {
-            s.id for s in ball.flight_segments
-            if s.parabola.get("spin_omega_rad_s") is not None
-        }
-        flight_frames = [f for f in ball.frames if f.state == "flight"]
-        spin_frames = [
-            f for f in flight_frames if f.flight_segment_id in spin_seg_ids
-        ]
-        spin_coverage = (
-            100.0 * len(spin_frames) / len(flight_frames)
-            if flight_frames else 0.0
-        )
-        report["ball"] = {
-            "grounded_frames": states.count("grounded"),
-            "flight_segments": len(ball.flight_segments),
-            "missing_frames": states.count("missing"),
-            "mean_flight_fit_residual_px": (
-                float(np.mean(residuals)) if residuals else 0.0
-            ),
-            "spin_coverage_pct": spin_coverage,
-        }
-        # C3a: surface depth-under-determined flight spans written by the
-        # ball stage. These are spans whose airborne depth cannot be
-        # recovered monocularly (fewer than 2 hard knots) — adding a
-        # bracketing kick/bounce/goal_impact/grounded anchor resolves them.
-        diag_path = ball_path.with_name(
-            ball_path.name.replace("ball_track", "ball_diag")
-        )
-        if diag_path.exists():
-            try:
-                report["ball"]["underconstrained_spans"] = json.loads(
-                    diag_path.read_text()
-                ).get("underconstrained_spans", [])
-            except Exception:
-                report["ball"]["underconstrained_spans"] = []
+    ball_section = _ball_section(output_dir, manifest)
+    if ball_section is not None:
+        report["ball"] = ball_section
 
     refined_summary_path = output_dir / "refined_poses" / "refined_poses_summary.json"
     if refined_summary_path.exists():

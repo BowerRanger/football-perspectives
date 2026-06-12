@@ -838,6 +838,7 @@ class BallStage(BaseStage):
             for s in steps
         }
         n_second_pass = 0
+        n_zoom = 0
         if sp_cfg.enabled:
             gap_runs = find_gap_runs(sources, outliers, n_clip)
             if gap_runs:
@@ -852,6 +853,7 @@ class BallStage(BaseStage):
                 )
                 if sp_dets:
                     n_second_pass = len(sp_dets)
+                    n_zoom = sum(1 for d in sp_dets if d.used_zoom)
                     logger.info(
                         "ball: second pass recovered %d/%d gap frames for %s",
                         n_second_pass,
@@ -873,6 +875,8 @@ class BallStage(BaseStage):
             "pass1": n_pass1 / n_clip,
             "second_pass": n_second_pass / n_clip,
             "total": (n_pass1 + n_second_pass) / n_clip,
+            # Count (not fraction): zoom-retry recoveries within second_pass.
+            "zoom_recoveries": n_zoom,
         }
 
         try:

@@ -103,7 +103,7 @@ second_pass:
 
 ### Diagnostics
 
-`_ball_diag.json` gains `detection_coverage: {pass1, pass2, total}` (fractions
+`_ball_diag.json` gains `detection_coverage: {pass1, second_pass, total}` (fractions
 of frames) and per-source observation counts; `quality_report.json` surfaces
 coverage per shot so detector-limited clips are visible at a glance.
 

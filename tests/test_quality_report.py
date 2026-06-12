@@ -402,6 +402,8 @@ def test_quality_report_ball_per_shot_with_diag(tmp_path: Path) -> None:
     underconstrained spans, contact gaps."""
     from src.schemas.shots import Shot, ShotsManifest
 
+    (tmp_path / "shots").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "ball").mkdir(parents=True, exist_ok=True)
     ShotsManifest(
         source_file="match.mp4",
         fps=30.0,

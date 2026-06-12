@@ -1,0 +1,7 @@
+# Refinement lever: snap PnLCalib keypoints to sub-pixel line intersections.
+# Inherits the default winning recipe (smoothing + denser keyframes).
+camera:
+  auto_anchors:
+    snap_keypoints: true
+    snap_window_px: 30
+    snap_min_confidence: 0.5

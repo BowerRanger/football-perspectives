@@ -160,6 +160,110 @@ camera:
   # round anyway, so >1 only costs runtime. Raise per-clip if a clip's
   # propagated bootstrap cameras are poor enough that re-detection helps.
   line_extraction_static_rounds: 1
+  # Minimum detected painted lines for a frame's per-frame static-C solve to
+  # be trusted. A per-frame solve recovers 4 DOF (rotation + focal); with
+  # fewer than this many lines (often near-parallel touchlines) the solve is
+  # under-determined and can yield non-physical cameras (extreme focal,
+  # rotation flips) that still fit the few lines. Frames below this keep the
+  # smooth interpolated camera instead. Lower it if a clip is line-poor and
+  # you would rather have noisier per-frame solves than more interpolation.
+  line_extraction_min_lines_per_frame: 4
+  # Per-detection acceptance gates for the static-line solve. min_n_samples is
+  # the number of perpendicular cross-sections a detected line must have; 40 is
+  # ~120px of line, which rejects short far-side lines (e.g. far_touchline).
+  # Lower it (e.g. 20) to admit shorter lines and improve solve conditioning on
+  # clips dominated by near-parallel near-side lines.
+  line_extraction_det_min_n_samples: 40
+  line_extraction_det_min_confidence: 0.5
+  # Temporal smoothing window for the final per-frame (rotation, focal)
+  # trajectory after the static-line solve. 0 disables it. ~7-11 removes the
+  # seam steps where line-solved frames meet interpolated gap frames.
+  line_extraction_smooth_window: 9        # adaptive rotation smoothing window (0 disables)
+  line_extraction_smooth_iters: 4         # pin-and-smooth relaxation passes (line-solved frames pinned, interp relaxed)
+  # Clip-adaptive detection bootstrap. The static-line solve normally bootstraps
+  # detection from the anchor-interpolated camera. On clips where the anchors
+  # are sparse/partial (PnLCalib only cold-started part of the clip), that
+  # bootstrap is off by more than the search strip and detection finds nothing
+  # even though lines are visible. When line-detected coverage falls below
+  # _min_coverage, re-bootstrap detection from PnLCalib's accurate per-frame
+  # camera instead. gberch's coverage is ~100% so this never triggers there
+  # (its path is unchanged); origi/kroupi benefit.
+  line_extraction_pnlcalib_bootstrap: true
+  line_extraction_pnlcalib_bootstrap_min_coverage: 0.5
+  # Centre-circle rescue: frames the straight-line filter drops (too few lines —
+  # e.g. midfield where the box is out of view) but where the centre circle is
+  # visible are rescued by detecting the circle and adding it as a weighted
+  # point constraint. Only dropped frames are rescued, so well-lined clips
+  # (gberch) are unchanged.
+  # Off by default: as currently tuned the circle constraint trades straight-
+  # line fit for circle fit and regresses the line-RMS metric on midfield-heavy
+  # clips (origi01: mean 3.1 -> 5.0px). Enable to experiment; needs circle_weight
+  # tuning to be a clear win. Camera stays smooth either way.
+  line_extraction_detect_circle: false
+  line_extraction_circle_lens: true     # centre-circle ellipse pins global lens (distortion+principal point) on wide/midfield shots
+  line_extraction_circle_lens_min_misfit: 5.0   # px; only refine lens when circle this mis-fit (gberch's fits -> skipped)
+  line_extraction_circle_lens_min_frames: 4
+  line_extraction_circle_ellipse_band: 50.0
+  line_extraction_circle_lens_weight: 1.0
+  line_extraction_circle_min_lines: 2     # need >=this many straight lines too
+  line_extraction_circle_points: 20       # circle samples fed to the solve
+  line_extraction_circle_weight: 0.3      # residual weight vs straight lines
+  # Coverage extension: solve frames beyond the anchor span where PnLCalib
+  # gives a plausible camera and lines are detectable (e.g. clip tails). Only
+  # adds frames; full-coverage clips are unaffected.
+  line_extraction_extend_coverage: true
+  line_extraction_extend_max_rms: 4.0     # px; reject extended frames above this
+  # Propagating coverage extension: fill uncovered frames by seeding each from
+  # its covered neighbour (static camera -> locked C applies). Sweeps outward;
+  # reaches spans PnLCalib never cold-started. gberch is full -> no-op.
+  line_extraction_propagate_coverage: true
+  # Frames the static bundle skipped (too few straight lines) keep rotations
+  # solved under the PRE-bundle geometry; re-deriving t against the bundle's C
+  # silently shifts their projections (origi01 midfield: ~330 px off the
+  # user's clicks). Demote them to uncovered so propagation re-solves them
+  # against their own lines (+ circle) at the locked geometry; anything
+  # unsolvable is SLERP-filled between solved neighbours. gberch: no-op.
+  line_extraction_resolve_underlined: true
+  # Advertising-hoarding base line: a static scene line parallel to the far
+  # touchline (one lateral offset per clip; height fixed to 0 — with a static
+  # camera centre the (offset, height) family is projectively equivalent).
+  # Calibrated per clip from anchor/bundle frames, then injected as a line
+  # constraint into propagation / cold-start solves and the stored detections
+  # (so the lens refinement and outlier passes see it). The boards are the
+  # strongest feature in exactly the far field where pitch lines are starved.
+  # Clips whose boards are out of view (gberch) fail calibration -> no-op.
+  line_extraction_board_line: true
+  # Anchor frames among the demoted are re-solved IN PLACE from their landmark
+  # points (PnLCalib/manual) at the locked geometry — solved islands inside
+  # feature-poor spans that propagation then fills between. Reject above this
+  # point-reprojection rms (PnLCalib keypoint noise is ~5-15 px).
+  line_extraction_anchor_resolve_max_rms: 30.0
+  line_extraction_cold_start: true            # orientation-sweep cold-start for the uncovered (wide) start of clips
+  line_extraction_cold_start_max_rms: 12.0     # accept lens-limited wide-field rms (the lens refinement then fixes it)
+  # Circle-aided start frames gate on the MEDIAN residual, dominated by global
+  # lens error across the circle's arc while the wide start is still solved
+  # under the box-derived lens (origi01: 13-37 px). The circle-lens refinement
+  # + post-lens re-solve correct accepted frames afterwards.
+  line_extraction_cold_start_circle_max_rms: 40.0
+  line_extraction_cold_start_min_lines: 3
+  line_extraction_cold_start_max_dev_deg: 25.0 # reject cold-starts more than this far from the covered boundary
+  line_extraction_propagate_passes: 4
+  line_extraction_propagate_max_bridge: 8   # jump feature-poor barriers up to this many frames
+  line_extraction_propagate_min_lines: 2     # seed prior + rms gate + outlier rejection make 2 perpendicular lines safe
+  # Per-frame centre circle during propagation/re-solve — consulted ONLY on
+  # line-sparse frames (< min_lines_per_frame straight lines), where it is the
+  # constraint that disambiguates a parallel line pair (origi01's midfield /
+  # start). Well-lined frames solve from lines alone, so the historical
+  # line-RMS regression (circle trading away straight-line fit) cannot recur.
+  line_extraction_propagate_circle: true
+  # Outlier rejection: frames whose per-frame line-RMS exceeds max(abs, rel x
+  # clip-median) are bad per-frame solves; replace them with neighbour
+  # interpolation. abs=8px keeps gberch's well-fit frames untouched.
+  line_extraction_outlier_rejection: true
+  line_extraction_outlier_rot_deg: 2.0    # rotation-jump vs neighbour SLERP
+  line_extraction_outlier_passes: 6       # iterate to bridge multi-frame seam blocks
+  line_extraction_outlier_max_rms: 8.0
+  line_extraction_outlier_rel: 3.0
   # ORB is the only detector currently implemented in feature_propagator.
   # SuperPoint is a future enhancement (better repeatability under zoom).
   feature_detector: orb
@@ -169,6 +273,42 @@ camera:
   enable_bidirectional: true
   pitch_line_consistency_max_px: 5.0
   forward_backward_disagreement_warn_deg: 0.5
+  # Landmark-free cold-start via the vendored PnLCalib model. On by default:
+  # the camera stage auto-generates anchors and writes {shot}_anchors.json
+  # before the normal solve. With mode: replace_when_empty this ONLY runs for
+  # shots that have no manual anchors, so hand-placed anchors always take
+  # precedence; un-anchored shots (previously skipped) now get a PnLCalib
+  # cold-start. First use downloads ~500MB of weights to data/models/pnlcalib/.
+  # Set enabled: false to restore manual-only anchoring. mode:
+  #   replace_when_empty - only auto-generate when no manual anchors exist
+  #   augment            - union auto anchors with existing manual ones
+  #   force              - always regenerate (overwrites manual)
+  auto_anchors:
+    enabled: true
+    mode: replace_when_empty
+    # Denser keyframes (interval 18 / up to 24 anchors) keep the per-frame
+    # bootstrap accurate across the whole clip so the strict line detector
+    # finds lines on every frame (no interpolation gaps). Validated on gberch:
+    # 0-line frames 145 -> 0, max per-frame rotation jitter 5.3° -> 0.3°.
+    keyframe_interval: 18
+    max_keyframes: 24
+    min_points_per_anchor: 4
+    consensus_max_position_mad: 4.0
+    # Snap each PnLCalib keypoint to its sub-pixel painted-line intersection
+    # before it becomes an anchor, to cut PnLCalib's ~4-5px point noise.
+    # line_intersection mode only moves a keypoint when two roughly-
+    # perpendicular lines are found; spots/occluded corners keep their estimate.
+    snap_keypoints: false
+    snap_window_px: 30
+    snap_min_confidence: 0.5
+    plausibility_bounds:
+      x: [-30.0, 135.0]
+      y: [-60.0, 130.0]
+      z: [3.0, 80.0]
+    model:
+      device: auto          # auto -> cuda on the Linux box, cpu/mps on Mac
+      kp_threshold: 0.3434
+      line_threshold: 0.7867
 
 hmr_world:
   # Force CPU on macOS: GVHMR's RoPE attention has a slice op that

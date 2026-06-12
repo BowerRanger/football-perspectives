@@ -31,10 +31,41 @@ from scipy.sparse import lil_matrix
 
 from src.schemas.anchor import LandmarkObservation, LineObservation
 from src.utils.anchor_solver import _make_K, _point_residuals_distorted
+from src.utils.circle_detector import CENTRE_CIRCLE_CENTRE, CENTRE_CIRCLE_RADIUS
+from src.utils.ellipse_detector import _ellipse_distance
 
 logger = logging.getLogger(__name__)
 
 LensModel = Literal["pinhole_k1k2", "brown_conrady"]
+
+# Fixed world samples on the centre circle, for the ellipse-distance constraint.
+_CIRCLE_M = 60
+_CIRCLE_TH = np.linspace(0.0, 2.0 * np.pi, _CIRCLE_M, endpoint=False)
+_CIRCLE_WORLD = np.stack([
+    CENTRE_CIRCLE_CENTRE[0] + CENTRE_CIRCLE_RADIUS * np.cos(_CIRCLE_TH),
+    CENTRE_CIRCLE_CENTRE[1] + CENTRE_CIRCLE_RADIUS * np.sin(_CIRCLE_TH),
+    np.full(_CIRCLE_M, CENTRE_CIRCLE_CENTRE[2]),
+], axis=1)
+
+
+def _ellipse_residuals_distorted(ellipse, K, rvec, t, dist2):
+    """Distance of each projected centre-circle sample to the detected image
+    ellipse (rotation-invariant — the circle has no per-point correspondence).
+    Behind-camera samples contribute 0 so the per-frame count stays ``_CIRCLE_M``
+    for the sparse Jacobian. This is what pins distortion + principal point: the
+    ring spans the image where central box lines don't."""
+    R, _ = cv2.Rodrigues(rvec)
+    cam_z = _CIRCLE_WORLD @ R[2] + t[2]
+    out = np.zeros(_CIRCLE_M)
+    in_front = cam_z > 0.1
+    if in_front.sum() >= 5:
+        dist = np.array([dist2[0], dist2[1], 0.0, 0.0, 0.0], dtype=np.float64)
+        proj, _ = cv2.projectPoints(
+            _CIRCLE_WORLD[in_front].reshape(-1, 1, 3),
+            np.asarray(rvec, np.float64).reshape(3, 1),
+            np.asarray(t, np.float64).reshape(3, 1), K.astype(np.float64), dist)
+        out[in_front] = _ellipse_distance(proj.reshape(-1, 2), ellipse)
+    return out
 
 # How many distortion coefficients are *free parameters* per lens model.
 _N_FREE_DIST: dict[str, int] = {"pinhole_k1k2": 2, "brown_conrady": 5}
@@ -135,9 +166,15 @@ def solve_static_camera_from_lines(
     lens_seed: tuple[float, float, float, float],
     per_frame_seeds: dict[int, tuple[np.ndarray, float]],
     point_hints: dict[int, list[LandmarkObservation]] | None = None,
+    circle_points: dict[int, list[LandmarkObservation]] | None = None,
+    per_frame_ellipses: dict[int, tuple] | None = None,
     lens_model: LensModel = "pinhole_k1k2",
     point_hint_weight: float = 0.05,
+    circle_weight: float = 0.3,
+    ellipse_weight: float = 1.0,
     max_nfev: int = 600,
+    c_bound_m: float = 5.0,
+    dist_bound: float = 0.5,
 ) -> StaticCameraSolution:
     """Solve one fixed camera centre across all frames in
     ``per_frame_lines``.
@@ -181,18 +218,31 @@ def solve_static_camera_from_lines(
     p0[0], p0[1] = cx_s, cy_s
     lower[0], upper[0] = W / 2 - 150, W / 2 + 150
     lower[1], upper[1] = H / 2 - 150, H / 2 + 150
-    # distortion seeds + bounds
-    dist_seed = [k1_s, k2_s, 0.0, 0.0, 0.0][:n_dist]
-    dist_lo = [-0.5, -0.5, -0.1, -0.1, -0.5][:n_dist]
-    dist_hi = [0.5, 0.5, 0.1, 0.1, 0.5][:n_dist]
+    # Distortion seeds + bounds. ``dist_bound`` lets the caller pose a
+    # modest-lens candidate: with the centre held, an azimuth-poor line set
+    # compensates through (k1, fx) instead and walks the distortion to the
+    # bound (origi01: k1 0.395 paired with fx ~12% high — the wide-field
+    # anchors paid 300 px); the anchor-fit arbitration picks between it and
+    # the free-lens solution.
+    db = float(dist_bound)
+    dist_seed = [
+        float(np.clip(v, -db, db)) for v in (k1_s, k2_s, 0.0, 0.0, 0.0)
+    ][:n_dist]
+    dist_lo = [-db, -db, -0.1, -0.1, -db][:n_dist]
+    dist_hi = [db, db, 0.1, 0.1, db][:n_dist]
     for j in range(n_dist):
         p0[2 + j] = dist_seed[j]
         lower[2 + j] = dist_lo[j]
         upper[2 + j] = dist_hi[j]
     c_base = 2 + n_dist
     p0[c_base : c_base + 3] = c_seed
-    lower[c_base : c_base + 3] = np.asarray(c_seed) - 5.0
-    upper[c_base : c_base + 3] = np.asarray(c_seed) + 5.0
+    # Detected lines are strip-searched around the CURRENT cameras'
+    # projections, so they partially self-confirm whatever C they were found
+    # under — the caller passes a tight ``c_bound_m`` when it has trustworthy
+    # independent C evidence (the anchor-stage consensus; origi01's bundle
+    # drifted C ~3 m onto its own detections and every span paid for it).
+    lower[c_base : c_base + 3] = np.asarray(c_seed) - c_bound_m
+    upper[c_base : c_base + 3] = np.asarray(c_seed) + c_bound_m
 
     for i, fid in enumerate(fids):
         if fid not in per_frame_seeds:
@@ -207,6 +257,8 @@ def solve_static_camera_from_lines(
         upper[base + 3] = fx0 * 2.0
 
     hints = point_hints or {}
+    circles = circle_points or {}
+    ellipses = per_frame_ellipses or {}
 
     def _unpack_shared(p: np.ndarray):
         cx, cy = float(p[0]), float(p[1])
@@ -236,6 +288,22 @@ def solve_static_camera_from_lines(
                         hint, K_i, rvec, t_i, (dist[0], dist[1])
                     )
                 )
+            circ = circles.get(fid)
+            if circ:
+                parts.append(
+                    circle_weight
+                    * _point_residuals_distorted(
+                        circ, K_i, rvec, t_i, (dist[0], dist[1])
+                    )
+                )
+            ell = ellipses.get(fid)
+            if ell is not None:
+                parts.append(
+                    ellipse_weight
+                    * _ellipse_residuals_distorted(
+                        ell, K_i, rvec, t_i, (dist[0], dist[1])
+                    )
+                )
         return np.concatenate(parts) if parts else np.empty(0)
 
     # Sparse Jacobian: each frame's residuals touch SHARED cols + its PER cols.
@@ -244,6 +312,10 @@ def solve_static_camera_from_lines(
         n_res = 2 * len(per_frame_lines[fid])
         if fid in hints:
             n_res += 2 * len(hints[fid])
+        if fid in circles:
+            n_res += 2 * len(circles[fid])
+        if fid in ellipses:
+            n_res += _CIRCLE_M
         n_res_per_frame.append(n_res)
     total_res = sum(n_res_per_frame)
     total_par = SHARED + PER * n

@@ -184,6 +184,24 @@ def _refined_poses_complete(output_dir: Path) -> bool:
     return all((refined / f"{pid}_refined.npz").exists() for pid in expected)
 
 
+# A valid output-directory basename: letters, digits, dash, underscore. No
+# path separators or dots, so it can never escape the parent directory.
+_OUTPUT_DIR_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _discover_output_dirs(current: Path) -> list[str]:
+    """Sorted basenames of every ``output*`` directory beside ``current``.
+
+    Globs sibling directories of ``current`` (its parent is typically the
+    repo root) and always includes ``current`` itself, even when its own
+    name doesn't match ``output*`` (e.g. a custom ``--output`` path).
+    """
+    parent = current.parent
+    names = {p.name for p in parent.glob("output*") if p.is_dir()}
+    names.add(current.name)
+    return sorted(names)
+
+
 _STAGE_COMPLETE = {
     "prepare_shots": lambda d: (d / "shots" / "shots_manifest.json").exists(),
     "tracking": lambda d: any((d / "tracks").glob("*_tracks.json")),
@@ -493,6 +511,68 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             }
             for i, name in enumerate(STAGE_ORDER)
         ]
+
+    def _output_dirs_payload() -> dict:
+        return {
+            "current": output_dir.name,
+            "dirs": _discover_output_dirs(output_dir),
+            "parent": str(output_dir.parent),
+        }
+
+    @app.get("/api/output-dirs")
+    def list_output_dirs():
+        """List selectable ``output*`` sibling dirs and the active one."""
+        return _output_dirs_payload()
+
+    @app.put("/api/output-dirs/active")
+    def set_active_output_dir(payload: dict):
+        """Re-point the server at an existing ``output*`` sibling.
+
+        Reassigns the ``output_dir`` closure cell shared by every endpoint
+        defined in ``create_app`` (``nonlocal``), so all existing handlers
+        immediately read from the new directory. In-flight pipeline jobs are
+        unaffected — they captured their own ``output_dir`` at submit time.
+        """
+        nonlocal output_dir
+        name = (payload or {}).get("name")
+        if not isinstance(name, str) or not _OUTPUT_DIR_NAME_RE.match(name):
+            raise HTTPException(status_code=400, detail="Invalid output directory name")
+        parent = output_dir.parent
+        target = (parent / name).resolve()
+        if (
+            target.parent != parent
+            or not target.is_dir()
+            or name not in _discover_output_dirs(output_dir)
+        ):
+            raise HTTPException(
+                status_code=400, detail=f"Unknown output directory: {name}"
+            )
+        output_dir = target
+        app.state.output_dir = target
+        return _output_dirs_payload()
+
+    @app.post("/api/output-dirs")
+    def create_output_dir(payload: dict):
+        """Create a new empty ``output-<name>`` sibling and switch to it.
+
+        ``name`` is used as-is when it already starts with ``output``,
+        otherwise it's prefixed (``foo`` → ``output-foo``). Sanitised to
+        ``[A-Za-z0-9_-]+`` so it can't escape the parent directory.
+        """
+        nonlocal output_dir
+        raw = (payload or {}).get("name")
+        name = raw.strip() if isinstance(raw, str) else ""
+        if not _OUTPUT_DIR_NAME_RE.match(name):
+            raise HTTPException(status_code=400, detail="Invalid output directory name")
+        dir_name = name if name.startswith("output") else f"output-{name}"
+        parent = output_dir.parent
+        target = (parent / dir_name).resolve()
+        if target.parent != parent:
+            raise HTTPException(status_code=400, detail="Invalid output directory name")
+        target.mkdir(parents=True, exist_ok=True)
+        output_dir = target
+        app.state.output_dir = target
+        return _output_dirs_payload()
 
     @app.get("/api/config")
     def get_config():
@@ -1796,7 +1876,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         return {"saved": saved, "skipped": skipped, "job_id": job_id}
 
     @app.get("/camera/track")
-    def get_camera_track(shot: str | None = None):
+    def get_camera_track(response: Response, shot: str | None = None):
         """Return a CameraTrack as JSON.
 
         ``?shot=xxx`` returns ``{shot}_camera_track.json``; absent or
@@ -1805,6 +1885,9 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         compatibility with viewer / dashboard callers that don't yet
         pass a shot filter.
         """
+        # Re-running the camera stage rewrites this file in place; never let a
+        # browser serve a cached (stale) track after a re-run or dir switch.
+        response.headers["Cache-Control"] = "no-store"
         if shot:
             if not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
                 raise HTTPException(status_code=400, detail="Invalid shot id")
@@ -1827,7 +1910,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         return asdict(track)
 
     @app.get("/camera/detected-lines")
-    def get_detected_lines(shot: str | None = None):
+    def get_detected_lines(response: Response, shot: str | None = None):
         """Return the painted-line detections written by the camera
         stage's ``line_extraction`` pass.
 
@@ -1836,6 +1919,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         plus their world-segment correspondences. Returns an empty
         ``{"frames": {}}`` shape when line extraction wasn't run.
         """
+        # Rewritten in place on every camera re-run -> no-store (see /camera/track).
+        response.headers["Cache-Control"] = "no-store"
         if shot:
             if not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
                 raise HTTPException(status_code=400, detail="Invalid shot id")
@@ -1857,6 +1942,30 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                 status_code=500,
                 detail=f"Failed to load detected lines: {exc}",
             )
+
+    @app.get("/api/camera/metrics")
+    def get_camera_metrics(response: Response, shot: str):
+        """Honest per-shot camera quality dashboard for the dashboard card.
+
+        Returns the independent signals line-RMS alone hides — coverage,
+        jitter, HELD-OUT centre-circle misfit (detected in the image, not the
+        line solve), and geometric Δ vs the manual track. The circle check
+        reads the clip video + runs detection, so this is slower than the plain
+        track fetch (a few seconds) — the card loads it lazily.
+        """
+        response.headers["Cache-Control"] = "no-store"
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
+            raise HTTPException(status_code=400, detail="Invalid shot id")
+        base = str(output_dir / "camera" / shot)
+        try:
+            from scripts._clip_eval import compute_camera_metrics
+            metrics = compute_camera_metrics(base)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to compute camera metrics: {exc}")
+        if metrics is None:
+            return {"available": False}
+        return {"available": True, **metrics}
 
     @app.get("/tracking/shots")
     def list_tracked_shots():

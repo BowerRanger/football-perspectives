@@ -6,7 +6,8 @@ import cv2
 import numpy as np
 import pytest
 
-from src.schemas.anchor import LineObservation
+from src.schemas.anchor import LandmarkObservation, LineObservation
+from src.utils.circle_detector import CENTRE_CIRCLE_CENTRE, CENTRE_CIRCLE_RADIUS
 from src.utils.pitch_lines_catalogue import LINE_CATALOGUE
 from src.utils.static_line_solver import (
     StaticCameraSolution,
@@ -122,3 +123,50 @@ def test_solver_returns_one_centre_for_every_frame():
     )
     assert set(sol.per_frame_KRt.keys()) == set(per_frame_lines.keys())
     assert sol.camera_centre.shape == (3,)
+
+
+def _circle_obs(K, R, t, n=28):
+    cx, cy, _ = CENTRE_CIRCLE_CENTRE
+    r = CENTRE_CIRCLE_RADIUS
+    obs = []
+    for th in np.linspace(0, 2 * np.pi, n, endpoint=False):
+        w = np.array([cx + r * np.cos(th), cy + r * np.sin(th), 0.0])
+        if (R @ w + t)[2] <= 0.1:
+            continue
+        obs.append(LandmarkObservation(
+            name="centre_circle", image_xy=_project(K, R, t, w),
+            world_xyz=(float(w[0]), float(w[1]), 0.0)))
+    return obs
+
+
+@pytest.mark.unit
+def test_circle_points_constrain_midfield_frame():
+    """A midfield-style frame (only 2 straight lines) recovers the static
+    centre when the centre circle is supplied as point constraints."""
+    yaws = [-2.0, 2.0]
+    fxs = [1500.0, 1520.0]
+    per_frame_lines, per_frame_seeds, circle_points = {}, {}, {}
+    for i, (yaw, fx) in enumerate(zip(yaws, fxs)):
+        R = _yaw(yaw)
+        t = -R @ C_TRUE
+        K = np.array([[fx, 0, CX], [0, fx, CY], [0, 0, 1.0]])
+        per_frame_lines[i] = [
+            _make_line(K, R, t, "far_touchline"),
+            _make_line(K, R, t, "halfway_line"),
+        ]
+        circle_points[i] = _circle_obs(K, R, t)
+        rvec, _ = cv2.Rodrigues(R)
+        per_frame_seeds[i] = (rvec.reshape(3), fx)
+
+    perturbed = {f: (rv + np.deg2rad(1.0), fx * 1.01)
+                 for f, (rv, fx) in per_frame_seeds.items()}
+    sol = solve_static_camera_from_lines(
+        per_frame_lines, IMAGE_SIZE,
+        c_seed=C_TRUE + np.array([1.0, -0.8, 0.5]), lens_seed=(CX, CY, 0.0, 0.0),
+        per_frame_seeds=perturbed, circle_points=circle_points,
+        circle_weight=0.5, lens_model="pinhole_k1k2",
+    )
+    # circle + 2 lines recovers the static centre on clean data
+    assert np.linalg.norm(sol.camera_centre - C_TRUE) < 0.5
+    for fid, (K, R, t) in sol.per_frame_KRt.items():
+        assert np.linalg.norm((-R.T @ t) - sol.camera_centre) < 1e-6

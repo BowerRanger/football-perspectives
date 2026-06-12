@@ -1,0 +1,3 @@
+# Step A: temporal smoothing only, on baseline (strict) detection.
+camera:
+  line_extraction_smooth_window: 9

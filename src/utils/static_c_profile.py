@@ -22,8 +22,8 @@ import cv2
 import numpy as np
 from scipy.optimize import least_squares
 
-from src.schemas.anchor import LineObservation
-from src.utils.anchor_solver import _make_K
+from src.schemas.anchor import LandmarkObservation, LineObservation
+from src.utils.anchor_solver import _make_K, _point_residuals_distorted
 from src.utils.static_line_solver import _dist5, _line_residuals_distorted
 
 logger = logging.getLogger(__name__)
@@ -62,9 +62,39 @@ def _solve_frame_at_fixed_c(
     C: np.ndarray,
     rvec_seed: np.ndarray,
     fx_seed: float,
+    *,
+    fx_rel: float | None = None,
+    circle_obs: list[LandmarkObservation] | None = None,
+    circle_weight: float = 0.3,
+    pose_prior: tuple[np.ndarray, float] | None = None,
+    fx_prior: tuple[float, float] | None = None,
+    anchor_obs: list[LandmarkObservation] | None = None,
+    anchor_weight: float = 1.0,
+    roll_prior: tuple[np.ndarray, float] | None = None,
 ) -> tuple[np.ndarray, float, float]:
-    """LM-solve one frame's (rvec, fx) with C pinned. Returns
-    ``(rvec, fx, line_rms)``."""
+    """LM-solve one frame's ``(rvec, fx)`` with C pinned. Returns
+    ``(rvec, fx, reprojection_rms)``.
+
+    ``fx_rel`` tightens the focal bounds to ``fx_seed * (1 ± fx_rel)`` (default
+    None → the wide 0.5–2× range). Use a small value (e.g. 0.05) on sparse-line
+    frames where (rvec, fx) are jointly under-determined and the LM would
+    otherwise drift focal to fit a wrong rotation — a 2-line frame can fit at
+    ~0px yet leave the pitch metres off. The seed focal (velocity-extrapolated
+    from a covered neighbour) is reliable, so a tight band keeps the few lines
+    over-determining rotation while still letting focal track real zoom.
+
+    ``circle_obs`` adds detected centre-circle points as weighted reprojection
+    constraints (``circle_weight``) — a strong, well-spread feature that pins
+    rotation+focal where straight lines are sparse (the propagation lever for
+    featureless spans). The returned RMS is over lines + circle, unweighted.
+
+    ``pose_prior``/``fx_prior`` add soft continuity residuals toward a prior
+    ``(rvec, weight)`` / ``(fx, weight)`` — the global-polish chain term: a
+    sparse frame bends toward its neighbours unless its own evidence says
+    otherwise. Prior residuals are excluded from the returned RMS.
+    """
+    circ = circle_obs or []
+    d2 = (float(dist5[0]), float(dist5[1]))
 
     def res(p: np.ndarray) -> np.ndarray:
         rvec = p[0:3]
@@ -72,11 +102,41 @@ def _solve_frame_at_fixed_c(
         R, _ = cv2.Rodrigues(rvec)
         t = -R @ C
         K = _make_K(fx, cx, cy)
-        return _line_residuals_distorted(lines, K, rvec, t, dist5)
+        parts = [_line_residuals_distorted(lines, K, rvec, t, dist5)]
+        if circ:
+            parts.append(
+                circle_weight * _point_residuals_distorted(circ, K, rvec, t, d2))
+        if anchor_obs:
+            parts.append(
+                anchor_weight
+                * _point_residuals_distorted(anchor_obs, K, rvec, t, d2))
+        if pose_prior is not None:
+            pr, w = pose_prior
+            parts.append(w * (rvec - np.asarray(pr, float).reshape(3)))
+        if roll_prior is not None:
+            # Anisotropic continuity: the rotation component about the VIEW
+            # axis (roll) is rig-fixed up to a smooth pan-coupled trend, but
+            # the centre circle is rotationally symmetric about its own
+            # centre — circle-dominant solves have a free roll mode that
+            # swings the halfway line degrees left/right between anchors.
+            # Penalize roll deviation from the reference pose heavily while
+            # leaving pan/tilt to the data.
+            rr, wr = roll_prior
+            rr = np.asarray(rr, float).reshape(3)
+            R_ref, _ = cv2.Rodrigues(rr)
+            view = R_ref[2]
+            parts.append(np.array([
+                wr * float(np.dot(rvec - rr, view))]))
+        if fx_prior is not None:
+            pf, wf = fx_prior
+            parts.append(np.array([wf * (fx - float(pf))]))
+        return np.concatenate(parts)
 
+    fx_lo = fx_seed * (1.0 - fx_rel) if fx_rel is not None else fx_seed * 0.5
+    fx_hi = fx_seed * (1.0 + fx_rel) if fx_rel is not None else fx_seed * 2.0
     p0 = np.array([*np.asarray(rvec_seed, float).reshape(3), float(fx_seed)])
-    lower = np.array([-np.pi, -np.pi, -np.pi, fx_seed * 0.5])
-    upper = np.array([np.pi, np.pi, np.pi, fx_seed * 2.0])
+    lower = np.array([-np.pi, -np.pi, -np.pi, fx_lo])
+    upper = np.array([np.pi, np.pi, np.pi, fx_hi])
     result = least_squares(
         res, p0, bounds=(lower, upper),
         method="trf", loss="huber", f_scale=2.0, max_nfev=80,
@@ -87,6 +147,8 @@ def _solve_frame_at_fixed_c(
     t = -R @ C
     K = _make_K(fx, cx, cy)
     r = _line_residuals_distorted(lines, K, rvec, t, dist5)
+    if circ:
+        r = np.concatenate([r, _point_residuals_distorted(circ, K, rvec, t, d2)])
     rms = float(np.sqrt((r ** 2).mean())) if r.size else float("nan")
     return rvec, fx, rms
 

@@ -387,3 +387,24 @@ FINAL: origi01 roll-dev p95 0.75/max 1.62 (leakage-dominated), f159 overlay
 visually locked, clicks 5.8/16.2/47.6, sys 0.19 m; origi02 max roll dev 0.95
 (was 6.7), clicks 6.4/16.5/23.8, sys 0.14 m, jitter 0.95/0.47; kroupi clicks
 med 6.3 (f0 tail = carve-out); gberch byte-baseline 0.37/0.29.
+
+## KNOWN RESIDUAL / FUTURE LEVER — optical-flow carry-through on dropout spans
+
+origi01 f140-165 still pan-lags slightly between anchors (~15-25 px overlay
+slide, no visible tilt). The span has ZERO pitch evidence beyond the
+re-locked circle: the bridge interpolates pan linearly across 31 frames
+while the real camera pan accelerates, and the circle re-lock can only pull
+pan as far as the circle constrains it.
+
+The lever: the propagation stage already runs bidirectional OPTICAL-FLOW
+feature tracking — flow on background texture (crowd, hoardings, grass
+pattern) measures TRUE inter-frame pan/tilt deltas with no pitch lines at
+all. Instead of a flank SLERP, integrate the flow deltas across the dropout
+span and distribute the closure error (flow drift) linearly so the span
+still lands exactly on its determined flanks; keep the existing roll pinning
+and circle re-lock on top. This replaces the linear-pan assumption with
+measured motion and should erase the remaining lag at f140-165 (and any
+future blur/featureless spans on new clips).
+
+Judge it the same way: eval_bracket_wobble.py + overlay dumps at the span
+midpoint, with clicks/systematic guards on all four clips.

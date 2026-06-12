@@ -110,6 +110,38 @@ def resolve_goal_impact_world(
     return candidates[0][2]
 
 
+def goal_element_candidates(
+    image_xy: tuple[float, float],
+    *,
+    K: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    distortion: tuple[float, float] = (0.0, 0.0),
+    geometry: GoalGeometry,
+) -> list[tuple[str, float, float, np.ndarray]]:
+    """All goal-element intersections for a pixel ray, both goals.
+
+    Returns ``(element, residual_m, ray_s, world)`` tuples sorted by
+    ``(residual_m, ray_s)``. Posts and crossbars are 1-D lines so their
+    residual is the ray's closest-approach distance; nets are bounded
+    planes with residual 0 whenever the ray crosses them — callers that
+    auto-classify impacts must therefore demand extra evidence (e.g. a
+    speed collapse) for net hits, or any shot into the goal mouth would
+    classify as a net impact.
+    """
+    C, d = _camera_ray(image_xy, K=K, R=R, t=t, distortion=distortion)
+    out: list[tuple[str, float, float, np.ndarray]] = []
+    for element in ("post", "crossbar", "back_net", "side_net"):
+        for goal_x in (geometry.goal_line_x_near, geometry.goal_line_x_far):
+            sign = -1.0 if goal_x == geometry.goal_line_x_near else 1.0
+            for residual, s, world in _candidates_for_element(
+                C, d, element, goal_x, sign, geometry
+            ):
+                out.append((element, residual, s, world))
+    out.sort(key=lambda h: (h[1], h[2]))
+    return out
+
+
 def _camera_ray(
     image_xy: tuple[float, float],
     *,

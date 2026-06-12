@@ -80,6 +80,7 @@ from src.utils.ball_second_pass import (
     apparent_ball_px,
     best_gated_candidate,
     corridor_predictions,
+    filter_in_bounds,
     find_gap_runs,
     map_crop_candidates,
 )
@@ -619,6 +620,10 @@ class BallStage(BaseStage):
                     consecutive_misses = 0
                 else:
                     det = detector.detect(frame)
+                    if det is not None:
+                        h_img, w_img = frame.shape[:2]
+                        if not (0.0 <= det[0] < w_img and 0.0 <= det[1] < h_img):
+                            det = None
                     if det is None:
                         consecutive_misses += 1
                         bridge_result = bridge.try_bridge(
@@ -701,6 +706,7 @@ class BallStage(BaseStage):
                     cands = detector.detect_candidates(
                         frame, sp_cfg.candidate_min_score, sp_cfg.top_k,
                     )
+                    cands = filter_in_bounds(cands, frame.shape[1], frame.shape[0])
                     if f < start or f not in corridors:
                         continue
                     mean, cov = corridors[f]

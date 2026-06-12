@@ -28,12 +28,14 @@ def _camera_pose():
 
 
 def _write_blank_clip(path: Path, n: int, fps: float = 30.0) -> None:
+    """1280×720 so that projected ball coordinates (u≈162–285, v≈358) from
+    _camera_pose() fall inside the frame and pass the in-bounds check."""
     path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
-        str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (320, 240)
+        str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (1280, 720)
     )
     for _ in range(n):
-        writer.write(np.full((240, 320, 3), [50, 200, 50], dtype=np.uint8))
+        writer.write(np.full((720, 1280, 3), [50, 200, 50], dtype=np.uint8))
     writer.release()
 
 

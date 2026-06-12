@@ -62,13 +62,17 @@ def _save_camera_track(
 
 def _write_blank_clip(path: Path, n: int, fps: float = 30.0) -> None:
     """The BallDetector is faked in tests, so the frame contents don't matter —
-    we just need the VideoCapture to return ``n`` frames."""
+    we just need the VideoCapture to return ``n`` frames.
+
+    1280×720 so that projected ball coordinates (u≈162–285, v≈358) from
+    _camera_pose() fall inside the frame and pass the in-bounds check.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
-        str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (320, 240)
+        str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (1280, 720)
     )
     for _ in range(n):
-        writer.write(np.full((240, 320, 3), [50, 200, 50], dtype=np.uint8))
+        writer.write(np.full((720, 1280, 3), [50, 200, 50], dtype=np.uint8))
     writer.release()
 
 
@@ -255,3 +259,54 @@ def test_second_pass_disabled_is_noop(tmp_path: Path):
     stage.run()
     diag = json.loads((tmp_path / "ball" / "ball_diag.json").read_text())
     assert diag["detection_coverage"]["second_pass"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Bounds-filter integration test.
+#
+# _write_blank_clip is now 1280×720 (updated from 320×240 when the bounds
+# filter was added).  The camera pose projects the ball to u≈162–285, v≈358,
+# which is comfortably inside 1280×720.  The "impossible" detection uses
+# v=-200, which is below zero on any frame size.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_pass1_out_of_bounds_detection_treated_as_miss(tmp_path: Path):
+    """A detector hit mapped outside the image (letterbox padding artifact)
+    must be treated as a miss, not fed to the tracker/track.
+
+    Clip is 1280×720 so the legit projected coordinates (u≈162–285, v≈358)
+    fall inside the frame.  The impossible detection uses v=-200 (above the
+    top edge on any frame size).
+    """
+    from src.stages.ball import BallStage
+
+    n = 30
+    fps = 30.0
+    K, R, t = _camera_pose()
+    _save_camera_track(tmp_path / "camera" / "camera_track.json", K, R, t, n, fps=fps)
+    _write_blank_clip(tmp_path / "shots" / "play.mp4", n, fps=fps)
+
+    detections = []
+    for i in range(n):
+        p = np.array([30.0 + 0.2 * i, 34.0, 0.11])
+        u, v = _project(p, K, R, t)
+        if i == 15:
+            detections.append((u, -200.0, 0.9))  # impossible: above the frame
+        else:
+            detections.append((u, v, 0.9))
+
+    stage = BallStage(
+        config={"ball": {"detector": "fake",
+                         "appearance_bridge": {"enabled": False},
+                         "second_pass": {"enabled": False}}},
+        output_dir=tmp_path,
+        ball_detector=FakeBallDetector(detections),
+    )
+    stage.run()
+
+    obs = json.loads((tmp_path / "ball" / "ball_observations.json").read_text())
+    by_frame = {f["frame"]: f for f in obs["frames"]}
+    # Frame 15 must NOT carry the impossible detection as a "detector" obs.
+    assert by_frame[15]["source"] != "detector"

@@ -184,3 +184,16 @@ def map_crop_candidates(
 ) -> list[tuple[float, float, float]]:
     """Translate crop-space candidates back into full-frame pixels."""
     return [(u + x0, v + y0, s) for u, v, s in candidates]
+
+
+def filter_in_bounds(
+    candidates: list[tuple[float, float, float]],
+    width: int,
+    height: int,
+) -> list[tuple[float, float, float]]:
+    """Drop candidates outside the image — letterbox-padding blobs map
+    through the inverse affine to impossible coordinates."""
+    return [
+        (u, v, s) for u, v, s in candidates
+        if 0.0 <= u < width and 0.0 <= v < height
+    ]

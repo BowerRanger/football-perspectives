@@ -156,3 +156,22 @@ def test_find_gap_runs_leading_gap_and_all_gaps():
 def test_gate_empty_candidate_list_returns_none():
     cfg = SecondPassCfg()
     assert best_gated_candidate([], np.array([0.0, 0.0]), np.eye(2), cfg) is None
+
+
+from src.utils.ball_second_pass import filter_in_bounds  # noqa: E402
+
+
+@pytest.mark.unit
+def test_filter_in_bounds_drops_outside_image():
+    cands = [
+        (10.0, 20.0, 0.9),        # inside
+        (-5.0, 20.0, 0.9),        # left of image
+        (10.0, -85.0, 0.9),       # above image (letterbox padding artifact)
+        (1930.0, 20.0, 0.9),      # right of a 1920-wide image
+        (10.0, 1085.0, 0.9),      # below a 1080-high image
+        (1919.9, 1079.9, 0.5),    # inside, at the far corner
+    ]
+    assert filter_in_bounds(cands, width=1920, height=1080) == [
+        (10.0, 20.0, 0.9),
+        (1919.9, 1079.9, 0.5),
+    ]

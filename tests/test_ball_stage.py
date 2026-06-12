@@ -60,13 +60,17 @@ def _save_camera_track(
 
 def _write_blank_clip(path: Path, n: int, fps: float = 30.0) -> None:
     """The BallDetector is faked in tests, so the frame contents don't matter —
-    we just need the VideoCapture to return ``n`` frames."""
+    we just need the VideoCapture to return ``n`` frames.
+
+    1280×720 so that the projected ball coordinates (u≈162–285, v≈358) from
+    _camera_pose() fall inside the frame and pass the in-bounds check.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
-        str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (320, 240)
+        str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (1280, 720)
     )
     for _ in range(n):
-        writer.write(np.full((240, 320, 3), [50, 200, 50], dtype=np.uint8))
+        writer.write(np.full((720, 1280, 3), [50, 200, 50], dtype=np.uint8))
     writer.release()
 
 
@@ -136,7 +140,10 @@ def test_ball_stage_bridges_bracketed_gap_and_marks_trailing_missing(tmp_path: P
         config={"ball": {"detector": "fake", "max_gap_frames": 3,
                          "auto_anchors": {"enabled": True,
                                           "grounded_interval": 8},
-                         "second_pass": {"enabled": False}}},
+                         "second_pass": {"enabled": False},
+                         # Disable the appearance bridge: the all-green clip
+                         # gives a uniform NCC surface that confuses it.
+                         "appearance_bridge": {"enabled": False}}},
         output_dir=tmp_path,
         ball_detector=FakeBallDetector(detections),
     )
@@ -465,7 +472,10 @@ def test_auto_touch_anchors_flight_to_players_foot(tmp_path: Path):
             # at this camera geometry, and the test isolates the contact
             # pipeline (pose -> touch event -> anchor -> launch arc).
             "ball": {"detector": "fake",
-                     "auto_anchors": {"grounded_min_conf": 2.0}},
+                     "auto_anchors": {"grounded_min_conf": 2.0},
+                     # Disable the appearance bridge: the all-green clip
+                     # gives a uniform NCC surface that confuses it.
+                     "appearance_bridge": {"enabled": False}},
             "pitch": {"length_m": 105.0, "width_m": 68.0},
         },
         output_dir=out,

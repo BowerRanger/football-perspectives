@@ -346,9 +346,11 @@ class TestOpenSpanGroundedFallback:
         steps = []
         for fi in range(n):
             if fi in gap_fill_frames:
-                # Wildly extrapolated pixel — projects way off-pitch.
+                # Plausible ON-pitch pixel, but flagged gap-fill — only the
+                # gap-fill guard (not the off-pitch bounds) may reject it,
+                # so this test isolates that guard.
                 steps.append(TrackerStep(
-                    frame=fi, uv=(960.0, -850.0),  # near-horizon, v strongly negative
+                    frame=fi, uv=genuine_pixels.get(fi),
                     p_flight=0.0, is_outlier=False, is_gap_fill=True,
                 ))
             else:

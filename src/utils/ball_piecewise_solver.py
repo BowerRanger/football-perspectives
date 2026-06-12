@@ -210,6 +210,7 @@ class _SpanOutcome:
     underconstrained: bool = False
     residual_px: float | None = None
     physics_violation: bool = False
+    fixes_used: int = 0
 
 
 class _Solver:
@@ -232,6 +233,7 @@ class _Solver:
         split_hints: Sequence[tuple[int, float]],
         z_hints: Mapping[int, tuple[float, float]] | None,
         manual_obs_frames: set[int] | None,
+        world_fixes: Mapping[int, tuple[np.ndarray, float]] | None,
         cfg: SolverCfg,
     ) -> None:
         dedup: dict[int, TrajectoryNode] = {}
@@ -268,6 +270,9 @@ class _Solver:
         self.z_hints = dict(z_hints or {})
         self.manual_obs_frames = set(manual_obs_frames or ())
         self.arc_contested_spans: set[tuple[int, int]] = set()
+        self.world_fixes: Mapping[int, tuple[np.ndarray, float]] = dict(
+            world_fixes or {}
+        )
         self.cfg = cfg
 
     # ------------------------------------------------------------------
@@ -324,6 +329,14 @@ class _Solver:
             ts.append(self.t[f])
         return obs, Ks, Rs, ts
 
+    def _fixes_in(self, fa: int, fb: int) -> list[tuple[int, np.ndarray, float]]:
+        """World fixes whose frame is in [fa, fb], in fitter list form."""
+        result = []
+        for f, (xyz, weight) in self.world_fixes.items():
+            if fa <= f <= fb:
+                result.append((f, np.asarray(xyz, dtype=float), float(weight)))
+        return result
+
     # ------------------------------------------------------------------
     # Ballistic fitting
 
@@ -334,7 +347,9 @@ class _Solver:
         return _Arc(fa=fa, fb=fb, p0=p0, v0=v0, residual_px=0.0, n_obs=0)
 
     def _fit_arc(self, a: np.ndarray, b: np.ndarray,
-                 fa: int, fb: int, only_frames=None) -> _Arc:
+                 fa: int, fb: int, only_frames=None,
+                 wfixes: list[tuple[int, np.ndarray, float]] | None = None,
+                 ) -> _Arc:
         """Best single gravity arc through (fa, a) and (fb, b)."""
         obs, Ks, Rs, ts = self._interior_obs(fa, fb, only_frames)
         analytic = self._analytic_arc(a, b, fa, fb)
@@ -374,6 +389,7 @@ class _Solver:
                 # demoted to a light hinge that cannot fight the arc
                 # when the operator picked the wrong bucket (C2 rule).
                 z_range_weight=20.0,
+                world_fixes=wfixes or None,
             )
         except Exception as exc:
             logger.debug("arc fit failed on %d-%d: %s — using analytic",
@@ -416,7 +432,9 @@ class _Solver:
         return arc
 
     def _try_magnus(self, arc: _Arc, a: np.ndarray, b: np.ndarray,
-                    spin_preset: str | None) -> _Arc:
+                    spin_preset: str | None,
+                    wfixes: list[tuple[int, np.ndarray, float]] | None = None,
+                    ) -> _Arc:
         cfg = self.cfg
         duration_s = (arc.fb - arc.fa) / self.fps
         if (
@@ -447,6 +465,7 @@ class _Solver:
                     omega_mag_bound=cfg.spin_max_omega_rad_s,
                     v0_abs_bound=max(cfg.horizontal_speed_max_m_s * 1.5, 40.0),
                     distortion=self.distortion,
+                    world_fixes=wfixes or None,
                 )
             else:
                 mp0, mv0, momega, _ = fit_magnus_trajectory(
@@ -456,6 +475,7 @@ class _Solver:
                     p0_fixed=np.asarray(a, float),
                     omega_abs_bound=cfg.spin_max_omega_rad_s / np.sqrt(3.0),
                     distortion=self.distortion,
+                    world_fixes=wfixes or None,
                 )
         except Exception as exc:
             logger.debug("magnus fit failed on %d-%d: %s", arc.fa, arc.fb, exc)
@@ -518,7 +538,8 @@ class _Solver:
                         fa: int, fb: int, spin_preset: str | None,
                         splits_left: int, used_splits: set[int],
                         manual_span: bool = False) -> _SpanOutcome:
-        arc = self._fit_arc(a, b, fa, fb)
+        wfixes = self._fixes_in(fa, fb)
+        arc = self._fit_arc(a, b, fa, fb, wfixes=wfixes)
         if (
             manual_span
             and arc.n_obs > 0
@@ -537,6 +558,7 @@ class _Solver:
             )
             arc = self._fit_arc(
                 a, b, fa, fb, only_frames=self.manual_obs_frames,
+                wfixes=wfixes,
             )
             splits_left = 0
         if (
@@ -570,8 +592,9 @@ class _Solver:
                     if s.residual_px is not None
                 ]
                 combined.residual_px = max(resids) if resids else None
+                combined.fixes_used = left.fixes_used + right.fixes_used
                 return combined
-        arc = self._try_magnus(arc, a, b, spin_preset)
+        arc = self._try_magnus(arc, a, b, spin_preset, wfixes=wfixes)
         out = _SpanOutcome(kind="ballistic")
         out.arcs = [arc]
         out.residual_px = arc.residual_px if arc.n_obs else None
@@ -579,6 +602,7 @@ class _Solver:
             arc.n_obs > 0
             and arc.residual_px > self.cfg.flight_max_residual_px
         )
+        out.fixes_used = len(wfixes)
         for f in range(fa, fb + 1):
             out.worlds[f] = arc.eval(f, self.fps)
         return out
@@ -713,12 +737,14 @@ class _Solver:
         if len(obs) < self.cfg.min_obs_for_lm_fit:
             return None
         a = np.asarray(node_a.world_xyz, dtype=float)
+        wfixes = self._fixes_in(node_a.frame, fb)
         try:
             p0, v0, _ = fit_parabola_to_image_observations(
                 obs, Ks=Ks, Rs=Rs, t_world=ts,
                 fps=self.fps, distortion=self.distortion,
                 p0_fixed=None,
                 knot_frames={node_a.frame - obs[0][0]: a},
+                world_fixes=wfixes or None,
             )
         except Exception:
             return None
@@ -1001,12 +1027,14 @@ class _Solver:
                     p0_s + v0_s * dt_s + 0.5 * G_VEC * dt_s**2,
                     v0_s + G_VEC * dt_s,
                 )
+            wfixes_run = self._fixes_in(arc_fa, arc_fb)
             try:
                 p0, v0, _ = fit_parabola_to_image_observations(
                     obs, Ks=Ks, Rs=Rs, t_world=ts,
                     fps=self.fps, distortion=self.distortion,
                     knot_frames=knots or None,
                     seed=seed,
+                    world_fixes=wfixes_run or None,
                 )
             except Exception:
                 continue
@@ -1043,6 +1071,7 @@ class _Solver:
                 residual_px=float(resid), n_obs=len(obs),
             )
             out.arcs.append(arc)
+            out.fixes_used += len(wfixes_run)
             for f in range(arc_fa, arc_fb + 1):
                 if f_lo <= f < f_hi:
                     out.worlds[f] = arc.eval(f, self.fps)
@@ -1134,6 +1163,7 @@ class _Solver:
                 "start": fa, "end": fb, "kind": outcome.kind,
                 "residual_px": outcome.residual_px,
                 "underconstrained": outcome.underconstrained,
+                "fixes_used": outcome.fixes_used,
             })
             if outcome.underconstrained:
                 diagnostics["underconstrained_spans"].append({
@@ -1241,6 +1271,7 @@ def solve_piecewise(
     split_hints: Sequence[tuple[int, float]] = (),
     z_hints: Mapping[int, tuple[float, float]] | None = None,
     manual_obs_frames: set[int] | None = None,
+    world_fixes: Mapping[int, tuple[np.ndarray, float]] | None = None,
     cfg: SolverCfg | None = None,
 ) -> SolveResult:
     """Solve one shot's dense ball trajectory. See module docstring."""
@@ -1252,6 +1283,7 @@ def solve_piecewise(
         pitch_length_m=pitch_length_m, pitch_width_m=pitch_width_m,
         split_hints=split_hints, z_hints=z_hints,
         manual_obs_frames=manual_obs_frames,
+        world_fixes=world_fixes,
         cfg=cfg or SolverCfg(),
     )
     return solver.solve()

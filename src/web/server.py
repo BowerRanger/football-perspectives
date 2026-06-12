@@ -104,6 +104,27 @@ def _manifest_shot_ids(output_dir: Path) -> list[str]:
         return []
 
 
+def _is_allowed_input(output_dir: Path, resolved: Path) -> bool:
+    """True when ``resolved`` may be fed to prepare_shots: an upload in
+    ``output/source/`` or the source video the manifest already records
+    (the re-split path — server state, not client input)."""
+    try:
+        resolved.relative_to((output_dir / "source").resolve())
+        return True
+    except ValueError:
+        pass
+    from src.schemas.shots import ShotsManifest
+
+    manifest_path = output_dir / "shots" / "shots_manifest.json"
+    if not manifest_path.exists():
+        return False
+    try:
+        recorded = ShotsManifest.load(manifest_path).source_file
+    except Exception:
+        return False
+    return bool(recorded) and Path(recorded).resolve() == resolved
+
+
 def _camera_complete(output_dir: Path) -> bool:
     """Camera stage is green only when every shot in the manifest has a
     ``{shot_id}_camera_track.json`` on disk. With no manifest we fall
@@ -322,6 +343,13 @@ class RunRequest(BaseModel):
     # Other stages ignore this. Used by the dashboard's
     # /api/run-shot-player endpoint for fast iteration on one player.
     player_filter: str | None = None
+    # Pipeline input video (prepare_shots only). Set by the dashboard's
+    # reel-upload flow; must point inside ``output/source/`` (or be the
+    # manifest's recorded source) — the run endpoints reject anything
+    # else so a request can't make the server read arbitrary paths.
+    input_path: str | None = None
+    # Wipe previous split state and re-ingest (dashboard "Re-run split").
+    force_resplit: bool = False
 
 
 def _emit(job: Job, line: str) -> None:
@@ -379,6 +407,21 @@ def _run_job(job: Job, output_dir: Path, config_path: Path | None, params: RunRe
     _emit(job, f"[job {job.job_id}] starting stages={params.stages!r}")
     try:
         cfg = load_config(config_path)
+        extra_kwargs: dict = {}
+        if params.input_path:
+            # Defence in depth: the run endpoints validate this too, but
+            # every path into run_pipeline must hold the same invariant —
+            # request-supplied inputs only ever come from output/source/
+            # or are the manifest's already-recorded source video.
+            resolved = Path(params.input_path).resolve()
+            if not _is_allowed_input(output_dir, resolved):
+                raise ValueError(
+                    f"input_path {resolved} is neither under "
+                    "output/source/ nor the manifest's recorded source"
+                )
+            extra_kwargs["video_path"] = resolved
+        if params.force_resplit:
+            extra_kwargs["force_resplit"] = True
         run_pipeline(
             output_dir=output_dir,
             stages=params.stages,
@@ -387,6 +430,7 @@ def _run_job(job: Job, output_dir: Path, config_path: Path | None, params: RunRe
             device=params.device,
             shot_filter=params.shot_filter,
             player_filter=params.player_filter,
+            **extra_kwargs,
         )
         job.status = "done"
     except Exception as exc:
@@ -678,8 +722,22 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     return j
         return None
 
+    def _validate_input_path(params: RunRequest) -> None:
+        """``input_path`` may only name an upload in ``output/source/``
+        or the manifest's recorded source video."""
+        if not params.input_path:
+            return
+        resolved = Path(params.input_path).resolve()
+        if not _is_allowed_input(output_dir, resolved):
+            raise HTTPException(
+                status_code=400,
+                detail="input_path must point inside the output dir's "
+                       "source/ folder or match the recorded source",
+            )
+
     @app.post("/api/run", status_code=202)
     def run_stages(params: RunRequest):
+        _validate_input_path(params)
         requested_stages = (params.stages or "").split(",")
         wants_hmr = "hmr_world" in requested_stages or params.stages == "all"
         if wants_hmr:
@@ -970,9 +1028,26 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
 
     @app.get("/api/output/shots")
     def list_shots():
+        """Shot ids for the per-shot pickers (tracking/camera/viewer).
+
+        Manifest-aware: excluded shots (dropped reactions/transitions)
+        are hidden from every downstream picker. Falls back to globbing
+        ``shots/*.mp4`` when no manifest exists yet. The Prepare Shots
+        panel reads the full manifest instead, so the dropped tray still
+        sees everything.
+        """
         shots_dir = output_dir / "shots"
         if not shots_dir.exists():
             return {"shots": []}
+        manifest_path = shots_dir / "shots_manifest.json"
+        if manifest_path.exists():
+            from src.schemas.shots import ShotsManifest
+
+            try:
+                manifest = ShotsManifest.load(manifest_path)
+                return {"shots": [s.id for s in manifest.active_shots()]}
+            except Exception:
+                pass  # unreadable manifest → glob fallback below
         ids = sorted(p.stem for p in shots_dir.glob("*.mp4"))
         return {"shots": ids}
 
@@ -1272,7 +1347,10 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         method: str = "manual"
         confidence: float = 1.0
 
-    class SyncMapPayload(BaseModel):
+    class GroupSyncPayload(BaseModel):
+        # One group's sync state per POST — the dashboard's editor is
+        # group-scoped, so saves never touch other groups' offsets.
+        group_id: str = ""
         reference_shot: str
         alignments: list[SyncAlignmentPayload]
 
@@ -1286,19 +1364,43 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         # mid-bootstrap (e.g. before the first prepare_shots run).
         return _manifest_shot_ids(output_dir)
 
+    def _manifest_group_members() -> dict[str, list[str]]:
+        """Map ``group_id`` → member shot ids (manifest shot order).
+
+        Shots with ``group_id == ""`` form the ungrouped bucket under
+        key ``""`` (manually-added clips). Returns {} when no manifest.
+        """
+        from src.schemas.shots import ShotsManifest
+
+        manifest_path = output_dir / "shots" / "shots_manifest.json"
+        if not manifest_path.exists():
+            return {}
+        try:
+            manifest = ShotsManifest.load(manifest_path)
+        except Exception:
+            return {}
+        members: dict[str, list[str]] = {}
+        for s in manifest.shots:
+            members.setdefault(s.group_id, []).append(s.id)
+        return members
+
     @app.get("/api/sync")
     def get_sync_map():
-        """Return the SyncMap JSON (operator-edited shot offsets).
+        """Return the group-scoped SyncMap JSON (v2).
 
-        On disk: ``output/shots/sync_map.json``. When absent, return a
-        fresh default with every shot at ``frame_offset=0`` so the
-        dashboard's editor can render one row per shot before the
-        operator has saved anything.
+        On disk: ``output/shots/sync_map.json`` (v1 files migrate on
+        read). Every manifest group is topped up with default
+        ``frame_offset=0`` rows for members missing from the saved map,
+        so the editor renders a full row set without an explicit save
+        first. Alignments for shots that left a group are hidden (the
+        bulk shot editor prunes them on write).
         """
-        from src.schemas.sync_map import SyncMap, default_sync_map
+        from src.schemas.sync_map import (
+            Alignment, GroupSync, SyncMap, default_group_sync,
+        )
 
         path = _sync_map_path()
-        manifest_ids = _manifest_shot_ids_or_empty()
+        sm = SyncMap()
         if path.exists():
             try:
                 sm = SyncMap.load(path)
@@ -1306,44 +1408,65 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                 raise HTTPException(
                     status_code=500, detail=f"Failed to load sync_map: {exc}",
                 )
-            saved_ids = {a.shot_id for a in sm.alignments}
-            # If new shots were added since the last save, append them
-            # at offset=0 so the editor surfaces every current shot
-            # without forcing the operator to re-save first.
-            from src.schemas.sync_map import Alignment
-            for sid in manifest_ids:
-                if sid not in saved_ids:
-                    sm.alignments.append(
-                        Alignment(shot_id=sid, frame_offset=0)
-                    )
-            sm.alignments.sort(key=lambda a: a.shot_id)
+
+        members = _manifest_group_members()
+        if not members:
+            # No manifest: present whatever was saved, untouched.
             return asdict(sm)
-        if not manifest_ids:
-            return {"reference_shot": "", "alignments": []}
-        return asdict(
-            default_sync_map(reference_shot=manifest_ids[0], shot_ids=manifest_ids)
-        )
+
+        groups: list[GroupSync] = []
+        for gid in sorted(members):
+            ids = members[gid]
+            saved = sm.group(gid)
+            if saved is None:
+                groups.append(default_group_sync(gid, ids[0], ids))
+                continue
+            id_set = set(ids)
+            alignments = [a for a in saved.alignments if a.shot_id in id_set]
+            present = {a.shot_id for a in alignments}
+            alignments.extend(
+                Alignment(shot_id=sid, frame_offset=0)
+                for sid in ids if sid not in present
+            )
+            alignments.sort(key=lambda a: a.shot_id)
+            reference = (
+                saved.reference_shot
+                if saved.reference_shot in id_set else ids[0]
+            )
+            groups.append(GroupSync(
+                group_id=gid, reference_shot=reference, alignments=alignments,
+            ))
+        return asdict(SyncMap(groups=groups))
 
     @app.post("/api/sync")
-    def post_sync_map(payload: SyncMapPayload):
-        """Persist a SyncMap. The reference shot must appear in the
-        alignments with ``frame_offset=0``; the dashboard enforces this
-        UX-side too but we re-validate for safety."""
+    def post_sync_map(payload: GroupSyncPayload):
+        """Persist one group's sync state. The reference shot must appear
+        in the alignments with ``frame_offset=0``; the dashboard enforces
+        this UX-side too but we re-validate for safety."""
         from src.schemas.sync_map import (
-            Alignment, SyncMap, validate_method,
+            Alignment, GroupSync, SyncMap, validate_method,
         )
 
-        manifest_ids = set(_manifest_shot_ids_or_empty())
+        members = _manifest_group_members()
+        group_ids = set(members.get(payload.group_id, []))
+        if members and not group_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"group_id {payload.group_id!r} has no shots in the "
+                    "manifest"
+                ),
+            )
         if not payload.reference_shot:
             raise HTTPException(
                 status_code=400, detail="reference_shot is required",
             )
-        if manifest_ids and payload.reference_shot not in manifest_ids:
+        if group_ids and payload.reference_shot not in group_ids:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"reference_shot {payload.reference_shot!r} is not in"
-                    " the shots manifest"
+                    f"reference_shot {payload.reference_shot!r} is not a "
+                    f"member of group {payload.group_id!r}"
                 ),
             )
         seen: set[str] = set()
@@ -1355,11 +1478,12 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     detail=f"duplicate shot_id {a.shot_id!r} in alignments",
                 )
             seen.add(a.shot_id)
-            if manifest_ids and a.shot_id not in manifest_ids:
+            if group_ids and a.shot_id not in group_ids:
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        f"shot_id {a.shot_id!r} is not in the shots manifest"
+                        f"shot_id {a.shot_id!r} is not a member of group "
+                        f"{payload.group_id!r}"
                     ),
                 )
             try:
@@ -1391,11 +1515,296 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                 ),
             )
         alignments.sort(key=lambda a: a.shot_id)
-        sm = SyncMap(
-            reference_shot=payload.reference_shot, alignments=alignments,
+
+        path = _sync_map_path()
+        # Same lock as the manifest editors: every sync_map read-modify-
+        # write cycle (here, /api/sync/auto, /api/shots/bulk) serialises
+        # on it so concurrent saves can't drop each other's groups.
+        with _match_manifest_lock:
+            sm = SyncMap.load(path) if path.exists() else SyncMap()
+            sm = sm.with_group(GroupSync(
+                group_id=payload.group_id,
+                reference_shot=payload.reference_shot,
+                alignments=alignments,
+            ))
+            sm.save(path)
+        return {
+            "saved": True,
+            "path": str(path),
+            "group_id": payload.group_id,
+            "count": len(alignments),
+        }
+
+    # ------------------------------------------------------------------
+    # Highlight groups: bulk shot edits + auto re-alignment + sidecars
+    # ------------------------------------------------------------------
+
+    _GROUP_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+    class ShotUpdate(BaseModel):
+        shot_id: str
+        excluded: bool | None = None
+        exclude_reason: str | None = None
+        group_id: str | None = None
+
+    class BulkShotsPayload(BaseModel):
+        updates: list[ShotUpdate]
+
+    class SyncAutoPayload(BaseModel):
+        group_id: str
+        force: bool = False
+
+    @app.patch("/api/shots/bulk")
+    def patch_shots_bulk(payload: BulkShotsPayload):
+        """Apply shot-level edits (discard/restore/regroup) atomically.
+
+        One endpoint covers the whole groups-board UX: discard a shot
+        (``excluded=true``), restore from the dropped tray, move a shot
+        between groups (``group_id``), merge groups (move every member),
+        split a group (move the tail to a fresh id) and discard a group
+        (exclude every member). Afterwards ``manifest.groups`` is
+        reconciled from the shots' ``group_id`` values — emptied groups
+        are dropped, brand-new ids get a ``manual`` group record — and
+        sync-map alignments of shots that left a group are pruned.
+        """
+        from dataclasses import replace as dc_replace
+
+        from src.schemas.shots import HighlightGroup, ShotsManifest
+        from src.schemas.sync_map import GroupSync, SyncMap
+
+        manifest_path = _match_manifest_path()
+        if not manifest_path.exists():
+            raise HTTPException(status_code=404, detail="no shots manifest")
+        with _match_manifest_lock:
+            manifest = ShotsManifest.load(manifest_path)
+            by_id = {s.id: s for s in manifest.shots}
+            for u in payload.updates:
+                if u.shot_id not in by_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"unknown shot_id {u.shot_id!r}",
+                    )
+                if (u.group_id is not None and u.group_id != ""
+                        and not _GROUP_ID_PATTERN.match(u.group_id)):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"invalid group_id {u.group_id!r}",
+                    )
+
+            for u in payload.updates:
+                shot = by_id[u.shot_id]
+                changes: dict = {}
+                if u.excluded is not None:
+                    changes["excluded"] = u.excluded
+                    if not u.excluded and u.exclude_reason is None:
+                        changes["exclude_reason"] = ""
+                if u.exclude_reason is not None:
+                    changes["exclude_reason"] = u.exclude_reason
+                if u.group_id is not None:
+                    changes["group_id"] = u.group_id
+                by_id[u.shot_id] = dc_replace(shot, **changes)
+
+            shots = [by_id[s.id] for s in manifest.shots]
+
+            # Reconcile groups from the shots' group_id values: original
+            # order for surviving groups, new ids appended in first-
+            # appearance order, emptied groups dropped.
+            members: dict[str, list[str]] = {}
+            for s in shots:
+                if s.group_id:
+                    members.setdefault(s.group_id, []).append(s.id)
+            existing_groups = {g.id: g for g in manifest.groups}
+            groups: list[HighlightGroup] = []
+            for g in manifest.groups:
+                if g.id in members:
+                    groups.append(dc_replace(g, shot_ids=members[g.id]))
+            for gid, ids in members.items():
+                if gid not in existing_groups:
+                    groups.append(HighlightGroup(
+                        id=gid,
+                        label=f"Highlight {len(groups) + 1}",
+                        shot_ids=ids,
+                        boundary_rule="manual",
+                        boundary_confidence=1.0,
+                    ))
+
+            manifest = ShotsManifest(
+                source_file=manifest.source_file,
+                fps=manifest.fps,
+                total_frames=manifest.total_frames,
+                shots=shots,
+                groups=groups,
+                match=manifest.match,
+            )
+            manifest.save(manifest_path)
+
+            # Prune sync alignments for shots that left their group.
+            sync_path = _sync_map_path()
+            if sync_path.exists():
+                try:
+                    sm = SyncMap.load(sync_path)
+                except Exception:
+                    sm = None
+                if sm is not None:
+                    group_of = {s.id: s.group_id for s in shots}
+                    pruned: list[GroupSync] = []
+                    changed = False
+                    for gs in sm.groups:
+                        kept = [a for a in gs.alignments
+                                if group_of.get(a.shot_id) == gs.group_id]
+                        if len(kept) != len(gs.alignments):
+                            changed = True
+                        if not kept:
+                            changed = True
+                            continue
+                        reference = gs.reference_shot
+                        if all(a.shot_id != reference for a in kept):
+                            reference = kept[0].shot_id
+                            changed = True
+                        pruned.append(GroupSync(
+                            group_id=gs.group_id,
+                            reference_shot=reference,
+                            alignments=kept,
+                        ))
+                    if changed:
+                        SyncMap(groups=pruned).save(sync_path)
+
+        return asdict(manifest)
+
+    @app.post("/api/sync/auto")
+    def sync_auto(payload: SyncAutoPayload):
+        """Re-run the motion-profile aligner for one group.
+
+        ``force=false`` keeps operator-saved ``manual`` offsets;
+        ``force=true`` recomputes every member.
+        """
+        from src.schemas.shots import ShotsManifest
+        from src.schemas.sync_map import Alignment, SyncMap
+        from src.utils.shot_alignment import align_group
+
+        manifest_path = _match_manifest_path()
+        if not manifest_path.exists():
+            raise HTTPException(status_code=404, detail="no shots manifest")
+        manifest = ShotsManifest.load(manifest_path)
+        group = next(
+            (g for g in manifest.groups if g.id == payload.group_id), None,
         )
-        sm.save(_sync_map_path())
-        return {"saved": True, "path": str(_sync_map_path()), "count": len(alignments)}
+        if group is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"unknown group {payload.group_id!r}",
+            )
+        shots_by_id = {s.id: s for s in manifest.shots}
+        member_clips = {
+            sid: output_dir / shots_by_id[sid].clip_file
+            for sid in group.shot_ids
+            if sid in shots_by_id
+            and not shots_by_id[sid].excluded
+            and (output_dir / shots_by_id[sid].clip_file).exists()
+        }
+        if len(member_clips) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="group needs at least two active shots to align",
+            )
+
+        sync_path = _sync_map_path()
+        sm = SyncMap.load(sync_path) if sync_path.exists() else SyncMap()
+        saved = sm.group(payload.group_id)
+        reference = (
+            saved.reference_shot
+            if saved is not None and saved.reference_shot in member_clips
+            else next(iter(member_clips))
+        )
+
+        align_cfg = (
+            load_config(app.state.config_path)
+            .get("prepare_shots", {})
+            .get("align", {})
+        )
+        fps = manifest.fps or 25.0
+        results = align_group(
+            member_clips,
+            reference_id=reference,
+            width_px=int(align_cfg.get("curve_width_px", 192)),
+            smooth_sigma=float(align_cfg.get("smooth_sigma_frames", 2.0)),
+            min_overlap_frames=max(
+                2, int(float(align_cfg.get("min_overlap_s", 1.0)) * fps),
+            ),
+            min_confidence=float(align_cfg.get("min_confidence", 0.5)),
+        )
+        aligned = 0
+        out_alignments = []
+        # Re-load under the shared lock so a save that landed while the
+        # aligner was decoding video can't be dropped, and manual
+        # offsets are honoured against the freshest state.
+        with _match_manifest_lock:
+            sm = SyncMap.load(sync_path) if sync_path.exists() else SyncMap()
+            saved = sm.group(payload.group_id)
+            for sid, result in results.items():
+                if not payload.force and saved is not None:
+                    prior = next(
+                        (a for a in saved.alignments if a.shot_id == sid),
+                        None,
+                    )
+                    if prior is not None and prior.method == "manual":
+                        continue
+                alignment = Alignment(
+                    shot_id=sid,
+                    frame_offset=result.frame_offset,
+                    method=result.method,
+                    confidence=result.confidence,
+                )
+                sm = sm.with_group_alignment(
+                    payload.group_id, reference, alignment,
+                )
+                out_alignments.append(asdict(alignment))
+                aligned += 1
+            sm.save(sync_path)
+        return {
+            "group_id": payload.group_id,
+            "reference_shot": reference,
+            "aligned": aligned,
+            "alignments": out_alignments,
+        }
+
+    @app.get("/api/shots/features")
+    def get_shot_features():
+        """Per-shot classification diagnostics written by split mode
+        (``shots/shot_features.json``). ``{}`` when absent."""
+        path = output_dir / "shots" / "shot_features.json"
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text())
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to load shot features: {exc}",
+            )
+
+    @app.get("/api/shots/{shot_id}/thumb")
+    def get_shot_thumbnail(shot_id: str):
+        """Shot thumbnail JPEG (generated at split time; lazily created
+        for clips that predate thumbnails)."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", shot_id):
+            raise HTTPException(status_code=400, detail="Invalid shot id")
+        thumb = output_dir / "shots" / "thumbs" / f"{shot_id}.jpg"
+        if not thumb.exists():
+            clip = output_dir / "shots" / f"{shot_id}.mp4"
+            if not clip.exists():
+                raise HTTPException(status_code=404, detail="Unknown shot")
+            from src.stages.prepare_shots import _video_metadata
+            from src.utils.ffmpeg import extract_thumbnail
+
+            fps, frames = _video_metadata(clip)
+            midpoint = (frames / fps / 2.0) if fps > 0 and frames > 0 else 0.0
+            try:
+                extract_thumbnail(clip, thumb, midpoint)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500, detail=f"thumbnail failed: {exc}",
+                )
+        return FileResponse(str(thumb), media_type="image/jpeg")
 
     @app.get("/landmarks")
     def get_landmarks():
@@ -1875,6 +2284,131 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         ).start()
         return {"saved": saved, "skipped": skipped, "job_id": job_id}
 
+    @app.post("/api/shots/upload-reel")
+    async def upload_reel(file: UploadFile = File(...)):
+        """Save a full highlights reel to ``output/source/`` and spawn a
+        prepare_shots job that splits it into shots, groups them, and
+        auto-aligns each group (mode auto/split — see
+        ``prepare_shots.mode`` in config).
+        """
+        from src.schemas.shots import _sanitise_shot_id
+
+        raw_name = Path(file.filename or "").name
+        if not raw_name.lower().endswith(".mp4"):
+            await file.close()
+            raise HTTPException(
+                status_code=400, detail="reel must be an .mp4 file",
+            )
+        try:
+            stem = _sanitise_shot_id(Path(raw_name).stem)
+        except ValueError as exc:
+            await file.close()
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        source_dir = output_dir / "source"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        dest = source_dir / f"{stem}.mp4"
+        try:
+            # Exclusive create: two concurrent uploads of the same name
+            # can't both pass an exists() check and interleave writes.
+            with dest.open("xb") as out:
+                while True:
+                    chunk = await file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+        except FileExistsError:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"source {dest.name!r} already exists — delete it from "
+                    "output/source/ (or rename the upload) to re-ingest"
+                ),
+            )
+        finally:
+            await file.close()
+
+        params = RunRequest(
+            stages="prepare_shots",
+            from_stage="prepare_shots",
+            input_path=str(dest),
+        )
+        with _jobs_lock:
+            running_jobs = sum(
+                1 for j in _jobs.values() if j.status == "running"
+            )
+            if running_jobs >= _MAX_CONCURRENT_JOBS:
+                raise HTTPException(
+                    status_code=429, detail="Too many concurrent jobs",
+                )
+        job_id = str(uuid.uuid4())[:8]
+        job = Job(job_id=job_id, stages=params.stages)
+        with _jobs_lock:
+            _jobs[job_id] = job
+        Thread(
+            target=_run_job,
+            args=(job, output_dir, app.state.config_path, params),
+            daemon=True,
+        ).start()
+        return {"saved": stem, "source": str(dest), "job_id": job_id}
+
+    @app.post("/api/shots/resplit")
+    def resplit_shots():
+        """Re-run split-mode prepare_shots on the already-known source
+        video (manifest-recorded path, falling back to the newest upload
+        in ``output/source/``) — wipes shots/groups/sync state and
+        re-ingests with the current config. No re-upload needed.
+        """
+        from src.schemas.shots import ShotsManifest
+
+        source: Path | None = None
+        manifest_path = output_dir / "shots" / "shots_manifest.json"
+        if manifest_path.exists():
+            try:
+                recorded = ShotsManifest.load(manifest_path).source_file
+            except Exception:
+                recorded = ""
+            if recorded and Path(recorded).exists():
+                source = Path(recorded).resolve()
+        if source is None:
+            source_dir = output_dir / "source"
+            uploads = sorted(
+                source_dir.glob("*.mp4"),
+                key=lambda p: p.stat().st_mtime,
+            ) if source_dir.exists() else []
+            if uploads:
+                source = uploads[-1].resolve()
+        if source is None:
+            raise HTTPException(
+                status_code=404,
+                detail="no source video known — ingest a reel first",
+            )
+
+        params = RunRequest(
+            stages="prepare_shots",
+            from_stage="prepare_shots",
+            input_path=str(source),
+            force_resplit=True,
+        )
+        with _jobs_lock:
+            running_jobs = sum(
+                1 for j in _jobs.values() if j.status == "running"
+            )
+            if running_jobs >= _MAX_CONCURRENT_JOBS:
+                raise HTTPException(
+                    status_code=429, detail="Too many concurrent jobs",
+                )
+        job_id = str(uuid.uuid4())[:8]
+        job = Job(job_id=job_id, stages=params.stages)
+        with _jobs_lock:
+            _jobs[job_id] = job
+        Thread(
+            target=_run_job,
+            args=(job, output_dir, app.state.config_path, params),
+            daemon=True,
+        ).start()
+        return {"source": str(source), "job_id": job_id}
+
     @app.get("/camera/track")
     def get_camera_track(response: Response, shot: str | None = None):
         """Return a CameraTrack as JSON.
@@ -2344,7 +2878,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
 
                 sync_path = output_dir / "shots" / "sync_map.json"
                 if sync_path.exists():
-                    offset = SyncMap.load(sync_path).offset_for(shot)
+                    offset = SyncMap.load(sync_path).offset_for_shot(shot)
                     if offset:
                         frames = frames + offset
             payload = {

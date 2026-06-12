@@ -26,7 +26,7 @@ import pytest
 
 from src.schemas.refined_pose import RefinedPose
 from src.schemas.smpl_world import SmplWorldTrack
-from src.schemas.sync_map import Alignment, SyncMap
+from src.schemas.sync_map import Alignment, GroupSync, SyncMap
 from src.stages.refined_poses import (
     RefinedPosesStage,
     _apply_jitter_correction,
@@ -72,7 +72,9 @@ def _write_sync_map(output_dir: Path, *, ref: str, offsets: dict[str, int]) -> N
         Alignment(shot_id=sid, frame_offset=off, method="manual", confidence=1.0)
         for sid, off in offsets.items()
     ]
-    sm = SyncMap(reference_shot=ref, alignments=alignments)
+    sm = SyncMap(groups=[GroupSync(
+        group_id="", reference_shot=ref, alignments=alignments,
+    )])
     (output_dir / "shots").mkdir(parents=True, exist_ok=True)
     sm.save(output_dir / "shots" / "sync_map.json")
 

@@ -34,6 +34,33 @@ class Shot:
     end_time: float
     clip_file: str
     speed_factor: float = 1.0
+    # Highlights-ingestion fields. ``kind`` is what the classifier saw
+    # (gameplay | reaction | transition | closeup); ``excluded`` shots
+    # stay in the manifest (and on disk, for the dashboard's dropped
+    # tray) but are skipped by every pipeline stage via
+    # ``ShotsManifest.active_shots()``.
+    # ``source_start_s``/``source_end_s`` locate the shot in the original
+    # reel; -1.0 = unknown (manually added clip).
+    kind: str = "gameplay"
+    excluded: bool = False
+    exclude_reason: str = ""
+    group_id: str = ""
+    source_start_s: float = -1.0
+    source_end_s: float = -1.0
+
+
+@dataclass
+class HighlightGroup:
+    """One highlight event: an ordered run of shots covering the same
+    moment (live action + its replays). ``shot_ids`` is reel order.
+    ``boundary_rule`` records which grouping rule opened this group
+    ('start', 'transition', 'gap', 'live_after_replay', 'manual')."""
+
+    id: str
+    label: str
+    shot_ids: list[str] = field(default_factory=list)
+    boundary_rule: str = "start"
+    boundary_confidence: float = 1.0
 
 
 @dataclass
@@ -104,10 +131,15 @@ class ShotsManifest:
     fps: float
     total_frames: int
     shots: list[Shot] = field(default_factory=list)
+    groups: list[HighlightGroup] = field(default_factory=list)
     match: MatchInfo | None = None
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps(asdict(self), indent=2))
+        # Atomic write: a reader (dashboard thread, parallel stage) must
+        # never observe a torn manifest.
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(asdict(self), indent=2))
+        tmp.replace(path)
 
     @classmethod
     def load(cls, path: Path) -> "ShotsManifest":
@@ -115,9 +147,17 @@ class ShotsManifest:
         shots = [
             Shot(**_filter_kwargs(Shot, s)) for s in data.pop("shots", [])
         ]
+        groups = [
+            HighlightGroup(**_filter_kwargs(HighlightGroup, g))
+            for g in data.pop("groups", [])
+        ]
         match = _load_match(data.pop("match", None))
         manifest_kwargs = _filter_kwargs(cls, data)
-        return cls(shots=shots, match=match, **manifest_kwargs)
+        return cls(shots=shots, groups=groups, match=match, **manifest_kwargs)
+
+    def active_shots(self) -> list[Shot]:
+        """Shots that downstream stages should process (not excluded)."""
+        return [s for s in self.shots if not s.excluded]
 
     @classmethod
     def infer_from_clips(

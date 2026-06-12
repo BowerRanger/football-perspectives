@@ -189,7 +189,7 @@ class HmrWorldStage(BaseStage):
 
         if manifest_path.exists():
             manifest = ShotsManifest.load(manifest_path)
-            for shot in manifest.shots:
+            for shot in manifest.active_shots():
                 p = self.output_dir / "camera" / f"{shot.id}_camera_track.json"
                 if not p.exists():
                     logger.warning(

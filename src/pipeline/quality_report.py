@@ -19,6 +19,56 @@ from src.schemas.camera_track import CameraTrack
 from src.schemas.shots import ShotsManifest
 
 
+def _prepare_shots_section(output_dir: Path, manifest: ShotsManifest) -> dict:
+    """Ingestion diagnostics: exclusions, groups, alignment confidence."""
+    from src.schemas.sync_map import SyncMap
+
+    excluded: dict[str, int] = {}
+    for s in manifest.shots:
+        if s.excluded:
+            reason = s.exclude_reason or "unknown"
+            excluded[reason] = excluded.get(reason, 0) + 1
+
+    sync_path = output_dir / "shots" / "sync_map.json"
+    sync_map = None
+    if sync_path.exists():
+        try:
+            sync_map = SyncMap.load(sync_path)
+        except Exception:
+            sync_map = None
+
+    groups: list[dict] = []
+    low_confidence: list[str] = []
+    for g in manifest.groups:
+        alignment: dict = {"min_confidence": None, "methods": []}
+        gs = sync_map.group(g.id) if sync_map is not None else None
+        if gs is not None and gs.alignments:
+            confidences = [a.confidence for a in gs.alignments]
+            alignment = {
+                "min_confidence": round(min(confidences), 3),
+                "methods": sorted({a.method for a in gs.alignments}),
+            }
+            if min(confidences) < 0.5:
+                low_confidence.append(g.id)
+        groups.append({
+            "id": g.id,
+            "label": g.label,
+            "shots": len(g.shot_ids),
+            "boundary_rule": g.boundary_rule,
+            "boundary_confidence": g.boundary_confidence,
+            "alignment": alignment,
+        })
+
+    return {
+        "total_shots": len(manifest.shots),
+        "active_shots": len(manifest.active_shots()),
+        "excluded": excluded,
+        "group_count": len(manifest.groups),
+        "groups": groups,
+        "low_confidence_groups": low_confidence,
+    }
+
+
 def write_quality_report(output_dir: Path) -> None:
     """Aggregate diagnostics from camera/, hmr_world/, ball/ into a single JSON."""
     report: dict = {}
@@ -27,6 +77,7 @@ def write_quality_report(output_dir: Path) -> None:
     # downstream tooling can answer "which match was this from?" without
     # re-reading the manifest. ``None`` when unset or no manifest yet.
     manifest_path = output_dir / "shots" / "shots_manifest.json"
+    manifest = None
     if manifest_path.exists():
         try:
             manifest = ShotsManifest.load(manifest_path)
@@ -34,6 +85,14 @@ def write_quality_report(output_dir: Path) -> None:
             manifest = None
         if manifest is not None and manifest.match is not None:
             report["match"] = asdict(manifest.match)
+
+    # Highlights-ingestion summary: drop counts, groups, and per-group
+    # alignment confidence. Only emitted when the manifest carries
+    # ingestion state (groups or exclusions) — flat copy-mode manifests
+    # have nothing to review here.
+    if manifest is not None and (manifest.groups
+                                 or any(s.excluded for s in manifest.shots)):
+        report["prepare_shots"] = _prepare_shots_section(output_dir, manifest)
 
     cam_path = output_dir / "camera" / "camera_track.json"
     anchors_path = output_dir / "camera" / "anchors.json"

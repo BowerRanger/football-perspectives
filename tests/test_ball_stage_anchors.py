@@ -1111,7 +1111,7 @@ def test_player_touch_prefers_refined_pose_over_hmr_world(tmp_path: Path):
     )
     from src.schemas.smpl_world import SmplWorldTrack
     from src.schemas.refined_pose import RefinedPose
-    from src.schemas.sync_map import Alignment, SyncMap
+    from src.schemas.sync_map import Alignment, GroupSync, SyncMap
 
     r_foot_idx = SMPL_JOINT_NAMES.index("r_foot")
     rest_r_foot = SMPL_REST_JOINTS_YUP[r_foot_idx]
@@ -1155,12 +1155,13 @@ def test_player_touch_prefers_refined_pose_over_hmr_world(tmp_path: Path):
 
     # Sync map: play has offset 3, so the anchor's local frame 15
     # corresponds to reference frame 12 in the refined track.
-    SyncMap(
+    SyncMap(groups=[GroupSync(
+        group_id="",
         reference_shot="play",
         alignments=[
             Alignment(shot_id="play", frame_offset=3, method="manual", confidence=1.0),
         ],
-    ).save(out / "shots" / "sync_map.json")
+    )]).save(out / "shots" / "sync_map.json")
 
     # C1: click the ball at the REFINED bone's projection. The ball lands on
     # that ray at the bone's depth; if the stage wrongly used hmr_world the

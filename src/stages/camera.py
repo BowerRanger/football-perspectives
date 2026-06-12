@@ -117,7 +117,7 @@ class CameraStage(BaseStage):
         manifest = ShotsManifest.load(manifest_path)
         return all(
             (self.output_dir / "camera" / f"{shot.id}_camera_track.json").exists()
-            for shot in manifest.shots
+            for shot in manifest.active_shots()
         )
 
     def run(self) -> None:
@@ -132,7 +132,7 @@ class CameraStage(BaseStage):
         manifest = ShotsManifest.load(manifest_path)
         shot_filter = getattr(self, "shot_filter", None)
         any_processed = False
-        for shot in manifest.shots:
+        for shot in manifest.active_shots():
             if shot_filter is not None and shot.id != shot_filter:
                 continue
             anchors_path = (

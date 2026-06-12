@@ -23,7 +23,7 @@ import pytest
 
 from src.schemas.refined_pose import RefinedPose
 from src.schemas.smpl_world import SmplWorldTrack
-from src.schemas.sync_map import Alignment, SyncMap
+from src.schemas.sync_map import Alignment, GroupSync, SyncMap
 from src.stages.refined_poses import (
     RefinedPosesStage,
     _clean_player_translation,
@@ -212,13 +212,14 @@ def test_clean_translation_carries_rotation_and_thetas() -> None:
 
 
 def _write_sync_map(output_dir: Path, *, ref: str, offsets: dict[str, int]) -> None:
-    sm = SyncMap(
+    sm = SyncMap(groups=[GroupSync(
+        group_id="",
         reference_shot=ref,
         alignments=[
             Alignment(shot_id=s, frame_offset=o, method="manual", confidence=1.0)
             for s, o in offsets.items()
         ],
-    )
+    )])
     (output_dir / "shots").mkdir(parents=True, exist_ok=True)
     sm.save(output_dir / "shots" / "sync_map.json")
 

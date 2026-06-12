@@ -25,7 +25,7 @@ import pytest
 
 from src.schemas.refined_pose import RefinedPose
 from src.schemas.smpl_world import SmplWorldTrack
-from src.schemas.sync_map import Alignment, SyncMap
+from src.schemas.sync_map import Alignment, GroupSync, SyncMap
 
 # Load ``scripts/blender_export_fbx.py`` as a plain module — it lives
 # outside the ``src`` package and the Blender main() is not imported,
@@ -101,14 +101,15 @@ def _write_hmr(
 
 def _write_sync(out_dir: Path, *, ref: str, offsets: dict[str, int]) -> None:
     (out_dir / "shots").mkdir(parents=True, exist_ok=True)
-    SyncMap(
+    SyncMap(groups=[GroupSync(
+        group_id="",
         reference_shot=ref,
         alignments=[
             Alignment(shot_id=sid, frame_offset=off, method="manual",
                       confidence=1.0)
             for sid, off in offsets.items()
         ],
-    ).save(out_dir / "shots" / "sync_map.json")
+    )]).save(out_dir / "shots" / "sync_map.json")
 
 
 @pytest.mark.unit

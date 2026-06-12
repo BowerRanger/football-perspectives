@@ -15,6 +15,97 @@ pitch:
 prepare_shots:
   expected_format: mp4
   output_fps: null
+  # auto  : split single inputs >= split.min_input_duration_s, else copy
+  # copy  : always treat inputs as pre-trimmed clips (legacy behaviour)
+  # split : always run highlights-reel ingestion on a single video input
+  mode: auto
+  split:
+    min_input_duration_s: 90
+    # adaptive tolerates broadcast pans/zooms better; content is the
+    # simple frame-diff threshold detector (better on synthetic/clean
+    # footage).
+    detector: adaptive
+    threshold: 27.0
+    adaptive_threshold: 3.0
+    adaptive_min_content_val: 15.0
+    min_scene_len_frames: 13
+    # Sub-second fragments are useless for reconstruction; very short
+    # neighbours are merged first (false cuts from whip pans), then
+    # anything still under min_shot_duration_s is dropped. Kept at 0.6 s
+    # so spike-rescued real cuts (rapid celebration cutting) don't
+    # re-fuse with their neighbours.
+    min_shot_duration_s: 1.0
+    merge_max_gap_s: 0.08
+    merge_short_shots_max_duration_s: 0.6
+    # Frame-diff outlier rescue: unions statistically violent cuts the
+    # adaptive detector misses inside continuous fast action (see
+    # src/utils/shot_split.py docstring — 28/36 -> 36/36 confirmed cuts
+    # on the Liverpool test reel).
+    spike_rescue:
+      enabled: true
+      z_min: 4.0
+      abs_min: 18.0
+      window_frames: 25
+    # Cross-dissolve splitting (fades between clips, montage intros):
+    # sustained frame-diff with near-zero optical flow. Pans carry real
+    # flow and are rejected (Liverpool reel: dissolves at flow 1.0-1.2,
+    # pans 1.4-8.6).
+    dissolve_split:
+      enabled: true
+      # Block-median frame change: a fade alters every block equally
+      # (>= ~10); static-camera action only alters player blocks (<= ~7).
+      uniformity_min: 10.0
+      flow_max: 1.25
+      min_run_frames: 5
+      # Fade frames (plus this margin either side) belong to NO shot —
+      # extracted clips never start or end with blend artifacts.
+      fade_trim_margin_frames: 2
+  classify:
+    sample_points: [0.15, 0.3, 0.5, 0.7, 0.85]
+    # A shot is a crowd/bench "reaction" when the green-pitch fraction
+    # stays below these (median / peak over the sampled frames).
+    reaction_max_median_pitch_ratio: 0.12
+    reaction_max_peak_pitch_ratio: 0.20
+    # Scale bands on median pitch ratio (camera-distance proxy).
+    wide_min_pitch_ratio: 0.40
+    tight_max_pitch_ratio: 0.22
+    # Fade-to-black transition detection. Real fades/wipes are short —
+    # longer spans that merely sample one dark frame stay gameplay.
+    fade_black_frame_threshold: 0.18
+    fade_min_brightness_range: 0.25
+    transition_max_duration_s: 2.0
+    # Shots whose zoom-invariant motion rate is this many times slower
+    # than the live-shot reference are replays (and get retimed to real
+    # time at extraction).
+    replay_min_speed_factor: 1.25
+    # Player close-up discard (celebration close-ups): a shot whose
+    # tallest person's median height fraction exceeds the threshold is
+    # excluded as 'closeup'. Bournemouth GT: the operator KEEPS medium
+    # replay shots up to ~0.74; celebration close-ups sit higher. Shots
+    # with pitch but ZERO detected persons drop as 'ambient'. Stage
+    # default is off (tests/light envs); this config turns it on.
+    closeup_max_person_height: 0.78
+    person_check:
+      enabled: true
+      model: yolov8n.pt
+      confidence: 0.35
+  group:
+    # One group per attack passage: a new group starts at each long
+    # wide live shot (small players = true wide framing). Derived from
+    # the Bournemouth GT: group-initial shots are >= 6 s with person
+    # height <= 0.19; replays are shorter/closer. Hard-cut
+    # continuations (gap ~0) never start a group.
+    live_wide_max_person_height: 0.25
+    live_wide_min_duration_s: 5.7
+    continuation_max_gap_s: 0.1
+  align:
+    enabled: true
+    curve_width_px: 192
+    smooth_sigma_frames: 2.0
+    min_overlap_s: 1.0
+    # NCC peaks below this are recorded as low_confidence with an
+    # align-ends fallback offset instead.
+    min_confidence: 0.5
 
 tracking:
   player_model: yolov8x.pt

@@ -1416,7 +1416,7 @@ class RefinedPosesStage(BaseStage):
         logger.warning(
             "[refined_poses] sync_map.json missing; treating offsets as 0"
         )
-        return SyncMap(reference_shot="", alignments=[])
+        return SyncMap()
 
     def _gather_contributions(
         self, hmr_dir: Path,
@@ -1464,7 +1464,10 @@ def _assemble_player(
     tracks onto the shared reference timeline."""
     cleaned: list[tuple[str, SmplWorldTrack, int]] = []
     for shot_id, track in contribs:
-        offset = sync_map.offset_for(shot_id) if shot_id else 0
+        # Group-agnostic lookup: a shot has at most one alignment across
+        # the per-group sync map, and fusion only ever pairs shots from
+        # the same highlight group.
+        offset = sync_map.offset_for_shot(shot_id) if shot_id else 0
         cleaned.append((shot_id, track, offset))
 
     # Single-shot fast path: pass cleaned data through with sync offset.

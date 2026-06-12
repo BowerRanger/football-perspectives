@@ -77,18 +77,19 @@ def test_export_consumes_refined_poses_when_present(tmp_path: Path) -> None:
     directory is non-empty, projecting frames back to the shot's local timeline.
     """
     from src.schemas.refined_pose import RefinedPose
-    from src.schemas.sync_map import Alignment, SyncMap
+    from src.schemas.sync_map import Alignment, GroupSync, SyncMap
     from src.stages.export import _per_shot_smpl_tracks
 
     output_dir = tmp_path
     (output_dir / "shots").mkdir()
-    SyncMap(
+    SyncMap(groups=[GroupSync(
+        group_id="",
         reference_shot="A",
         alignments=[
             Alignment(shot_id="A", frame_offset=0),
             Alignment(shot_id="B", frame_offset=5),
         ],
-    ).save(output_dir / "shots" / "sync_map.json")
+    )]).save(output_dir / "shots" / "sync_map.json")
 
     refined = RefinedPose(
         player_id="P001",

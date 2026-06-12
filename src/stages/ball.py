@@ -783,7 +783,7 @@ class BallStage(BaseStage):
         manifest = ShotsManifest.load(manifest_path)
         return all(
             (self.output_dir / "ball" / f"{shot.id}_ball_track.json").exists()
-            for shot in manifest.shots
+            for shot in manifest.active_shots()
         )
 
     def run(self) -> None:
@@ -805,7 +805,7 @@ class BallStage(BaseStage):
 
         manifest = ShotsManifest.load(manifest_path)
         shot_filter = getattr(self, "shot_filter", None)
-        for shot in manifest.shots:
+        for shot in manifest.active_shots():
             if shot_filter is not None and shot.id != shot_filter:
                 continue
             cam_path = self.output_dir / "camera" / f"{shot.id}_camera_track.json"

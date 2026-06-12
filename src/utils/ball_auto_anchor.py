@@ -49,11 +49,19 @@ class AutoAnchorCfg:
     contact_max_gap_m: float = 0.6
     # Outbound pixel speed (px/frame) above which a touch is a shot.
     shot_speed_px: float = 12.0
-    # Validation gates.
+    # Validation gates. Ground-level candidate pairs use the tighter
+    # rolling cap: a lob the IMM missed projects to ground positions
+    # whose implied roll speed is impossible, and that is often the only
+    # signal that the sample is airborne.
     max_speed_m_s: float = 45.0
+    max_ground_speed_m_s: float = 35.0
     pitch_margin_m: float = 3.0
     # Auto anchors this close to a manual anchor defer to the operator.
     suppress_radius_frames: int = 3
+    # No grounded sampling for this long after a touch/bounce/impact:
+    # the ball is likely airborne and the IMM posterior lags the launch,
+    # so early post-event samples are the classic bogus ground anchor.
+    post_event_suppress_frames: int = 8
     ball_radius_m: float = 0.11
 
 
@@ -187,6 +195,11 @@ def _grounded_candidates(
             continue
         if any(abs(f - tf) <= cfg.suppress_radius_frames for tf in taken_frames):
             continue
+        if any(
+            0 < f - tf <= cfg.post_event_suppress_frames
+            for tf in taken_frames
+        ):
+            continue
         if last_emitted is not None and f - last_emitted < cfg.grounded_interval:
             continue
         out.append(_Candidate(
@@ -271,14 +284,23 @@ def _apply_gates(
 
     # Reachability: walk in frame order; drop the lower-scored member of
     # any pair implying an impossible speed.
+    _GROUND_STATES = ("grounded", "bounce")
     kept: list[tuple[_Candidate, np.ndarray]] = []
     for cand, world in resolved:
         if kept:
             prev_cand, prev_world = kept[-1]
             df = cand.anchor.frame - prev_cand.anchor.frame
             if df > 0:
+                both_ground = (
+                    cand.anchor.state in _GROUND_STATES
+                    and prev_cand.anchor.state in _GROUND_STATES
+                )
+                cap = (
+                    cfg.max_ground_speed_m_s if both_ground
+                    else cfg.max_speed_m_s
+                )
                 speed = float(np.linalg.norm(world - prev_world)) * fps / df
-                if speed > cfg.max_speed_m_s:
+                if speed > cap:
                     if cand.score <= prev_cand.score:
                         logger.info(
                             "ball auto-anchor: %s at frame %d rejected — "
@@ -322,11 +344,21 @@ def generate_auto_anchors(
         candidates, per_frame_K, per_frame_R, per_frame_t,
         distortion, player_ctx, fps, pitch_cfg, cfg,
     )
-    # One anchor per frame: highest score wins.
+    # One anchor per frame. Specific beats generic regardless of score —
+    # a touch/impact carries strictly more information than a grounded
+    # sample of the same instant; scores only break ties within a rank.
+    _STATE_RANK = {
+        "goal_impact": 3, "player_touch": 2, "bounce": 2, "grounded": 1,
+    }
     by_frame: dict[int, _Candidate] = {}
     for cand in gated:
         existing = by_frame.get(cand.anchor.frame)
-        if existing is None or cand.score > existing.score:
+        if existing is None:
+            by_frame[cand.anchor.frame] = cand
+            continue
+        new_key = (_STATE_RANK.get(cand.anchor.state, 0), cand.score)
+        old_key = (_STATE_RANK.get(existing.anchor.state, 0), existing.score)
+        if new_key > old_key:
             by_frame[cand.anchor.frame] = cand
     anchors = tuple(
         by_frame[f].anchor for f in sorted(by_frame)

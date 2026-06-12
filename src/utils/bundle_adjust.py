@@ -36,6 +36,7 @@ def fit_parabola_to_image_observations(
     knot_frames: dict[int, np.ndarray] | None = None,
     z_range_frames: dict[int, tuple[float, float]] | None = None,
     z_range_weight: float = 200.0,
+    seed: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Fit a 3D parabola to per-frame image observations.
 
@@ -77,6 +78,8 @@ def fit_parabola_to_image_observations(
         z_range_weight: per-metre weight for the ``z_range_frames`` hinge.
             Defaults to 200 — strong enough to enforce typical bucket
             widths against pixel reprojection noise.
+        seed: optional ``(p0, v0)`` warm start at the first observation
+            frame, overriding the ground-projection seeding heuristic.
 
     Returns:
         ``(p0, v0, mean_residual_px)`` where ``mean_residual_px`` is
@@ -152,6 +155,13 @@ def fit_parabola_to_image_observations(
     v_horiz = (p_end - p_start) / duration
     v0_seed = np.array([v_horiz[0], v_horiz[1], 0.5 * abs(g) * duration])
     p0_seed = p_start
+    if seed is not None:
+        # Caller-supplied warm start (e.g. the analytic two-knot arc).
+        # The default ground-projection heuristic regularly lands in a
+        # depth-flipped local minimum on monocular data; a seed in the
+        # right basin is worth more than any weighting.
+        p0_seed = np.asarray(seed[0], dtype=float)
+        v0_seed = np.asarray(seed[1], dtype=float)
 
     if p0_fixed is None:
         result = least_squares(

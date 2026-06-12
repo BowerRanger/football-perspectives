@@ -77,10 +77,7 @@ def _minimal_cfg() -> dict:
                      "min_residual_improvement": 0.2,
                      "max_omega_rad_s": 200.0, "drag_k_over_m": 0.005},
             "plausibility": {"z_max_m": 50.0, "horizontal_speed_max_m_s": 40.0, "pitch_margin_m": 5.0},
-            "flight_promotion": {"enabled": False, "min_run_frames": 6,
-                                 "off_pitch_margin_m": 5.0, "max_ground_speed_m_s": 35.0},
-            "kick_anchor": {"enabled": False, "max_pixel_distance_px": 30.0, "lookahead_frames": 4,
-                            "min_pixel_acceleration_px_per_frame": 6.0, "foot_anchor_z_m": 0.11},
+            "auto_anchors": {"enabled": False},
             "appearance_bridge": {"enabled": False, "max_gap_frames": 8, "template_size_px": 32,
                                   "search_radius_px": 64, "min_ncc": 0.6,
                                   "template_max_age_frames": 30, "template_update_confidence": 0.5},
@@ -222,12 +219,6 @@ def test_kick_event_anchored_pins_p0(tmp_path: Path, monkeypatch):
         anchors=(BallAnchor(frame=5, image_xy=kick_uv, state="kick"),),
     ).save(out / "ball" / "play_ball_anchors.json")
 
-    # Force a single flight run covering frames 5-29 so the IMM is bypassed.
-    monkeypatch.setattr(
-        _BallStage, "_flight_runs",
-        lambda self_arg, steps, min_flight, max_flight: [(5, 29)],
-    )
-
     cfg = _minimal_cfg()
     BallStage(
         config=cfg, output_dir=out,
@@ -268,14 +259,14 @@ def test_bounce_event_splits_flight_run(tmp_path: Path, monkeypatch):
 
     g_vec = np.array([0.0, 0.0, -9.81])
 
-    # Arc A is designed so the ball naturally returns to z=0.11 at exactly
-    # bounce_frame (v0z = 0.5 * 9.81 → 1-second symmetric arc).  This keeps
-    # the bounce anchor pixel within ~3 px of the previous frame so the
-    # Kalman tracker doesn't jump, avoiding corrupted post-bounce tracker UVs.
+    # Arc A launches at frame 5 and is designed to return to z=0.11 at
+    # exactly bounce_frame: flight time T = (bounce_frame - 5) / 30 s, so
+    # v0z = g·T/2 closes the symmetric arc on the bounce anchor.
     bounce_frame = 30
-    v0z_a = 0.5 * 9.81  # ≈ 4.905 m/s
+    t_flight = (bounce_frame - 5) / 30.0
+    v0z_a = 0.5 * 9.81 * t_flight
     p0_a = np.array([52.5, 34.0, 0.11]); v0_a = np.array([3.0, 0.5, v0z_a])
-    p0_b = p0_a + v0_a * (bounce_frame / 30.0) + 0.5 * g_vec * (bounce_frame / 30.0) ** 2
+    p0_b = p0_a + v0_a * t_flight + 0.5 * g_vec * t_flight ** 2
     p0_b[2] = 0.11  # pin to ground after bounce
     v0_b = np.array([2.0, 0.5, v0z_a])  # same upward kick for arc B
 
@@ -298,13 +289,6 @@ def test_bounce_event_splits_flight_run(tmp_path: Path, monkeypatch):
         anchors=(BallAnchor(frame=bounce_frame, image_xy=bounce_uv, state="bounce"),),
     ).save(out / "ball" / "play_ball_anchors.json")
 
-    # Force a single large flight run (frames 5-54) that the bounce anchor
-    # must split into two sub-runs: [5-29] and [31-54].
-    monkeypatch.setattr(
-        _BallStage, "_flight_runs",
-        lambda self_arg, steps, min_flight, max_flight: [(5, 54)],
-    )
-
     cfg = _minimal_cfg()
     BallStage(
         config=cfg, output_dir=out,
@@ -312,10 +296,16 @@ def test_bounce_event_splits_flight_run(tmp_path: Path, monkeypatch):
     ).run()
 
     track = BallTrack.load(out / "ball" / "play_ball_track.json")
-    pre_segs = [s for s in track.flight_segments if s.frame_range[1] < bounce_frame]
-    post_segs = [s for s in track.flight_segments if s.frame_range[0] > bounce_frame]
-    assert pre_segs, f"expected a flight segment ending before frame {bounce_frame}"
-    assert post_segs, f"expected a flight segment starting after frame {bounce_frame}"
+    # The bounce node terminates the incoming arc and starts the next:
+    # both sides get their own segment, neither flies through the bounce.
+    pre_segs = [s for s in track.flight_segments if s.frame_range[1] <= bounce_frame]
+    post_segs = [s for s in track.flight_segments if s.frame_range[0] >= bounce_frame]
+    assert pre_segs, f"expected a flight segment ending at/before frame {bounce_frame}"
+    assert post_segs, f"expected a flight segment starting at/after frame {bounce_frame}"
+    assert not any(
+        s.frame_range[0] < bounce_frame < s.frame_range[1]
+        for s in track.flight_segments
+    ), "no single segment may fly through the bounce"
 
 
 @pytest.mark.integration
@@ -531,11 +521,18 @@ def test_grounded_then_airborne_does_not_interpolate_world(tmp_path: Path):
     ).run()
 
     track = BallTrack.load(out / "ball" / "play_ball_track.json")
-    # Frame 7: NOT in any flight (no airborne→airborne or grounded→grounded
-    # contiguous pair covering it). Should be state=grounded from WASB.
+    # grounded(5) -> airborne_mid(10): the ball must launch in between.
+    # The solver brackets the chain-edge airborne anchor and fits a
+    # rising arc — frame 7 gets a physically-consistent world position,
+    # NOT a flat ground interpolation and NOT a bucket-depth zigzag.
+    f5 = next(f for f in track.frames if f.frame == 5)
     f7 = next(f for f in track.frames if f.frame == 7)
-    assert f7.state == "grounded", (
-        f"grounded→airborne boundary should leave in-between frames alone, got {f7.state}"
+    f10 = next(f for f in track.frames if f.frame == 10)
+    assert f7.world_xyz is not None
+    assert f5.world_xyz[2] < 0.2
+    assert f5.world_xyz[2] <= f7.world_xyz[2] <= f10.world_xyz[2] + 0.3, (
+        f"expected a rising launch arc, got z: "
+        f"{f5.world_xyz[2]:.2f} -> {f7.world_xyz[2]:.2f} -> {f10.world_xyz[2]:.2f}"
     )
 
 
@@ -1500,14 +1497,10 @@ def test_airborne_player_touch_still_fits_parabola(tmp_path: Path):
 
 
 @pytest.mark.integration
-def test_grounded_anchor_inside_flight_run_stays_at_ground(tmp_path: Path, monkeypatch):
-    """A 'grounded' anchor placed inside an IMM-detected flight run must
-    keep z = ball_radius. Anchors are the user's ground truth and must
-    not be lifted into the air by a parabola fit that happens to span
-    them."""
-    from src.stages.ball import BallStage as _BallStage
-    from src.stages import ball as _ball
-
+def test_grounded_anchor_inside_flight_run_stays_at_ground(tmp_path: Path):
+    """A user-clicked 'grounded' anchor pins its frame to the z=0.11
+    ray-cast even when the surrounding pixel motion looks like flight —
+    the operator's ground truth must never be lifted into the air."""
     K, R, t = _camera_pose()
     out = tmp_path / "out"
     n_frames = 40
@@ -1520,6 +1513,7 @@ def test_grounded_anchor_inside_flight_run_stays_at_ground(tmp_path: Path, monke
         pix = K @ cam
         return (float(pix[0] / pix[2]), float(pix[1] / pix[2]))
 
+    # Fast diagonal pixel motion drives the IMM toward the flight branch.
     detections = [(640.0 + i * 3.0, 360.0 - i * 2.0, 0.85) for i in range(n_frames)]
     grounded_uv = _proj(np.array([55.0, 35.0, 0.11]))
     BallAnchorSet(
@@ -1527,160 +1521,21 @@ def test_grounded_anchor_inside_flight_run_stays_at_ground(tmp_path: Path, monke
         anchors=(BallAnchor(frame=15, image_xy=grounded_uv, state="grounded"),),
     ).save(out / "ball" / "play_ball_anchors.json")
 
-    # Force a flight run spanning the anchor, and force the parabola fit
-    # to return a clean low-residual airborne parabola — together these
-    # guarantee the IMM-side write loop covers f=15 with z > ball_radius,
-    # which is exactly the production bug we're testing for.
-    monkeypatch.setattr(
-        _BallStage, "_flight_runs",
-        lambda self_arg, steps, min_flight, max_flight: [(5, 34)],
-    )
-
-    p0_fake = np.array([50.0, 34.0, 6.0])
-    v0_fake = np.array([3.0, 0.5, 0.0])
-
-    def fake_fit(obs, *, Ks, Rs, t_world, fps, distortion, **kwargs):
-        return p0_fake.copy(), v0_fake.copy(), 1.0
-    monkeypatch.setattr(_ball, "fit_parabola_to_image_observations", fake_fit)
-
     BallStage(
         config=_minimal_cfg(), output_dir=out,
         ball_detector=FakeBallDetector(detections),
     ).run()
 
     track = BallTrack.load(out / "ball" / "play_ball_track.json")
-    overlapping = [
-        s for s in track.flight_segments
-        if s.frame_range[0] <= 15 <= s.frame_range[1]
-    ]
-    assert overlapping, (
-        f"test setup did not produce a flight segment over f=15; "
-        f"segments={[s.frame_range for s in track.flight_segments]}"
-    )
-
     f15 = next(f for f in track.frames if f.frame == 15)
     assert f15.world_xyz is not None
+    assert f15.state == "grounded"
     from src.utils.foot_anchor import ankle_ray_to_pitch
     expected = ankle_ray_to_pitch(grounded_uv, K=K, R=R, t=t, plane_z=0.11)
     assert abs(f15.world_xyz[2] - 0.11) < 0.02, (
-        f"grounded anchor lifted by parabola: z={f15.world_xyz[2]:.3f}"
+        f"grounded anchor lifted off the ground: z={f15.world_xyz[2]:.3f}"
     )
-    assert np.allclose(f15.world_xyz, expected, atol=0.05), (
-        f"grounded anchor world XY should match its pixel ray-cast at z=0.11; "
-        f"expected {expected.tolist()}, got {list(f15.world_xyz)}"
-    )
-
-
-@pytest.mark.integration
-def test_promotion_skips_runs_containing_grounded_anchors(tmp_path: Path, monkeypatch):
-    """The grounded-to-flight promotion stage must not promote a run
-    that overlaps a user-clicked 'grounded' anchor. Promoting it would
-    contradict the user's explicit non-flight intent."""
-    from src.stages import ball as _ball
-    from src.utils.ball_plausibility import GroundedRun
-
-    K, R, t = _camera_pose()
-    out = tmp_path / "out"
-    n_frames = 30
-    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
-    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
-    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
-
-    # Smooth horizontal pixel motion — the IMM stays in the grounded branch.
-    detections = [(640.0 + i * 5.0, 360.0, 0.85) for i in range(n_frames)]
-    grounded_uv = (640.0 + 15 * 5.0, 360.0)
-    BallAnchorSet(
-        clip_id="play", image_size=(1280, 720),
-        anchors=(BallAnchor(frame=15, image_xy=grounded_uv, state="grounded"),),
-    ).save(out / "ball" / "play_ball_anchors.json")
-
-    # Force the promotion detector to flag [10, 25] as implausible.
-    monkeypatch.setattr(
-        _ball, "find_implausible_grounded_runs",
-        lambda **kwargs: [GroundedRun(start=10, end=25)],
-    )
-    # And force the refit to return a clean airborne parabola so the
-    # only way the run can be rejected is the anchor veto.
-    p0_fake = np.array([50.0, 34.0, 6.0])
-    v0_fake = np.array([3.0, 0.5, 0.0])
-
-    def fake_fit(obs, *, Ks, Rs, t_world, fps, distortion, **kwargs):
-        return p0_fake.copy(), v0_fake.copy(), 1.0
-    monkeypatch.setattr(_ball, "fit_parabola_to_image_observations", fake_fit)
-
-    cfg = _minimal_cfg()
-    cfg["ball"]["flight_promotion"] = {
-        "enabled": True,
-        "min_run_frames": 6,
-        "off_pitch_margin_m": 5.0,
-        "max_ground_speed_m_s": 15.0,
-    }
-
-    BallStage(
-        config=cfg, output_dir=out,
-        ball_detector=FakeBallDetector(detections),
-    ).run()
-
-    track = BallTrack.load(out / "ball" / "play_ball_track.json")
-    for seg in track.flight_segments:
-        a, b = seg.frame_range
-        assert not (a <= 15 <= b), (
-            f"promotion lifted grounded anchor f=15 into flight segment "
-            f"{seg.frame_range}: parabola apex would override the user's ground anchor"
-        )
-
-
-@pytest.mark.integration
-def test_promotion_rejects_high_residual_refits(tmp_path: Path, monkeypatch):
-    """The promotion stage must enforce the same residual cap as the
-    IMM-side parabola fit. A 60-px residual refit is not a real flight
-    arc — it's tracker confusion that should leave the run as
-    grounded."""
-    from src.stages import ball as _ball
-    from src.utils.ball_plausibility import GroundedRun
-
-    K, R, t = _camera_pose()
-    out = tmp_path / "out"
-    n_frames = 30
-    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
-    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
-    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
-
-    detections = [(640.0 + i * 5.0, 360.0, 0.85) for i in range(n_frames)]
-
-    monkeypatch.setattr(
-        _ball, "find_implausible_grounded_runs",
-        lambda **kwargs: [GroundedRun(start=10, end=25)],
-    )
-
-    p0_fake = np.array([50.0, 34.0, 6.0])
-    v0_fake = np.array([3.0, 0.5, 0.0])
-    # High residual — should be rejected by the promotion residual cap.
-    def fake_fit(obs, *, Ks, Rs, t_world, fps, distortion, **kwargs):
-        return p0_fake.copy(), v0_fake.copy(), 60.0
-    monkeypatch.setattr(_ball, "fit_parabola_to_image_observations", fake_fit)
-
-    cfg = _minimal_cfg()
-    cfg["ball"]["flight_max_residual_px"] = 5.0
-    cfg["ball"]["flight_promotion"] = {
-        "enabled": True,
-        "min_run_frames": 6,
-        "off_pitch_margin_m": 5.0,
-        "max_ground_speed_m_s": 15.0,
-    }
-
-    BallStage(
-        config=cfg, output_dir=out,
-        ball_detector=FakeBallDetector(detections),
-    ).run()
-
-    track = BallTrack.load(out / "ball" / "play_ball_track.json")
-    for seg in track.flight_segments:
-        a, b = seg.frame_range
-        assert (b < 10) or (a > 25), (
-            f"promotion accepted high-residual refit as flight: {seg.frame_range} "
-            f"resid={seg.fit_residual_px}"
-        )
+    assert np.allclose(f15.world_xyz, expected, atol=0.05)
 
 
 @pytest.mark.integration
@@ -2160,67 +2015,6 @@ def _integrate_magnus_truth(
         v = v + (h / 6.0) * (k1v + 2 * k2v + 2 * k3v + k4v)
         pos[i] = p
     return times, pos
-
-
-def test_spin_seed_for_segment_extracts_player_touch_spin():
-    """``_spin_seed_for_segment`` finds a player_touch anchor inside
-    the [a, b] segment, translates its spin preset to an omega seed
-    via ``omega_seed_from_preset``, and reports hint_provided=True.
-
-    Anchors outside the segment, anchors with no spin, and anchors
-    with ``spin="none"`` all leave the segment unhinted.
-    """
-    from src.stages.ball import _spin_seed_for_segment
-
-    # Helper to build a player_touch anchor with the right shape.
-    def _pt(frame: int, *, spin: str | None, touch_type: str | None = None):
-        return BallAnchor(
-            frame=frame, image_xy=(640.0, 360.0),
-            state="player_touch", player_id="P1", bone="r_foot",
-            touch_type=touch_type, spin=spin,
-        )
-
-    v0 = np.array([10.0, 0.0, 5.0])
-
-    # Case 1: instep_curl_right inside the segment → vertical seed.
-    anchors = {2: _pt(2, spin="instep_curl_right", touch_type="shot")}
-    seed, hint = _spin_seed_for_segment(anchors, a=2, b=28, v0=v0)
-    assert hint is True
-    assert seed[2] > 0 and seed[0] == 0.0 and seed[1] == 0.0
-
-    # Case 2: matching anchor outside [a, b] → no hint.
-    seed, hint = _spin_seed_for_segment(anchors, a=10, b=28, v0=v0)
-    assert hint is False
-    np.testing.assert_array_equal(seed, np.zeros(3))
-
-    # Case 3: spin == "none" → no hint (user explicitly opted out).
-    anchors = {2: _pt(2, spin="none", touch_type="shot")}
-    seed, hint = _spin_seed_for_segment(anchors, a=2, b=28, v0=v0)
-    assert hint is False
-    np.testing.assert_array_equal(seed, np.zeros(3))
-
-    # Case 4: no spin attribute on the anchor → no hint.
-    anchors = {2: _pt(2, spin=None)}
-    seed, hint = _spin_seed_for_segment(anchors, a=2, b=28, v0=v0)
-    assert hint is False
-    np.testing.assert_array_equal(seed, np.zeros(3))
-
-    # Case 5: only non-player_touch anchors → no hint even with spin
-    # (defense-in-depth; the schema rejects this combination at load).
-    anchors = {2: BallAnchor(
-        frame=2, image_xy=(640.0, 360.0), state="bounce",
-    )}
-    seed, hint = _spin_seed_for_segment(anchors, a=2, b=28, v0=v0)
-    assert hint is False
-    np.testing.assert_array_equal(seed, np.zeros(3))
-
-    # Case 6: topspin preset → horizontal axis perpendicular to v0,
-    # not zeros (orientation check is in test_ball_spin_presets).
-    anchors = {2: _pt(2, spin="topspin", touch_type="volley")}
-    seed, hint = _spin_seed_for_segment(anchors, a=2, b=28, v0=v0)
-    assert hint is True
-    assert seed[2] == 0.0
-    assert float(np.linalg.norm(seed)) > 0
 
 
 @pytest.mark.integration

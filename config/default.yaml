@@ -439,29 +439,47 @@ ball:
   # state="missing". 6 ≈ 0.2 s at 30 fps.
   max_gap_frames: 6
   flight_max_residual_px: 5.0
-  max_occlusion_frames: 8
-  # 10cm-accuracy controls (anchor-driven reconstruction).
-  # C2: when a flight span carries at least this many hard 3D knots
-  # (kick/bounce/goal_impact/grounded/contact), gravity + the knots fully
-  # determine the arc, so p0 is left free instead of pinned — this recovers
-  # airborne depth. Below the threshold p0 stays pinned (no drift).
-  free_p0_min_hard_knots: 2
   # C4: an airborne-anchored frame whose emitted world reprojects farther
   # than this from the user's clicked pixel is snapped onto the clicked ray
   # (keeping fitted depth). Makes the user's click authoritative for lateral.
   ray_faithful_tolerance_px: 3.0
-  # C3a: flight spans with fewer than this many hard knots are flagged in the
-  # quality report as monocularly depth-under-determined (add a bracketing
-  # kick/bounce/goal_impact/grounded anchor to resolve them via C2).
-  min_hard_knots_warn: 2
-  # C3b: optional coarse ball-apparent-size depth prior. Off by default — a
-  # ~5px ball at 90m gives metre-scale depth, so this is a smoothing aid for
-  # under-constrained spans, not a 10cm mechanism.
-  size_depth_prior:
-    enabled: false
-    weight: 20.0
-    min_pixel_diameter: 3.0
-    max_pixel_diameter: 40.0
+  # Automatic anchoring (camera auto-anchor analogy): velocity breaks on
+  # the pixel track are classified as player touches / bounces / goal
+  # impacts using the players' FK contact joints and the goal geometry,
+  # validated (contact gap vs the ball ray, on-pitch, reachability) and
+  # merged with manual anchors. Manual anchors always win; auto anchors
+  # within suppress_radius_frames of a manual one are dropped. Auto
+  # anchors persist to {shot}_ball_anchors_auto.json for review.
+  auto_anchors:
+    enabled: true
+    # Event detection (pixel units are px/frame).
+    touch_max_px: 25.0
+    min_direction_change_deg: 25.0
+    min_speed_change_px: 4.0
+    event_window_frames: 3
+    merge_window_frames: 4
+    # Goal impacts: post/crossbar need the ray within this distance of
+    # the line; net hits additionally need the outbound speed to drop
+    # below this fraction of the inbound speed.
+    goal_line_tolerance_m: 0.35
+    goal_net_speed_drop_ratio: 0.55
+    # Anchor generation + validation.
+    min_event_score: 0.25
+    grounded_interval: 25
+    grounded_min_conf: 0.55
+    contact_max_gap_m: 0.6
+    shot_speed_px: 12.0
+    suppress_radius_frames: 3
+  # Piecewise-physical solver: rolling friction cap, residual gates and
+  # the bounce restitution envelope (violations are flagged in the
+  # diagnostics/quality report, never silently corrected).
+  physics:
+    ground_z_tol_m: 0.35
+    rolling_max_residual_px: 8.0
+    rolling_decel_max_m_s2: 6.0
+    max_splits_per_span: 3
+    restitution_min: 0.5
+    restitution_max: 0.85
   wasb:
     checkpoint: third_party/wasb_sbdt/pretrained_weights/wasb_soccer_best.pth.tar
     confidence: 0.3
@@ -494,17 +512,6 @@ ball:
     z_max_m: 50.0
     horizontal_speed_max_m_s: 40.0
     pitch_margin_m: 5.0
-  flight_promotion:
-    enabled: true
-    min_run_frames: 6
-    off_pitch_margin_m: 5.0
-    max_ground_speed_m_s: 35.0
-  kick_anchor:
-    enabled: true
-    max_pixel_distance_px: 30.0
-    lookahead_frames: 4
-    min_pixel_acceleration_px_per_frame: 6.0
-    foot_anchor_z_m: 0.11
   appearance_bridge:
     enabled: true
     max_gap_frames: 8

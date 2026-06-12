@@ -36,6 +36,7 @@ import cv2
 import numpy as np
 
 from src.utils.ball_detector import BallDetector
+from src.utils.ball_heatmap import heatmap_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -258,55 +259,37 @@ class WASBBallDetector(BallDetector):
         stacked = np.concatenate(channels, axis=0)  # (9, H, W)
         return stacked, trans_inv
 
-    def detect(self, frame: np.ndarray) -> tuple[float, float, float] | None:
+    def _forward(self, frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Update the 3-frame ring, run HRNet; returns (heatmap, trans_inv)."""
         if frame.ndim != 3 or frame.shape[2] != 3:
             raise ValueError(f"frame must be (H, W, 3); got {frame.shape}")
-
-        # Maintain a 3-frame ring; front-pad on the first frame so the
-        # first call already runs the network instead of returning None.
         if not self._buffer:
             self._buffer = [frame.copy(), frame.copy(), frame.copy()]
         else:
             self._buffer.append(frame.copy())
             if len(self._buffer) > self._frames_in:
                 self._buffer.pop(0)
-
         h, w = frame.shape[:2]
         stacked, trans_inv = self._preprocess_buffer((h, w))
         inp = self._torch.from_numpy(stacked).unsqueeze(0).to(self._device)
-
         with self._torch.no_grad():
             out = self._model(inp)
-        # HRNet returns ``dict[scale -> tensor]``; WASB uses scale=0 only.
-        logits = out[0]
-        hms = self._torch.sigmoid(logits).cpu().numpy()  # (1, 3, H, W)
-        # Channel index 2 corresponds to the most recent input frame.
-        hm = hms[0, -1]
+        hms = self._torch.sigmoid(out[0]).cpu().numpy()  # (1, 3, H, W)
+        return hms[0, -1], trans_inv
 
-        peak = float(hm.max())
-        if peak < self._confidence:
-            return None
+    def detect(self, frame: np.ndarray) -> tuple[float, float, float] | None:
+        cands = self.detect_candidates(frame, min_score=self._confidence, top_k=1)
+        return cands[0] if cands else None
 
-        _, binary = cv2.threshold(hm, self._confidence, 1, cv2.THRESH_BINARY)
-        n_labels, labels = cv2.connectedComponents(binary.astype(np.uint8))
+    def detect_candidates(
+        self, frame: np.ndarray, min_score: float, top_k: int = 5,
+    ) -> list[tuple[float, float, float]]:
+        hm, trans_inv = self._forward(frame)
+        out: list[tuple[float, float, float]] = []
+        for cx, cy, peak in heatmap_candidates(hm, min_score, top_k):
+            uv = _affine_apply(np.array([cx, cy], dtype=np.float32), trans_inv)
+            out.append((float(uv[0]), float(uv[1]), peak))
+        return out
 
-        best: tuple[float, float, float] | None = None
-        best_blob_score = -1.0
-        for label in range(1, n_labels):
-            ys, xs = np.where(labels == label)
-            ws = hm[ys, xs]
-            blob_score = float(ws.sum())
-            if blob_score <= best_blob_score:
-                continue
-            x = float(np.sum(xs * ws) / np.sum(ws))
-            y = float(np.sum(ys * ws) / np.sum(ws))
-            peak_blob = float(ws.max())
-            best = (x, y, peak_blob)
-            best_blob_score = blob_score
-
-        if best is None:
-            return None
-
-        cx, cy, conf = best
-        uv = _affine_apply(np.array([cx, cy], dtype=np.float32), trans_inv)
-        return float(uv[0]), float(uv[1]), conf
+    def reset(self) -> None:
+        self._buffer = []

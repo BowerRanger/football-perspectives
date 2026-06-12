@@ -1993,9 +1993,11 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
 
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)
-            # Mirror the production camera + shots + (optionally) hmr_world
-            # data into the temp output dir; BallStage writes only to ball/.
-            for sub in ("camera", "shots", "hmr_world"):
+            # Mirror the production camera + shots + pose data into the
+            # temp output dir; BallStage writes only to ball/. The
+            # refined_poses copy keeps preview contact resolution on the
+            # cleaned tracks (PlayerContext prefers them over hmr_world).
+            for sub in ("camera", "shots", "hmr_world", "refined_poses"):
                 src = output_dir / sub
                 if src.exists():
                     shutil.copytree(src, tdp / sub, dirs_exist_ok=True)

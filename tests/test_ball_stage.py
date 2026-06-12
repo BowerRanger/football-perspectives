@@ -358,11 +358,9 @@ def test_aerial_arc_promotes_grounded_run_to_flight(tmp_path: Path):
 
     track = BallTrack.load(out / "ball" / "play_ball_track.json")
 
-    # Layer 2 ran and exercised the find_implausible_grounded_runs path
-    # on this synthetic fast-rolling-but-on-pitch trajectory. The
-    # parabola refit cannot recover a real flight from purely-linear
-    # pixel motion, so the safe behaviour is to leave the frames as
-    # grounded — the original ground projection is noisy but bounded
+    # Purely-linear pixel motion cannot support a real flight fit, so
+    # the safe behaviour is to leave the frames as grounded — the
+    # original ground projection is noisy but bounded
     # and better than `state="missing"`. We assert the safe fall-back:
     # frames remain grounded, no spurious flight segment was created,
     # and the run was not demoted to missing.

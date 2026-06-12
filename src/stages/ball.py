@@ -326,6 +326,48 @@ def _write_observations_sidecar(
     path.write_text(json.dumps(payload))
 
 
+def _build_tracker(cfg: dict, max_gap_frames: int | None = None) -> BallTracker:
+    """IMM tracker from the ball config; optional max-gap override for
+    corridor prediction (predictions must persist through long gaps)."""
+    tracker_cfg = cfg.get("tracker", {})
+    return BallTracker(
+        process_noise_grounded_px=float(tracker_cfg.get("process_noise_grounded_px", 4.0)),
+        process_noise_flight_px=float(tracker_cfg.get("process_noise_flight_px", 12.0)),
+        measurement_noise_px=float(tracker_cfg.get("measurement_noise_px", 2.0)),
+        gating_sigma=float(tracker_cfg.get("gating_sigma", 4.0)),
+        max_gap_frames=(
+            int(cfg.get("max_gap_frames", 6))
+            if max_gap_frames is None else int(max_gap_frames)
+        ),
+        initial_p_flight=float(tracker_cfg.get("initial_p_flight", 0.1)),
+    )
+
+
+def _resmooth_observations(
+    per_frame_uv: dict[int, tuple[float, float] | None],
+    n_frames: int,
+    cfg: dict,
+) -> list[TrackerStep]:
+    """Fresh IMM pass over a merged observation set (no video access).
+
+    Applies the same raw-uv override rule as the streaming detect loop:
+    fits must see raw measurements, the tracker only bridges misses.
+    """
+    tracker = _build_tracker(cfg)
+    steps: list[TrackerStep] = []
+    for f in range(n_frames):
+        uv = per_frame_uv.get(f)
+        step = tracker.update(f, uv)
+        if uv is not None and not step.is_outlier:
+            step = TrackerStep(
+                frame=step.frame, uv=uv, p_flight=step.p_flight,
+                is_outlier=step.is_outlier, is_gap_fill=step.is_gap_fill,
+                pos_cov=step.pos_cov,
+            )
+        steps.append(step)
+    return steps
+
+
 def _auto_event_cfg(auto_cfg: dict) -> AutoEventCfg:
     base = AutoEventCfg()
     return AutoEventCfg(
@@ -513,15 +555,7 @@ class BallStage(BaseStage):
         anchor_by_frame: dict[int, BallAnchor],
     ) -> tuple[list[TrackerStep], dict[int, float], dict[int, str]]:
         """Per-frame detection + appearance bridging + IMM smoothing."""
-        tracker_cfg = cfg.get("tracker", {})
-        tracker = BallTracker(
-            process_noise_grounded_px=float(tracker_cfg.get("process_noise_grounded_px", 4.0)),
-            process_noise_flight_px=float(tracker_cfg.get("process_noise_flight_px", 12.0)),
-            measurement_noise_px=float(tracker_cfg.get("measurement_noise_px", 2.0)),
-            gating_sigma=float(tracker_cfg.get("gating_sigma", 4.0)),
-            max_gap_frames=int(cfg.get("max_gap_frames", 6)),
-            initial_p_flight=float(tracker_cfg.get("initial_p_flight", 0.1)),
-        )
+        tracker = _build_tracker(cfg)
         bridge_cfg = AppearanceBridgeCfg(
             enabled=bool(cfg.get("appearance_bridge", {}).get("enabled", True)),
             max_gap_frames=int(cfg.get("appearance_bridge", {}).get("max_gap_frames", 8)),

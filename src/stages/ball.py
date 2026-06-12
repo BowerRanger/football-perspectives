@@ -31,6 +31,7 @@ Run flow per shot:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 from pathlib import Path
@@ -74,6 +75,14 @@ from src.utils.camera_projection import (
     project_point_onto_pixel_ray,
     project_world_to_image,
 )
+from src.schemas.ball_fixes import BallFix, BallFixSet
+from src.schemas.sync_map import SyncMap
+from src.utils.ball_cross_replay import (
+    CrossReplayCfg,
+    PairFix,
+    refine_pair_offset,
+    triangulate_pair,
+)
 from src.utils.ball_second_pass import (
     SecondPassCfg,
     SecondPassDetection,
@@ -88,6 +97,39 @@ from src.utils.foot_anchor import ankle_ray_to_pitch
 from src.utils.goal_geometry import GoalGeometry, resolve_goal_impact_world
 
 logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass(frozen=True)
+class _DetectArtifacts:
+    """Everything produced by the detect pass for one shot.
+
+    Carries the raw detection output, camera matrices, manual anchors, and
+    the paths needed by the solve pass — so detect and solve can run in
+    two separate loops.
+    """
+
+    shot_id: str
+    ball_out_path: Path
+    camera_clip_id: str
+    camera_fps: float
+    camera_image_size: tuple[int, int]
+    distortion: tuple[float, float]
+    n_clip: int
+    n_frames: int
+
+    # Detection output
+    steps: list  # list[TrackerStep]
+    raw_confidences: dict[int, float]
+    sources: dict[int, str]
+    detection_coverage: dict[str, float]
+
+    # Camera matrices (per frame)
+    per_frame_K: dict[int, object]
+    per_frame_R: dict[int, object]
+    per_frame_t: dict[int, object]
+
+    # Manual anchors
+    manual_by_frame: dict[int, object]  # dict[int, BallAnchor]
 
 # Kept as module-level names: the ray-faithfulness tests (and the C1/C4
 # behaviours they pin) exercise these directly.
@@ -392,6 +434,27 @@ def _second_pass_cfg(cfg: dict) -> SecondPassCfg:
     )
 
 
+def _cross_replay_cfg(cfg: dict) -> CrossReplayCfg:
+    """Map ball.cross_replay.* to a :class:.
+
+    Pattern: same as _second_pass_cfg in this module.
+    """
+    cr = cfg.get("cross_replay", {})
+    base = CrossReplayCfg()
+    return CrossReplayCfg(
+        enabled=bool(cr.get("enabled", base.enabled)),
+        min_conf=float(cr.get("min_conf", base.min_conf)),
+        max_ray_miss_m=float(cr.get("max_ray_miss_m", base.max_ray_miss_m)),
+        min_parallax_deg=float(cr.get("min_parallax_deg", base.min_parallax_deg)),
+        offset_search_radius_frames=float(cr.get(
+            "offset_search_radius_frames", base.offset_search_radius_frames)),
+        offset_search_step=float(cr.get("offset_search_step", base.offset_search_step)),
+        min_pairs_for_refine=int(cr.get(
+            "min_pairs_for_refine", base.min_pairs_for_refine)),
+        fix_weight_px_per_m=float(cr.get("fix_weight_px_per_m", base.fix_weight_px_per_m)),
+    )
+
+
 def _auto_event_cfg(auto_cfg: dict) -> AutoEventCfg:
     base = AutoEventCfg()
     return AutoEventCfg(
@@ -534,12 +597,18 @@ class BallStage(BaseStage):
                     f"ball stage requires manifest at {manifest_path}; run prepare_shots first"
                 )
             clip_path = self._guess_legacy_clip()
-            self._run_shot("", clip_path, cam_path, ball_out, cfg, detector)
+            arts = self._detect_shot("", clip_path, cam_path, ball_out, cfg, detector)
+            if arts is not None:
+                self._solve_shot(arts, cfg, fixes=None)
             return
 
         manifest = ShotsManifest.load(manifest_path)
         shot_filter = getattr(self, "shot_filter", None)
-        for shot in manifest.active_shots():
+
+        # --- Pass 1: detect all shots ------------------------------------
+        artifacts_by_shot: dict[str, _DetectArtifacts] = {}
+        active_shots = manifest.active_shots()
+        for shot in active_shots:
             if shot_filter is not None and shot.id != shot_filter:
                 continue
             cam_path = self.output_dir / "camera" / f"{shot.id}_camera_track.json"
@@ -557,7 +626,39 @@ class BallStage(BaseStage):
                     shot.id, clip_path,
                 )
                 continue
-            self._run_shot(shot.id, clip_path, cam_path, ball_out, cfg, detector)
+            arts = self._detect_shot(shot.id, clip_path, cam_path, ball_out, cfg, detector)
+            if arts is not None:
+                artifacts_by_shot[shot.id] = arts
+
+        # --- Pass 2: triangulate per sync-group --------------------------
+        fixes_by_shot, cr_summaries = self._triangulate_groups(
+            artifacts_by_shot, cfg, manifest=manifest,
+        )
+
+        # --- Pass 3: solve all shots with fixes --------------------------
+        for shot_id, arts in artifacts_by_shot.items():
+            self._solve_shot(arts, cfg, fixes=fixes_by_shot.get(shot_id))
+
+    def _run_shot(
+        self,
+        shot_id: str,
+        clip_path: Path,
+        camera_path: Path,
+        ball_out_path: Path,
+        cfg: dict,
+        detector: BallDetector,
+    ) -> None:
+        """Compatibility shim: detect then solve for one shot.
+
+        Retained for callers (e.g. real-clip acceptance tests) that invoke
+        the method directly.  The three-pass run() path uses
+        _detect_shot / _triangulate_groups / _solve_shot instead.
+        """
+        arts = self._detect_shot(
+            shot_id, clip_path, camera_path, ball_out_path, cfg, detector,
+        )
+        if arts is not None:
+            self._solve_shot(arts, cfg, fixes=None)
 
     def _guess_legacy_clip(self) -> Path:
         """Find a clip file under shots/ for the legacy no-manifest path."""
@@ -780,7 +881,7 @@ class BallStage(BaseStage):
         detector.reset()
         return best
 
-    def _run_shot(
+    def _detect_shot(
         self,
         shot_id: str,
         clip_path: Path,
@@ -788,7 +889,13 @@ class BallStage(BaseStage):
         ball_out_path: Path,
         cfg: dict,
         detector: BallDetector,
-    ) -> None:
+    ) -> "_DetectArtifacts | None":
+        """Detect pass for one shot: camera load → manual anchors → detect
+        loop → second pass → coverage → observations sidecar.
+
+        Returns a :class:`_DetectArtifacts` with everything the solve pass
+        needs, or ``None`` if the clip contained no frames.
+        """
         camera = CameraTrack.load(camera_path)
         per_frame_K = {f.frame: np.array(f.K) for f in camera.frames}
         per_frame_R = {f.frame: np.array(f.R) for f in camera.frames}
@@ -799,14 +906,6 @@ class BallStage(BaseStage):
         }
         distortion = camera.distortion
         n_frames = max(per_frame_K) + 1 if per_frame_K else 0
-
-        ball_radius = float(cfg.get("ball_radius_m", 0.11))
-        pitch_cfg = self.config.get("pitch", {})
-        goal_geometry = GoalGeometry.from_pitch_config(pitch_cfg)
-        auto_cfg_dict = cfg.get("auto_anchors", {})
-        event_cfg = _auto_event_cfg(auto_cfg_dict)
-        anchor_cfg = _auto_anchor_cfg(auto_cfg_dict, ball_radius)
-        solver_cfg = _solver_cfg(cfg, ball_radius)
 
         manual_by_frame = _load_ball_anchors(self.output_dir, shot_id)
         if manual_by_frame:
@@ -821,7 +920,7 @@ class BallStage(BaseStage):
         )
         if not steps:
             logger.warning("ball stage: clip %s contained no frames", clip_path)
-            return
+            return None
         n_frames = max(n_frames, steps[-1].frame + 1)
 
         # --- 1b. Second pass over evidence gaps -------------------------
@@ -839,6 +938,7 @@ class BallStage(BaseStage):
         }
         n_second_pass = 0
         n_zoom = 0
+        ball_radius = float(cfg.get("ball_radius_m", 0.11))
         if sp_cfg.enabled:
             gap_runs = find_gap_runs(sources, outliers, n_clip)
             if gap_runs:
@@ -888,6 +988,260 @@ class BallStage(BaseStage):
         except Exception as exc:  # noqa: BLE001 — sidecar is enrichment
             logger.warning("ball: failed to write observations sidecar: %s", exc)
 
+        return _DetectArtifacts(
+            shot_id=shot_id,
+            ball_out_path=ball_out_path,
+            camera_clip_id=camera.clip_id,
+            camera_fps=camera.fps,
+            camera_image_size=camera.image_size,
+            distortion=distortion,
+            n_clip=n_clip,
+            n_frames=n_frames,
+            steps=steps,
+            raw_confidences=raw_confidences,
+            sources=sources,
+            detection_coverage=detection_coverage,
+            per_frame_K=per_frame_K,
+            per_frame_R=per_frame_R,
+            per_frame_t=per_frame_t,
+            manual_by_frame=manual_by_frame,
+        )
+
+    def _triangulate_groups(
+        self,
+        artifacts_by_shot: dict[str, "_DetectArtifacts"],
+        cfg: dict,
+        manifest: "ShotsManifest | None" = None,
+    ) -> tuple[dict[str, dict[int, tuple[np.ndarray, float]]], dict[str, dict]]:
+        """Cross-replay triangulation pass.
+
+        For each highlight group with >= 2 member shots present in
+        ``artifacts_by_shot``: refine the saved sync offset by ray-miss
+        minimisation, triangulate detection pairs into 3D fixes, and
+        write per-shot :class:`BallFixSet` sidecars.
+
+        Returns ``(fixes_by_shot, summaries_by_shot)`` where:
+        - ``fixes_by_shot[shot_id]`` is ``{frame: (xyz_array, weight)}``
+        - ``summaries_by_shot[shot_id]`` is the cross_replay summary dict
+          (surfaced in the diag sidecar).
+        """
+        sync_map_path = self.output_dir / "shots" / "sync_map.json"
+        if not sync_map_path.exists():
+            return {}, {}
+
+        cr_cfg = _cross_replay_cfg(cfg)
+        if not cr_cfg.enabled:
+            return {}, {}
+
+        try:
+            sync_map = SyncMap.load(sync_map_path)
+        except Exception as exc:
+            logger.warning("ball: failed to load sync_map.json: %s — skipping triangulation", exc)
+            return {}, {}
+
+        # Build a shot_id -> group_id mapping from the manifest groups
+        # (needed to look up which sync-group each shot belongs to).
+        shot_to_group: dict[str, str] = {}
+        if manifest is not None:
+            for shot in manifest.shots:
+                if shot.group_id:
+                    shot_to_group[shot.id] = shot.group_id
+
+        fixes_by_shot: dict[str, dict[int, tuple[np.ndarray, float]]] = {}
+        summaries_by_shot: dict[str, dict] = {}
+
+        for group_sync in sync_map.groups:
+            # Gather the members that are both in this group AND detected.
+            members_present = [
+                a for a in group_sync.alignments
+                if a.shot_id in artifacts_by_shot
+            ]
+            if len(members_present) < 2:
+                continue
+
+            # Side A = member with offset closest to 0 (the reference).
+            members_present.sort(key=lambda a: abs(a.frame_offset))
+            align_a = members_present[0]
+            sides_b = members_present[1:]
+
+            arts_a = artifacts_by_shot[align_a.shot_id]
+
+            # Build obs and cams for side A (accepted evidence only).
+            obs_a = {
+                s.frame: (s.uv, arts_a.raw_confidences.get(s.frame, 0.0))
+                for s in arts_a.steps
+                if (
+                    s.uv is not None
+                    and s.frame in arts_a.sources
+                    and not s.is_outlier
+                )
+            }
+            cams_a = {
+                f: (arts_a.per_frame_K[f], arts_a.per_frame_R[f], arts_a.per_frame_t[f])
+                for f in arts_a.per_frame_K
+            }
+
+            for align_b in sides_b:
+                arts_b = artifacts_by_shot[align_b.shot_id]
+                obs_b = {
+                    s.frame: (s.uv, arts_b.raw_confidences.get(s.frame, 0.0))
+                    for s in arts_b.steps
+                    if (
+                        s.uv is not None
+                        and s.frame in arts_b.sources
+                        and not s.is_outlier
+                    )
+                }
+                cams_b = {
+                    f: (arts_b.per_frame_K[f], arts_b.per_frame_R[f], arts_b.per_frame_t[f])
+                    for f in arts_b.per_frame_K
+                }
+
+                # delta_saved = offset_B - offset_A (per sync_map convention:
+                # f_b - frame_offset_B == f_a - frame_offset_A
+                # => f_b = f_a + (offset_B - offset_A)).
+                delta_saved = float(align_b.frame_offset - align_a.frame_offset)
+
+                # Refine the offset.
+                refined_offset, median_miss, n_pairs = refine_pair_offset(
+                    obs_a=obs_a, cams_a=cams_a,
+                    obs_b=obs_b, cams_b=cams_b,
+                    saved_offset=delta_saved, cfg=cr_cfg,
+                    distortion_a=arts_a.distortion,
+                    distortion_b=arts_b.distortion,
+                )
+
+                # Triangulate.
+                pair_fixes: list[PairFix] = triangulate_pair(
+                    obs_a=obs_a, cams_a=cams_a,
+                    obs_b=obs_b, cams_b=cams_b,
+                    offset_b_minus_a=refined_offset, cfg=cr_cfg,
+                    distortion_a=arts_a.distortion,
+                    distortion_b=arts_b.distortion,
+                )
+
+                if not pair_fixes:
+                    logger.info(
+                        "ball: cross-replay: no inlier fixes for pair %s / %s",
+                        align_a.shot_id, align_b.shot_id,
+                    )
+                    continue
+
+                median_parallax = float(np.median([fx.parallax_deg for fx in pair_fixes]))
+                cross_replay_summary = {
+                    "partner_shots": [align_b.shot_id],
+                    "saved_offset": delta_saved,
+                    "refined_offset": refined_offset,
+                    "offset_disagreement_frames": abs(refined_offset - delta_saved),
+                    "n_pairs": n_pairs,
+                    "n_inlier_fixes": len(pair_fixes),
+                    "median_ray_miss_m": float(median_miss),
+                    "median_parallax_deg": median_parallax,
+                }
+
+                weight = cr_cfg.fix_weight_px_per_m
+
+                # Build per-shot fix dicts.
+                # shotA: keyed by frame_a
+                for fx in pair_fixes:
+                    fixes_by_shot.setdefault(align_a.shot_id, {})[fx.frame_a] = (
+                        np.array(fx.xyz), weight
+                    )
+                # shotB: keyed by frame_b
+                for fx in pair_fixes:
+                    fixes_by_shot.setdefault(align_b.shot_id, {})[fx.frame_b] = (
+                        np.array(fx.xyz), weight
+                    )
+
+                # Record the cross_replay summary for both shots' diag.
+                summaries_by_shot[align_a.shot_id] = cross_replay_summary
+                summaries_by_shot[align_b.shot_id] = {
+                    **cross_replay_summary,
+                    "partner_shots": [align_a.shot_id],
+                }
+
+                # Persist fix sidecars.
+                ball_dir = self.output_dir / "ball"
+                ball_dir.mkdir(parents=True, exist_ok=True)
+
+                a_ball_fixes = tuple(
+                    BallFix(
+                        frame=fx.frame_a,
+                        xyz=fx.xyz,
+                        ray_miss_m=fx.ray_miss_m,
+                        parallax_deg=fx.parallax_deg,
+                        partner_shot=align_b.shot_id,
+                        partner_frame=fx.frame_b,
+                    )
+                    for fx in pair_fixes
+                )
+                BallFixSet(
+                    clip_id=arts_a.camera_clip_id,
+                    group_id=group_sync.group_id,
+                    cross_replay=cross_replay_summary,
+                    fixes=a_ball_fixes,
+                ).save(ball_dir / f"{align_a.shot_id}_ball_fixes.json")
+
+                b_ball_fixes = tuple(
+                    BallFix(
+                        frame=fx.frame_b,
+                        xyz=fx.xyz,
+                        ray_miss_m=fx.ray_miss_m,
+                        parallax_deg=fx.parallax_deg,
+                        partner_shot=align_a.shot_id,
+                        partner_frame=fx.frame_a,
+                    )
+                    for fx in pair_fixes
+                )
+                b_summary = summaries_by_shot[align_b.shot_id]
+                BallFixSet(
+                    clip_id=arts_b.camera_clip_id,
+                    group_id=group_sync.group_id,
+                    cross_replay=b_summary,
+                    fixes=b_ball_fixes,
+                ).save(ball_dir / f"{align_b.shot_id}_ball_fixes.json")
+
+                logger.info(
+                    "ball: cross-replay %s / %s: %d inlier fixes, "
+                    "refined offset %.2f (saved %.2f), median miss %.3f m",
+                    align_a.shot_id, align_b.shot_id,
+                    len(pair_fixes), refined_offset, delta_saved, median_miss,
+                )
+
+        return fixes_by_shot, summaries_by_shot
+
+    def _solve_shot(
+        self,
+        artifacts: "_DetectArtifacts",
+        cfg: dict,
+        fixes: "dict[int, tuple[np.ndarray, float]] | None",
+    ) -> None:
+        """Solve pass for one shot: player context → events → anchors →
+        nodes → solve_piecewise (with optional world fixes) → outputs → diag.
+
+        ``fixes`` is ``{frame: (xyz_array, weight)}`` from the triangulation
+        pass; ``None`` or empty means the pre-1.5 single-shot path.
+        """
+        shot_id = artifacts.shot_id
+        ball_out_path = artifacts.ball_out_path
+        per_frame_K = artifacts.per_frame_K
+        per_frame_R = artifacts.per_frame_R
+        per_frame_t = artifacts.per_frame_t
+        distortion = artifacts.distortion
+        steps = artifacts.steps
+        raw_confidences = artifacts.raw_confidences
+        sources = artifacts.sources
+        manual_by_frame = artifacts.manual_by_frame
+        n_frames = artifacts.n_frames
+
+        ball_radius = float(cfg.get("ball_radius_m", 0.11))
+        pitch_cfg = self.config.get("pitch", {})
+        goal_geometry = GoalGeometry.from_pitch_config(pitch_cfg)
+        auto_cfg_dict = cfg.get("auto_anchors", {})
+        event_cfg = _auto_event_cfg(auto_cfg_dict)
+        anchor_cfg = _auto_anchor_cfg(auto_cfg_dict, ball_radius)
+        solver_cfg = _solver_cfg(cfg, ball_radius)
+
         # --- 2. Player context -----------------------------------------
         player_ctx = PlayerContext.load(
             self.output_dir, shot_id,
@@ -919,13 +1273,13 @@ class BallStage(BaseStage):
                     player_ctx=player_ctx,
                     per_frame_K=per_frame_K, per_frame_R=per_frame_R,
                     per_frame_t=per_frame_t, distortion=distortion,
-                    fps=camera.fps, pitch_cfg=pitch_cfg, cfg=anchor_cfg,
+                    fps=artifacts.camera_fps, pitch_cfg=pitch_cfg, cfg=anchor_cfg,
                     sources=sources,
                 )
                 auto_by_frame = {a.frame: a for a in auto_anchors}
                 BallAnchorSet(
-                    clip_id=camera.clip_id,
-                    image_size=camera.image_size,
+                    clip_id=artifacts.camera_clip_id,
+                    image_size=artifacts.camera_image_size,
                     anchors=auto_anchors,
                 ).save(auto_anchor_path(ball_out_path.parent, shot_id))
             except Exception as exc:  # noqa: BLE001 — auto anchors must never kill the stage
@@ -1067,7 +1421,7 @@ class BallStage(BaseStage):
             confidences=raw_confidences,
             per_frame_K=per_frame_K, per_frame_R=per_frame_R,
             per_frame_t=per_frame_t, distortion=distortion,
-            fps=camera.fps, n_frames=n_frames,
+            fps=artifacts.camera_fps, n_frames=n_frames,
             pitch_length_m=float(pitch_cfg.get("length_m", 105.0)),
             pitch_width_m=float(pitch_cfg.get("width_m", 68.0)),
             split_hints=split_hints,
@@ -1077,6 +1431,7 @@ class BallStage(BaseStage):
                 if anc.image_xy is not None
             },
             cfg=solver_cfg,
+            world_fixes=fixes or None,
         )
         world_by_frame = dict(result.world_by_frame)
         state_by_frame = dict(result.state_by_frame)
@@ -1143,8 +1498,8 @@ class BallStage(BaseStage):
                 ))
 
         track = BallTrack(
-            clip_id=camera.clip_id,
-            fps=camera.fps,
+            clip_id=artifacts.camera_clip_id,
+            fps=artifacts.camera_fps,
             frames=tuple(per_frame_out),
             flight_segments=result.flight_segments,
         )
@@ -1153,9 +1508,9 @@ class BallStage(BaseStage):
         try:
             _emit_ball_keyframes(
                 ball_out_path=ball_out_path,
-                clip_id=camera.clip_id,
-                fps=camera.fps,
-                image_size=camera.image_size,
+                clip_id=artifacts.camera_clip_id,
+                fps=artifacts.camera_fps,
+                image_size=artifacts.camera_image_size,
                 per_frame_out=per_frame_out,
                 anchor_by_frame=anchor_by_frame,
                 per_frame_K=per_frame_K,
@@ -1177,6 +1532,19 @@ class BallStage(BaseStage):
                 "anchor inside it",
                 span["start"], span["end"], span.get("residual_px") or -1.0,
             )
+
+        # cross_replay summary: loaded from the fixes sidecar if present,
+        # or None for single-shot runs.
+        cr_summary: dict | None = None
+        fixes_path = ball_out_path.with_name(
+            ball_out_path.name.replace("ball_track", "ball_fixes")
+        )
+        if fixes_path.exists():
+            try:
+                cr_summary = BallFixSet.load(fixes_path).cross_replay
+            except Exception:
+                pass
+
         diag_path = ball_out_path.with_name(
             ball_out_path.name.replace("ball_track", "ball_diag")
         )
@@ -1203,5 +1571,6 @@ class BallStage(BaseStage):
                 "merged": len(anchor_by_frame),
                 "nodes": len(nodes),
             },
-            "detection_coverage": detection_coverage,
+            "detection_coverage": artifacts.detection_coverage,
+            "cross_replay": cr_summary,
         }, indent=2))

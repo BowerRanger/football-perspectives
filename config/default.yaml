@@ -550,6 +550,31 @@ ball:
     min_ncc: 0.6
     template_max_age_frames: 30
     template_update_confidence: 0.5
+  # Cross-replay triangulation (Phase 1.5): when two shots in a sync group
+  # are both processed, pair their detections through the saved sync offset,
+  # optionally refine it by ray-miss minimisation (operator offsets are NEVER
+  # overwritten — disagreements are flagged in the cross_replay diag), and
+  # triangulate inlier pairs into 3D fixes that soft-constrain the LM flight
+  # fitters. Shots without a synced partner take the pre-1.5 path (diag:
+  # cross_replay: null). Disable with enabled: false to restore pre-1.5 output.
+  cross_replay:
+    enabled: true
+    # Minimum detection confidence to include as a triangulation observation.
+    min_conf: 0.3
+    # Maximum midpoint-to-ray distance (metres) accepted as an inlier fix.
+    max_ray_miss_m: 1.0
+    # Minimum angular separation between the two rays (degrees). Below this
+    # the pair has insufficient parallax and the triangulated depth is unreliable.
+    min_parallax_deg: 8.0
+    # Offset refinement search: scan +/- this many frames around the saved offset.
+    offset_search_radius_frames: 4.0
+    # Sub-frame step size for the refinement grid scan.
+    offset_search_step: 0.25
+    # Minimum inlier pairs required at the saved offset before refinement runs;
+    # if fewer are found, the saved offset is kept unchanged.
+    min_pairs_for_refine: 8
+    # Weight of each 3D fix residual in the LM fitters (px per metre of 3D error).
+    fix_weight_px_per_m: 30.0
 
 refined_poses:
   # Outlier rejection (per frame, per view) using MAD on root_t.

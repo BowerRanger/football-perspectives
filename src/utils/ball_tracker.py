@@ -33,6 +33,9 @@ class TrackerStep:
     p_flight: float
     is_outlier: bool
     is_gap_fill: bool
+    # Blended posterior position covariance (sigma_uu, sigma_vv, sigma_uv),
+    # px². None until the filter has been initialised by a detection.
+    pos_cov: tuple[float, float, float] | None = None
 
 
 class BallTracker:
@@ -92,13 +95,14 @@ class BallTracker:
             if uv is None:
                 return TrackerStep(
                     frame=frame, uv=None, p_flight=float(self._mu[1]),
-                    is_outlier=False, is_gap_fill=True,
+                    is_outlier=False, is_gap_fill=True, pos_cov=None,
                 )
             self._init_state(uv)
             self._consecutive_gap = 0
             return TrackerStep(
                 frame=frame, uv=uv, p_flight=float(self._mu[1]),
                 is_outlier=False, is_gap_fill=False,
+                pos_cov=(self._r ** 2, self._r ** 2, 0.0),
             )
 
         # IMM mixing — combine previous per-mode estimates weighted by the
@@ -171,10 +175,18 @@ class BallTracker:
         else:
             self._consecutive_gap = 0
 
+        blended = self._mu[0] * x_post[0] + self._mu[1] * x_post[1]
+        P_blend = np.zeros((4, 4))
+        for j in range(2):
+            d = x_post[j] - blended
+            P_blend += self._mu[j] * (P_post[j] + np.outer(d, d))
+        pos_cov = (
+            float(P_blend[0, 0]), float(P_blend[1, 1]), float(P_blend[0, 1]),
+        )
+
         if is_gap and self._consecutive_gap > self._max_gap:
             out_uv: tuple[float, float] | None = None
         else:
-            blended = self._mu[0] * x_post[0] + self._mu[1] * x_post[1]
             out_uv = (float(blended[0]), float(blended[1]))
 
         return TrackerStep(
@@ -183,4 +195,5 @@ class BallTracker:
             p_flight=float(self._mu[1]),
             is_outlier=is_outlier,
             is_gap_fill=is_gap,
+            pos_cov=pos_cov,
         )

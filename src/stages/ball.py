@@ -599,6 +599,7 @@ class BallStage(BaseStage):
                         frame=step.frame, uv=uv, p_flight=step.p_flight,
                         is_outlier=step.is_outlier,
                         is_gap_fill=step.is_gap_fill,
+                        pos_cov=step.pos_cov,
                     )
                 steps.append(step)
                 frame_idx += 1

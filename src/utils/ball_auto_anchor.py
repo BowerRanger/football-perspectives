@@ -326,6 +326,7 @@ def generate_auto_anchors(
     fps: float,
     pitch_cfg: Mapping[str, float],
     cfg: AutoAnchorCfg | None = None,
+    sources: Mapping[int, str] | None = None,
 ) -> tuple[BallAnchor, ...]:
     """Events + grounded sampling -> validated auto anchors, frame order."""
     cfg = cfg or AutoAnchorCfg()
@@ -340,6 +341,13 @@ def generate_auto_anchors(
     )
     taken = {c.anchor.frame for c in candidates}
     candidates.extend(_grounded_candidates(steps, confidences, taken, cfg))
+    if sources is not None:
+        # Second-pass detections densify solver evidence but never mint
+        # constraints (ball v2 design, Phase 1).
+        candidates = [
+            c for c in candidates
+            if sources.get(c.anchor.frame) != "second_pass"
+        ]
     gated = _apply_gates(
         candidates, per_frame_K, per_frame_R, per_frame_t,
         distortion, player_ctx, fps, pitch_cfg, cfg,

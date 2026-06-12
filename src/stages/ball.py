@@ -725,6 +725,7 @@ class BallStage(BaseStage):
                     per_frame_K=per_frame_K, per_frame_R=per_frame_R,
                     per_frame_t=per_frame_t, distortion=distortion,
                     fps=camera.fps, pitch_cfg=pitch_cfg, cfg=anchor_cfg,
+                    sources=sources,
                 )
                 auto_by_frame = {a.frame: a for a in auto_anchors}
                 BallAnchorSet(

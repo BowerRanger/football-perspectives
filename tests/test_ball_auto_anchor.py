@@ -7,6 +7,7 @@ BallAnchorSet schema.
 """
 from __future__ import annotations
 
+import pytest
 import numpy as np
 
 from src.schemas.ball_anchor import BallAnchor, BallAnchorSet
@@ -185,6 +186,66 @@ class TestGroundedSampling:
         for a in anchors:
             if a.state == "grounded":
                 assert abs(a.frame - 30) > cfg.suppress_radius_frames
+
+
+    @pytest.mark.unit
+    def test_second_pass_frames_never_become_anchors(self):
+        """Frames whose observation source is 'second_pass' are excluded from
+        anchor candidacy even when their confidence clears every gate."""
+        n = 120
+        K, R, t = broadcast_camera()
+        worlds = rolling_worlds((70.0, 30.0), (-0.15, 0.0), n)
+        pixels = project_track(worlds, K, R, t)
+        steps = steps_from_pixels(pixels, n, p_flight=0.05)
+        conf = {i: 0.9 for i in range(n)}
+        cfg = AutoAnchorCfg(grounded_interval=25)
+        Ks, Rs, ts = per_frame_cams(n)
+
+        # All frames marked second_pass -> no anchors should be minted.
+        sources_sp = {s.frame: "second_pass" for s in steps}
+        anchors = generate_auto_anchors(
+            events=(),
+            steps=steps,
+            confidences=conf,
+            player_ctx=FakePlayerContext(),
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0),
+            fps=FPS,
+            pitch_cfg=PITCH_CFG,
+            cfg=cfg,
+            sources=sources_sp,
+        )
+        assert anchors == ()
+
+        # All frames marked detector -> anchors produced normally.
+        sources_ok = {s.frame: "detector" for s in steps}
+        anchors_ok = generate_auto_anchors(
+            events=(),
+            steps=steps,
+            confidences=conf,
+            player_ctx=FakePlayerContext(),
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0),
+            fps=FPS,
+            pitch_cfg=PITCH_CFG,
+            cfg=cfg,
+            sources=sources_ok,
+        )
+        assert len(anchors_ok) > 0
+
+        # Backward compatibility: no sources kwarg -> same as detector path.
+        anchors_compat = generate_auto_anchors(
+            events=(),
+            steps=steps,
+            confidences=conf,
+            player_ctx=FakePlayerContext(),
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0),
+            fps=FPS,
+            pitch_cfg=PITCH_CFG,
+            cfg=cfg,
+        )
+        assert len(anchors_compat) > 0
 
 
 class TestValidationGates:

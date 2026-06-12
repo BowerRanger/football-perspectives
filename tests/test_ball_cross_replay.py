@@ -91,7 +91,10 @@ def test_triangulate_pair_inliers_and_gates():
         assert fx.parallax_deg >= cfg.min_parallax_deg
     # A decoy detection in B far off the epipolar geometry is rejected.
     obsB_bad = dict(obsB)
-    obsB_bad[10 + 5] = ((pixB[10][0] + 300.0, pixB[10][1]), 0.9)
+    # Shift in BOTH axes so the decoy ray genuinely diverges from the
+    # epipolar geometry (a horizontal-only shift can stay near-coplanar
+    # with the baseline and triangulate with deceptively low ray miss).
+    obsB_bad[10 + 5] = ((pixB[10][0] + 500.0, pixB[10][1] - 250.0), 0.9)
     fixes_bad = triangulate_pair(
         obs_a=obsA, cams_a=camsA, obs_b=obsB_bad, cams_b=camsB,
         offset_b_minus_a=5.0, cfg=cfg,

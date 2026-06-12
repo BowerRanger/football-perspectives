@@ -31,7 +31,7 @@ Cams = dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]]
 class CrossReplayCfg:
     enabled: bool = True
     min_conf: float = 0.3
-    max_ray_miss_m: float = 0.5
+    max_ray_miss_m: float = 1.0
     min_parallax_deg: float = 8.0
     offset_search_radius_frames: float = 4.0
     offset_search_step: float = 0.25

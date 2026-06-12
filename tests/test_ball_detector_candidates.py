@@ -32,10 +32,7 @@ def test_fake_scripted_candidates_filter_and_truncate():
         candidates=[[(10.0, 10.0, 0.9), (20.0, 20.0, 0.4), (30.0, 30.0, 0.7)]],
     )
     out = det.detect_candidates(_FRAME, min_score=0.5, top_k=2)
-    assert out == [(10.0, 10.0, 0.9), (20.0, 20.0, 0.7)] or out == [
-        (10.0, 10.0, 0.9), (30.0, 30.0, 0.7)
-    ]
-    assert len(out) == 2
+    assert out == [(10.0, 10.0, 0.9), (30.0, 30.0, 0.7)]
 
 
 @pytest.mark.unit

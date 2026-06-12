@@ -712,10 +712,12 @@ class BallStage(BaseStage):
                         ))
                         continue
                     K = per_frame_K.get(f)
-                    if K is None:
+                    R = per_frame_R.get(f)
+                    t = per_frame_t.get(f)
+                    if K is None or R is None or t is None:
                         continue
                     size = apparent_ball_px(
-                        K, per_frame_R[f], per_frame_t[f],
+                        K, R, t,
                         (float(mean[0]), float(mean[1])),
                         ball_radius, distortion,
                     )

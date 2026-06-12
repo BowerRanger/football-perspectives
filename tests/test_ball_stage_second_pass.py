@@ -87,6 +87,11 @@ class ScriptedDetector(FakeBallDetector):
     served FIFO across detect_candidates calls (the second pass visits
     frames in a deterministic order: prime frames first, then the gap)."""
 
+    # Pin the prime offset the stage derives via getattr(detector,
+    # "_frames_in", 3) — the FIFO script below counts on exactly 2 prime
+    # frames per run; misalignment should fail loudly here, not silently.
+    _frames_in = 3
+
     def __init__(self, detections, second_pass_cands):
         super().__init__(detections)
         self._sp = deque(second_pass_cands)

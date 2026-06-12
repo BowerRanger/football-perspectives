@@ -63,7 +63,10 @@ forward–backward track smoother to predict where to look.
   rejected as outlier): build a gating ellipse from the smoothed prediction
   covariance (inflated by `corridor_sigma`), call `detect_candidates` on
   that frame, keep candidates inside the ellipse, and re-score:
-  `combined = candidate.score * exp(-0.5 * mahalanobis²)`.
+  `combined = candidate.score * exp(-0.5 * mahalanobis² / corridor_sigma²)`
+  — the hard gate (mahalanobis ≤ corridor_sigma) does the rejection work;
+  the exponent is sigma-normalised so the distance penalty stays mild and
+  `accept_min` is tuned against the candidate's score, not its position.
 - Accept the best candidate if `combined >= accept_min`. Accepted frames are
   appended to observations with `source: "second_pass"` and
   `confidence = combined` (always < pass-1 confidences by construction of

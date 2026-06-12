@@ -280,6 +280,53 @@ def _integrate_magnus_positions(
     return out
 
 
+def _integrate_magnus_backward(
+    p0: np.ndarray,
+    v0: np.ndarray,
+    omega: np.ndarray,
+    g_vec: np.ndarray,
+    drag_k_over_m: float,
+    neg_times: np.ndarray,
+    substeps_per_interval: int = 4,
+) -> np.ndarray:
+    """RK4-integrate backward from (p0, v0) at t=0 to each time in neg_times.
+
+    ``neg_times`` must be strictly negative and sorted in *descending* order
+    (i.e. closest-to-zero first: e.g. [-0.04, -0.08, -0.12]).  The same ODE
+    stage formulas work with a negative step h — the physics is time-reversible
+    for this form of the equation.
+
+    Returns positions of shape ``(len(neg_times), 3)``.
+    """
+    out = np.zeros((len(neg_times), 3))
+
+    def accel(v: np.ndarray) -> np.ndarray:
+        return g_vec + drag_k_over_m * np.cross(omega, v)
+
+    p, v = p0.astype(float).copy(), v0.astype(float).copy()
+    t_cur = 0.0
+    for i, t_target in enumerate(neg_times):
+        total = t_target - t_cur  # negative
+        if total >= 0:
+            out[i] = p
+            continue
+        h = total / substeps_per_interval  # negative step
+        for _ in range(substeps_per_interval):
+            k1v = accel(v)
+            k1p = v
+            k2v = accel(v + 0.5 * h * k1v)
+            k2p = v + 0.5 * h * k1v
+            k3v = accel(v + 0.5 * h * k2v)
+            k3p = v + 0.5 * h * k2v
+            k4v = accel(v + h * k3v)
+            k4p = v + h * k3v
+            p = p + (h / 6.0) * (k1p + 2 * k2p + 2 * k3p + k4p)
+            v = v + (h / 6.0) * (k1v + 2 * k2v + 2 * k3v + k4v)
+        t_cur = t_target
+        out[i] = p
+    return out
+
+
 def fit_magnus_trajectory(
     observations: list[tuple[int, tuple[float, float]]],
     *,
@@ -376,30 +423,65 @@ def fit_magnus_trajectory(
 
     if _active_fixes:
         # Merge obs dts and fix dts into a sorted unique grid.
-        # The grid must always start at 0.0 (= first obs dt) so that
-        # _integrate_magnus_positions initialises p0 at the correct time.
-        # Fix times before 0 are clamped to 0; those after last obs are
-        # appended and the integration naturally extrapolates.
-        _fix_dts_raw = [(fdt, fxyz, fw) for fdt, fxyz, fw in _active_fixes]
-        _fix_dts = [max(0.0, fdt) for fdt, _, _ in _fix_dts_raw]
-        _all_dts_set: list[float] = sorted(
-            set(list(dt)) | set(_fix_dts)
+        # Fixes with negative dt (before the first observation) are placed
+        # in the grid as-is; fixes at or after the first obs are merged
+        # into the forward integration grid normally.
+        #
+        # When negative fix times are present the grid spans
+        # [min_neg_fix_dt, ..., 0.0, ..., max_obs_dt].  A helper
+        # evaluates positions at negative slots by backward RK4 from
+        # (p0, v0) at t=0; the forward integrator covers t ≥ 0.
+        _fix_dts = [(fdt, fxyz, fw) for fdt, fxyz, fw in _active_fixes]
+        _neg_fix_dts = [(fdt, fxyz, fw) for fdt, fxyz, fw in _fix_dts if fdt < 0.0]
+        _pos_fix_dts = [(fdt, fxyz, fw) for fdt, fxyz, fw in _fix_dts if fdt >= 0.0]
+
+        # Forward grid: obs times + non-negative fix times (must include 0.0).
+        _pos_fix_times_only = [fdt for fdt, _, _ in _pos_fix_dts]
+        _all_fwd_set: list[float] = sorted(
+            set(list(dt)) | set(_pos_fix_times_only)
         )
-        _aug_times = np.array(_all_dts_set)
-        # obs_indices[i] → position of dt[i] in the augmented grid.
+        _aug_times = np.array(_all_fwd_set)
+        # obs_indices[i] → position of dt[i] in the forward augmented grid.
         _obs_indices = np.searchsorted(_aug_times, dt)
-        # fix_indices[j] → position of (clamped) fix_dts[j] in the grid.
-        _fix_indices = np.searchsorted(_aug_times, np.array(_fix_dts))
-        # Rebuild _active_fixes with clamped dts (so residual uses the
-        # clamped time, consistent with integration grid).
-        _active_fixes = [
-            (_fix_dts[j], fxyz, fw)
-            for j, (_, fxyz, fw) in enumerate(_fix_dts_raw)
-        ]
+        # fix_indices for non-negative fixes → position in forward grid.
+        if _pos_fix_dts:
+            _pos_fix_indices = np.searchsorted(
+                _aug_times, np.array([fdt for fdt, _, _ in _pos_fix_dts])
+            )
+        else:
+            _pos_fix_indices = np.empty(0, dtype=int)
+
+        # Backward grid: negative fix times sorted descending (closest to 0 first)
+        # so the backward RK4 steps away from t=0 one slot at a time.
+        _neg_fix_sorted = sorted(_neg_fix_dts, key=lambda x: x[0], reverse=True)
+        _neg_times_arr = np.array([fdt for fdt, _, _ in _neg_fix_sorted])
     else:
         _aug_times = dt
         _obs_indices = np.arange(len(dt), dtype=int)
-        _fix_indices = np.empty(0, dtype=int)
+        _pos_fix_indices = np.empty(0, dtype=int)
+        _pos_fix_dts = []
+        _neg_fix_sorted = []
+        _neg_times_arr = np.empty(0)
+
+    def _eval_fixes(fwd_pts: np.ndarray, p0_node: np.ndarray,
+                    v0_node: np.ndarray, omega: np.ndarray) -> list:
+        """Return residual blocks for all active fixes.
+
+        fwd_pts: positions on the forward grid (t ≥ 0), shape (N, 3).
+        p0_node, v0_node: state at t=0 (= first obs frame) used as the
+            seed for backward extrapolation to negative fix times.
+        """
+        blocks: list = []
+        for j, (_, fix_xyz, fix_weight) in enumerate(_pos_fix_dts):
+            pos_f = fwd_pts[_pos_fix_indices[j]]
+            blocks.append(fix_weight * (pos_f - fix_xyz))
+        if _neg_fix_sorted:
+            neg_pts = _integrate_magnus_backward(
+                p0_node, v0_node, omega, g_vec, drag_k_over_m, _neg_times_arr,
+            )
+            for k, (_, fix_xyz, fix_weight) in enumerate(_neg_fix_sorted):
+                blocks.append(fix_weight * (neg_pts[k] - fix_xyz))
+        return blocks
 
     def _residuals(params: np.ndarray) -> np.ndarray:
         p0 = params[:3]
@@ -414,9 +496,7 @@ def fit_magnus_trajectory(
             pix = Ks[i] @ cam
             uv = pix[:2] / pix[2]
             residuals.append(uv - obs_array[i])
-        for j, (_, fix_xyz, fix_weight) in enumerate(_active_fixes):
-            pos_f = pts[_fix_indices[j]]
-            residuals.append(fix_weight * (pos_f - fix_xyz))
+        residuals.extend(_eval_fixes(pts, p0, v0, omega))
         return np.concatenate(residuals)
 
     # Three parametrizations of the spin DOF, from most-to-least free:
@@ -483,9 +563,7 @@ def fit_magnus_trajectory(
                 pix = Ks[i] @ cam
                 uv = pix[:2] / pix[2]
                 residuals.append(uv - obs_array[i])
-            for j, (_, fix_xyz, fix_weight) in enumerate(_active_fixes):
-                pos_f = positions[_fix_indices[j]]
-                residuals.append(fix_weight * (pos_f - fix_xyz))
+            residuals.extend(_eval_fixes(positions, p0_pin, v0, omega))
             return np.concatenate(residuals)
 
         x0 = np.concatenate([v0_seed, omega_seed])
@@ -516,9 +594,7 @@ def fit_magnus_trajectory(
                     pix = Ks[i] @ cam
                     uv = pix[:2] / pix[2]
                     residuals.append(uv - obs_array[i])
-                for j, (_, fix_xyz, fix_weight) in enumerate(_active_fixes):
-                    pos_f = pts[_fix_indices[j]]
-                    residuals.append(fix_weight * (pos_f - fix_xyz))
+                residuals.extend(_eval_fixes(pts, p0, v0, omega))
                 return np.concatenate(residuals)
 
             x0 = np.concatenate([p0_seed, v0_seed, [scalar_seed]])
@@ -544,9 +620,7 @@ def fit_magnus_trajectory(
                     pix = Ks[i] @ cam
                     uv = pix[:2] / pix[2]
                     residuals.append(uv - obs_array[i])
-                for j, (_, fix_xyz, fix_weight) in enumerate(_active_fixes):
-                    pos_f = pts[_fix_indices[j]]
-                    residuals.append(fix_weight * (pos_f - fix_xyz))
+                residuals.extend(_eval_fixes(pts, p0_pin, v0, omega))
                 return np.concatenate(residuals)
 
             x0 = np.concatenate([v0_seed, [scalar_seed]])

@@ -81,3 +81,63 @@ def test_magnus_accepts_fixes_and_respects_weight():
     # from the base fit (error ≤ base + small tolerance).
     base_err = np.linalg.norm(p0_base - p0)
     assert np.linalg.norm(p0w - p0) <= base_err + 0.01
+
+
+@pytest.mark.unit
+def test_magnus_backward_fix_constrains_extrapolation():
+    """A world fix placed BEFORE the first observation must constrain the
+    backward-extrapolated trajectory — not be silently clamped to t=0.
+
+    Setup:
+    - Observations run frames 5..24 (20 frames of a no-spin parabolic arc).
+    - A strong fix (weight 30.0) is placed at frame 2, i.e. dt = -3/FPS
+      relative to the first observation at frame 5.
+    - The ground-truth position at frame 2 is computed from the analytic arc.
+
+    Pass criterion:
+    - The fitted trajectory, when evaluated analytically at frame 2's time
+      (t2 = -3/FPS relative to first obs), must land within 0.15 m of the
+      true position.  This proves the fix was extrapolated backward.
+
+    Before the fix the clamp forces dt=0, so the "fix" residual actually
+    measures the mismatch at t=0 (frame 5's position), leaving frame 2
+    unconstrained — yielding errors of ~0.77 m.
+    """
+    K, R, t = broadcast_camera()
+    p0_true = np.array([40.0, 30.0, 0.11])
+    v0_true = np.array([8.0, 4.0, 9.0])
+
+    # Analytic arc: p(t) = p0_true + v0_true*t + 0.5*G*t^2
+    def arc_pos(frame: int) -> np.ndarray:
+        ti = frame / FPS
+        return p0_true + v0_true * ti + 0.5 * G * ti ** 2
+
+    # Observations start at frame 5 (absolute), run to frame 24.
+    obs_frames = list(range(5, 25))
+    worlds_obs = {f: arc_pos(f) for f in obs_frames}
+    obs, Ks, Rs, ts = _fit_inputs(worlds_obs, K, R, t, noise=0.0)
+
+    # Fix is at absolute frame 2 — two frames before the first observation.
+    # dt relative to first obs (frame 5) = (2 - 5)/FPS = -3/FPS  (<0).
+    fix_frame = 2
+    fix_xyz = arc_pos(fix_frame)
+    world_fixes = [(fix_frame, fix_xyz, 30.0)]
+
+    p0_fit, v0_fit, _omega, _res = fit_magnus_trajectory(
+        obs, Ks=Ks, Rs=Rs, t_world=ts, fps=FPS,
+        world_fixes=world_fixes,
+        omega_seed=np.zeros(3),
+    )
+
+    # Evaluate fitted arc backward to frame 2.
+    # In no-spin / zero-drag the trajectory is a parabola:
+    # p(t) = p0_fit + v0_fit * t + 0.5 * G * t^2
+    # where t is relative to the first obs (frame 5).
+    t_fix_rel = (fix_frame - obs_frames[0]) / FPS  # negative: -3/25 = -0.12 s
+    pos_at_fix = p0_fit + v0_fit * t_fix_rel + 0.5 * G * t_fix_rel ** 2
+
+    err = float(np.linalg.norm(pos_at_fix - fix_xyz))
+    assert err < 0.15, (
+        f"Backward fix not respected: error={err:.3f} m (expected <0.15 m). "
+        f"Likely the fix dt was clamped to 0 instead of being extrapolated."
+    )

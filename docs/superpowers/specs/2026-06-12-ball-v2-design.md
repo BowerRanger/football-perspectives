@@ -1,10 +1,12 @@
 # Ball v2 design: evidence booster, global mode-sequence solve, spin
 
-Status: draft for review.
+Status: Phase 1 shipped; Phases 1.5/2/3 in progress.
 Scope agreed 2026-06-12: Ideas 1, 3, 4 from
 [2026-06-12-ball-v2-ideas.md](2026-06-12-ball-v2-ideas.md), in that order.
-Idea 2 (cross-replay triangulation) is parked until multi-shot support is
-ready; Idea 5 (UE realism layer) and Idea 6 (learned lifting prior) deferred.
+Scope extended 2026-06-12 (post-Phase-1): Idea 2 (cross-replay
+triangulation) un-parked as **Phase 1.5**, sequenced before Phase 2 so its
+3D fixes are available to the global solver. Idea 5 (UE realism layer) and
+Idea 6 (learned lifting prior) remain deferred.
 
 ## Goals
 
@@ -118,6 +120,99 @@ coverage per shot so detector-limited clips are visible at a glance.
 
 ---
 
+## Phase 1.5 — Cross-replay triangulation
+
+### Problem
+
+Monocular depth on flights is ambiguous: cross-checking against the origi02
+replay showed ~2 m typical depth disagreement and an 8 m worst case in the
+Phase-1 solution. Broadcast replays of the same event are a free second
+view: prepare_shots already groups them and saves per-group sync offsets
+(`shots/sync_map.json`, v1 files migrate to one group). The prototype
+(`prototypes/replay_triangulation.py`) validated the physics: origi01/
+origi02 cameras sit 37.5 m apart (11–44° parallax), 11/21 detection pairs
+triangulate with < 1 m ray-miss (best 2–15 cm), and ball ray-miss
+minimisation found the saved sync offset to be ~2 frames off.
+
+### Design
+
+The ball stage restructures from one per-shot loop into three passes:
+
+1. **Detect all shots** — the existing pass-1 + second-pass detection per
+   shot, persisting observation sidecars (unchanged behaviour, now run for
+   every shot before any solve).
+2. **Triangulate per sync group** — for each group with ≥ 2 members that
+   have camera tracks and observation sidecars:
+   - **Local offset refinement**: scan the saved offset ± `offset_search_
+     radius_frames` in `offset_search_step` increments, minimising the
+     median ray-miss of conf-gated detection pairs (reference detections
+     linearly interpolated at fractional frames, gaps ≤ 3 frames). Needs
+     ≥ `min_pairs_for_refine` pairs, else the saved offset is used as-is.
+     The refined offset is **local to triangulation** — `sync_map.json` is
+     never written (operator offsets win); a disagreement > 1 frame is
+     flagged in the diag and quality report as a sync-review cue.
+   - **Pair triangulation**: for every synced frame pair where both views
+     have a detection with conf ≥ `min_conf`: midpoint of the rays' common
+     perpendicular. Gates: parallax ≥ `min_parallax_deg`, ray-miss ≤
+     `max_ray_miss_m`, both ray depths positive.
+   - **Fix assignment**: each surviving point becomes a fix for BOTH
+     shots, assigned to each shot's nearest integer frame, persisted to
+     `ball/<shot>_ball_fixes.json` (xyz, ray_miss_m, parallax_deg, partner
+     shot + frame, refined-offset metadata).
+3. **Solve all shots** — the existing event/anchor/solve flow, now passing
+   the shot's fixes into the piecewise solver.
+
+**Solver consumption (soft constraints).** The LM flight fitters
+(`fit_parabola_to_image_observations`, `fit_magnus_trajectory`) accept
+optional `world_fixes` — per-frame 3D points appended to the residual
+vector as `fix_weight_px_per_m * (pos(t_f) − xyz)`. Flight fits
+(node-bracketed and open-span) include any fixes inside their frame range.
+Manual anchors remain hard knots; fixes are soft and can never override an
+anchor. Rolling/grounded spans do not consume fixes in this phase.
+
+Single-shot outputs (kroupi) and shots without a synced partner take the
+exact pre-1.5 path: no fixes sidecar, solver unchanged — the feature is a
+structural no-op without a group.
+
+### Config (`ball.cross_replay.*`)
+
+```yaml
+cross_replay:
+  enabled: true
+  min_conf: 0.3                  # per-view detection gate
+  max_ray_miss_m: 1.0            # inlier gate on the common perpendicular
+  min_parallax_deg: 8.0          # conditioning gate
+  offset_search_radius_frames: 4
+  offset_search_step: 0.25       # sub-frame, via interpolated reference uv
+  min_pairs_for_refine: 8
+  fix_weight_px_per_m: 30.0      # soft-constraint weight in LM fits
+```
+
+### Diagnostics
+
+Per shot: `cross_replay: {partner_shots, saved_offset, refined_offset,
+offset_disagreement_frames, n_pairs, n_inlier_fixes, median_ray_miss_m,
+median_parallax_deg}` in the diag sidecar; fix counts consumed per flight
+segment in `segments[]`; quality report surfaces fix counts and the
+sync-disagreement flag.
+
+### Acceptance criteria
+
+- origi01/origi02: ≥ 8 inlier fixes total across the pair; refined offset
+  lands at −144 ± 0.5 (vs saved −142) and the disagreement is flagged.
+- Flight segments consuming ≥ 1 fix: pixel residual within 1.5× of the
+  unconstrained fit, and the fitted trajectory passes within
+  `max_ray_miss_m` of its fixes (3D agreement).
+- **Cross-view consistency** (measurement, not a hard gate): median 3D
+  distance between the origi01 and origi02 solved tracks at synced frames
+  — record before/after; the expectation is a clear improvement on flight
+  frames.
+- kroupi01 (no group): byte-identical solve path, no regressions; anchor
+  harness green; synthetic two-camera unit tests for refinement,
+  triangulation gates and fix-constrained fits.
+
+---
+
 ## Phase 2 — Global mode-sequence solve
 
 ### Problem
@@ -154,7 +249,9 @@ per-segment mode. Scored as the sum of:
   possessing player is searched over the 2 players nearest the ball's last
   confident pixel before the segment, each as its own hypothesis branch;
   `stationary`: constant position; `out_of_view`: no pixel cost, fixed
-  per-frame penalty so it's never free.
+  per-frame penalty so it's never free. Flight fits consume Phase-1.5
+  triangulated fixes automatically (same fitters, same `world_fixes`
+  path), so hypotheses that contradict a cross-replay fix score worse.
 - **Transition priors**: flight→rolling/flight requires bounce (restitution
   inside the envelope, else penalty), touch transitions require a player
   joint within `contact_max_gap_m`, goal impacts require ray–goal-geometry

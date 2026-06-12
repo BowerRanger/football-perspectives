@@ -350,3 +350,40 @@ FINAL: origi01 clicks med 5.8 px / p90 16.2 / max 47.6, systematic worst
 0.19 m; origi02 med 6.4 / p90 16.4 / max 24.0, systematic worst 0.14 m —
 both within the 1-foot bar; kroupi baseline (6.3 px med, jitter 1.17);
 gberch baseline (jitter 0.37/0.29, snap gated off).
+
+## 2026-06-12 round 2 — inter-anchor stability (user report: f6/159/183/256/276, origi02 f267)
+
+New honest metric: eval_bracket_wobble.py — per-frame ROLL deviation from the
+bracketing-USER-anchor SLERP (pan dev is expected, roll dev is not). Note the
+metric leaks pan into "roll" by sin(tilt)≈0.3 when total dev is large.
+
+Mechanisms found and fixed (in pipeline order):
+1. BRACKET PRIORS in the polish: the neighbour-chain roll/fx prior drifts
+   with the chain and peaks mid-segment. Snapped anchors are ~5 px truth, so
+   roll + fx now reference the bracketing-anchor interpolation (a bound).
+2. PARALLEL-LINE DEGENERACY: origi02 f262-264 carry 4-5 pitch lines that are
+   ALL x-parallel (left-box 18yd/6yd edges) — as roll-free as board-only
+   frames. Determinedness now requires 2 line DIRECTIONS >20 deg apart
+   (cross product > 0.34), not a line count.
+3. HARD ROLL CORRECTION on circle-only polished frames: circle points are
+   point-to-point vs world attributions inherited from the previous camera —
+   tangential (roll) info is self-confirmation; under Huber loss 55 points
+   out-vote ANY soft prior scalar. Pan/tilt/fx keep the circle's genuine
+   info; roll dev vs the bracket is removed exactly post-solve.
+4. FINAL DROPOUT BRIDGE: spans with no usable evidence (origi02 f265-275 pan
+   blur: only the hoarding base; origi01 f135-164: nothing until the circle
+   reappears) are SLERP/LERP-bridged between flanking determined frames.
+   MUST run LAST (post outlier-rejection + anchor snap): bridging from
+   pre-polish flanks locked a bad pose across the span (f268 -2.5 -> -6.7).
+5. CIRCLE RE-LOCK on bridged frames: their detections were strip-searched
+   around the original drifted cameras and found nothing even where the
+   circle is plainly visible. The bridge is the first unbiased seed —
+   re-detect (wide 100 px strip) + point-solve pan/tilt/fx, roll pinned to
+   the bridge. GOTCHAS: frames_bgr only holds pre-propagation coverage
+   (read on demand via cap); gate on line_extraction_propagate_circle
+   (detect_circle key is FALSE in config — silent dead gate cost 3 runs).
+
+FINAL: origi01 roll-dev p95 0.75/max 1.62 (leakage-dominated), f159 overlay
+visually locked, clicks 5.8/16.2/47.6, sys 0.19 m; origi02 max roll dev 0.95
+(was 6.7), clicks 6.4/16.5/23.8, sys 0.14 m, jitter 0.95/0.47; kroupi clicks
+med 6.3 (f0 tail = carve-out); gberch byte-baseline 0.37/0.29.

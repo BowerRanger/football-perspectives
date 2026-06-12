@@ -2487,6 +2487,7 @@ class CameraStage(BaseStage):
         # skip untouched.
         gp_ran = False
         gp_touched: set[int] = set()
+        gp_underdet: set[int] = set()
         if bool(cfg.get("line_extraction_global_polish", True)):
             from scipy.spatial.transform import Rotation as _GPRot
             from scipy.spatial.transform import Slerp as _GPSlerp
@@ -2534,6 +2535,74 @@ class CameraStage(BaseStage):
                     "line_extraction_global_polish_min_sparse", 0.05)):
                 gp_d5v = _gp_d5(sol.distortion)
                 gp_cx, gp_cy = sol.principal_point
+                # Bracketing USER-anchor frames: the neighbour-chain prior
+                # lets roll drift accumulate and peak mid-segment (user-visible
+                # roll at f159/183/256/276 on origi01, all mid-bracket); the
+                # anchor frames are click-fitted to ~5 px, so interpolating
+                # BETWEEN brackets is a trustworthy absolute reference for
+                # roll and fx — a bound that cannot drift, unlike the chain.
+                import bisect as _gp_bisect
+                gp_anchor_fids = sorted(
+                    a.frame for a in anchors.anchors
+                    if len(a.landmarks) >= 4
+                    and not all(lm.name.startswith("pnl_")
+                                for lm in a.landmarks)
+                    and a.frame < len(per_frame_K)
+                    and per_frame_K[a.frame] is not None)
+
+                def _gp_bracket(f):
+                    k = _gp_bisect.bisect_left(gp_anchor_fids, f)
+                    if 0 < k < len(gp_anchor_fids):
+                        a_, b_ = gp_anchor_fids[k - 1], gp_anchor_fids[k]
+                        return a_, b_, (f - a_) / max(1, b_ - a_)
+                    return None
+
+                # Underdetermined DROPOUT spans (origi02 f265-275: a pan
+                # blur kills every pitch line; only the hoarding base
+                # survives). One distant line cannot determine roll, and its
+                # detection was strip-searched around the current (wrong)
+                # camera, so its data term self-confirms the error against
+                # any prior. Bridge such spans with SLERP/LERP between the
+                # flanking determined frames and keep them constraint-free
+                # during the sweeps.
+                def _gp_diverse(f):
+                    # Determinedness needs line DIRECTIONS, not line counts:
+                    # origi02 f262-264 carry 4-5 pitch lines that are ALL
+                    # x-parallel (left-box 18yd/6yd edges) — a pure parallel
+                    # family leaves roll/fx as free as a board-only frame.
+                    dirs = []
+                    for ln in gp_lines.get(f, []):
+                        if ln.name == "board_line":
+                            continue
+                        a2 = np.asarray(ln.world_segment[0][:2], float)
+                        b2 = np.asarray(ln.world_segment[1][:2], float)
+                        v = b2 - a2
+                        n = float(np.linalg.norm(v))
+                        if n > 1e-6:
+                            dirs.append(v / n)
+                    return any(
+                        abs(float(np.cross(dirs[i], dirs[j]))) > 0.34
+                        for i in range(len(dirs))
+                        for j in range(i + 1, len(dirs)))
+
+                def _gp_determined(f):
+                    return (_gp_diverse(f) or f in gp_circ
+                            or f in anchor_landmarks
+                            or f in anchor_resolved_frames)
+
+                run: list[int] = []
+                for f in gp_covered + [-1]:
+                    if f >= 0 and not _gp_determined(f):
+                        run.append(f)
+                        continue
+                    if run:
+                        lo, hi = run[0] - 1, run[-1] + 1
+                        if (lo in gp_covered and hi in gp_covered
+                                and _gp_determined(lo)
+                                and _gp_determined(hi)):
+                            gp_underdet.update(run)
+                        run = []
+
                 w_pose = float(cfg.get(
                     "line_extraction_global_polish_pose_weight", 100.0))
                 w_fx = float(cfg.get(
@@ -2564,6 +2633,10 @@ class CameraStage(BaseStage):
                             prior_fx = float(per_frame_K[nbs[0]][0, 0])
                         lns = gp_lines.get(f, [])
                         pts = gp_circ.get(f)
+                        if f in gp_underdet:
+                            # no usable evidence — final flank bridge (after
+                            # outlier rejection + anchor snap) replaces these
+                            continue
                         n_str = sum(
                             1 for ln in lns if ln.name != "board_line")
                         if n_str >= 3:
@@ -2594,6 +2667,26 @@ class CameraStage(BaseStage):
                             rv_pr, _ = cv2.Rodrigues(prior_R)
                             rv_cur, _ = cv2.Rodrigues(
                                 np.asarray(per_frame_R[f]))
+                            # roll + fx reference: the bracketing-anchor
+                            # interpolation when one exists; the (drift-prone)
+                            # neighbour prior otherwise.
+                            roll_w_eff = float(cfg.get(
+                                "line_extraction_roll_prior_weight", 120.0))
+                            br = _gp_bracket(f)
+                            if br is not None:
+                                a_, b_, w_ = br
+                                R_br = _GPSlerp(
+                                    [0.0, 1.0], _GPRot.from_matrix(
+                                        [per_frame_R[a_], per_frame_R[b_]])
+                                )([w_]).as_matrix()[0]
+                                rv_br, _ = cv2.Rodrigues(R_br)
+                                roll_ref = rv_br.reshape(3)
+                                fx_ref = ((1 - w_) * float(
+                                    per_frame_K[a_][0, 0])
+                                    + w_ * float(per_frame_K[b_][0, 0]))
+                            else:
+                                roll_ref = rv_pr.reshape(3)
+                                fx_ref = prior_fx
                             rvec_n, fx_n, rms_n = _gp_solve(
                                 lns, gp_cx, gp_cy, gp_d5v, C,
                                 rv_cur.reshape(3),
@@ -2602,12 +2695,30 @@ class CameraStage(BaseStage):
                                 anchor_obs=anch_obs,
                                 anchor_weight=3.0,
                                 pose_prior=(rv_pr.reshape(3), wp),
-                                fx_prior=(prior_fx, wf),
-                                roll_prior=(rv_pr.reshape(3), float(cfg.get("line_extraction_roll_prior_weight", 120.0))))
+                                fx_prior=(fx_ref, wf),
+                                roll_prior=(roll_ref, roll_w_eff))
                             if not np.isfinite(rms_n):
                                 continue
                             R_new, _ = cv2.Rodrigues(rvec_n)
                             fx_new = float(fx_n)
+                            if pts and n_str < 2 and br is not None:
+                                # Circle points are point-to-point against
+                                # world attributions INHERITED from the
+                                # previous camera — their tangential (roll)
+                                # component is self-confirmation, not
+                                # measurement, and under the Huber loss they
+                                # out-vote any soft prior. Keep the circle's
+                                # genuine pan/tilt/fx information and take
+                                # roll ENTIRELY from the bracket reference.
+                                R_br2, _ = cv2.Rodrigues(
+                                    np.asarray(roll_ref, float).reshape(3))
+                                view2 = R_br2[2]
+                                rv_rel, _ = cv2.Rodrigues(
+                                    np.asarray(R_new) @ R_br2.T)
+                                roll_dev = float(
+                                    np.dot(rv_rel.reshape(3), view2))
+                                R_fix, _ = cv2.Rodrigues(-roll_dev * view2)
+                                R_new = R_fix @ np.asarray(R_new)
                         d = _angle_between(
                             np.asarray(per_frame_R[f]), np.asarray(R_new))
                         max_delta = max(max_delta, d)
@@ -2880,6 +2991,151 @@ class CameraStage(BaseStage):
                 logger.info(
                     "static line solve: anchor snap improved %d anchor "
                     "frame(s)", n_snapped)
+
+        # FINAL bridge of underdetermined dropout spans (e.g. origi02
+        # f265-275: a pan blur kills every pitch line and only the hoarding
+        # base survives). One distant line cannot determine roll, and its
+        # detection was strip-searched around the current camera, so its
+        # data term self-confirms whatever error it was born with. These
+        # frames carry no usable evidence — replace them with SLERP/LERP
+        # between their flanking determined frames. Runs LAST (after
+        # polish, outlier rejection and anchor snap) so the flanks hold
+        # their final, corrected values — bridging from pre-polish flanks
+        # locked a bad pose across the whole span.
+        if gp_underdet:
+            from scipy.spatial.transform import Rotation as _UBRot
+            from scipy.spatial.transform import Slerp as _UBSlerp
+            ub_cx, ub_cy = sol.principal_point
+            spans: list[list[int]] = []
+            for g in sorted(gp_underdet):
+                if spans and g == spans[-1][-1] + 1:
+                    spans[-1].append(g)
+                else:
+                    spans.append([g])
+            n_bridged = 0
+            for span in spans:
+                lo, hi = span[0] - 1, span[-1] + 1
+                if (not (0 <= lo and hi < len(per_frame_K))
+                        or per_frame_R[lo] is None
+                        or per_frame_R[hi] is None):
+                    continue
+                sl = _UBSlerp(
+                    [float(lo), float(hi)], _UBRot.from_matrix(
+                        [per_frame_R[lo], per_frame_R[hi]]))
+                fx_lo = float(per_frame_K[lo][0, 0])
+                fx_hi = float(per_frame_K[hi][0, 0])
+                for g in span:
+                    w_ = (g - lo) / (hi - lo)
+                    R_g = sl([float(g)]).as_matrix()[0]
+                    fx_g = (1 - w_) * fx_lo + w_ * fx_hi
+                    per_frame_K[g] = np.array(
+                        [[fx_g, 0.0, ub_cx], [0.0, fx_g, ub_cy],
+                         [0.0, 0.0, 1.0]])
+                    per_frame_R[g] = np.asarray(R_g)
+                    per_frame_t[g] = -np.asarray(R_g) @ C
+                    n_bridged += 1
+            if n_bridged:
+                logger.info(
+                    "static line solve: bridged %d underdetermined frame(s) "
+                    "(<2 pitch lines, no circle/anchor) by final flank "
+                    "interpolation", n_bridged)
+
+            # Circle RE-LOCK on bridged frames: their detections were
+            # strip-searched around the original (drifted) cameras and came
+            # up empty even where the centre circle is plainly visible
+            # (origi01 f135-164: the SLERP bridge still pan-lags the true
+            # camera by ~40 px mid-span). The bridged pose is the first
+            # UNBIASED seed these frames ever had — re-detect under it and
+            # point-solve pan/tilt/fx from the circle, keeping roll pinned
+            # to the bridge (a circle cannot measure roll).
+            if gp_underdet and bool(cfg.get(
+                    "line_extraction_propagate_circle", True)):
+                from src.schemas.anchor import (
+                    LandmarkObservation as _RLLm,
+                )
+                from src.utils.circle_detector import detect_circle as _rl_det
+                from src.utils.static_c_profile import (
+                    _solve_frame_at_fixed_c as _rl_solve,
+                )
+                from src.utils.static_line_solver import _dist5 as _rl_d5
+                rl_d5v = _rl_d5(sol.distortion)
+                rl_n = int(cfg.get("line_extraction_circle_points", 20))
+                rl_w = float(cfg.get("line_extraction_circle_weight", 0.3))
+                # Wide strip: the bridge still pan-lags the true camera by
+                # tens of px (same lesson as the cold-start sweep) — the
+                # default 25 px strip never sees the real circle.
+                import dataclasses as _rl_dc
+                rl_cfg = _rl_dc.replace(
+                    det_cfg, search_strip_px=int(cfg.get(
+                        "line_extraction_relock_strip_px", 100)))
+                n_relock = 0
+                rl_gates = {"noR": 0, "noimg": 0, "nodet": 0, "rms": 0,
+                            "rot": 0}
+                for g in sorted(gp_underdet):
+                    if per_frame_R[g] is None:
+                        rl_gates["noR"] += 1
+                        continue
+                    img_g = frames_bgr.get(g)
+                    if img_g is None:
+                        # bridged frames gained coverage AFTER frames_bgr
+                        # was snapshotted (pre-propagation) — read on demand
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, g)
+                        ok_g, img_g = cap.read()
+                        if not ok_g:
+                            rl_gates["noimg"] += 1
+                            continue
+                    det = _rl_det(
+                        img_g, per_frame_K[g],
+                        np.asarray(per_frame_R[g]),
+                        np.asarray(per_frame_t[g]), (0.0, 0.0), rl_cfg)
+                    if det is None or len(det.image_points) < 8:
+                        rl_gates["nodet"] += 1
+                        continue
+                    k = min(rl_n, len(det.image_points))
+                    idx = np.linspace(
+                        0, len(det.image_points) - 1, k).astype(int)
+                    obs = [
+                        _RLLm(name=det.name,
+                              image_xy=det.image_points[j],
+                              world_xyz=det.world_points[j])
+                        for j in idx
+                    ]
+                    rv_g, _ = cv2.Rodrigues(np.asarray(per_frame_R[g]))
+                    rv_g = rv_g.reshape(3)
+                    fx_g = float(per_frame_K[g][0, 0])
+                    rvec_n, fx_n, rms_n = _rl_solve(
+                        [], ub_cx, ub_cy, rl_d5v, C, rv_g, fx_g,
+                        circle_obs=obs, circle_weight=rl_w,
+                        pose_prior=(rv_g, 5.0), fx_prior=(fx_g, 0.05),
+                        roll_prior=(rv_g, float(cfg.get(
+                            "line_extraction_roll_prior_weight", 120.0))))
+                    if not np.isfinite(rms_n) or rms_n > float(cfg.get(
+                            "line_extraction_cold_start_circle_max_rms",
+                            40.0)):
+                        rl_gates["rms"] += 1
+                        continue
+                    R_n, _ = cv2.Rodrigues(rvec_n)
+                    if _angle_between(
+                            np.asarray(per_frame_R[g]), R_n) > 5.0:
+                        rl_gates["rot"] += 1
+                        continue
+                    # roll comes ENTIRELY from the bridge trend
+                    R_br3, _ = cv2.Rodrigues(rv_g)
+                    view3 = R_br3[2]
+                    rv_rel3, _ = cv2.Rodrigues(R_n @ R_br3.T)
+                    roll_dev3 = float(np.dot(rv_rel3.reshape(3), view3))
+                    R_fix3, _ = cv2.Rodrigues(-roll_dev3 * view3)
+                    R_n = R_fix3 @ R_n
+                    per_frame_K[g] = np.array(
+                        [[fx_n, 0.0, ub_cx], [0.0, fx_n, ub_cy],
+                         [0.0, 0.0, 1.0]])
+                    per_frame_R[g] = np.asarray(R_n)
+                    per_frame_t[g] = -np.asarray(R_n) @ C
+                    n_relock += 1
+                logger.info(
+                    "static line solve: circle re-lock refined %d of %d "
+                    "bridged frame(s) [gates: %s]",
+                    n_relock, len(gp_underdet), rl_gates)
 
         # Pin-and-smooth temporal smoothing of the per-frame rotation. The
         # dominant jitter is the seam step where a line-solved frame meets an

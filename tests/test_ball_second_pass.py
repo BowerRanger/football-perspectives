@@ -143,3 +143,16 @@ def test_corridor_single_sided_before_first_and_after_last_obs():
         assert np.isfinite(mean).all()
     # Extrapolated frames are more uncertain than interpolated ones.
     assert corridors[5][1][0, 0] > corridors[12][1][0, 0]
+
+
+@pytest.mark.unit
+def test_find_gap_runs_leading_gap_and_all_gaps():
+    assert find_gap_runs({1: "detector"}, set(), 4) == [(0, 0), (2, 3)]
+    assert find_gap_runs({}, set(), 3) == [(0, 2)]
+    assert find_gap_runs({f: "detector" for f in range(3)}, set(), 3) == []
+
+
+@pytest.mark.unit
+def test_gate_empty_candidate_list_returns_none():
+    cfg = SecondPassCfg()
+    assert best_gated_candidate([], np.array([0.0, 0.0]), np.eye(2), cfg) is None

@@ -325,6 +325,127 @@ class TestContinuityAndOpenSpans:
             assert got is not None
             assert np.linalg.norm(np.asarray(got[0]) - truth[f]) <= 0.10
 
+class TestOpenSpanGroundedFallback:
+    """Open-span grounded fallback must skip gap-fill frames and off-pitch
+    raycasts rather than emitting teleports."""
+
+    def test_open_span_skips_gap_fill_frames(self):
+        # An open span (no nodes): frames 0..9 have genuine on-pitch
+        # detections; frames 10..14 are gap-fill with wildly extrapolated
+        # uv (IMM glided off-screen); frame 15..19 back to genuine.
+        # Expectation: gap-fill frames → state=="missing", genuine frames
+        # → grounded world within 10 cm of truth.
+        n = 20
+        K, R, t = broadcast_camera()
+        truth = rolling_worlds((55.0, 30.0), (-0.2, 0.0), n)
+        genuine_pixels = project_track(truth, K, R, t)
+
+        from src.utils.ball_tracker import TrackerStep
+
+        gap_fill_frames = set(range(10, 15))
+        steps = []
+        for fi in range(n):
+            if fi in gap_fill_frames:
+                # Wildly extrapolated pixel — projects way off-pitch.
+                steps.append(TrackerStep(
+                    frame=fi, uv=(960.0, -850.0),  # near-horizon, v strongly negative
+                    p_flight=0.0, is_outlier=False, is_gap_fill=True,
+                ))
+            else:
+                steps.append(TrackerStep(
+                    frame=fi, uv=genuine_pixels.get(fi),
+                    p_flight=0.0, is_outlier=False, is_gap_fill=False,
+                ))
+
+        Ks, Rs, ts = per_frame_cams(n)
+        result = solve_piecewise(
+            nodes=[],
+            steps=steps,
+            confidences={f: 0.8 for f in range(n) if f not in gap_fill_frames},
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0),
+            fps=FPS,
+            n_frames=n,
+            pitch_length_m=105.0, pitch_width_m=68.0,
+            split_hints=(),
+            cfg=SolverCfg(),
+        )
+
+        # Gap-fill frames must be missing.
+        for f in gap_fill_frames:
+            assert result.state_by_frame[f] == "missing", (
+                f"frame {f} is gap-fill but got state {result.state_by_frame[f]!r}"
+            )
+            assert f not in result.world_by_frame, (
+                f"frame {f} is gap-fill but has a world position (teleport!)"
+            )
+
+        # Genuine frames must be grounded and within 10 cm of truth.
+        for f in range(n):
+            if f in gap_fill_frames:
+                continue
+            got = result.world_by_frame.get(f)
+            assert got is not None, f"frame {f} (genuine) unexpectedly missing"
+            assert np.linalg.norm(np.asarray(got[0]) - truth[f]) <= 0.10, (
+                f"frame {f}: grounded position {got[0]} too far from truth {truth[f]}"
+            )
+
+    def test_open_span_rejects_off_pitch_raycast(self):
+        # An open span where one frame's uv projects to world coords well
+        # beyond the pitch + margin (a near-horizon pixel).  That frame
+        # must be "missing", not a 70m teleport.
+        n = 10
+        K, R, t = broadcast_camera()
+        truth = rolling_worlds((55.0, 30.0), (-0.2, 0.0), n)
+        good_pixels = project_track(truth, K, R, t)
+
+        from src.utils.ball_tracker import TrackerStep
+
+        # Frame 5 gets a far-right pixel — ankle_ray_to_pitch projects it to
+        # world x ≈ 124 m, well beyond the 105 + 5 m pitch+margin boundary.
+        # The _ground_raycast clamp (2×max(length,width)=210 m) lets it pass;
+        # only the new pitch-bounds guard in _solve_open_span should reject it.
+        offpitch_uv = (2500.0, 540.0)  # far-right pixel → world x ≈ 124 m
+
+        steps = []
+        for fi in range(n):
+            uv = offpitch_uv if fi == 5 else good_pixels.get(fi)
+            steps.append(TrackerStep(
+                frame=fi, uv=uv,
+                p_flight=0.0, is_outlier=False, is_gap_fill=False,
+            ))
+
+        Ks, Rs, ts = per_frame_cams(n)
+        result = solve_piecewise(
+            nodes=[],
+            steps=steps,
+            confidences={f: 0.8 for f in range(n)},
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0),
+            fps=FPS,
+            n_frames=n,
+            pitch_length_m=105.0, pitch_width_m=68.0,
+            split_hints=(),
+            cfg=SolverCfg(),
+        )
+
+        # Off-pitch frame must be missing.
+        assert result.state_by_frame[5] == "missing", (
+            f"frame 5 has an off-pitch raycast but state={result.state_by_frame[5]!r}"
+        )
+        assert 5 not in result.world_by_frame, (
+            "frame 5 has an off-pitch raycast but got a world position (teleport!)"
+        )
+
+        # Good frames must remain grounded.
+        for f in range(n):
+            if f == 5:
+                continue
+            got = result.world_by_frame.get(f)
+            assert got is not None, f"frame {f} (good pixel) unexpectedly missing"
+            assert np.linalg.norm(np.asarray(got[0]) - truth[f]) <= 0.10
+
+
 class TestMagnusArcConsistency:
     def test_end_velocity_and_eval_share_magnus_dynamics(self):
         # A spinning arc's terminal velocity must come from the same

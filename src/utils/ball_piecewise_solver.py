@@ -1050,6 +1050,12 @@ class _Solver:
         for f in frames:
             if f in flight_frames:
                 continue
+            if f in self.gap_fill:
+                # IMM-extrapolated pixel with no real observation behind it.
+                # Other call sites (_rolling_span, _interior_obs) already skip
+                # gap-fill; be consistent — leave missing rather than emit a
+                # teleport from an extrapolated pixel.
+                continue
             if self.p_flight.get(f, 0.0) >= 0.5:
                 # Flight posterior but no accepted arc: a grounded
                 # ray-cast would be a knowingly-wrong depth. Leave
@@ -1057,6 +1063,15 @@ class _Solver:
                 continue
             ground = self._ground_raycast(f)
             if ground is None:
+                continue
+            m = self.cfg.pitch_margin_m
+            if not (
+                -m <= ground[0] <= self.pitch.length_m + m
+                and -m <= ground[1] <= self.pitch.width_m + m
+            ):
+                # Near-horizon or off-image pixel projects outside the pitch
+                # envelope — emitting it would cause a multi-metre teleport.
+                # Leave missing, consistent with _rolling_span's own guard.
                 continue
             out.worlds[f] = ground
         return out

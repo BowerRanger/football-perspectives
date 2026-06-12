@@ -45,6 +45,60 @@ def project_world_to_image(
     return out.reshape(-1, 2)
 
 
+def pixel_ray(
+    pixel_uv: tuple[float, float] | np.ndarray,
+    K: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    distortion: tuple[float, float] = (0.0, 0.0),
+) -> tuple[np.ndarray, np.ndarray]:
+    """Camera centre and unit world-direction of the ray through a pixel.
+
+    Returns ``(C, d_hat)`` with ``C = -Rᵀt`` and ``d_hat`` the normalised
+    back-projection ``Rᵀ K⁻¹ [u, v, 1]ᵀ`` after undistortion.
+    """
+    uv = np.asarray(pixel_uv, dtype=np.float64)
+    if distortion != (0.0, 0.0):
+        uv = undistort_pixel(uv, K, distortion)
+    C = -np.asarray(R).T @ np.asarray(t, dtype=np.float64)
+    d = np.asarray(R).T @ (
+        np.linalg.inv(np.asarray(K, dtype=np.float64))
+        @ np.array([uv[0], uv[1], 1.0])
+    )
+    return C, d / np.linalg.norm(d)
+
+
+def project_point_onto_pixel_ray(
+    point: np.ndarray,
+    pixel_uv: tuple[float, float] | np.ndarray,
+    K: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    distortion: tuple[float, float] = (0.0, 0.0),
+) -> np.ndarray:
+    """The point on the pixel's camera ray at ``point``'s along-ray depth.
+
+    Keeps the pixel authoritative for lateral position (the result
+    reprojects to ``pixel_uv``) while taking depth from ``point``.
+    """
+    C, d_hat = pixel_ray(pixel_uv, K, R, t, distortion)
+    depth = float(np.dot(np.asarray(point, dtype=np.float64) - C, d_hat))
+    return C + depth * d_hat
+
+
+def point_to_pixel_ray_distance(
+    point: np.ndarray,
+    pixel_uv: tuple[float, float] | np.ndarray,
+    K: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    distortion: tuple[float, float] = (0.0, 0.0),
+) -> float:
+    """Perpendicular distance (m) from a world point to a pixel's ray."""
+    on_ray = project_point_onto_pixel_ray(point, pixel_uv, K, R, t, distortion)
+    return float(np.linalg.norm(np.asarray(point, dtype=np.float64) - on_ray))
+
+
 def undistort_pixel(
     pixel_uv: tuple[float, float] | np.ndarray,
     K: np.ndarray,

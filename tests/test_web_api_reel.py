@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -90,3 +91,41 @@ def test_run_rejects_input_path_outside_source(client) -> None:
         "input_path": "/etc/passwd",
     })
     assert res.status_code == 400
+
+
+@pytest.mark.integration
+def test_resplit_respawns_job_on_recorded_source(client, monkeypatch) -> None:
+    """POST /api/shots/resplit re-runs split mode on the source video
+    already recorded in the manifest — no re-upload."""
+    c, tmp = client
+    calls: dict = {}
+    monkeypatch.setattr(
+        "src.web.server.run_pipeline", lambda **kw: calls.update(kw),
+    )
+    # seed: a manifest pointing at an on-disk source video
+    source = tmp / "source"
+    source.mkdir()
+    reel = source / "reel.mp4"
+    reel.write_bytes(_tiny_mp4_bytes(tmp))
+    (tmp / "shots").mkdir()
+    (tmp / "shots" / "shots_manifest.json").write_text(json.dumps({
+        "source_file": str(reel), "fps": 25.0, "total_frames": 100,
+        "shots": [{"id": "s001", "start_frame": 0, "end_frame": 99,
+                   "start_time": 0.0, "end_time": 4.0,
+                   "clip_file": "shots/s001.mp4"}],
+    }))
+
+    res = c.post("/api/shots/resplit")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["job_id"]
+    assert body["source"] == str(reel)
+    assert _wait_for_job(c, body["job_id"]) == "done"
+    assert Path(calls["video_path"]) == reel
+    assert calls["force_resplit"] is True
+
+
+@pytest.mark.integration
+def test_resplit_404_without_source(client) -> None:
+    c, _ = client
+    assert c.post("/api/shots/resplit").status_code == 404

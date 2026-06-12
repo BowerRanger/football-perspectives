@@ -149,3 +149,31 @@ def test_auto_mode_splits_long_input(tmp_path: Path):
     PrepareShotsStage(config=cfg, output_dir=out, video_path=reel).run()
     m = ShotsManifest.load(out / "shots" / "shots_manifest.json")
     assert len(m.shots) == 3
+
+
+def test_force_resplit_replaces_previous_split(split_run, tmp_path: Path):
+    """Re-running the stage on the same source normally no-ops (the
+    idempotency guard). force_resplit wipes the previous split state
+    and re-ingests — the dashboard's 'Re-run split' button — while
+    preserving the manifest's match block."""
+    from src.schemas.shots import MatchInfo
+
+    reel = split_run.parent / "reel.mp4"
+    manifest_path = split_run / "shots" / "shots_manifest.json"
+
+    # attach a match block + a stray old clip that must disappear
+    m = ShotsManifest.load(manifest_path)
+    m.match = MatchInfo(home_team="A", away_team="B", home_score=1,
+                        away_score=0, venue="V")
+    m.save(manifest_path)
+    stale = split_run / "shots" / "s099.mp4"
+    stale.write_bytes(b"stale")
+
+    PrepareShotsStage(config=CFG, output_dir=split_run, video_path=reel,
+                      force_resplit=True).run()
+
+    m2 = ShotsManifest.load(manifest_path)
+    assert [s.id for s in m2.shots] == [f"s{i:03d}" for i in range(1, 6)]
+    assert m2.match is not None and m2.match.home_team == "A"
+    assert not stale.exists()
+    assert len(m2.groups) == 2

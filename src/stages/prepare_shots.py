@@ -143,10 +143,17 @@ class PrepareShotsStage(BaseStage):
         config: dict,
         output_dir: Path,
         video_path: Path | None = None,
+        force_resplit: bool = False,
         **_: object,
     ) -> None:
         super().__init__(config, output_dir)
         self.video_path = video_path
+        # Wipe the previous split state and re-ingest the same source
+        # (the dashboard's "Re-run split" button). Manual regrouping,
+        # discards and sync offsets are reset — shot boundaries change,
+        # so they could not survive meaningfully anyway. The manifest's
+        # match block is preserved.
+        self.force_resplit = force_resplit
 
     def is_complete(self) -> bool:
         return (self.output_dir / "shots" / "shots_manifest.json").exists()
@@ -206,10 +213,30 @@ class PrepareShotsStage(BaseStage):
             if manifest_path.exists()
             else ShotsManifest(source_file="", fps=25.0, total_frames=0)
         )
-        if existing.shots and existing.source_file == str(src):
+        if self.force_resplit and existing.shots:
+            logger.info(
+                "prepare_shots[split]: force re-split — wiping %d previous "
+                "shot(s), groups and sync state (match info preserved)",
+                len(existing.shots),
+            )
+            for clip in shots_dir.glob("*.mp4"):
+                clip.unlink()
+            thumbs = shots_dir / "thumbs"
+            if thumbs.exists():
+                shutil.rmtree(thumbs)
+            for name in ("shot_features.json", "sync_map.json"):
+                path = shots_dir / name
+                if path.exists():
+                    path.unlink()
+            existing = ShotsManifest(
+                source_file="", fps=25.0, total_frames=0,
+                match=existing.match,
+            )
+        elif existing.shots and existing.source_file == str(src):
             logger.info(
                 "prepare_shots[split]: %s already ingested (%d shots) — "
-                "skipping. Use --clean (or a fresh output dir) to re-split.",
+                "skipping. Use the dashboard's Re-run split (or --clean) "
+                "to re-split.",
                 src.name, len(existing.shots),
             )
             return

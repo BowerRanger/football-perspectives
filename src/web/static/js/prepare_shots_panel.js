@@ -173,6 +173,55 @@ function _chip(text, fg, bg, title) {
   return c;
 }
 
+// Deterministic per-group accent colour so a shot's group membership
+// is readable at a glance (tile ribbon = card accent).
+const _GROUP_PALETTE = [
+  "#6366f1", "#22c55e", "#f59e0b", "#06b6d4", "#ec4899",
+  "#84cc16", "#a855f7", "#f97316", "#14b8a6", "#e11d48",
+];
+
+function _groupColor(groupId, model) {
+  if (!groupId) return "#475569";
+  const ids = model.manifest.groups.map((g) => g.id);
+  const idx = ids.indexOf(groupId);
+  return _GROUP_PALETTE[(idx >= 0 ? idx : ids.length) % _GROUP_PALETTE.length];
+}
+
+// Large click-to-expand preview: the tile videos are necessarily small,
+// so clicking any tile opens the clip big with full controls.
+function _openLightbox(shot, title) {
+  document.querySelectorAll("[data-lightbox]").forEach((m) => m.remove());
+  const overlay = document.createElement("div");
+  overlay.dataset.lightbox = "1";
+  overlay.style.cssText = `
+    position:fixed;inset:0;z-index:1002;background:rgba(4,6,12,.88);
+    display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;`;
+  const heading = document.createElement("div");
+  heading.style.cssText = "color:#f1f5f9;font-size:15px;font-weight:700;display:flex;gap:10px;align-items:center;";
+  heading.textContent = title;
+  const hint = document.createElement("span");
+  hint.textContent = "esc or click outside to close";
+  hint.style.cssText = "color:#64748b;font-size:11px;font-weight:400;";
+  heading.appendChild(hint);
+  const video = document.createElement("video");
+  video.src = `/api/video/${encodeURIComponent(shot.id)}`;
+  video.controls = true;
+  video.autoplay = true;
+  video.style.cssText = "max-width:86vw;max-height:80vh;border-radius:8px;background:#000;box-shadow:0 12px 48px rgba(0,0,0,.7);";
+  overlay.append(heading, video);
+  const close = () => {
+    video.pause();
+    overlay.remove();
+    window.removeEventListener("keydown", onKey);
+  };
+  const onKey = (ev) => { if (ev.key === "Escape") close(); };
+  overlay.addEventListener("click", (ev) => {
+    if (ev.target === overlay) close();
+  });
+  window.addEventListener("keydown", onKey);
+  document.body.appendChild(overlay);
+}
+
 // ── Ingest card (reel upload + Add Shots) ────────────────────────────
 
 function _renderIngestCard(panel, refresh) {
@@ -246,6 +295,41 @@ function _renderIngestCard(panel, refresh) {
     });
   }
 
+  // Re-run split on the already-known source (no re-upload): wipes
+  // shots/groups/sync and re-ingests with the current config.
+  const rerunBox = document.createElement("div");
+  rerunBox.style.cssText = "flex:0 0 auto;display:flex;flex-direction:column;gap:8px;justify-content:center;";
+  const rerunBtn = document.createElement("button");
+  rerunBtn.className = "btn";
+  rerunBtn.textContent = "⟳ Re-run split";
+  rerunBtn.style.cssText = "font-size:12px;background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:6px;padding:6px 12px;cursor:pointer;";
+  rerunBtn.title = "Re-split the original reel with the current settings. Replaces all shots, groups and sync offsets (match info survives).";
+  const rerunHint = document.createElement("div");
+  rerunHint.style.cssText = "color:#64748b;font-size:11px;max-width:170px;";
+  rerunHint.textContent = "Re-ingest the same source video from scratch.";
+  rerunBox.append(rerunBtn, rerunHint);
+  rerunBtn.addEventListener("click", async () => {
+    if (!confirm("Re-run the split on the original reel?\n\nThis replaces ALL shots, groups, discards and sync offsets.")) {
+      return;
+    }
+    rerunBtn.disabled = true;
+    reelStatus.style.color = "#94a3b8";
+    reelStatus.textContent = "Re-splitting the source reel…";
+    try {
+      const res = await fetch("/api/shots/resplit", { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || res.statusText);
+      attachToJob(body.job_id, "prepare_shots", async () => {
+        await loadStages();
+        if (currentStage === "prepare_shots") await refresh();
+      });
+    } catch (err) {
+      reelStatus.style.color = "#f87171";
+      reelStatus.textContent = `Re-split failed: ${err.message || err}`;
+      rerunBtn.disabled = false;
+    }
+  });
+
   // Pre-trimmed clips ("Add Shots", copy mode) — unchanged flow.
   const clipsBox = document.createElement("div");
   clipsBox.style.cssText = "flex:0 0 auto;display:flex;flex-direction:column;gap:8px;justify-content:center;";
@@ -313,7 +397,7 @@ function _renderIngestCard(panel, refresh) {
     }
   });
 
-  body.append(zone, reelInput, clipsBox, reelStatus);
+  body.append(zone, reelInput, rerunBox, clipsBox, reelStatus);
   panel.appendChild(wrap);
 }
 
@@ -355,14 +439,16 @@ function _badgesFor(shot, groupSync) {
 }
 
 function _shotTile(shot, opts) {
-  // opts: {groupSync, draggable, actions: [{icon,title,onClick}], menu: [{label,onClick}]}
+  // opts: {groupSync, draggable, actions, menu, groupColor, groupLabel}
+  const accent = opts.groupColor || "#1f2937";
   const tile = document.createElement("div");
   tile.style.cssText = `
-    flex:0 0 auto;width:172px;background:#0f1117;border:1px solid #1f2937;
+    flex:0 0 auto;width:300px;background:#0f1117;border:1px solid #1f2937;
+    border-top:3px solid ${accent};
     border-radius:8px;overflow:hidden;display:flex;flex-direction:column;
     transition:border-color .12s;`;
-  tile.addEventListener("mouseenter", () => { tile.style.borderColor = "#475569"; });
-  tile.addEventListener("mouseleave", () => { tile.style.borderColor = "#1f2937"; });
+  tile.addEventListener("mouseenter", () => { tile.style.borderColor = "#475569"; tile.style.borderTopColor = accent; });
+  tile.addEventListener("mouseleave", () => { tile.style.borderColor = "#1f2937"; tile.style.borderTopColor = accent; });
 
   if (opts.draggable) {
     tile.draggable = true;
@@ -374,20 +460,27 @@ function _shotTile(shot, opts) {
     tile.addEventListener("dragend", () => { tile.style.opacity = "1"; });
   }
 
-  // Media: thumbnail poster that plays muted on hover.
+  // Media: thumbnail poster that plays muted on hover; click for the
+  // full-size lightbox player.
   const media = document.createElement("video");
   media.poster = `/api/shots/${encodeURIComponent(shot.id)}/thumb`;
   media.muted = true;
   media.loop = true;
   media.playsInline = true;
   media.preload = "none";
-  media.style.cssText = "width:100%;aspect-ratio:16/9;object-fit:cover;background:#000;display:block;cursor:grab;";
-  media.title = "Hover to preview";
+  media.style.cssText = "width:100%;aspect-ratio:16/9;object-fit:cover;background:#000;display:block;cursor:zoom-in;";
+  media.title = "Hover to preview · click to open large";
   media.addEventListener("mouseenter", () => {
     if (!media.src) media.src = `/api/video/${encodeURIComponent(shot.id)}`;
     media.play().catch(() => {});
   });
   media.addEventListener("mouseleave", () => { media.pause(); });
+  media.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    media.pause();
+    _openLightbox(shot, opts.groupLabel
+      ? `${shot.id} — ${opts.groupLabel}` : shot.id);
+  });
   tile.appendChild(media);
 
   const info = document.createElement("div");
@@ -410,6 +503,10 @@ function _shotTile(shot, opts) {
   const badgeRow = document.createElement("div");
   badgeRow.dataset.role = "badges";
   badgeRow.style.cssText = "display:flex;gap:4px;flex-wrap:wrap;min-height:16px;";
+  if (opts.groupLabel) {
+    badgeRow.appendChild(_chip(opts.groupLabel, "#0b0d16", accent,
+                               "Highlight group this shot belongs to"));
+  }
   for (const b of _badgesFor(shot, opts.groupSync)) badgeRow.appendChild(b);
   info.appendChild(badgeRow);
 
@@ -525,9 +622,11 @@ function _renderGroupsBoard(panel, model, refresh) {
 }
 
 function _groupCard(group, model, refresh) {
+  const accent = _groupColor(group.id, model);
   const card = document.createElement("div");
   card.style.cssText = `
     background:#0a0e1a;border:1px solid #1f2937;border-radius:8px;
+    border-left:4px solid ${accent};
     padding:10px 12px;display:flex;flex-direction:column;gap:8px;
     transition:border-color .12s;`;
 
@@ -555,7 +654,7 @@ function _groupCard(group, model, refresh) {
   const header = document.createElement("div");
   header.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
   const title = document.createElement("span");
-  title.style.cssText = "font-size:13px;font-weight:700;color:#f1f5f9;";
+  title.style.cssText = `font-size:14px;font-weight:700;color:${accent};`;
   title.textContent = group.label;
   header.appendChild(title);
 
@@ -697,6 +796,8 @@ function _groupCard(group, model, refresh) {
       draggable: true,
       actions,
       menu,
+      groupColor: accent,
+      groupLabel: group.label,
     }));
   });
   card.appendChild(strip);

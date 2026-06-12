@@ -104,6 +104,27 @@ def _manifest_shot_ids(output_dir: Path) -> list[str]:
         return []
 
 
+def _is_allowed_input(output_dir: Path, resolved: Path) -> bool:
+    """True when ``resolved`` may be fed to prepare_shots: an upload in
+    ``output/source/`` or the source video the manifest already records
+    (the re-split path — server state, not client input)."""
+    try:
+        resolved.relative_to((output_dir / "source").resolve())
+        return True
+    except ValueError:
+        pass
+    from src.schemas.shots import ShotsManifest
+
+    manifest_path = output_dir / "shots" / "shots_manifest.json"
+    if not manifest_path.exists():
+        return False
+    try:
+        recorded = ShotsManifest.load(manifest_path).source_file
+    except Exception:
+        return False
+    return bool(recorded) and Path(recorded).resolve() == resolved
+
+
 def _camera_complete(output_dir: Path) -> bool:
     """Camera stage is green only when every shot in the manifest has a
     ``{shot_id}_camera_track.json`` on disk. With no manifest we fall
@@ -305,10 +326,12 @@ class RunRequest(BaseModel):
     # /api/run-shot-player endpoint for fast iteration on one player.
     player_filter: str | None = None
     # Pipeline input video (prepare_shots only). Set by the dashboard's
-    # reel-upload flow; must point inside ``output/source/`` — the run
-    # endpoints reject anything else so a request can't make the server
-    # read arbitrary paths.
+    # reel-upload flow; must point inside ``output/source/`` (or be the
+    # manifest's recorded source) — the run endpoints reject anything
+    # else so a request can't make the server read arbitrary paths.
     input_path: str | None = None
+    # Wipe previous split state and re-ingest (dashboard "Re-run split").
+    force_resplit: bool = False
 
 
 def _emit(job: Job, line: str) -> None:
@@ -370,10 +393,17 @@ def _run_job(job: Job, output_dir: Path, config_path: Path | None, params: RunRe
         if params.input_path:
             # Defence in depth: the run endpoints validate this too, but
             # every path into run_pipeline must hold the same invariant —
-            # request-supplied inputs only ever come from output/source/.
+            # request-supplied inputs only ever come from output/source/
+            # or are the manifest's already-recorded source video.
             resolved = Path(params.input_path).resolve()
-            resolved.relative_to((output_dir / "source").resolve())
+            if not _is_allowed_input(output_dir, resolved):
+                raise ValueError(
+                    f"input_path {resolved} is neither under "
+                    "output/source/ nor the manifest's recorded source"
+                )
             extra_kwargs["video_path"] = resolved
+        if params.force_resplit:
+            extra_kwargs["force_resplit"] = True
         run_pipeline(
             output_dir=output_dir,
             stages=params.stages,
@@ -613,18 +643,16 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         return None
 
     def _validate_input_path(params: RunRequest) -> None:
-        """``input_path`` may only name a file under ``output/source/``."""
+        """``input_path`` may only name an upload in ``output/source/``
+        or the manifest's recorded source video."""
         if not params.input_path:
             return
-        source_dir = (output_dir / "source").resolve()
-        try:
-            resolved = Path(params.input_path).resolve()
-            resolved.relative_to(source_dir)
-        except ValueError:
+        resolved = Path(params.input_path).resolve()
+        if not _is_allowed_input(output_dir, resolved):
             raise HTTPException(
                 status_code=400,
                 detail="input_path must point inside the output dir's "
-                       "source/ folder",
+                       "source/ folder or match the recorded source",
             )
 
     @app.post("/api/run", status_code=202)
@@ -2243,6 +2271,63 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             daemon=True,
         ).start()
         return {"saved": stem, "source": str(dest), "job_id": job_id}
+
+    @app.post("/api/shots/resplit")
+    def resplit_shots():
+        """Re-run split-mode prepare_shots on the already-known source
+        video (manifest-recorded path, falling back to the newest upload
+        in ``output/source/``) — wipes shots/groups/sync state and
+        re-ingests with the current config. No re-upload needed.
+        """
+        from src.schemas.shots import ShotsManifest
+
+        source: Path | None = None
+        manifest_path = output_dir / "shots" / "shots_manifest.json"
+        if manifest_path.exists():
+            try:
+                recorded = ShotsManifest.load(manifest_path).source_file
+            except Exception:
+                recorded = ""
+            if recorded and Path(recorded).exists():
+                source = Path(recorded).resolve()
+        if source is None:
+            source_dir = output_dir / "source"
+            uploads = sorted(
+                source_dir.glob("*.mp4"),
+                key=lambda p: p.stat().st_mtime,
+            ) if source_dir.exists() else []
+            if uploads:
+                source = uploads[-1].resolve()
+        if source is None:
+            raise HTTPException(
+                status_code=404,
+                detail="no source video known — ingest a reel first",
+            )
+
+        params = RunRequest(
+            stages="prepare_shots",
+            from_stage="prepare_shots",
+            input_path=str(source),
+            force_resplit=True,
+        )
+        with _jobs_lock:
+            running_jobs = sum(
+                1 for j in _jobs.values() if j.status == "running"
+            )
+            if running_jobs >= _MAX_CONCURRENT_JOBS:
+                raise HTTPException(
+                    status_code=429, detail="Too many concurrent jobs",
+                )
+        job_id = str(uuid.uuid4())[:8]
+        job = Job(job_id=job_id, stages=params.stages)
+        with _jobs_lock:
+            _jobs[job_id] = job
+        Thread(
+            target=_run_job,
+            args=(job, output_dir, app.state.config_path, params),
+            daemon=True,
+        ).start()
+        return {"source": str(source), "job_id": job_id}
 
     @app.get("/camera/track")
     def get_camera_track(shot: str | None = None):

@@ -51,14 +51,14 @@ class PairFix:
 
 
 def triangulate_rays(
-    uv_a,
-    K_a,
-    R_a,
-    t_a,
-    uv_b,
-    K_b,
-    R_b,
-    t_b,
+    uv_a: tuple[float, float],
+    K_a: np.ndarray,
+    R_a: np.ndarray,
+    t_a: np.ndarray,
+    uv_b: tuple[float, float],
+    K_b: np.ndarray,
+    R_b: np.ndarray,
+    t_b: np.ndarray,
     distortion_a: tuple[float, float] = (0.0, 0.0),
     distortion_b: tuple[float, float] = (0.0, 0.0),
 ) -> tuple[np.ndarray, float, float]:

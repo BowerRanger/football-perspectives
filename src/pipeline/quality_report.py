@@ -128,6 +128,7 @@ def _ball_shot_entry(track_path: Path, shot_id: str) -> dict:
             "goal_impacts": [
                 e for e in events if e.get("kind") == "goal_impact"
             ],
+            "detection_coverage": diag.get("detection_coverage"),
         })
     return entry
 

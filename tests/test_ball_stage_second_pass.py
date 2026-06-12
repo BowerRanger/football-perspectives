@@ -226,6 +226,11 @@ def test_second_pass_fills_gap_and_never_anchors(tmp_path: Path):
     states = {f.frame: f.state for f in track.frames}
     assert all(states[i] != "missing" for i in range(20, 25))
 
+    # Quality report surfaces coverage.
+    from src.pipeline.quality_report import _ball_shot_entry
+    entry = _ball_shot_entry(tmp_path / "ball" / "ball_track.json", "")
+    assert entry["detection_coverage"]["total"] > entry["detection_coverage"]["pass1"]
+
 
 @pytest.mark.integration
 def test_second_pass_disabled_is_noop(tmp_path: Path):

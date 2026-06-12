@@ -1936,6 +1936,22 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"Failed to load ball anchors: {exc}")
         return data
 
+    @app.get("/ball-anchors/{shot_id}/auto")
+    def get_auto_ball_anchors_for_shot(shot_id: str):
+        """Auto-generated anchors (read-only sidecar written by the ball
+        stage). Empty set when the stage hasn't run with auto-anchoring."""
+        path = output_dir / "ball" / f"{shot_id}_ball_anchors_auto.json"
+        if not path.exists():
+            return {"clip_id": shot_id, "image_size": [0, 0], "anchors": []}
+        try:
+            data = json.loads(path.read_text())
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to load auto ball anchors: {exc}",
+            )
+        return data
+
     @app.post("/ball-anchors/{shot_id}")
     def post_ball_anchors_for_shot(shot_id: str, payload: BallAnchorPayload):
         tmp = output_dir / "ball" / f".{shot_id}_ball_anchors.tmp.json"

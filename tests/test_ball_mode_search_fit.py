@@ -1,0 +1,279 @@
+"""Task 3 TDD: fitter-reuse layer + sound segment-fit cache.
+
+Asserts the ``_SegmentSolver`` wrapper:
+- FLIGHT fit recovers a synthetic gravity arc (endpoint-free).
+- ROLLING fit recovers a synthetic constant-decel roll.
+- STATIONARY fit on a still ball gives a constant world + ~0 residual.
+- OUT_OF_VIEW returns empty worlds, residual 0.
+- The frame-keyed cache returns the same object and increments the
+  ``_fit_calls`` counter only once per distinct key.
+- ``BudgetExceeded`` is raised once ``max_segment_fit_calls`` is passed.
+- ``boundary_vel`` is non-None for FLIGHT / ROLLING / STATIONARY.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from src.utils.ball_mode_search import (
+    BudgetExceeded,
+    Mode,
+    SegmentFit,
+    _SegmentSolver,
+)
+from src.utils.ball_piecewise_solver import SolverCfg
+from tests.fixtures.ball_synthetic import (
+    FPS,
+    ballistic_worlds,
+    broadcast_camera,
+    per_frame_cams,
+    project_track,
+    rolling_worlds,
+    steps_from_pixels,
+)
+
+
+# ---------------------------------------------------------------------------
+# Scene builders
+# ---------------------------------------------------------------------------
+
+def _solver_kwargs(worlds, n_frames, *, p_flight=0.0, cfg=None):
+    """Build the kwargs a real ``_Solver`` (and thus ``_SegmentSolver``)
+    consumes from a dense world track."""
+    K, R, t = broadcast_camera()
+    pixels = project_track(worlds, K, R, t)
+    steps = steps_from_pixels(pixels, n_frames, p_flight=p_flight)
+    per_K, per_R, per_t = per_frame_cams(n_frames)
+    return dict(
+        nodes=(),
+        steps=steps,
+        confidences={i: 1.0 for i in range(n_frames)},
+        per_frame_K=per_K,
+        per_frame_R=per_R,
+        per_frame_t=per_t,
+        distortion=(0.0, 0.0),
+        fps=FPS,
+        n_frames=n_frames,
+        pitch_length_m=105.0,
+        pitch_width_m=68.0,
+        split_hints=(),
+        z_hints=None,
+        manual_obs_frames=None,
+        world_fixes=None,
+        cfg=cfg or SolverCfg(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# FLIGHT
+# ---------------------------------------------------------------------------
+
+def test_flight_fit_recovers_arc():
+    n = 40
+    p0 = np.array([30.0, 34.0, 0.5])
+    v0 = np.array([8.0, 2.0, 9.0])
+    worlds = ballistic_worlds(tuple(p0), tuple(v0), n)
+    kwargs = _solver_kwargs(worlds, n)
+    seg = _SegmentSolver(**kwargs)
+
+    fa, fb = 2, 30
+    fit = seg.fit_segment(fa, fb, Mode.FLIGHT)
+
+    assert isinstance(fit, SegmentFit)
+    assert fit.kind == "ballistic"
+    assert fit.residual_px < 2.0
+    # Worlds recovered close to the true arc at interior frames.
+    for f in (5, 15, 25):
+        assert np.linalg.norm(fit.worlds[f] - worlds[f]) < 0.5
+    # Boundary velocities present and the launch is going up (+z), the
+    # later boundary slower / descending in z.
+    v_a, v_b = fit.boundary_vel
+    assert v_a is not None and v_b is not None
+    assert v_a[2] > 0.0           # ascending at fa
+    assert v_b[2] < v_a[2]        # gravity has pulled vz down by fb
+    assert not fit.underconstrained
+
+
+def test_flight_fit_endpoint_free_no_knot_for_free_breakpoint():
+    """A free-floating (non-anchor) breakpoint must NOT pin endpoints —
+    the fit still recovers the arc from interior pixels alone."""
+    n = 40
+    p0 = np.array([28.0, 30.0, 0.4])
+    v0 = np.array([10.0, 1.0, 8.0])
+    worlds = ballistic_worlds(tuple(p0), tuple(v0), n)
+    kwargs = _solver_kwargs(worlds, n)
+    seg = _SegmentSolver(**kwargs)
+    fit = seg.fit_segment(4, 28, Mode.FLIGHT)
+    assert fit.residual_px < 2.0
+    assert np.linalg.norm(fit.worlds[16] - worlds[16]) < 0.5
+
+
+# ---------------------------------------------------------------------------
+# ROLLING
+# ---------------------------------------------------------------------------
+
+def test_rolling_fit_recovers_constant_decel_roll():
+    n = 30
+    # Constant-decel roll: start fast, decelerate. Build with a quadratic.
+    start = np.array([20.0, 34.0])
+    v_per_f = np.array([0.8, 0.0])      # m / frame initial
+    accel_per_f2 = np.array([-0.01, 0.0])
+    z = 0.11
+    worlds = {}
+    for i in range(n):
+        xy = start + v_per_f * i + 0.5 * accel_per_f2 * i * i
+        worlds[i] = np.array([xy[0], xy[1], z])
+    kwargs = _solver_kwargs(worlds, n)
+    seg = _SegmentSolver(**kwargs)
+
+    fa, fb = 1, 28
+    fit = seg.fit_segment(fa, fb, Mode.ROLLING)
+
+    assert fit.kind == "rolling"
+    assert fit.residual_px is not None
+    assert fit.residual_px < 8.0
+    for f in (5, 14, 24):
+        assert np.linalg.norm(fit.worlds[f][:2] - worlds[f][:2]) < 0.5
+        assert abs(fit.worlds[f][2] - z) < 1e-6
+    v_a, v_b = fit.boundary_vel
+    assert v_a is not None and v_b is not None
+    # Decelerating roll: start speed > end speed (in xy).
+    assert np.linalg.norm(v_a[:2]) > np.linalg.norm(v_b[:2])
+
+
+# ---------------------------------------------------------------------------
+# STATIONARY
+# ---------------------------------------------------------------------------
+
+def test_stationary_fit_constant_world_zero_residual():
+    n = 20
+    z = 0.11
+    pt = np.array([40.0, 30.0, z])
+    worlds = {i: pt.copy() for i in range(n)}
+    kwargs = _solver_kwargs(worlds, n)
+    seg = _SegmentSolver(**kwargs)
+
+    fit = seg.fit_segment(1, 18, Mode.STATIONARY)
+    assert fit.kind == "stationary"
+    assert fit.residual_px < 1e-3
+    for f in (4, 10, 15):
+        assert np.linalg.norm(fit.worlds[f] - pt) < 0.2
+    v_a, v_b = fit.boundary_vel
+    assert v_a is not None and v_b is not None
+    np.testing.assert_allclose(v_a, np.zeros(3))
+    np.testing.assert_allclose(v_b, np.zeros(3))
+
+
+# ---------------------------------------------------------------------------
+# OUT_OF_VIEW
+# ---------------------------------------------------------------------------
+
+def test_out_of_view_empty_worlds():
+    n = 20
+    worlds = rolling_worlds((20.0, 34.0), (0.5, 0.0), n)
+    kwargs = _solver_kwargs(worlds, n)
+    seg = _SegmentSolver(**kwargs)
+
+    fit = seg.fit_segment(3, 12, Mode.OUT_OF_VIEW)
+    assert fit.kind == "out_of_view"
+    assert fit.worlds == {}
+    assert fit.residual_px == 0.0
+    assert fit.underconstrained is False
+    assert fit.boundary_vel == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# POSSESSED — Task 4
+# ---------------------------------------------------------------------------
+
+def test_possessed_not_yet_implemented():
+    n = 20
+    worlds = rolling_worlds((20.0, 34.0), (0.5, 0.0), n)
+    kwargs = _solver_kwargs(worlds, n)
+    seg = _SegmentSolver(**kwargs)
+    with pytest.raises(NotImplementedError):
+        seg.fit_segment(2, 15, Mode.POSSESSED, player_id="P001")
+
+
+# ---------------------------------------------------------------------------
+# Cache + budget
+# ---------------------------------------------------------------------------
+
+def test_cache_same_key_returns_same_object_increments_once():
+    n = 40
+    worlds = ballistic_worlds((30.0, 34.0, 0.5), (8.0, 2.0, 9.0), n)
+    kwargs = _solver_kwargs(worlds, n)
+    seg = _SegmentSolver(**kwargs)
+
+    assert seg._fit_calls == 0
+    first = seg.fit_segment(2, 30, Mode.FLIGHT)
+    assert seg._fit_calls == 1
+    second = seg.fit_segment(2, 30, Mode.FLIGHT)
+    assert second is first               # identical object from cache
+    assert seg._fit_calls == 1           # not re-fit
+
+    # A different key fits afresh.
+    third = seg.fit_segment(2, 28, Mode.FLIGHT)
+    assert third is not first
+    assert seg._fit_calls == 2
+
+
+def test_cache_keys_distinct_per_mode_and_player():
+    n = 30
+    worlds = rolling_worlds((20.0, 34.0), (0.5, 0.0), n)
+    kwargs = _solver_kwargs(worlds, n)
+    seg = _SegmentSolver(**kwargs)
+    seg.fit_segment(1, 20, Mode.ROLLING)
+    assert seg._fit_calls == 1
+    seg.fit_segment(1, 20, Mode.STATIONARY)   # same range, different mode
+    assert seg._fit_calls == 2
+    seg.fit_segment(1, 20, Mode.ROLLING)      # repeat → cached
+    assert seg._fit_calls == 2
+
+
+def test_budget_raises_on_second_distinct_fit():
+    n = 40
+    worlds = ballistic_worlds((30.0, 34.0, 0.5), (8.0, 2.0, 9.0), n)
+    cfg = SolverCfg()
+    kwargs = _solver_kwargs(worlds, n, cfg=cfg)
+    from src.utils.ball_mode_search import ModeSearchCfg
+
+    seg = _SegmentSolver(**kwargs, mode_cfg=ModeSearchCfg(max_segment_fit_calls=1))
+    seg.fit_segment(2, 30, Mode.FLIGHT)       # 1st real fit — ok
+    with pytest.raises(BudgetExceeded):
+        seg.fit_segment(2, 28, Mode.FLIGHT)   # 2nd distinct fit — over budget
+
+
+def test_budget_cached_hit_does_not_count():
+    n = 40
+    worlds = ballistic_worlds((30.0, 34.0, 0.5), (8.0, 2.0, 9.0), n)
+    from src.utils.ball_mode_search import ModeSearchCfg
+    kwargs = _solver_kwargs(worlds, n)
+    seg = _SegmentSolver(**kwargs, mode_cfg=ModeSearchCfg(max_segment_fit_calls=1))
+    seg.fit_segment(2, 30, Mode.FLIGHT)
+    # Re-using the same key must NOT trip the budget.
+    seg.fit_segment(2, 30, Mode.FLIGHT)
+    assert seg._fit_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# boundary_vel for all (computable) modes
+# ---------------------------------------------------------------------------
+
+def test_boundary_vel_present_for_flight_rolling_stationary():
+    n = 40
+    arc = ballistic_worlds((30.0, 34.0, 0.5), (8.0, 2.0, 9.0), n)
+    seg_f = _SegmentSolver(**_solver_kwargs(arc, n))
+    f_fit = seg_f.fit_segment(2, 30, Mode.FLIGHT)
+    assert all(v is not None for v in f_fit.boundary_vel)
+
+    roll = rolling_worlds((20.0, 34.0), (0.6, 0.0), n)
+    seg_r = _SegmentSolver(**_solver_kwargs(roll, n))
+    r_fit = seg_r.fit_segment(1, 30, Mode.ROLLING)
+    assert all(v is not None for v in r_fit.boundary_vel)
+
+    still = {i: np.array([40.0, 30.0, 0.11]) for i in range(n)}
+    seg_s = _SegmentSolver(**_solver_kwargs(still, n))
+    s_fit = seg_s.fit_segment(1, 30, Mode.STATIONARY)
+    assert all(v is not None for v in s_fit.boundary_vel)

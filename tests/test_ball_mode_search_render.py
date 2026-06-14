@@ -117,14 +117,18 @@ def test_flight_frames_have_segment_id_and_no_flight_state_for_possessed():
     flight_frames = [f for f, st in res.state_by_frame.items() if st == "flight"]
     assert flight_frames, "scene must produce at least one flight frame"
 
-    # Build the frame -> segment-id map the renderer must produce.
-    seg_id_by_frame = res.diagnostics.get("flight_segment_id_by_frame", {})
+    # Build the frame -> segment-id map EXACTLY as the stage does
+    # (ball.py _solve_shot: from result.flight_segments frame_ranges). This
+    # is the real contract — flight frames must fall inside a FlightSegment
+    # so the stage assigns them a non-null id.
+    seg_id_by_frame: dict[int, int] = {}
+    for seg in res.flight_segments:
+        for fi in range(seg.frame_range[0], seg.frame_range[1] + 1):
+            seg_id_by_frame[fi] = seg.id
     for f in flight_frames:
-        sid = seg_id_by_frame.get(f)
-        assert sid is not None, (
-            f"flight frame {f} has no flight_segment_id"
+        assert seg_id_by_frame.get(f) is not None, (
+            f"flight frame {f} is not inside any FlightSegment frame_range"
         )
-        assert any(s.id == sid for s in res.flight_segments)
 
 
 def test_possessed_frames_are_grounded_not_flight():

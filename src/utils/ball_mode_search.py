@@ -1754,24 +1754,6 @@ def _segment_to_outcome(seg: Segment, fps: float) -> _SpanOutcome:
     return out
 
 
-def _flight_segment_id_by_frame(
-    st: _CommitState,
-) -> dict[int, int]:
-    """Frame → emitted FlightSegment id for every flight frame.
-
-    Walks the committed ``segments`` (each a FlightSegment with a
-    ``frame_range``) so the renderer can attach the per-frame
-    ``flight_segment_id`` exactly as the BallTrack writer expects.
-    """
-    by_frame: dict[int, int] = {}
-    for seg in st.segments:
-        lo, hi = seg.frame_range
-        for f in range(lo, hi + 1):
-            if st.state_by_frame.get(f) == "flight":
-                by_frame[f] = seg.id
-    return by_frame
-
-
 def _out_of_view_spans(
     winner: Hypothesis,
     min_span: int,
@@ -1842,7 +1824,6 @@ def render(
     apply_restitution_flags(st, list(nodes), fps, cfg)
 
     # Per-frame flight-segment id for the BallTrack writer / overlay.
-    st.diagnostics["flight_segment_id_by_frame"] = _flight_segment_id_by_frame(st)
 
     # Phase-2 search diagnostics.
     runner = beam.runner_up

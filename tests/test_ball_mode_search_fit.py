@@ -387,3 +387,119 @@ def test_rolling_genuine_slow_roll_not_flagged():
         f"Genuine slow roll incorrectly flagged underconstrained "
         f"(residual={fit.residual_px:.2f})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fix F16: grounded ray-cast fallback — coverage where the roll is not clean
+# ---------------------------------------------------------------------------
+
+def _grounded_jitter_worlds(n: int, start_frame: int = 0):
+    """A ball moving on the ground whose speed jitters back and forth — NOT a
+    clean constant-decel roll, so the rolling fit's residual gate fires, but it
+    is genuinely grounded (z = ball radius) and observed every frame.
+
+    Mirrors the piecewise open-span grounded fallback's job: the ball is
+    detected on the pitch but the constant-decel model cannot explain it, so
+    per-frame ground ray-casts are the honest coverage.
+    """
+    z = 0.11
+    worlds: dict[int, np.ndarray] = {}
+    x = 30.0
+    for i in range(n):
+        # Speed oscillates (forward / nearly-stopped / forward) — a single
+        # constant acceleration cannot match this, so the roll fit residual
+        # will exceed the gate.  Kept slow enough that the ground-track speed
+        # stays well under ``rolling_max_speed_m_s`` (a real ground pass), so
+        # the raw-raycast plausibility gate does NOT mistake it for an arc.
+        step = 0.35 if (i // 3) % 2 == 0 else 0.02
+        x += step
+        worlds[start_frame + i] = np.array([x, 34.0 + 0.5 * np.sin(i * 0.5), z])
+    return worlds
+
+
+def test_rolling_falls_back_to_ground_raycasts_when_roll_not_clean():
+    """Fix F16: a grounded but NOT-cleanly-rolling observed span must fall back
+    to per-frame ground ray-casts (pixel-exact, residual ≈ 0, NOT
+    underconstrained) rather than returning a high-residual roll fit.
+
+    This mirrors piecewise's open-span grounded ray-cast fallback so the global
+    solver gets the same grounded coverage piecewise enjoys.
+    """
+    n = 30
+    worlds = _grounded_jitter_worlds(n)
+    # Tight rolling residual gate so the constant-decel fit is rejected and the
+    # ray-cast fallback must kick in.
+    cfg = SolverCfg(rolling_max_residual_px=2.0)
+    kwargs = _solver_kwargs(worlds, n, cfg=cfg)
+    seg = _SegmentSolver(**kwargs)
+
+    fa, fb = 1, 28
+    fit = seg.fit_segment(fa, fb, Mode.ROLLING)
+
+    assert fit.kind == "rolling"
+    # Pixel-exact ray-casts reproject to their own pixels → residual ≈ 0.
+    assert fit.residual_px < 1.0, (
+        f"ground ray-cast fallback should be pixel-exact, got "
+        f"residual_px={fit.residual_px:.3f}"
+    )
+    assert not fit.underconstrained, (
+        "a span fully covered by valid ground ray-casts must NOT be flagged "
+        "underconstrained (it is the honest grounded explanation)"
+    )
+    # Worlds cover (nearly) all interior observed frames, on the ground, and
+    # close to the true grounded positions.
+    interior = list(range(fa + 1, fb))
+    covered = [f for f in interior if f in fit.worlds]
+    assert len(covered) >= len(interior) * 0.9, (
+        f"fallback should cover almost all observed frames; covered "
+        f"{len(covered)}/{len(interior)}"
+    )
+    for f in covered:
+        assert abs(fit.worlds[f][2] - cfg.ball_radius_m) < 1e-6
+        assert np.linalg.norm(fit.worlds[f][:2] - worlds[f][:2]) < 0.5
+    v_a, v_b = fit.boundary_vel
+    assert v_a is not None and v_b is not None
+
+
+def test_rolling_fallback_excludes_gap_fill_frame_no_teleport():
+    """Fix F16 guard: a gap-fill (synthesised) frame inside a grounded span is
+    excluded from the ray-cast fallback — no teleport from an extrapolated
+    pixel.  Mirrors the piecewise open-span guard.
+    """
+    from src.utils.ball_tracker import TrackerStep
+    from tests.fixtures.ball_synthetic import (
+        broadcast_camera,
+        per_frame_cams,
+        project_track,
+    )
+
+    n = 30
+    worlds = _grounded_jitter_worlds(n)
+    K, R, t = broadcast_camera()
+    pixels = project_track(worlds, K, R, t)
+
+    gap_frame = 12
+    steps = []
+    for fi in range(n):
+        steps.append(TrackerStep(
+            frame=fi, uv=pixels.get(fi), p_flight=0.0,
+            is_outlier=False, is_gap_fill=(fi == gap_frame),
+        ))
+    per_K, per_R, per_t = per_frame_cams(n)
+    cfg = SolverCfg(rolling_max_residual_px=2.0)
+    seg = _SegmentSolver(
+        nodes=(), steps=steps,
+        confidences={i: 1.0 for i in range(n)},
+        per_frame_K=per_K, per_frame_R=per_R, per_frame_t=per_t,
+        distortion=(0.0, 0.0), fps=FPS, n_frames=n,
+        pitch_length_m=105.0, pitch_width_m=68.0,
+        split_hints=(), z_hints=None, manual_obs_frames=None,
+        world_fixes=None, cfg=cfg,
+    )
+
+    fit = seg.fit_segment(1, 28, Mode.ROLLING)
+    # The gap-fill frame must NOT receive a ray-cast world from the fallback.
+    assert gap_frame not in fit.worlds, (
+        "gap-fill frame must be excluded from the ground ray-cast fallback "
+        "(no teleport from an extrapolated pixel)"
+    )

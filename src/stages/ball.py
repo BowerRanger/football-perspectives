@@ -131,6 +131,29 @@ class _DetectArtifacts:
     # Manual anchors
     manual_by_frame: dict[int, object]  # dict[int, BallAnchor]
 
+
+def _accepted_obs_and_cams(
+    arts: "_DetectArtifacts",
+) -> tuple[dict[int, tuple[tuple[float, float], float]], dict[int, tuple]]:
+    """Accepted-evidence observation + camera maps for triangulation.
+
+    Observations are frames with a non-outlier detection carrying a source
+    (detector/bridge/anchor/second_pass) — the same accepted-evidence
+    filter the second-pass corridor uses. Cameras are the shot's per-frame
+    (K, R, t).
+    """
+    obs = {
+        s.frame: (s.uv, arts.raw_confidences.get(s.frame, 0.0))
+        for s in arts.steps
+        if (s.uv is not None and s.frame in arts.sources and not s.is_outlier)
+    }
+    cams = {
+        f: (arts.per_frame_K[f], arts.per_frame_R[f], arts.per_frame_t[f])
+        for f in arts.per_frame_K
+    }
+    return obs, cams
+
+
 # Kept as module-level names: the ray-faithfulness tests (and the C1/C4
 # behaviours they pin) exercise these directly.
 _project_point_onto_pixel_ray = project_point_onto_pixel_ray
@@ -632,12 +655,16 @@ class BallStage(BaseStage):
 
         # --- Pass 2: triangulate per sync-group --------------------------
         fixes_by_shot, cr_summaries = self._triangulate_groups(
-            artifacts_by_shot, cfg, manifest=manifest,
+            artifacts_by_shot, cfg,
         )
 
         # --- Pass 3: solve all shots with fixes --------------------------
         for shot_id, arts in artifacts_by_shot.items():
-            self._solve_shot(arts, cfg, fixes=fixes_by_shot.get(shot_id))
+            self._solve_shot(
+                arts, cfg,
+                fixes=fixes_by_shot.get(shot_id),
+                cr_summary=cr_summaries.get(shot_id),
+            )
 
     def _run_shot(
         self,
@@ -1011,7 +1038,6 @@ class BallStage(BaseStage):
         self,
         artifacts_by_shot: dict[str, "_DetectArtifacts"],
         cfg: dict,
-        manifest: "ShotsManifest | None" = None,
     ) -> tuple[dict[str, dict[int, tuple[np.ndarray, float]]], dict[str, dict]]:
         """Cross-replay triangulation pass.
 
@@ -1039,16 +1065,10 @@ class BallStage(BaseStage):
             logger.warning("ball: failed to load sync_map.json: %s — skipping triangulation", exc)
             return {}, {}
 
-        # Build a shot_id -> group_id mapping from the manifest groups
-        # (needed to look up which sync-group each shot belongs to).
-        shot_to_group: dict[str, str] = {}
-        if manifest is not None:
-            for shot in manifest.shots:
-                if shot.group_id:
-                    shot_to_group[shot.id] = shot.group_id
-
         fixes_by_shot: dict[str, dict[int, tuple[np.ndarray, float]]] = {}
         summaries_by_shot: dict[str, dict] = {}
+        ball_dir = self.output_dir / "ball"
+        weight = cr_cfg.fix_weight_px_per_m
 
         for group_sync in sync_map.groups:
             # Gather the members that are both in this group AND detected.
@@ -1063,63 +1083,37 @@ class BallStage(BaseStage):
             members_present.sort(key=lambda a: abs(a.frame_offset))
             align_a = members_present[0]
             sides_b = members_present[1:]
-
             arts_a = artifacts_by_shot[align_a.shot_id]
+            obs_a, cams_a = _accepted_obs_and_cams(arts_a)
 
-            # Build obs and cams for side A (accepted evidence only).
-            obs_a = {
-                s.frame: (s.uv, arts_a.raw_confidences.get(s.frame, 0.0))
-                for s in arts_a.steps
-                if (
-                    s.uv is not None
-                    and s.frame in arts_a.sources
-                    and not s.is_outlier
-                )
-            }
-            cams_a = {
-                f: (arts_a.per_frame_K[f], arts_a.per_frame_R[f], arts_a.per_frame_t[f])
-                for f in arts_a.per_frame_K
-            }
+            # Accumulate the reference shot's fixes/summary across ALL
+            # partners; its sidecar is written ONCE after the partner loop
+            # so a multi-partner group never clobbers the reference.
+            a_fix_records: list[BallFix] = []
+            a_best_miss: dict[int, float] = {}
+            a_partners: dict[str, dict] = {}
+            a_ray_misses: list[float] = []
+            a_parallaxes: list[float] = []
 
             for align_b in sides_b:
                 arts_b = artifacts_by_shot[align_b.shot_id]
-                obs_b = {
-                    s.frame: (s.uv, arts_b.raw_confidences.get(s.frame, 0.0))
-                    for s in arts_b.steps
-                    if (
-                        s.uv is not None
-                        and s.frame in arts_b.sources
-                        and not s.is_outlier
-                    )
-                }
-                cams_b = {
-                    f: (arts_b.per_frame_K[f], arts_b.per_frame_R[f], arts_b.per_frame_t[f])
-                    for f in arts_b.per_frame_K
-                }
+                obs_b, cams_b = _accepted_obs_and_cams(arts_b)
 
                 # delta_saved = offset_B - offset_A (per sync_map convention:
                 # f_b - frame_offset_B == f_a - frame_offset_A
                 # => f_b = f_a + (offset_B - offset_A)).
                 delta_saved = float(align_b.frame_offset - align_a.frame_offset)
 
-                # Refine the offset.
-                refined_offset, median_miss, n_pairs = refine_pair_offset(
-                    obs_a=obs_a, cams_a=cams_a,
-                    obs_b=obs_b, cams_b=cams_b,
+                refined_offset, _refine_miss, n_pairs = refine_pair_offset(
+                    obs_a=obs_a, cams_a=cams_a, obs_b=obs_b, cams_b=cams_b,
                     saved_offset=delta_saved, cfg=cr_cfg,
-                    distortion_a=arts_a.distortion,
-                    distortion_b=arts_b.distortion,
+                    distortion_a=arts_a.distortion, distortion_b=arts_b.distortion,
                 )
-
-                # Triangulate.
                 pair_fixes: list[PairFix] = triangulate_pair(
-                    obs_a=obs_a, cams_a=cams_a,
-                    obs_b=obs_b, cams_b=cams_b,
+                    obs_a=obs_a, cams_a=cams_a, obs_b=obs_b, cams_b=cams_b,
                     offset_b_minus_a=refined_offset, cfg=cr_cfg,
-                    distortion_a=arts_a.distortion,
-                    distortion_b=arts_b.distortion,
+                    distortion_a=arts_a.distortion, distortion_b=arts_b.distortion,
                 )
-
                 if not pair_fixes:
                     logger.info(
                         "ball: cross-replay: no inlier fixes for pair %s / %s",
@@ -1127,86 +1121,105 @@ class BallStage(BaseStage):
                     )
                     continue
 
-                median_parallax = float(np.median([fx.parallax_deg for fx in pair_fixes]))
-                cross_replay_summary = {
-                    "partner_shots": [align_b.shot_id],
+                # Per-partner metadata. median_ray_miss is over the accepted
+                # inlier fixes (what actually constrains the solve), not the
+                # refine-grid median used internally for offset selection.
+                inlier_miss = float(np.median([fx.ray_miss_m for fx in pair_fixes]))
+                inlier_parallax = float(
+                    np.median([fx.parallax_deg for fx in pair_fixes])
+                )
+                partner_meta = {
                     "saved_offset": delta_saved,
                     "refined_offset": refined_offset,
                     "offset_disagreement_frames": abs(refined_offset - delta_saved),
                     "n_pairs": n_pairs,
                     "n_inlier_fixes": len(pair_fixes),
-                    "median_ray_miss_m": float(median_miss),
-                    "median_parallax_deg": median_parallax,
+                    "median_ray_miss_m": inlier_miss,
+                    "median_parallax_deg": inlier_parallax,
                 }
+                a_partners[align_b.shot_id] = partner_meta
 
-                weight = cr_cfg.fix_weight_px_per_m
-
-                # Build per-shot fix dicts.
-                # shotA: keyed by frame_a
+                # Reference-shot solver fixes: keep the lowest-ray-miss fix
+                # per frame across partners; sidecar keeps every record.
+                a_solver = fixes_by_shot.setdefault(align_a.shot_id, {})
                 for fx in pair_fixes:
-                    fixes_by_shot.setdefault(align_a.shot_id, {})[fx.frame_a] = (
-                        np.array(fx.xyz), weight
-                    )
-                # shotB: keyed by frame_b
-                for fx in pair_fixes:
-                    fixes_by_shot.setdefault(align_b.shot_id, {})[fx.frame_b] = (
-                        np.array(fx.xyz), weight
-                    )
+                    prev = a_best_miss.get(fx.frame_a)
+                    if prev is None or fx.ray_miss_m < prev:
+                        a_best_miss[fx.frame_a] = fx.ray_miss_m
+                        a_solver[fx.frame_a] = (np.array(fx.xyz), weight)
+                    a_fix_records.append(BallFix(
+                        frame=fx.frame_a, xyz=fx.xyz,
+                        ray_miss_m=fx.ray_miss_m, parallax_deg=fx.parallax_deg,
+                        partner_shot=align_b.shot_id, partner_frame=fx.frame_b,
+                    ))
+                    a_ray_misses.append(fx.ray_miss_m)
+                    a_parallaxes.append(fx.parallax_deg)
 
-                # Record the cross_replay summary for both shots' diag.
-                summaries_by_shot[align_a.shot_id] = cross_replay_summary
-                summaries_by_shot[align_b.shot_id] = {
-                    **cross_replay_summary,
+                # Partner shot has a single partner (the reference): write its
+                # fixes + summary + sidecar now.
+                b_solver = fixes_by_shot.setdefault(align_b.shot_id, {})
+                for fx in pair_fixes:
+                    b_solver[fx.frame_b] = (np.array(fx.xyz), weight)
+                b_summary = {
                     "partner_shots": [align_a.shot_id],
+                    **partner_meta,
+                    "partners": {align_a.shot_id: partner_meta},
                 }
-
-                # Persist fix sidecars.
-                ball_dir = self.output_dir / "ball"
+                summaries_by_shot[align_b.shot_id] = b_summary
                 ball_dir.mkdir(parents=True, exist_ok=True)
-
-                a_ball_fixes = tuple(
-                    BallFix(
-                        frame=fx.frame_a,
-                        xyz=fx.xyz,
-                        ray_miss_m=fx.ray_miss_m,
-                        parallax_deg=fx.parallax_deg,
-                        partner_shot=align_b.shot_id,
-                        partner_frame=fx.frame_b,
-                    )
-                    for fx in pair_fixes
-                )
-                BallFixSet(
-                    clip_id=arts_a.camera_clip_id,
-                    group_id=group_sync.group_id,
-                    cross_replay=cross_replay_summary,
-                    fixes=a_ball_fixes,
-                ).save(ball_dir / f"{align_a.shot_id}_ball_fixes.json")
-
-                b_ball_fixes = tuple(
-                    BallFix(
-                        frame=fx.frame_b,
-                        xyz=fx.xyz,
-                        ray_miss_m=fx.ray_miss_m,
-                        parallax_deg=fx.parallax_deg,
-                        partner_shot=align_a.shot_id,
-                        partner_frame=fx.frame_a,
-                    )
-                    for fx in pair_fixes
-                )
-                b_summary = summaries_by_shot[align_b.shot_id]
                 BallFixSet(
                     clip_id=arts_b.camera_clip_id,
                     group_id=group_sync.group_id,
                     cross_replay=b_summary,
-                    fixes=b_ball_fixes,
+                    fixes=tuple(
+                        BallFix(
+                            frame=fx.frame_b, xyz=fx.xyz,
+                            ray_miss_m=fx.ray_miss_m, parallax_deg=fx.parallax_deg,
+                            partner_shot=align_a.shot_id, partner_frame=fx.frame_a,
+                        )
+                        for fx in pair_fixes
+                    ),
                 ).save(ball_dir / f"{align_b.shot_id}_ball_fixes.json")
-
                 logger.info(
                     "ball: cross-replay %s / %s: %d inlier fixes, "
                     "refined offset %.2f (saved %.2f), median miss %.3f m",
                     align_a.shot_id, align_b.shot_id,
-                    len(pair_fixes), refined_offset, delta_saved, median_miss,
+                    len(pair_fixes), refined_offset, delta_saved, inlier_miss,
                 )
+
+            if not a_partners:
+                continue  # no partner produced fixes for the reference
+
+            # Aggregate the reference shot's summary. Offsets are inherently
+            # per-partner, so top-level scalars report the dominant pairing
+            # (most inlier fixes) and the WORST disagreement (the review cue);
+            # full per-partner detail lives in `partners`.
+            dominant = max(
+                a_partners.values(), key=lambda p: p["n_inlier_fixes"],
+            )
+            a_summary = {
+                "partner_shots": sorted(a_partners.keys()),
+                "saved_offset": dominant["saved_offset"],
+                "refined_offset": dominant["refined_offset"],
+                "offset_disagreement_frames": max(
+                    p["offset_disagreement_frames"] for p in a_partners.values()
+                ),
+                "n_pairs": sum(p["n_pairs"] for p in a_partners.values()),
+                "n_inlier_fixes": sum(
+                    p["n_inlier_fixes"] for p in a_partners.values()
+                ),
+                "median_ray_miss_m": float(np.median(a_ray_misses)),
+                "median_parallax_deg": float(np.median(a_parallaxes)),
+                "partners": a_partners,
+            }
+            summaries_by_shot[align_a.shot_id] = a_summary
+            ball_dir.mkdir(parents=True, exist_ok=True)
+            BallFixSet(
+                clip_id=arts_a.camera_clip_id,
+                group_id=group_sync.group_id,
+                cross_replay=a_summary,
+                fixes=tuple(a_fix_records),
+            ).save(ball_dir / f"{align_a.shot_id}_ball_fixes.json")
 
         return fixes_by_shot, summaries_by_shot
 
@@ -1215,12 +1228,16 @@ class BallStage(BaseStage):
         artifacts: "_DetectArtifacts",
         cfg: dict,
         fixes: "dict[int, tuple[np.ndarray, float]] | None",
+        cr_summary: "dict | None" = None,
     ) -> None:
         """Solve pass for one shot: player context → events → anchors →
         nodes → solve_piecewise (with optional world fixes) → outputs → diag.
 
         ``fixes`` is ``{frame: (xyz_array, weight)}`` from the triangulation
         pass; ``None`` or empty means the pre-1.5 single-shot path.
+        ``cr_summary`` is this run's cross_replay summary for the shot (None
+        when no triangulation produced fixes); it is written to the diag
+        directly so the diag always reflects the current run.
         """
         shot_id = artifacts.shot_id
         ball_out_path = artifacts.ball_out_path
@@ -1533,16 +1550,17 @@ class BallStage(BaseStage):
                 span["start"], span["end"], span.get("residual_px") or -1.0,
             )
 
-        # cross_replay summary: loaded from the fixes sidecar if present,
-        # or None for single-shot runs.
-        cr_summary: dict | None = None
+        # cross_replay summary reflects THIS run's triangulation (None for
+        # single-shot / disabled / no-partner). A stale fixes sidecar from a
+        # prior run is removed when this run produced no fixes, so the
+        # on-disk fixes never outlive the solve that consumed them.
         fixes_path = ball_out_path.with_name(
             ball_out_path.name.replace("ball_track", "ball_fixes")
         )
-        if fixes_path.exists():
+        if cr_summary is None and fixes_path.exists():
             try:
-                cr_summary = BallFixSet.load(fixes_path).cross_replay
-            except Exception:
+                fixes_path.unlink()
+            except OSError:
                 pass
 
         diag_path = ball_out_path.with_name(

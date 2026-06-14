@@ -49,20 +49,31 @@ def _camera_pose_a() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return K, R, t
 
 
-def _camera_pose_b() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Secondary camera ~30 m away for adequate parallax."""
-    centre_b = np.array([20.0, -30.0, 25.0])
+def _camera_from_centre(
+    centre: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """OpenCV-convention camera at ``centre`` looking at the pitch centre."""
     target = np.array([52.5, 34.0, 0.0])
-    fwd = target - centre_b
+    fwd = target - centre
     fwd /= np.linalg.norm(fwd)
     world_up = np.array([0.0, 0.0, 1.0])
     right = np.cross(fwd, world_up)
     right /= np.linalg.norm(right)
     down = np.cross(fwd, right)
     R = np.array([right, down, fwd], dtype=float)
-    t = -R @ centre_b
+    t = -R @ centre
     K = np.array([[1500.0, 0, 640.0], [0, 1500.0, 360.0], [0, 0, 1.0]])
     return K, R, t
+
+
+def _camera_pose_b() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Secondary camera ~30 m away for adequate parallax."""
+    return _camera_from_centre(np.array([20.0, -30.0, 25.0]))
+
+
+def _camera_pose_c() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Tertiary camera on the far side for the multi-partner test."""
+    return _camera_from_centre(np.array([85.0, -30.0, 25.0]))
 
 
 def _save_camera_track(
@@ -373,3 +384,177 @@ def test_single_shot_no_fixes_sidecar(tmp_path: Path):
     assert diag.get("cross_replay") is None, (
         f"Single-shot diag should have cross_replay=null, got {diag.get('cross_replay')}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Multi-partner group: the reference shot aggregates fixes from all partners
+# ---------------------------------------------------------------------------
+
+def _build_three_member_scene(tmp_path: Path, *, offset_c: int = 9):
+    """Three shots in one group (A ref, B at +5, C at +offset_c). Returns the
+    concatenated detector and the synthetic frame counts."""
+    Ka, Ra, ta = _camera_pose_a()
+    Kb, Rb, tb = _camera_pose_b()
+    Kc, Rc, tc = _camera_pose_c()
+    n_a = N_A
+    n_b = N_A + OFFSET
+    n_c = N_A + offset_c
+
+    _save_camera_track(tmp_path / "camera" / "shotA_camera_track.json", Ka, Ra, ta, n_a, clip_id="shotA")
+    _save_camera_track(tmp_path / "camera" / "shotB_camera_track.json", Kb, Rb, tb, n_b, clip_id="shotB")
+    _save_camera_track(tmp_path / "camera" / "shotC_camera_track.json", Kc, Rc, tc, n_c, clip_id="shotC")
+    _write_blank_clip(tmp_path / "shots" / "shotA.mp4", n_a)
+    _write_blank_clip(tmp_path / "shots" / "shotB.mp4", n_b)
+    _write_blank_clip(tmp_path / "shots" / "shotC.mp4", n_c)
+
+    ShotsManifest(
+        source_file="synthetic", fps=FPS, total_frames=n_a + n_b + n_c,
+        shots=[
+            Shot(id="shotA", start_frame=0, end_frame=n_a - 1, start_time=0.0,
+                 end_time=(n_a - 1) / FPS, clip_file="shots/shotA.mp4", group_id="g1"),
+            Shot(id="shotB", start_frame=0, end_frame=n_b - 1, start_time=0.0,
+                 end_time=(n_b - 1) / FPS, clip_file="shots/shotB.mp4", group_id="g1"),
+            Shot(id="shotC", start_frame=0, end_frame=n_c - 1, start_time=0.0,
+                 end_time=(n_c - 1) / FPS, clip_file="shots/shotC.mp4", group_id="g1"),
+        ],
+    ).save(tmp_path / "shots" / "shots_manifest.json")
+
+    data = {
+        "reference_shot": "shotA",
+        "alignments": [
+            {"shot_id": "shotA", "frame_offset": 0, "method": "manual", "confidence": 1.0},
+            {"shot_id": "shotB", "frame_offset": OFFSET, "method": "manual", "confidence": 1.0},
+            {"shot_id": "shotC", "frame_offset": offset_c, "method": "manual", "confidence": 1.0},
+        ],
+    }
+    (tmp_path / "shots" / "sync_map.json").write_text(json.dumps(data, indent=2))
+
+    def _dets(Kx, Rx, tx, nx, off):
+        out = []
+        for f_x in range(nx):
+            f_a = f_x - off
+            if 0 <= f_a < n_a:
+                u, v = _project(_truth_world(f_a), Kx, Rx, tx)
+                out.append((u, v, 0.9))
+            else:
+                out.append(None)
+        return out
+
+    all_dets = (
+        _dets(Ka, Ra, ta, n_a, 0)
+        + _dets(Kb, Rb, tb, n_b, OFFSET)
+        + _dets(Kc, Rc, tc, n_c, offset_c)
+    )
+    return all_dets
+
+
+@pytest.mark.integration
+def test_three_member_group_aggregates_reference_fixes(tmp_path: Path):
+    """A 3-member group must give the reference shot a sidecar holding fixes
+    from BOTH partners (not just the last), with both listed in partner_shots
+    and the partners sub-dict; each non-reference shot gets its own sidecar."""
+    offset_c = 9
+    all_dets = _build_three_member_scene(tmp_path, offset_c=offset_c)
+
+    stage = BallStage(
+        config={"ball": {
+            "detector": "fake",
+            "appearance_bridge": {"enabled": False},
+            "second_pass": {"enabled": False},
+            "auto_anchors": {"enabled": True, "grounded_interval": 8},
+        }},
+        output_dir=tmp_path,
+        ball_detector=FakeBallDetector(all_dets),
+    )
+    stage.run()
+
+    ball_dir = tmp_path / "ball"
+    fs_a = BallFixSet.load(ball_dir / "shotA_ball_fixes.json")
+
+    # partner_shots lists BOTH partners; partners sub-dict has both.
+    assert sorted(fs_a.cross_replay["partner_shots"]) == ["shotB", "shotC"]
+    assert set(fs_a.cross_replay["partners"].keys()) == {"shotB", "shotC"}
+
+    # The reference sidecar carries fix records from BOTH partners (the bug
+    # was the second partner clobbering the first).
+    partners_in_fixes = {fx.partner_shot for fx in fs_a.fixes}
+    assert partners_in_fixes == {"shotB", "shotC"}, (
+        f"reference fixes only reference {partners_in_fixes}, expected both partners"
+    )
+
+    # Aggregated count == sum of per-partner counts.
+    assert fs_a.cross_replay["n_inlier_fixes"] == sum(
+        p["n_inlier_fixes"] for p in fs_a.cross_replay["partners"].values()
+    )
+
+    # Each non-reference shot has its own single-partner sidecar.
+    for shot_id in ("shotB", "shotC"):
+        fs = BallFixSet.load(ball_dir / f"{shot_id}_ball_fixes.json")
+        assert fs.cross_replay["partner_shots"] == ["shotA"]
+        assert {fx.partner_shot for fx in fs.fixes} == {"shotA"}
+
+    # Every reference fix is still accurate to truth.
+    for fx in fs_a.fixes:
+        err = float(np.linalg.norm(np.array(fx.xyz) - _truth_world(fx.frame)))
+        assert err < 0.15, f"shotA fix frame {fx.frame}: err {err:.3f} m"
+
+
+# ---------------------------------------------------------------------------
+# Stale-sidecar hygiene: a re-run with triangulation disabled clears fixes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+def test_stale_fixes_sidecar_cleared_when_disabled(tmp_path: Path):
+    """Run a two-shot group (sidecars created), then re-run with cross_replay
+    disabled: the stale fixes sidecars must be deleted and both diags must
+    report cross_replay: null (the diag never lies about the current run)."""
+    Ka, Ra, ta = _camera_pose_a()
+    Kb, Rb, tb = _camera_pose_b()
+    _save_camera_track(tmp_path / "camera" / "shotA_camera_track.json", Ka, Ra, ta, N_A, clip_id="shotA")
+    _save_camera_track(tmp_path / "camera" / "shotB_camera_track.json", Kb, Rb, tb, N_B, clip_id="shotB")
+    _write_blank_clip(tmp_path / "shots" / "shotA.mp4", N_A)
+    _write_blank_clip(tmp_path / "shots" / "shotB.mp4", N_B)
+    ShotsManifest(
+        source_file="synthetic", fps=FPS, total_frames=N_A + N_B,
+        shots=[
+            Shot(id="shotA", start_frame=0, end_frame=N_A - 1, start_time=0.0,
+                 end_time=(N_A - 1) / FPS, clip_file="shots/shotA.mp4", group_id="g1"),
+            Shot(id="shotB", start_frame=0, end_frame=N_B - 1, start_time=0.0,
+                 end_time=(N_B - 1) / FPS, clip_file="shots/shotB.mp4", group_id="g1"),
+        ],
+    ).save(tmp_path / "shots" / "shots_manifest.json")
+    _write_sync_map_v1(tmp_path / "shots" / "sync_map.json")
+
+    all_dets = _make_detections_a(Ka, Ra, ta) + _make_detections_b(Kb, Rb, tb)
+    base_cfg = {
+        "detector": "fake",
+        "appearance_bridge": {"enabled": False},
+        "second_pass": {"enabled": False},
+        "auto_anchors": {"enabled": True, "grounded_interval": 8},
+    }
+
+    # Run 1: triangulation enabled → sidecars exist.
+    BallStage(
+        config={"ball": base_cfg},
+        output_dir=tmp_path,
+        ball_detector=FakeBallDetector(all_dets),
+    ).run()
+    ball_dir = tmp_path / "ball"
+    assert (ball_dir / "shotA_ball_fixes.json").exists()
+    assert (ball_dir / "shotB_ball_fixes.json").exists()
+
+    # Run 2: triangulation disabled (fresh detector — FakeBallDetector cycles).
+    BallStage(
+        config={"ball": {**base_cfg, "cross_replay": {"enabled": False}}},
+        output_dir=tmp_path,
+        ball_detector=FakeBallDetector(all_dets),
+    ).run()
+
+    for shot_id in ("shotA", "shotB"):
+        assert not (ball_dir / f"{shot_id}_ball_fixes.json").exists(), (
+            f"{shot_id}: stale fixes sidecar survived a disabled re-run"
+        )
+        diag = json.loads((ball_dir / f"{shot_id}_ball_diag.json").read_text())
+        assert diag.get("cross_replay") is None, (
+            f"{shot_id}: diag cross_replay not null after disabled re-run"
+        )

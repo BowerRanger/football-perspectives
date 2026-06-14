@@ -198,6 +198,15 @@ class ModeSearchCfg:
     max_segment_fit_calls: int = 20000
     """Hard budget: raise BudgetExceeded once the fitter cache hits this limit."""
 
+    max_skip: int = 3
+    """Max intermediate breakpoints a single segment may absorb (skip).
+
+    A span from ``bp_i`` may extend directly to ``bp_j`` with
+    ``j <= i + 1 + max_skip``; the ``j - i - 1`` intermediate breakpoints are
+    *skipped* and each is charged ``ignored_event_cost``.  Bounds beam
+    branching while letting the search merge spurious velocity breaks (the
+    40-break case) into a single physical segment."""
+
 
 def _mode_search_cfg(cfg: dict[str, Any]) -> ModeSearchCfg:
     """Map ``ball.mode_search.*`` config keys onto :class:`ModeSearchCfg`.
@@ -230,6 +239,7 @@ def _mode_search_cfg(cfg: dict[str, Any]) -> ModeSearchCfg:
             ms.get("velocity_discontinuity_weight", base.velocity_discontinuity_weight)
         ),
         max_segment_fit_calls=int(ms.get("max_segment_fit_calls", base.max_segment_fit_calls)),
+        max_skip=int(ms.get("max_skip", base.max_skip)),
     )
 
 
@@ -1051,3 +1061,314 @@ def ignored_event_cost(bp: Breakpoint, cfg: ModeSearchCfg) -> float:
         Non-negative cost to be added to the skipping hypothesis.
     """
     return cfg.ignored_event_penalty * float(bp.event_score)
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — left-to-right beam search loop
+# ---------------------------------------------------------------------------
+
+# Cost-quantization precision for the deterministic tie-break key (F10).
+# Float noise below this magnitude must NOT flip hypothesis ordering.
+_COST_QUANT_DP = 6
+
+
+@dataclass(frozen=True, eq=False)
+class BeamResult:
+    """Outcome of :func:`run_beam`.
+
+    Attributes
+    ----------
+    winner:
+        Lowest-cost COMPLETE hypothesis (spans frame 0 .. n_frames-1).
+    runner_up:
+        Lowest-cost complete hypothesis whose segment partition (breakpoint
+        set OR any segment's mode) differs from the winner (design note F11);
+        ``None`` when only one partition reached the end.
+    hypotheses_explored:
+        Total number of candidate hypotheses generated (pre-pruning) — a
+        coarse search-effort metric for diagnostics.
+    fit_calls:
+        Number of real (non-cached) segment fits charged to the solver's
+        budget over the whole search.
+    """
+
+    winner: Hypothesis
+    runner_up: Hypothesis | None
+    hypotheses_explored: int
+    fit_calls: int
+
+
+def _eligible_modes(
+    seg_solver: "_SegmentSolver",
+    fa: int,
+    ball_uv_at,
+) -> list[tuple[Mode, str | None]]:
+    """Return ``(mode, player_id)`` extension candidates for a span at ``fa``.
+
+    ROLLING / FLIGHT / STATIONARY / OUT_OF_VIEW are always candidates (each
+    with ``player_id=None``).  POSSESSED is added — one branch per player
+    returned by :func:`nearest_players` over the last confident ball pixel at
+    ``fa`` — only when a :class:`PlayerContext` is available AND a ball pixel
+    exists at ``fa``.  OUT_OF_VIEW is always present as a fallback so a span
+    with no usable evidence can still be explained.
+    """
+    cands: list[tuple[Mode, str | None]] = [
+        (Mode.ROLLING, None),
+        (Mode.FLIGHT, None),
+        (Mode.STATIONARY, None),
+        (Mode.OUT_OF_VIEW, None),
+    ]
+    ctx = seg_solver._player_ctx
+    if ctx is not None and ball_uv_at is not None:
+        uv = ball_uv_at(fa)
+        if uv is not None:
+            for pid in nearest_players(uv, fa, ctx, k=2):
+                cands.append((Mode.POSSESSED, pid))
+    return cands
+
+
+def _quant_key(hyp: Hypothesis) -> tuple[float, int, int]:
+    """Deterministic ordering key (design note F10).
+
+    Cost is quantized to ``_COST_QUANT_DP`` decimals so float noise below that
+    magnitude cannot flip the ordering; ties then break by the last consumed
+    frame, then by the current mode's integer value (Mode ordering).
+    """
+    last_frame = hyp.segments[-1].fb if hyp.segments else -1
+    mode_int = int(hyp.cur_mode) if hyp.cur_mode is not None else -1
+    return (round(float(hyp.cost), _COST_QUANT_DP), last_frame, mode_int)
+
+
+def _collapse_dominated(hyps: list[Hypothesis]) -> list[Hypothesis]:
+    """Dominance collapse: among hypotheses ending at the same breakpoint with
+    the same ``(cur_mode, player_id)`` keep only the lowest-cost one.
+
+    They are interchangeable going forward (the only state the next extension
+    reads is ``last_bp_idx``, ``cur_mode``, ``player_id`` and ``end_velocity``
+    — and ``end_velocity`` is a deterministic function of the last segment's
+    fit, so two hypotheses with the same mode/player at the same column have
+    the same forward behaviour).  The lower-cost survivor dominates.
+
+    Deterministic: when costs tie within the quantization, the existing
+    quantized ordering picks the winner.
+    """
+    best: dict[tuple[int, int, str | None], Hypothesis] = {}
+    for h in hyps:
+        mode_int = int(h.cur_mode) if h.cur_mode is not None else -1
+        key = (h.last_bp_idx, mode_int, h.player_id)
+        cur = best.get(key)
+        if cur is None or _quant_key(h) < _quant_key(cur):
+            best[key] = h
+    return list(best.values())
+
+
+def _partition_sig(hyp: Hypothesis) -> tuple[tuple[int, int, int, str | None], ...]:
+    """Signature distinguishing partitions (F11): per-segment frame range +
+    mode + possessing player.  Two hypotheses with the same signature are the
+    same partition even if their float costs differ infinitesimally."""
+    return tuple(
+        (s.fa, s.fb, int(s.mode), s.player_id) for s in hyp.segments
+    )
+
+
+def run_beam(
+    seg_solver: "_SegmentSolver",
+    breakpoints: list[Breakpoint],
+    n_frames: int,
+    cfg: ModeSearchCfg,
+    *,
+    ball_uv_at,
+) -> BeamResult:
+    """Left-to-right beam search over timeline partitions.
+
+    Algorithm
+    ---------
+    The sorted ``breakpoints`` list (frame-0 boundary + manual anchors +
+    event candidates + final boundary, all SORTED by frame, supplied by the
+    caller) defines the partition lattice.  Hypotheses are extended one
+    *segment* at a time between consecutive *chosen* breakpoints:
+
+    - The seed hypothesis sits at breakpoint index 0 (the frame-0 boundary)
+      with no committed segment and zero cost.
+    - A hypothesis ending at breakpoint ``i`` may extend to breakpoint ``j``
+      with ``i < j <= i + 1 + cfg.max_skip``.  The segment covers
+      ``[bp_i.frame, bp_j.frame]``; the ``j - i - 1`` intermediate
+      breakpoints are *absorbed* (skipped) and each is charged
+      :func:`ignored_event_cost`.  This bounds branching (the span absorbs at
+      most ``max_skip`` breaks) while letting the beam merge spurious velocity
+      breaks into one physical segment.
+    - For each extension, every ``(mode, player_id)`` from
+      :func:`_eligible_modes` is tried.  Cost increment =
+      ``segment_cost(fit) + Σ ignored_event_cost(skipped) +
+      transition_cost(at bp_j)``.
+
+    Manual-anchor forcing (pruning, not penalty)
+    --------------------------------------------
+    A segment may NOT span across a manual-anchor frame: any extension whose
+    span ``[bp_i.frame, bp_j.frame]`` strictly contains a breakpoint with
+    ``is_manual=True`` is pruned outright.  Because manual anchors appear in
+    the breakpoint list, this also forces them to be chosen as boundaries:
+    the only way past a manual anchor is to stop a segment exactly on it.
+
+    Beam pruning + dominance
+    ------------------------
+    Per breakpoint column the live hypotheses are dominance-collapsed (same
+    ``(last_bp_idx, cur_mode, player_id)`` → keep lowest cost), then sorted by
+    the quantized key ``(round(cost, 6), last_frame, cur_mode_int)`` (F10) and
+    truncated to ``cfg.beam_width``.
+
+    Completion + runner-up
+    ----------------------
+    A hypothesis is *complete* when it ends at the final breakpoint index
+    (frame ``n_frames - 1``).  The winner is the lowest-cost complete
+    hypothesis; the runner-up is the lowest-cost complete hypothesis whose
+    partition signature (breakpoint set OR any segment's mode/player) differs
+    from the winner's (F11), or ``None`` if only one partition reached the end.
+
+    Determinism: no randomness; every ordering uses the quantized key.
+
+    Design decision — skip ∩ manual-anchor interaction
+    --------------------------------------------------
+    When a manual anchor is one of the intermediate breakpoints of a candidate
+    span, the span is pruned (it would strictly contain the manual frame).
+    The manual anchor therefore can never be "absorbed" — it always ends a
+    segment.  ``max_skip`` only ever absorbs non-manual candidate breaks.
+
+    Raises
+    ------
+    BudgetExceeded
+        Propagated unchanged from ``seg_solver.fit_segment`` so Task 8 can
+        catch it and fall back to the whole-shot piecewise solver (F8).
+    """
+    if len(breakpoints) < 2:
+        raise ValueError(
+            "run_beam requires at least two breakpoints (frame-0 + final "
+            "boundary)."
+        )
+
+    n_bp = len(breakpoints)
+    final_idx = n_bp - 1
+
+    # Precompute manual-frame set for fast strict-containment pruning.
+    manual_frames = sorted(bp.frame for bp in breakpoints if bp.is_manual)
+
+    def _spans_manual(fa: int, fb: int) -> bool:
+        """True if any manual anchor lies strictly inside (fa, fb)."""
+        for mf in manual_frames:
+            if fa < mf < fb:
+                return True
+        return False
+
+    # Seed: empty hypothesis at breakpoint index 0.
+    seed = Hypothesis(
+        last_bp_idx=0,
+        cur_mode=None,
+        segments=(),
+        cost=0.0,
+        end_velocity=None,
+        player_id=None,
+    )
+
+    # Column-keyed live beams: column index -> list[Hypothesis] ending there.
+    # We process columns in increasing order; extensions only ever move
+    # forward, so a single forward sweep suffices.
+    columns: dict[int, list[Hypothesis]] = {0: [seed]}
+    completed: list[Hypothesis] = []
+    hypotheses_explored = 0
+
+    for i in range(0, final_idx):
+        live = columns.get(i)
+        if not live:
+            continue
+        # Dominance-collapse + beam-prune this column before expanding it.
+        live = _collapse_dominated(live)
+        live.sort(key=_quant_key)
+        live = live[: cfg.beam_width]
+        columns[i] = live
+
+        bp_i = breakpoints[i]
+        fa = bp_i.frame
+        modes = _eligible_modes(seg_solver, fa, ball_uv_at)
+
+        j_max = min(final_idx, i + 1 + cfg.max_skip)
+        for j in range(i + 1, j_max + 1):
+            bp_j = breakpoints[j]
+            fb = bp_j.frame
+            if fb <= fa:
+                continue
+            if _spans_manual(fa, fb):
+                # Strictly contains a manual anchor — forbidden span; and any
+                # j beyond also would, so stop extending from this i.
+                break
+            # Skipped (absorbed) intermediate breakpoints i+1 .. j-1.
+            skip_cost = sum(
+                ignored_event_cost(breakpoints[s], cfg)
+                for s in range(i + 1, j)
+            )
+
+            for mode, pid in modes:
+                fit = seg_solver.fit_segment(fa, fb, mode, player_id=pid)
+                n_seg = fb - fa + 1
+                s_cost = segment_cost(fit, mode, n_seg, cfg)
+
+                new_seg = Segment(
+                    fa=fa,
+                    fb=fb,
+                    mode=mode,
+                    worlds=fit.worlds,
+                    residual_px=fit.residual_px,
+                    underconstrained=fit.underconstrained,
+                    kind=fit.kind,
+                    player_id=pid,
+                    boundary_vel=fit.boundary_vel,
+                )
+
+                for h in live:
+                    prev_seg = h.segments[-1] if h.segments else None
+                    next_start_vel = fit.boundary_vel[0]
+                    # The transition occurs where the NEW segment begins —
+                    # breakpoint ``i`` (frame ``fa``) — between the previous
+                    # segment and this one.  ``transition_cost`` scores that
+                    # break's event-agreement and the velocity continuity from
+                    # the previous segment's end velocity into this segment's
+                    # start velocity.
+                    t_cost = transition_cost(
+                        prev_seg, bp_i, mode,
+                        h.end_velocity, next_start_vel, cfg,
+                    )
+                    new_cost = h.cost + s_cost + skip_cost + t_cost
+                    new_hyp = Hypothesis(
+                        last_bp_idx=j,
+                        cur_mode=mode,
+                        segments=h.segments + (new_seg,),
+                        cost=new_cost,
+                        end_velocity=fit.boundary_vel[1],
+                        player_id=pid,
+                    )
+                    hypotheses_explored += 1
+                    if j == final_idx:
+                        completed.append(new_hyp)
+                    else:
+                        columns.setdefault(j, []).append(new_hyp)
+
+    if not completed:
+        raise RuntimeError(
+            "beam search produced no complete hypothesis spanning the clip — "
+            "check that the breakpoint list includes both clip boundaries."
+        )
+
+    completed.sort(key=_quant_key)
+    winner = completed[0]
+    win_sig = _partition_sig(winner)
+    runner_up: Hypothesis | None = None
+    for h in completed[1:]:
+        if _partition_sig(h) != win_sig:
+            runner_up = h
+            break
+
+    return BeamResult(
+        winner=winner,
+        runner_up=runner_up,
+        hypotheses_explored=hypotheses_explored,
+        fit_calls=seg_solver._fit_calls,
+    )

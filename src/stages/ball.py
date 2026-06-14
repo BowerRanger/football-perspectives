@@ -63,6 +63,11 @@ from src.utils.ball_auto_anchor import (
 from src.utils.ball_auto_events import AutoEventCfg, detect_events
 from src.utils.ball_detector import BallDetector, YOLOBallDetector
 from src.utils.ball_keyframe_builder import build_ball_keyframe_set
+from src.utils.ball_mode_search import (
+    BudgetExceeded,
+    _mode_search_cfg,
+    solve_modes,
+)
 from src.utils.ball_piecewise_solver import (
     SolverCfg,
     TrajectoryNode,
@@ -1432,7 +1437,11 @@ class BallStage(BaseStage):
             if e.kind == "velocity_break" and e.frame not in node_frames
         )
 
-        result = solve_piecewise(
+        # The solver seam (Phase 2, Task 8). Both paths receive the EXACT same
+        # kwargs — factored into one dict so the global path and its whole-shot
+        # piecewise fallback can never drift apart (F8: the fallback must yield
+        # the identical piecewise result, not a degraded beam result).
+        solve_kwargs = dict(
             nodes=nodes,
             steps=steps,
             confidences=raw_confidences,
@@ -1450,6 +1459,33 @@ class BallStage(BaseStage):
             cfg=solver_cfg,
             world_fixes=fixes or None,
         )
+
+        solver_name = str(cfg.get("solver", "piecewise"))
+        mode_search_fallback = False
+        if solver_name == "global":
+            try:
+                result = solve_modes(
+                    **solve_kwargs,
+                    mode_search_cfg=_mode_search_cfg(cfg),
+                    player_ctx=player_ctx,
+                    events=events,
+                )
+            except BudgetExceeded as exc:
+                logger.warning(
+                    "ball stage: global mode-search exceeded its fit budget "
+                    "(%s) — falling back to whole-shot piecewise solve", exc,
+                )
+                mode_search_fallback = True
+                result = solve_piecewise(**solve_kwargs)
+            except Exception as exc:  # noqa: BLE001 — any global-solve failure falls back
+                logger.warning(
+                    "ball stage: global mode-search failed (%s) — falling "
+                    "back to whole-shot piecewise solve", exc,
+                )
+                mode_search_fallback = True
+                result = solve_piecewise(**solve_kwargs)
+        else:
+            result = solve_piecewise(**solve_kwargs)
         world_by_frame = dict(result.world_by_frame)
         state_by_frame = dict(result.state_by_frame)
 
@@ -1566,7 +1602,8 @@ class BallStage(BaseStage):
         diag_path = ball_out_path.with_name(
             ball_out_path.name.replace("ball_track", "ball_diag")
         )
-        diag_path.write_text(json.dumps({
+        diag: dict = {
+            "solver": solver_name,
             "underconstrained_spans": result.diagnostics.get(
                 "underconstrained_spans", []),
             "segments": result.diagnostics.get("segments", []),
@@ -1591,4 +1628,11 @@ class BallStage(BaseStage):
             },
             "detection_coverage": artifacts.detection_coverage,
             "cross_replay": cr_summary,
-        }, indent=2))
+        }
+        if solver_name == "global":
+            # Surface the beam search-effort metrics + the fallback flag so the
+            # quality report / operator can see whether the global solve
+            # completed or fell back to whole-shot piecewise (F8).
+            diag["mode_search_fallback"] = mode_search_fallback
+            diag["mode_search"] = result.diagnostics.get("mode_search", {})
+        diag_path.write_text(json.dumps(diag, indent=2))

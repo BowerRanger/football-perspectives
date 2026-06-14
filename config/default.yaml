@@ -435,6 +435,35 @@ ball:
   # used only in tests via dependency injection.
   detector: wasb
   ball_radius_m: 0.11
+  # Trajectory solver backend (Phase 2). piecewise (default) is the greedy
+  # event-classification + per-span physical solve. global is the Phase-2
+  # mode-sequence beam search (rolling/flight/possessed/stationary/out_of_view
+  # partitions); it is opt-in until validated. On any global-solve failure or
+  # fit-budget overrun the stage falls back to a whole-shot piecewise solve.
+  solver: piecewise
+  # Beam mode-sequence search tuning (only consulted when solver: global).
+  # Each field maps onto ModeSearchCfg in src/utils/ball_mode_search.py.
+  mode_search:
+    # Hypotheses retained at each breakpoint column.
+    beam_width: 8
+    # BIC-style parsimony cost added per segment (penalises over-segmentation).
+    segment_cost_constant: 6.0
+    # Cost for a mode transition with no supporting event.
+    unexplained_break_penalty: 10.0
+    # Cost for skipping a high-score breakpoint without a matching transition.
+    ignored_event_penalty: 8.0
+    # Per OBSERVED frame charged when OUT_OF_VIEW gaps a detection-rich span.
+    out_of_view_frame_penalty: 1.5
+    # Tiny per genuinely-missing frame charge so a long empty gap is not free.
+    out_of_view_missing_frame_penalty: 0.05
+    # Pixel tolerance for the soft tether to the possessing player's foot.
+    possessed_tether_px: 40.0
+    # Weight on |Δv| when scoring velocity continuity across a break.
+    velocity_discontinuity_weight: 2.0
+    # Hard fit-call budget; exceeding it falls back to whole-shot piecewise.
+    max_segment_fit_calls: 20000
+    # Max intermediate breakpoints a single segment may absorb (skip).
+    max_skip: 3
   # Max consecutive frames the IMM tracker will gap-fill before emitting
   # state="missing". 6 ≈ 0.2 s at 30 fps.
   max_gap_frames: 6

@@ -329,7 +329,18 @@ class _SegmentSolver:
         fa_anchor_world: np.ndarray | None = None,
         fb_anchor_world: np.ndarray | None = None,
     ) -> SegmentFit:
-        """Fit ``[fa, fb]`` under ``mode``; memoized + budget-gated."""
+        """Fit ``[fa, fb]`` under ``mode``; memoized + budget-gated.
+
+        **Precondition (cache soundness — design note F7):**
+        ``fa_anchor_world`` and ``fb_anchor_world`` MUST be *manual-anchor*
+        worlds — i.e. worlds whose value is deterministically derived from
+        the frame index alone (operator-placed anchors looked up from the
+        ``BallAnchorSet``).  Do NOT pass a path-dependent world such as the
+        endpoint of a previously solved segment: the cache key records only
+        whether an anchor is present (``True``/``False``), not its value, so
+        a different world for the same frame produces a silent cache hit with
+        stale results and corrupts the beam search.
+        """
         key = (
             int(fa), int(fb), int(mode), player_id,
             fa_anchor_world is not None, fb_anchor_world is not None,
@@ -476,7 +487,15 @@ class _SegmentSolver:
         v_a = v0
         v_b = parabola_end_velocity(v0, (fb - fa) / fps)
 
-        resid = float(mean_resid) if np.isfinite(mean_resid) else 0.0
+        # Fix F5: recompute residual over obs frames only (raw pixels).
+        # ``mean_resid`` from fit_parabola_to_image_observations includes the
+        # 1e3-weighted knot residual block when knot_frames is non-empty,
+        # inflating the value when a manual-anchor knot is present.  Mirror
+        # ``_fit_arc`` in ball_piecewise_solver: call ``_pixel_rms`` over the
+        # actual observation frames used in this fit.
+        obs_frames_only = [f for f, _ in obs]
+        raw_resid = solver._pixel_rms(worlds, obs_frames_only)
+        resid = float(raw_resid) if (raw_resid is not None and np.isfinite(raw_resid)) else 0.0
         underconstrained = resid > cfg.flight_max_residual_px
         return SegmentFit(
             worlds=worlds,
@@ -533,6 +552,16 @@ class _SegmentSolver:
         underconstrained = (
             resid is not None and resid > cfg.rolling_max_residual_px
         )
+
+        # Fix: restore lob-degeneracy guard from ``_rolling_span``.
+        # A roll faster than any realistic ground pass is physically impossible
+        # — the usual culprit is a lob whose ground projection happens to fit
+        # the rolling model in pixels (monocular degeneracy).  Mirror the check
+        # in ball_piecewise_solver._rolling_span (line ~896–899).
+        if not underconstrained and len(pts) >= 2:
+            speeds = np.linalg.norm(np.diff(pts[:, :2], axis=0), axis=1) * fps
+            if float(np.max(speeds)) > cfg.rolling_max_speed_m_s:
+                underconstrained = True
 
         v_a = self._roll_velocity(fit, 0.0, z, fps)
         v_b = self._roll_velocity(fit, T, z, fps)

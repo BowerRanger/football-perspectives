@@ -277,3 +277,111 @@ def test_boundary_vel_present_for_flight_rolling_stationary():
     seg_s = _SegmentSolver(**_solver_kwargs(still, n))
     s_fit = seg_s.fit_segment(1, 30, Mode.STATIONARY)
     assert all(v is not None for v in s_fit.boundary_vel)
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: raw-px flight residual — anchor knot must NOT inflate residual_px
+# ---------------------------------------------------------------------------
+
+def test_flight_anchored_residual_is_pixel_rms_not_lm_mean_resid():
+    """Fix F5: ``residual_px`` must equal ``_pixel_rms`` over obs frames,
+    NOT the LM's ``mean_resid`` which includes the 1e3-weighted knot block.
+
+    We inject a fake ``fit_parabola_to_image_observations`` that returns a
+    deliberately inflated ``mean_resid`` (simulating a monocular scenario
+    where the LM's knot-weighted residual vector is large).  The test asserts
+    that ``_fit_flight`` ignores the returned ``mean_resid`` and instead
+    recomputes residual via ``_pixel_rms`` — which, for a well-fitting arc,
+    is low regardless of the injected mean_resid.
+    """
+    import unittest.mock as mock
+    from src.utils import bundle_adjust as ba
+    from src.utils.ball_physics import G_VEC, eval_parabola
+
+    n = 50
+    p0 = np.array([30.0, 34.0, 0.5])
+    v0 = np.array([8.0, 2.0, 9.0])
+    worlds = ballistic_worlds(tuple(p0), tuple(v0), n)
+    kwargs = _solver_kwargs(worlds, n)
+
+    fa, fb = 3, 35
+    # Real call with the true anchor so the fitted arc is accurate.
+    real_fn = ba.fit_parabola_to_image_observations
+
+    def fake_fit(*args, **kw):
+        """Delegate to the real fitter but then inflate mean_resid by 1000x."""
+        p0r, v0r, real_resid = real_fn(*args, **kw)
+        # Simulate knot-contaminated LM mean_resid: 1000x inflated.
+        return p0r, v0r, real_resid * 1000.0 + 99.0
+
+    with mock.patch.object(ba, "fit_parabola_to_image_observations", fake_fit):
+        seg = _SegmentSolver(**kwargs)
+        fit = seg.fit_segment(fa, fb, Mode.FLIGHT, fa_anchor_world=worlds[fa])
+
+    # The worlds are correct (fake_fit returns correct p0/v0), so the
+    # per-obs pixel error is near 0.  Fix 1 must give a low residual_px
+    # regardless of the injected inflated mean_resid.
+    assert fit.residual_px < 2.0, (
+        f"residual_px = {fit.residual_px:.2f} — "
+        "looks like the inflated LM mean_resid leaked into residual_px. "
+        "Fix 1 not applied: _fit_flight must recompute via _pixel_rms, "
+        "not use the return value of fit_parabola_to_image_observations."
+    )
+    # Also verify the underconstrained flag is correctly False.
+    assert not fit.underconstrained, (
+        "underconstrained should be False for a well-fitting arc — "
+        "the inflated mean_resid must not drive the underconstrained check."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: rolling lob-degeneracy guard — fast roll is flagged underconstrained
+# ---------------------------------------------------------------------------
+
+def test_rolling_lob_ground_projection_flagged_underconstrained():
+    """Fix: a lob arc whose ground-projection happens to fit a 'roll' in
+    pixels must be flagged ``underconstrained=True`` because its ground speed
+    exceeds ``rolling_max_speed_m_s``.
+
+    We use ``rolling_max_residual_px=50`` (very permissive) so the residual
+    gate alone does NOT fire — the test isolates the speed guard.
+    """
+    from src.utils.ball_piecewise_solver import SolverCfg
+
+    n = 40
+    # A nearly-horizontal low-altitude lob at 20 m/s — ground raycasts look
+    # like a fast roll in pixels.  rolling_max_residual_px is set very high
+    # so the residual gate does NOT fire; only the speed guard should catch it.
+    p0 = np.array([20.0, 34.0, 0.11])
+    v0 = np.array([20.0, 0.0, 0.01])   # 20 m/s forward, nearly horizontal
+    worlds = ballistic_worlds(tuple(p0), tuple(v0), n)
+
+    # rolling_max_speed_m_s=15 (< 20 m/s) — guard must fire.
+    # rolling_max_residual_px=50 (very permissive) — residual gate must NOT fire.
+    cfg_tight = SolverCfg(rolling_max_speed_m_s=15.0, rolling_max_residual_px=50.0)
+    kwargs = _solver_kwargs(worlds, n, cfg=cfg_tight)
+    seg = _SegmentSolver(**kwargs)
+
+    fit = seg.fit_segment(2, 30, Mode.ROLLING)
+    assert fit.underconstrained, (
+        "ROLLING fit on a 20 m/s ground-projection lob should be flagged "
+        "underconstrained by the speed guard (rolling_max_speed_m_s=15). "
+        "Fix 2 not applied."
+    )
+
+
+def test_rolling_genuine_slow_roll_not_flagged():
+    """A genuine slow roll (≪ rolling_max_speed_m_s) must NOT be flagged."""
+    n = 30
+    # 0.5 m/frame @ 25 fps = 12.5 m/s — slow, realistic roll.
+    worlds = rolling_worlds((20.0, 34.0), (0.5, 0.0), n)
+    kwargs = _solver_kwargs(worlds, n)  # default cfg, rolling_max = 35 m/s
+    seg = _SegmentSolver(**kwargs)
+
+    fit = seg.fit_segment(1, 28, Mode.ROLLING)
+    # Genuine roll: residual is low AND speed is within the gate.
+    # underconstrained must be False (residual passes and speed passes).
+    assert not fit.underconstrained, (
+        f"Genuine slow roll incorrectly flagged underconstrained "
+        f"(residual={fit.residual_px:.2f})"
+    )

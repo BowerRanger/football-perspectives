@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -34,6 +34,9 @@ from src.utils.ball_physics import (
     parabola_end_velocity,
 )
 from src.utils.bundle_adjust import fit_parabola_to_image_observations
+
+if TYPE_CHECKING:
+    from src.utils.ball_player_context import PlayerContext
 
 
 # ---------------------------------------------------------------------------
@@ -311,9 +314,16 @@ class _SegmentSolver:
     in-range fix *frames* (fix values are deterministic from frame).
     """
 
-    def __init__(self, *, mode_cfg: ModeSearchCfg | None = None, **solver_kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        mode_cfg: ModeSearchCfg | None = None,
+        player_ctx: "PlayerContext | None" = None,
+        **solver_kwargs: Any,
+    ) -> None:
         self._solver = _Solver(**solver_kwargs)
         self._mode_cfg = mode_cfg or ModeSearchCfg()
+        self._player_ctx = player_ctx
         self._cache: dict[tuple, SegmentFit] = {}
         self._fit_calls: int = 0
 
@@ -387,9 +397,7 @@ class _SegmentSolver:
                 kind="out_of_view", boundary_vel=(None, None),
             )
         if mode is Mode.POSSESSED:
-            raise NotImplementedError(
-                "POSSESSED mode is implemented in Task 4 (player FK tether)"
-            )
+            return self._fit_possessed(fa, fb, player_id)
         raise ValueError(f"unknown mode {mode!r}")
 
     # ------------------------------------------------------------------
@@ -634,3 +642,192 @@ class _SegmentSolver:
             kind="stationary",
             boundary_vel=(np.zeros(3), np.zeros(3)),
         )
+
+    # ------------------------------------------------------------------
+    # POSSESSED
+
+    # Contact bone used to tether the ball to the possessing player.
+    # We query l_foot (the "lower" foot) as the primary contact bone;
+    # r_foot is used as a fallback when l_foot is not available.
+    _CONTACT_BONES: tuple[str, ...] = ("l_foot", "r_foot")
+
+    def _fit_possessed(
+        self,
+        fa: int,
+        fb: int,
+        player_id: str | None,
+    ) -> SegmentFit:
+        """Tether the ball to a player's foot via PlayerContext FK.
+
+        For each frame in ``[fa, fb]``:
+        - ``worlds[f]`` is the possessing player's contact-joint world position
+          from PlayerContext FK (``l_foot`` preferred, ``r_foot`` fallback).
+        - Frames where FK is unavailable: hold the last known foot world
+          (forward extrapolation); if no prior known world exists, interpolate
+          toward the next available frame.  Held frames are counted; too many
+          marks the segment underconstrained.
+        - ``residual_px``: mean reprojection error between the projected foot
+          world and the ball's observed pixel, computed via ``_pixel_rms``.
+        - ``boundary_vel``: finite-difference of the foot world at ``fa`` and
+          ``fb`` (design note F4).
+        - ``kind`` is always ``"possessed"`` (state maps to ``"grounded"`` —
+          design note F13).
+
+        Parameters
+        ----------
+        fa, fb:
+            Inclusive segment range.
+        player_id:
+            ID of the possessing player.  Must be non-None.
+
+        Raises
+        ------
+        ValueError
+            If ``player_id`` is None, or if this solver has no
+            ``PlayerContext`` (was constructed without ``player_ctx``).
+        """
+        if self._player_ctx is None:
+            raise ValueError(
+                "POSSESSED mode requires a PlayerContext — pass "
+                "player_ctx=<PlayerContext> to _SegmentSolver.__init__."
+            )
+        if player_id is None:
+            raise ValueError(
+                "POSSESSED mode requires player_id to be specified."
+            )
+
+        ctx = self._player_ctx
+        solver = self._solver
+        fps = solver.fps
+
+        # --- 1. Collect FK foot worlds for all frames in [fa, fb] ---------
+        # Primary bone: l_foot; fallback: r_foot.
+        raw_worlds: dict[int, np.ndarray] = {}
+        for f in range(fa, fb + 1):
+            for bone in self._CONTACT_BONES:
+                world = ctx.joint_world(f, player_id, bone)
+                if world is not None:
+                    raw_worlds[f] = np.asarray(world, dtype=float)
+                    break
+
+        # --- 2. Fill gaps: forward-hold then backward-hold ----------------
+        # Forward pass: hold last known.
+        worlds: dict[int, np.ndarray] = {}
+        last_known: np.ndarray | None = None
+        for f in range(fa, fb + 1):
+            if f in raw_worlds:
+                last_known = raw_worlds[f]
+                worlds[f] = raw_worlds[f].copy()
+            elif last_known is not None:
+                worlds[f] = last_known.copy()
+
+        # Backward pass: fill any remaining holes (frames before first known)
+        # from the first available frame.
+        first_known: np.ndarray | None = None
+        for f in range(fa, fb + 1):
+            if f in raw_worlds:
+                first_known = raw_worlds[f]
+                break
+        if first_known is not None:
+            for f in range(fa, fb + 1):
+                if f not in worlds:
+                    worlds[f] = first_known.copy()
+
+        # --- 3. Underconstrained check ------------------------------------
+        n_total = fb - fa + 1
+        n_held = sum(1 for f in range(fa, fb + 1) if f not in raw_worlds)
+        # More than half the frames held → underconstrained.
+        underconstrained = n_held > n_total // 2
+
+        # Edge-case: no FK at all for this player in this span.
+        if not worlds:
+            cfg: SolverCfg = solver.cfg
+            fallback = np.array([0.0, 0.0, cfg.ball_radius_m])
+            worlds = {f: fallback.copy() for f in range(fa, fb + 1)}
+            return SegmentFit(
+                worlds=worlds,
+                residual_px=0.0,
+                underconstrained=True,
+                kind="possessed",
+                boundary_vel=(np.zeros(3), np.zeros(3)),
+            )
+
+        # --- 4. Residual: pixel RMS between projected foot and ball obs ----
+        obs_frames = [
+            f for f in range(fa, fb + 1)
+            if solver._pixel_rms({f: worlds[f]}, [f]) is not None
+        ]
+        resid = solver._pixel_rms(worlds, obs_frames)
+        residual_px = float(resid) if (resid is not None and np.isfinite(resid)) else 0.0
+
+        # --- 5. Boundary velocities (F4): finite-diff of foot world --------
+        fps_f = float(fps)
+        h_frames = max(1, min(2, (fb - fa) // 4))
+
+        def _fd_vel(centre: int) -> np.ndarray:
+            f0 = max(fa, centre - h_frames)
+            f1 = min(fb, centre + h_frames)
+            if f1 == f0:
+                return np.zeros(3)
+            return (worlds[f1] - worlds[f0]) / ((f1 - f0) / fps_f)
+
+        v_a = _fd_vel(fa)
+        v_b = _fd_vel(fb)
+
+        return SegmentFit(
+            worlds=worlds,
+            residual_px=residual_px,
+            underconstrained=underconstrained,
+            kind="possessed",
+            boundary_vel=(v_a, v_b),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Module-level helper: nearest players by projected foot pixel
+# ---------------------------------------------------------------------------
+
+def nearest_players(
+    ball_uv: tuple[float, float],
+    frame: int,
+    player_ctx: "PlayerContext",
+    k: int = 2,
+) -> list[str]:
+    """Return the ``k`` player IDs whose projected foot pixel is nearest to
+    ``ball_uv`` at ``frame``, sorted nearest-first and deduplicated by player.
+
+    Used by Task 6's possessed-player branching to identify which players to
+    try as possessor candidates.
+
+    Parameters
+    ----------
+    ball_uv:
+        Ball pixel at ``frame`` (u, v) in image coordinates.
+    frame:
+        Frame index to query.
+    player_ctx:
+        A :class:`~src.utils.ball_player_context.PlayerContext` (or
+        duck-typed substitute providing ``joints_at``).
+    k:
+        Maximum number of distinct player IDs to return.
+
+    Returns
+    -------
+    list[str]
+        Up to ``k`` player IDs, nearest projected foot pixel first.
+        Empty if no player data is available at ``frame``.
+    """
+    u, v = float(ball_uv[0]), float(ball_uv[1])
+    samples = player_ctx.joints_at(int(frame))
+
+    # Accumulate best (nearest) distance per player_id.
+    best: dict[str, float] = {}
+    for s in samples:
+        if s.uv is None:
+            continue
+        dist = ((s.uv[0] - u) ** 2 + (s.uv[1] - v) ** 2) ** 0.5
+        if s.player_id not in best or dist < best[s.player_id]:
+            best[s.player_id] = dist
+
+    ordered = sorted(best.items(), key=lambda kv: kv[1])
+    return [pid for pid, _ in ordered[:k]]

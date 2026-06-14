@@ -187,12 +187,14 @@ def test_out_of_view_empty_worlds():
 # POSSESSED — Task 4
 # ---------------------------------------------------------------------------
 
-def test_possessed_not_yet_implemented():
+def test_possessed_raises_without_player_ctx():
+    """T4 implemented: POSSESSED raises ValueError if no player_ctx was passed,
+    not NotImplementedError (the T3 placeholder has been superseded)."""
     n = 20
     worlds = rolling_worlds((20.0, 34.0), (0.5, 0.0), n)
     kwargs = _solver_kwargs(worlds, n)
     seg = _SegmentSolver(**kwargs)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises((ValueError, RuntimeError)):
         seg.fit_segment(2, 15, Mode.POSSESSED, player_id="P001")
 
 

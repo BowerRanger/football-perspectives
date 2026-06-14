@@ -1372,6 +1372,7 @@ class BallStage(BaseStage):
                 confidence=1.0 if is_manual else 0.8,
                 spin=anc.spin,
                 is_manual=is_manual,
+                contact_bone=anc.bone if anc.state == "player_touch" else None,
             ))
             if (
                 anc.state == "player_touch"

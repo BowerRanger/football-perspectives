@@ -56,7 +56,7 @@ from src.utils.bundle_adjust import (
     fit_magnus_trajectory,
     fit_parabola_to_image_observations,
 )
-from src.utils.ball_spin_presets import omega_seed_from_preset
+from src.utils.ball_spin_presets import derive_spin_seed, omega_seed_from_preset
 from src.utils.camera_projection import project_world_to_image
 from src.utils.foot_anchor import ankle_ray_to_pitch
 
@@ -91,6 +91,7 @@ class TrajectoryNode:
     confidence: float = 1.0
     spin: str | None = None
     is_manual: bool = False
+    contact_bone: str | None = None
 
     @property
     def z(self) -> float:
@@ -606,7 +607,16 @@ class _Solver:
     def _try_magnus(self, arc: _Arc, a: np.ndarray, b: np.ndarray,
                     spin_preset: str | None,
                     wfixes: list[tuple[int, np.ndarray, float]] | None = None,
+                    derived_omega_seed: np.ndarray | None = None,
                     ) -> _Arc:
+        """Attempt Magnus refinement of ``arc``.
+
+        Precedence for the angular-velocity seed:
+        1. A manual ``spin_preset`` on the node (overrides everything).
+        2. A geometrically-derived seed (``derived_omega_seed``) from
+           :func:`derive_spin_seed`, with the relaxed hinted gate.
+        3. Free fit with no seed (strict gate).
+        """
         cfg = self.cfg
         duration_s = (arc.fb - arc.fa) / self.fps
         if (
@@ -618,10 +628,17 @@ class _Solver:
         hint = bool(spin_preset and spin_preset not in ("none", "knuckle"))
         if spin_preset == "knuckle":
             return arc
-        omega_seed = (
-            omega_seed_from_preset(spin_preset, arc.v0)
-            if hint else np.zeros(3)
-        )
+        # Manual preset wins over derived seed (precedence rule).
+        if hint:
+            omega_seed = omega_seed_from_preset(spin_preset, arc.v0)
+        elif derived_omega_seed is not None:
+            # Derived geometric seed: use it as the starting point with the
+            # relaxed hinted improvement gate, but treat it like a hint so
+            # the axis-fixed path is used (more constrained → safer).
+            omega_seed = derived_omega_seed
+            hint = True   # relaxed gate for derived seed too
+        else:
+            omega_seed = np.zeros(3)
         obs, Ks, Rs, ts = self._interior_obs(arc.fa, arc.fb)
         if len(obs) < cfg.min_obs_for_lm_fit:
             return arc
@@ -709,7 +726,9 @@ class _Solver:
     def _ballistic_span(self, a: np.ndarray, b: np.ndarray,
                         fa: int, fb: int, spin_preset: str | None,
                         splits_left: int, used_splits: set[int],
-                        manual_span: bool = False) -> _SpanOutcome:
+                        manual_span: bool = False,
+                        derived_omega_seed: np.ndarray | None = None,
+                        ) -> _SpanOutcome:
         wfixes = self._fixes_in(fa, fb)
         arc = self._fit_arc(a, b, fa, fb, wfixes=wfixes)
         if (
@@ -745,6 +764,8 @@ class _Solver:
                     a, ground, fa, split, spin_preset,
                     splits_left - 1, used_splits | {split},
                     manual_span=manual_span,
+                    # Derived seed only applies to the first (launch) sub-span.
+                    derived_omega_seed=derived_omega_seed,
                 )
                 right = self._ballistic_span(
                     ground, b, split, fb, spin_preset,
@@ -766,7 +787,8 @@ class _Solver:
                 combined.residual_px = max(resids) if resids else None
                 combined.fixes_used = left.fixes_used + right.fixes_used
                 return combined
-        arc = self._try_magnus(arc, a, b, spin_preset, wfixes=wfixes)
+        arc = self._try_magnus(arc, a, b, spin_preset, wfixes=wfixes,
+                               derived_omega_seed=derived_omega_seed)
         out = _SpanOutcome(kind="ballistic")
         out.arcs = [arc]
         out.residual_px = arc.residual_px if arc.n_obs else None
@@ -778,6 +800,60 @@ class _Solver:
         for f in range(fa, fb + 1):
             out.worlds[f] = arc.eval(f, self.fps)
         return out
+
+    # ------------------------------------------------------------------
+    # Geometric spin-seed helpers
+
+    def _v_in_at_node(self, node: TrajectoryNode) -> np.ndarray | None:
+        """Estimate the ball velocity arriving at ``node`` from the previous
+        span, using the analytic two-knot arc from the preceding node.
+
+        Returns ``None`` if there is no previous node or the two nodes are
+        the same frame.
+        """
+        node_idx = next(
+            (i for i, n in enumerate(self.nodes) if n.frame == node.frame),
+            None,
+        )
+        if node_idx is None or node_idx == 0:
+            return None
+        prev_node = self.nodes[node_idx - 1]
+        a = np.asarray(prev_node.world_xyz, dtype=float)
+        b = np.asarray(node.world_xyz, dtype=float)
+        T = (node.frame - prev_node.frame) / self.fps
+        if T <= 0.0:
+            return None
+        from src.utils.ball_physics import parabola_end_velocity, two_knot_arc
+        _, v0_prev = two_knot_arc(a, b, T)
+        return parabola_end_velocity(v0_prev, T)
+
+    def _derived_span_omega_seed(
+        self,
+        node_a: TrajectoryNode,
+        v_out_approx: np.ndarray,
+    ) -> np.ndarray | None:
+        """Return a geometric spin seed for the span launched from ``node_a``.
+
+        Only fires when ``node_a`` is a ``player_touch`` with a known
+        ``contact_bone`` and *no* manual ``spin`` preset — the manual preset
+        path always overrides this.  ``v_out_approx`` is the exit velocity
+        from the analytic two-knot arc (a cheap proxy before LM refinement).
+
+        Returns ``None`` when no pattern is detected or the prerequisite
+        conditions are not met.
+        """
+        if node_a.state != "player_touch":
+            return None
+        if node_a.spin is not None:
+            # Manual preset on the anchor — do not derive (it will be used
+            # via omega_seed_from_preset in _try_magnus instead).
+            return None
+        if not node_a.contact_bone:
+            return None
+        v_in = self._v_in_at_node(node_a)
+        if v_in is None:
+            return None
+        return derive_spin_seed(node_a.contact_bone, v_in, v_out_approx)
 
     # ------------------------------------------------------------------
     # Span solving
@@ -798,10 +874,17 @@ class _Solver:
             or any(fa < f < fb for f in self.z_hints)
         )
         manual_span = node_a.is_manual or node_b.is_manual
+        # Compute the analytic v_out for the geometric spin-seed derivation.
+        # This is a cheap proxy (two-knot arc) computed before the LM fit.
+        T_span = (fb - fa) / self.fps
+        from src.utils.ball_physics import two_knot_arc as _two_knot_arc
+        _, v_out_approx = _two_knot_arc(a, b, T_span) if T_span > 0 else (a, np.zeros(3))
+        derived_seed = self._derived_span_omega_seed(node_a, v_out_approx)
         if ballistic:
             return self._ballistic_span(
                 a, b, fa, fb, node_a.spin, self.cfg.max_splits_per_span,
                 set(), manual_span=manual_span,
+                derived_omega_seed=derived_seed,
             )
         rolling = self._rolling_span(a, b, fa, fb)
         rolling_ok = not rolling.physics_violation and (
@@ -822,6 +905,7 @@ class _Solver:
         promoted = self._ballistic_span(
             a, b, fa, fb, node_a.spin, self.cfg.max_splits_per_span,
             set(), manual_span=manual_span,
+            derived_omega_seed=derived_seed,
         )
         promoted_ok = (
             promoted.residual_px is not None

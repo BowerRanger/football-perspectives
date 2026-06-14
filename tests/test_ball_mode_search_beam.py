@@ -92,18 +92,31 @@ def test_multi_impact_resolves_segments_at_bounces():
     """A flight that bounces, flies again, then rolls.  Event breakpoints sit
     at the two bounce frames; the winner must place segment boundaries there
     and label flight before / after the bounce."""
-    n = 70
-    # Phase A: ballistic with a bounce ~frame 24 (restitution arc).
-    arc = ballistic_worlds((20.0, 30.0, 0.5), (9.0, 1.0, 7.5), 50,
-                           restitution=0.6)
-    # Find the bounce frame (local z minimum / restitution kick).
-    zs = np.array([arc[f][2] for f in range(50)])
-    # bounce ~ where z dips toward the floor; pick a clear value.
-    bounce1 = 22
+    n = 90
+    roll_start = 65
+    # Phase A: ballistic with a GENUINE high-energy ground bounce mid-flight.
+    # The launch vz (8.0) + restitution 0.7 makes the ball rise to ~3.6 m, land
+    # and bounce, then fly a second ~1.6 m arc — two physically-distinct gravity
+    # arcs joined at the floor impact, BOTH tall/long enough for the
+    # endpoint-free FLIGHT fitter to recover an unambiguous parabola.  (A
+    # shallow bounce is monocular-ambiguous: the free-floating fitter cannot
+    # resolve the depth of a <0.5 m arc, so the correct labelling would be
+    # un-winnable for fitter reasons unrelated to the scoring fix under test.)
+    arc = ballistic_worlds((20.0, 30.0, 0.5), (9.0, 1.0, 8.0), roll_start,
+                           restitution=0.7)
+    # The first ground impact is the floor-contact local z-minimum: the frame
+    # whose z is below both neighbours (the restitution kick follows it).
+    zs = np.array([arc[f][2] for f in range(roll_start)])
+    bounce1 = int(
+        next(f for f in range(2, roll_start - 1)
+             if zs[f] < zs[f - 1] and zs[f] < zs[f + 1])
+    )
+    assert 30 <= bounce1 <= 55, f"unexpected bounce frame {bounce1}"
     # Phase B (roll) after the ball settles: append a clean ground roll.
-    worlds = {f: arc[f] for f in range(40)}
-    last_xy = worlds[39][:2]
-    roll = rolling_worlds(tuple(last_xy), (0.4, 0.05), n - 40, start_frame=40)
+    worlds = {f: arc[f] for f in range(roll_start)}
+    last_xy = worlds[roll_start - 1][:2]
+    roll = rolling_worlds(tuple(last_xy), (0.4, 0.05), n - roll_start,
+                          start_frame=roll_start)
     worlds.update(roll)
 
     kwargs, pixels = _solver_kwargs(worlds, n)
@@ -113,7 +126,7 @@ def test_multi_impact_resolves_segments_at_bounces():
     breakpoints = [
         _boundary(0),
         _bp(bounce1, kind="bounce", event_score=0.9),
-        _bp(40, kind="ground", event_score=0.85),
+        _bp(roll_start, kind="ground", event_score=0.85),
         _boundary(n - 1),
     ]
     res = run_beam(seg, breakpoints, n, ModeSearchCfg(), ball_uv_at=ball_uv_at)
@@ -128,11 +141,46 @@ def test_multi_impact_resolves_segments_at_bounces():
     # The bounce frame and the ground-contact frame are segment boundaries.
     boundary_frames = {s.fa for s in win.segments} | {s.fb for s in win.segments}
     assert bounce1 in boundary_frames
-    assert 40 in boundary_frames
+    assert roll_start in boundary_frames
     # The last segment over the clean roll is ROLLING.
     assert win.segments[-1].mode is Mode.ROLLING
     # There is at least one FLIGHT segment in the airborne portion.
     assert any(s.mode is Mode.FLIGHT for s in win.segments)
+
+    # --- C5: physics-aware scoring assertions (reproduce + fix C1) ---------
+    # (a) The post-impact airborne arc must be MODELLED as FLIGHT, not gapped:
+    #     the segment that STARTS at the bounce frame is FLIGHT.
+    seg_at_bounce = next(
+        (s for s in win.segments if s.fa == bounce1), None
+    )
+    assert seg_at_bounce is not None, (
+        f"no segment starts at the bounce frame {bounce1}: "
+        f"{[(s.fa, s.fb, s.mode.name) for s in win.segments]}"
+    )
+    assert seg_at_bounce.mode is Mode.FLIGHT, (
+        f"post-impact arc starting at {bounce1} must be FLIGHT, got "
+        f"{seg_at_bounce.mode.name}: "
+        f"{[(s.fa, s.fb, s.mode.name) for s in win.segments]}"
+    )
+
+    # (b) NO winning segment may be OUT_OF_VIEW over a span that contains
+    #     >=3 confident ball observations — gapping out a span full of
+    #     detections is the C1 defect.
+    def _n_confident_obs(fa: int, fb: int) -> int:
+        return sum(
+            1 for f in range(fa, fb + 1)
+            if ball_uv_at(f) is not None
+        )
+
+    for s in win.segments:
+        if s.mode is Mode.OUT_OF_VIEW:
+            n_obs = _n_confident_obs(s.fa, s.fb)
+            assert n_obs < 3, (
+                f"OUT_OF_VIEW segment {s.fa}-{s.fb} spans {n_obs} confident "
+                f"ball observations (>=3) — the beam gapped a span full of "
+                f"detections (C1): "
+                f"{[(s.fa, s.fb, s.mode.name) for s in win.segments]}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -328,3 +376,104 @@ def test_beam_result_accounting():
 def test_max_skip_in_cfg():
     assert ModeSearchCfg().max_skip == 3
     assert ModeSearchCfg(max_skip=5).max_skip == 5
+
+
+# ---------------------------------------------------------------------------
+# C2 — structural determinism via partition-signature tie-break
+# ---------------------------------------------------------------------------
+
+def _make_hyp(segments, cost):
+    """Build a Hypothesis from a list of (fa, fb, mode, player_id) tuples."""
+    from src.utils.ball_mode_search import Hypothesis, Segment
+    segs = tuple(
+        Segment(fa=fa, fb=fb, mode=mode, worlds={}, residual_px=0.0,
+                underconstrained=False, kind="x", player_id=pid,
+                boundary_vel=(None, None))
+        for (fa, fb, mode, pid) in segments
+    )
+    last = segs[-1]
+    return Hypothesis(
+        last_bp_idx=last.fb, cur_mode=last.mode, segments=segs,
+        cost=cost, end_velocity=None, player_id=last.player_id,
+    )
+
+
+def test_quant_key_is_total_order_on_tied_cost():
+    """Two DIFFERENT partitions that tie on (cost, last_frame, mode_int) must
+    still order deterministically by the partition signature (C2) — never by
+    list append order."""
+    from src.utils.ball_mode_search import _quant_key
+
+    # Same cost, same last_frame (10), same cur_mode (FLIGHT), but the FIRST
+    # segment's mode differs → different partitions that would otherwise tie.
+    h1 = _make_hyp([(0, 5, Mode.FLIGHT, None), (5, 10, Mode.FLIGHT, None)], 12.0)
+    h2 = _make_hyp([(0, 5, Mode.ROLLING, None), (5, 10, Mode.FLIGHT, None)], 12.0)
+
+    k1, k2 = _quant_key(h1), _quant_key(h2)
+    # The first three fields tie; the signature field must break it.
+    assert k1[:3] == k2[:3]
+    assert k1 != k2, "partition-signature tie-break field must distinguish them"
+    # Ordering is reproducible regardless of insertion order.
+    assert sorted([h1, h2], key=_quant_key) == sorted([h2, h1], key=_quant_key)
+
+
+def test_tied_partitions_resolve_to_same_winner_regardless_of_bp_order():
+    """End-to-end determinism: building the SAME breakpoints with the segment
+    solver fresh each time yields an identical winning partition, and the
+    winner is reproducible (the structural tie-break removes append-order
+    dependence even when several partitions tie on cost)."""
+    n = 50
+    # A clean single arc with several zero-score breakpoints: many partitions
+    # (absorbing different subsets of breaks) tie on cost.
+    worlds = ballistic_worlds((20.0, 30.0, 0.5), (9.0, 1.0, 8.0), n)
+
+    breakpoints = [
+        _boundary(0),
+        _bp(15, event_score=0.0),
+        _bp(25, event_score=0.0),
+        _bp(35, event_score=0.0),
+        _boundary(n - 1),
+    ]
+
+    winners = []
+    for _ in range(5):
+        kwargs, pixels = _solver_kwargs(worlds, n)
+        seg = _SegmentSolver(**kwargs)
+        res = run_beam(seg, breakpoints, n, ModeSearchCfg(max_skip=4),
+                       ball_uv_at=_uv_lookup(pixels))
+        winners.append(_partition(res.winner))
+
+    # Every run must produce exactly the same winning partition.
+    assert len(set(winners)) == 1, (
+        f"non-deterministic winner across runs: {set(winners)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C4 — strictly-increasing breakpoint guard
+# ---------------------------------------------------------------------------
+
+def test_duplicate_frame_breakpoints_rejected():
+    import pytest
+    n = 30
+    worlds = ballistic_worlds((20.0, 30.0, 0.5), (9.0, 1.0, 8.0), n)
+    kwargs, pixels = _solver_kwargs(worlds, n)
+    seg = _SegmentSolver(**kwargs)
+    # Duplicate frame 15.
+    breakpoints = [_boundary(0), _bp(15), _bp(15), _boundary(n - 1)]
+    with pytest.raises(ValueError, match="strictly increasing"):
+        run_beam(seg, breakpoints, n, ModeSearchCfg(),
+                 ball_uv_at=_uv_lookup(pixels))
+
+
+def test_out_of_order_breakpoints_rejected():
+    import pytest
+    n = 30
+    worlds = ballistic_worlds((20.0, 30.0, 0.5), (9.0, 1.0, 8.0), n)
+    kwargs, pixels = _solver_kwargs(worlds, n)
+    seg = _SegmentSolver(**kwargs)
+    # Frame 20 before frame 10 — out of order.
+    breakpoints = [_boundary(0), _bp(20), _bp(10), _boundary(n - 1)]
+    with pytest.raises(ValueError, match="strictly increasing"):
+        run_beam(seg, breakpoints, n, ModeSearchCfg(),
+                 ball_uv_at=_uv_lookup(pixels))

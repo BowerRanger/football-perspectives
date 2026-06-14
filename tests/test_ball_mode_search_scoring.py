@@ -56,13 +56,14 @@ def _rolling_fit(residual_px: float, underconstrained: bool = False,
     )
 
 
-def _oov_fit() -> SegmentFit:
+def _oov_fit(n_observed: int = 0) -> SegmentFit:
     return SegmentFit(
         worlds={},
         residual_px=0.0,
         underconstrained=False,
         kind="out_of_view",
         boundary_vel=(None, None),
+        n_observed=n_observed,
     )
 
 
@@ -115,26 +116,53 @@ class TestRawPxOrdering:
 # ---------------------------------------------------------------------------
 
 class TestOutOfViewPenalty:
-    def test_penalty_scales_linearly_with_frames(self):
-        fit = _oov_fit()
-        cost_10 = segment_cost(fit, Mode.OUT_OF_VIEW, 10, CFG)
-        cost_20 = segment_cost(fit, Mode.OUT_OF_VIEW, 20, CFG)
-        # Non-OOV term is just segment_cost_constant + 0.0 residual.
-        # OOV adds out_of_view_frame_penalty * n_frames.
-        expected_delta = CFG.out_of_view_frame_penalty * 10
-        assert cost_20 - cost_10 == pytest.approx(expected_delta, rel=1e-6)
+    def test_observed_frame_penalty_scales_with_observed_count(self):
+        """C1c: the dominant OOV cost scales with OBSERVED frames, not span
+        length.  Two spans of equal length but different observed counts must
+        differ by ``out_of_view_frame_penalty * Δn_observed``."""
+        n = 20
+        fit_few = _oov_fit(n_observed=2)
+        fit_many = _oov_fit(n_observed=12)
+        cost_few = segment_cost(fit_few, Mode.OUT_OF_VIEW, n, CFG)
+        cost_many = segment_cost(fit_many, Mode.OUT_OF_VIEW, n, CFG)
+        # Δobserved = 10 (and Δmissing = -10): net delta is
+        # (oov_penalty - missing_penalty) * 10.
+        expected_delta = (
+            CFG.out_of_view_frame_penalty - CFG.out_of_view_missing_frame_penalty
+        ) * 10
+        assert cost_many - cost_few == pytest.approx(expected_delta, rel=1e-6)
 
-    def test_oov_contains_frame_penalty_term(self):
-        fit = _oov_fit()
-        cost = segment_cost(fit, Mode.OUT_OF_VIEW, 5, CFG)
-        # Must be > segment_cost_constant alone (residual = 0)
-        assert cost > CFG.segment_cost_constant
+    def test_observed_frames_dominate_missing_frames(self):
+        """C1c: an OOV span full of observations is far more expensive than an
+        equally-long span with no observations (last-resort semantics)."""
+        n = 20
+        fit_detection_rich = _oov_fit(n_observed=n)   # gap discards 20 detections
+        fit_genuinely_empty = _oov_fit(n_observed=0)  # nothing to discard
+        cost_rich = segment_cost(fit_detection_rich, Mode.OUT_OF_VIEW, n, CFG)
+        cost_empty = segment_cost(fit_genuinely_empty, Mode.OUT_OF_VIEW, n, CFG)
+        assert cost_rich > cost_empty
+        # The observed-frame term must dominate the missing-frame term.
+        assert CFG.out_of_view_frame_penalty > 10 * CFG.out_of_view_missing_frame_penalty
+
+    def test_genuinely_missing_span_stays_cheap(self):
+        """C1c: gapping a span with NO observations is cheap — only the tiny
+        per-missing-frame term applies on top of the parsimony constant."""
+        n = 5
+        fit = _oov_fit(n_observed=0)
+        cost = segment_cost(fit, Mode.OUT_OF_VIEW, n, CFG)
+        expected = (
+            CFG.segment_cost_constant
+            + CFG.out_of_view_missing_frame_penalty * n
+        )
+        assert cost == pytest.approx(expected, rel=1e-6)
+        # Cheaper than a constrained FLIGHT fit with any real residual.
+        assert cost < segment_cost(_flight_fit(residual_px=3.0), Mode.FLIGHT, n, CFG)
 
     def test_non_oov_mode_has_no_frame_penalty(self):
         fit_f  = _flight_fit(residual_px=0.0)
-        fit_ov = _oov_fit()
+        fit_ov = _oov_fit(n_observed=5)
         # Flight with 0 residual = segment_cost_constant exactly.
-        # OOV with 0 residual = segment_cost_constant + oov_penalty*n.
+        # OOV with observed frames = segment_cost_constant + oov_penalty*observed.
         cost_f  = segment_cost(fit_f,  Mode.FLIGHT,       5, CFG)
         cost_ov = segment_cost(fit_ov, Mode.OUT_OF_VIEW,  5, CFG)
         assert cost_ov > cost_f
@@ -345,10 +373,16 @@ class TestSegmentCostFormula:
         )
 
     def test_oov_formula(self):
-        """segment_cost = 0.0 + segment_cost_constant + oov_penalty * n."""
-        fit = _oov_fit()
+        """C1c: segment_cost = constant + oov_penalty * n_observed +
+        missing_penalty * (n_frames - n_observed)."""
         n = 7
-        expected = 0.0 + CFG.segment_cost_constant + CFG.out_of_view_frame_penalty * n
+        n_observed = 4
+        fit = _oov_fit(n_observed=n_observed)
+        expected = (
+            CFG.segment_cost_constant
+            + CFG.out_of_view_frame_penalty * n_observed
+            + CFG.out_of_view_missing_frame_penalty * (n - n_observed)
+        )
         assert segment_cost(fit, Mode.OUT_OF_VIEW, n, CFG) == pytest.approx(
             expected, rel=1e-6
         )
@@ -365,4 +399,128 @@ class TestSegmentCostFormula:
         assert diff == pytest.approx(0.0, abs=1e-9), (
             "kind_weight must be 1.0 for all modes in v1 (F6); "
             f"ROLLING vs FLIGHT cost differs by {diff}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# C1a — mode-pair-aware velocity continuity in transition_cost
+# ---------------------------------------------------------------------------
+
+def _seg(mode: Mode, player_id: str | None = None):
+    """Minimal prev_seg stub carrying just the fields transition_cost reads."""
+    from src.utils.ball_mode_search import Segment
+    return Segment(
+        fa=0, fb=1, mode=mode, worlds={}, residual_px=0.0,
+        underconstrained=False, kind="x", player_id=player_id,
+        boundary_vel=(None, None),
+    )
+
+
+def _vel_term(prev_mode, next_mode, v_prev, v_next, *, event_score=0.9):
+    """Isolate the velocity-continuity contribution of transition_cost by
+    subtracting the same call with both velocities None (no vel term)."""
+    bp = _bp(event_score=event_score, is_manual=False)
+    prev_seg = _seg(prev_mode) if prev_mode is not None else None
+    with_vel = transition_cost(prev_seg, bp, next_mode, v_prev, v_next, CFG)
+    no_vel = transition_cost(prev_seg, bp, next_mode, None, None, CFG)
+    return with_vel - no_vel
+
+
+class TestModePairVelocityContinuity:
+    """Fix C1a: the velocity-continuity penalty depends on the mode pair."""
+
+    def test_flight_to_flight_charges_full_delta_v(self):
+        # Vertical-only jump → full ‖Δv‖ charged (mid-air change is suspicious).
+        v_a = np.array([5.0, 0.0, 3.0])
+        v_b = np.array([5.0, 0.0, -3.0])   # Δv = (0,0,-6) → ‖Δv‖ = 6
+        term = _vel_term(Mode.FLIGHT, Mode.FLIGHT, v_a, v_b)
+        assert term == pytest.approx(CFG.velocity_discontinuity_weight * 6.0,
+                                     rel=1e-6)
+
+    def test_flight_to_rolling_landing_ignores_vertical_kill(self):
+        # A landing kills vz; only the horizontal Δv should be charged.
+        v_a = np.array([5.0, 0.0, -8.0])    # descending fast
+        v_b = np.array([5.0, 0.0, 0.0])     # rolling: vz killed, vxy unchanged
+        term = _vel_term(Mode.FLIGHT, Mode.ROLLING, v_a, v_b)
+        assert term == pytest.approx(0.0, abs=1e-9), (
+            "vertical velocity kill at a landing must NOT be penalised (C1a)"
+        )
+
+    def test_flight_to_rolling_charges_horizontal_slip(self):
+        v_a = np.array([5.0, 0.0, -8.0])
+        v_b = np.array([2.0, 0.0, 0.0])     # vx drops 3 m/s horizontally
+        term = _vel_term(Mode.FLIGHT, Mode.ROLLING, v_a, v_b)
+        assert term == pytest.approx(CFG.velocity_discontinuity_weight * 3.0,
+                                     rel=1e-6)
+
+    def test_flight_to_stationary_landing_ignores_vertical_kill(self):
+        v_a = np.array([0.0, 0.0, -6.0])
+        v_b = np.array([0.0, 0.0, 0.0])
+        term = _vel_term(Mode.FLIGHT, Mode.STATIONARY, v_a, v_b)
+        assert term == pytest.approx(0.0, abs=1e-9)
+
+    def test_rolling_to_flight_launch_no_penalty(self):
+        # A kick/bounce-up off the ground: velocity gain is the event itself.
+        v_a = np.array([3.0, 0.0, 0.0])
+        v_b = np.array([3.0, 0.0, 9.0])    # big vz gain
+        term = _vel_term(Mode.ROLLING, Mode.FLIGHT, v_a, v_b)
+        assert term == pytest.approx(0.0, abs=1e-9)
+
+    def test_stationary_to_flight_launch_no_penalty(self):
+        v_a = np.array([0.0, 0.0, 0.0])
+        v_b = np.array([4.0, 1.0, 10.0])
+        term = _vel_term(Mode.STATIONARY, Mode.FLIGHT, v_a, v_b)
+        assert term == pytest.approx(0.0, abs=1e-9)
+
+    def test_possessed_involved_no_penalty(self):
+        v_a = np.array([1.0, 0.0, 0.0])
+        v_b = np.array([9.0, 5.0, 7.0])    # large change
+        # POSSESSED on either side → no velocity penalty (player-controlled).
+        assert _vel_term(Mode.POSSESSED, Mode.FLIGHT, v_a, v_b) == pytest.approx(
+            0.0, abs=1e-9)
+        assert _vel_term(Mode.FLIGHT, Mode.POSSESSED, v_a, v_b) == pytest.approx(
+            0.0, abs=1e-9)
+
+    def test_rolling_to_rolling_charges_horizontal(self):
+        v_a = np.array([4.0, 0.0, 0.0])
+        v_b = np.array([1.0, 0.0, 0.0])    # horizontal Δ = 3
+        term = _vel_term(Mode.ROLLING, Mode.ROLLING, v_a, v_b)
+        assert term == pytest.approx(CFG.velocity_discontinuity_weight * 3.0,
+                                     rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# C1b — restitution envelope penalty applies ONLY to flight→flight bounces
+# ---------------------------------------------------------------------------
+
+class TestRestitutionOnlyFlightToFlight:
+    """Fix C1b: the restitution-envelope penalty must NOT charge a
+    flight→rolling/stationary landing (restitution ≈ 0 is physical there)."""
+
+    # A downward-incoming velocity that bounces back UP with an out-of-envelope
+    # restitution (e = 6/6 = 1.0 > 0.85) — would trip the envelope penalty.
+    V_IN = np.array([5.0, 0.0, -6.0])
+    V_OUT_BOUNCE = np.array([5.0, 0.0, 6.0])     # e = 1.0 (out of envelope)
+
+    def test_flight_to_flight_out_of_envelope_penalised(self):
+        term_bad = _vel_term(Mode.FLIGHT, Mode.FLIGHT, self.V_IN,
+                             self.V_OUT_BOUNCE)
+        # A good-restitution bounce (e in [0.5,0.85]) of equal ‖Δv‖ direction
+        # is cheaper because it avoids the envelope penalty.
+        v_out_good = np.array([5.0, 0.0, 3.9])   # e = 0.65 (in envelope)
+        term_good = _vel_term(Mode.FLIGHT, Mode.FLIGHT, self.V_IN, v_out_good)
+        # The bad one carries the +5*weight envelope penalty on top of Δv.
+        assert term_bad > term_good
+
+    def test_flight_to_rolling_landing_no_restitution_penalty(self):
+        """A flight→rolling landing must NOT incur the restitution envelope
+        penalty even if the post-velocity has a (residual) upward component —
+        only the horizontal slip is charged."""
+        v_in = np.array([5.0, 0.0, -6.0])
+        v_out = np.array([5.0, 0.0, 6.0])   # same as bounce, but next=ROLLING
+        term = _vel_term(Mode.FLIGHT, Mode.ROLLING, v_in, v_out)
+        # Horizontal Δ is 0 → term must be exactly 0 (no envelope penalty leaked).
+        assert term == pytest.approx(0.0, abs=1e-9), (
+            "restitution envelope must not be checked at a flight→ground landing "
+            "(C1b)"
         )

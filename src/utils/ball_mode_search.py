@@ -187,7 +187,20 @@ class ModeSearchCfg:
     """Cost for skipping a high-score breakpoint without a matching transition."""
 
     out_of_view_frame_penalty: float = 1.5
-    """Extra cost per frame spent in OUT_OF_VIEW mode."""
+    """Extra cost per *observed* frame gapped out by OUT_OF_VIEW mode (fix C1c).
+
+    Charged per frame in the span that carried a confident ball detection.
+    Gapping a detection-rich span is therefore expensive; OUT_OF_VIEW is a
+    last resort that wins only where the ball has no usable evidence."""
+
+    out_of_view_missing_frame_penalty: float = 0.05
+    """Tiny per-frame cost for *missing* (un-observed) frames in an OUT_OF_VIEW
+    span (fix C1c).
+
+    Keeps a long gap over genuinely-missing frames from being totally free
+    (so the beam still prefers a short out-of-view span over a long one),
+    while staying far below ``out_of_view_frame_penalty`` so the dominant cost
+    is the observed-frame term."""
 
     possessed_tether_px: float = 40.0
     """Pixel-space tolerance for the soft tether to the possessing player's foot."""
@@ -233,6 +246,12 @@ def _mode_search_cfg(cfg: dict[str, Any]) -> ModeSearchCfg:
         ignored_event_penalty=float(ms.get("ignored_event_penalty", base.ignored_event_penalty)),
         out_of_view_frame_penalty=float(
             ms.get("out_of_view_frame_penalty", base.out_of_view_frame_penalty)
+        ),
+        out_of_view_missing_frame_penalty=float(
+            ms.get(
+                "out_of_view_missing_frame_penalty",
+                base.out_of_view_missing_frame_penalty,
+            )
         ),
         possessed_tether_px=float(ms.get("possessed_tether_px", base.possessed_tether_px)),
         velocity_discontinuity_weight=float(
@@ -280,6 +299,12 @@ class SegmentFit:
     boundary_vel:
         ``(v_at_fa, v_at_fb)`` — world velocities at the two endpoints
         (design note F4).  ``(None, None)`` for OUT_OF_VIEW.
+    n_observed:
+        Number of frames in ``[fa, fb]`` that carry a confident ball
+        observation (a real detection).  Populated only for OUT_OF_VIEW
+        fits (fix C1c) — it is the count of detections the gap would discard,
+        and drives the OUT_OF_VIEW cost so gapping a detection-rich span is
+        expensive.  ``0`` (default) for every other mode.
     """
 
     worlds: dict[int, np.ndarray]
@@ -287,6 +312,7 @@ class SegmentFit:
     underconstrained: bool
     kind: str
     boundary_vel: tuple[np.ndarray | None, np.ndarray | None]
+    n_observed: int = 0
 
 
 class _SegmentSolver:
@@ -402,10 +428,7 @@ class _SegmentSolver:
         if mode is Mode.STATIONARY:
             return self._fit_stationary(fa, fb)
         if mode is Mode.OUT_OF_VIEW:
-            return SegmentFit(
-                worlds={}, residual_px=0.0, underconstrained=False,
-                kind="out_of_view", boundary_vel=(None, None),
-            )
+            return self._fit_out_of_view(fa, fb)
         if mode is Mode.POSSESSED:
             return self._fit_possessed(fa, fb, player_id)
         raise ValueError(f"unknown mode {mode!r}")
@@ -420,6 +443,41 @@ class _SegmentSolver:
         of in-range fix frames fully captures the cache dependency.
         """
         return tuple(sorted(f for f, _xyz, _w in self._solver._fixes_in(fa, fb)))
+
+    def _n_confident_obs(self, fa: int, fb: int) -> int:
+        """Count frames in ``[fa, fb]`` (inclusive) with a confident ball
+        observation — a real detection the solver would consume.
+
+        A frame counts when it has a ball pixel (``uvs[f] is not None``), a
+        valid camera, and is NOT a gap-fill (synthesised) frame — the same
+        admission rule ``_interior_obs`` applies, extended to the inclusive
+        endpoints.  Drives the OUT_OF_VIEW cost (fix C1c).
+        """
+        solver = self._solver
+        n = 0
+        for f in range(fa, fb + 1):
+            uv = solver.uvs.get(f)
+            if uv is None or not solver._has_cam(f) or f in solver.gap_fill:
+                continue
+            n += 1
+        return n
+
+    # ------------------------------------------------------------------
+    # OUT_OF_VIEW
+
+    def _fit_out_of_view(self, fa: int, fb: int) -> SegmentFit:
+        """Empty-worlds fit; carries the confident-observation count (C1c).
+
+        ``n_observed`` is the number of frames in ``[fa, fb]`` with a real ball
+        detection.  ``segment_cost`` charges per observed frame, so gapping a
+        detection-rich span is expensive while gapping a genuinely-missing span
+        stays cheap (correct LAST-RESORT semantics).
+        """
+        return SegmentFit(
+            worlds={}, residual_px=0.0, underconstrained=False,
+            kind="out_of_view", boundary_vel=(None, None),
+            n_observed=self._n_confident_obs(fa, fb),
+        )
 
     # ------------------------------------------------------------------
     # FLIGHT
@@ -515,6 +573,16 @@ class _SegmentSolver:
         raw_resid = solver._pixel_rms(worlds, obs_frames_only)
         resid = float(raw_resid) if (raw_resid is not None and np.isfinite(raw_resid)) else 0.0
         underconstrained = resid > cfg.flight_max_residual_px
+
+        # Fix C1: flight monocular-degeneracy guard.  A ground roll's pixel
+        # track can be fit perfectly (residual ≈ 0) by a far-away fast parabola
+        # whose recovered worlds are wildly off-pitch / far below ground — the
+        # FLIGHT analogue of the ROLLING lob guard in ``_fit_rolling``.  Such a
+        # fit is physically impossible, so flag it underconstrained: it must not
+        # masquerade as a low-cost FLIGHT explanation for a roll.
+        if not underconstrained and self._flight_worlds_implausible(worlds):
+            underconstrained = True
+
         return SegmentFit(
             worlds=worlds,
             residual_px=resid,
@@ -522,6 +590,30 @@ class _SegmentSolver:
             kind="ballistic",
             boundary_vel=(np.asarray(v_a, float), np.asarray(v_b, float)),
         )
+
+    def _flight_worlds_implausible(self, worlds: dict[int, np.ndarray]) -> bool:
+        """True when a fitted flight arc's worlds are non-physical.
+
+        A flight arc must stay within a generous envelope around the pitch and
+        above a small sub-ground margin.  We reuse the same clamp magnitude
+        ``_ground_raycast`` uses (``2× max pitch dimension``, floor 50 m) for
+        the horizontal extent, and reject any world more than a few metres
+        below the ground plane.  Catches the monocular degeneracy where a roll
+        is explained by a far-away parabola at absurd depth.
+        """
+        solver = self._solver
+        if not worlds:
+            return False
+        clamp = max(50.0, 2.0 * max(solver.pitch.length_m, solver.pitch.width_m))
+        z_floor = -2.0  # a couple of metres of slack below the ground plane
+        for w in worlds.values():
+            if not np.all(np.isfinite(w)):
+                return True
+            if abs(float(w[0])) > clamp or abs(float(w[1])) > clamp:
+                return True
+            if float(w[2]) < z_floor:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # ROLLING
@@ -864,10 +956,15 @@ def segment_cost(
     2. **Parsimony constant** — ``cfg.segment_cost_constant`` (BIC-style; one
        fixed cost per segment to penalise over-segmentation).
 
-    3. **OUT_OF_VIEW frame penalty** — ``cfg.out_of_view_frame_penalty *
-       n_frames_in_segment`` only when ``mode is Mode.OUT_OF_VIEW``.  This
-       encourages the beam to prefer a short out-of-view span over a long one,
-       and prevents collapsing the whole shot into a single OUT_OF_VIEW segment.
+    3. **OUT_OF_VIEW penalty (fix C1c)** — when ``mode is Mode.OUT_OF_VIEW``:
+       ``cfg.out_of_view_frame_penalty * fit.n_observed`` (the dominant term —
+       one charge per frame in the span that carried a confident ball
+       detection) PLUS ``cfg.out_of_view_missing_frame_penalty *
+       (n_frames_in_segment − fit.n_observed)`` (a tiny per-frame term over the
+       genuinely-missing frames so a long empty gap is not totally free).  Net
+       effect: gapping a detection-rich span is expensive; gapping a span with
+       no usable evidence is cheap — OUT_OF_VIEW becomes the LAST RESORT it
+       should be.
 
     4. **Underconstrained flag penalty** — when ``fit.underconstrained`` is
        ``True``, add ``cfg.unexplained_break_penalty`` as a cost.  We reuse the
@@ -905,9 +1002,14 @@ def segment_cost(
     # --- Term 2: BIC parsimony ---
     cost += cfg.segment_cost_constant
 
-    # --- Term 3: OUT_OF_VIEW per-frame penalty ---
+    # --- Term 3: OUT_OF_VIEW penalty (fix C1c) ---
+    # Dominant cost: one charge per OBSERVED frame the gap would discard.
+    # Tiny cost: per genuinely-missing frame, so an empty gap is not free.
     if mode is Mode.OUT_OF_VIEW:
-        cost += cfg.out_of_view_frame_penalty * n_frames_in_segment
+        n_observed = int(fit.n_observed)
+        n_missing = max(0, n_frames_in_segment - n_observed)
+        cost += cfg.out_of_view_frame_penalty * n_observed
+        cost += cfg.out_of_view_missing_frame_penalty * n_missing
 
     # --- Term 4: underconstrained flag ---
     if fit.underconstrained:
@@ -915,6 +1017,63 @@ def segment_cost(
         cost += cfg.unexplained_break_penalty
 
     return cost
+
+
+def _velocity_continuity_delta(
+    prev_mode: "Mode | None",
+    next_mode: Mode,
+    prev_end_vel: np.ndarray,
+    next_start_vel: np.ndarray,
+) -> float | None:
+    """Δv magnitude to charge for velocity continuity across a transition.
+
+    Mode-pair aware (fix C1a).  Returns the magnitude the caller multiplies by
+    ``velocity_discontinuity_weight``, or ``None`` when no continuity penalty
+    applies (a legitimate physical event whose velocity change is expected).
+
+    Both velocities are assumed defined (the caller guards on that).
+
+    Rules
+    -----
+    - flight→flight            : FULL ‖Δv‖ (mid-air change is suspicious).
+    - flight→rolling/stationary: horizontal ‖Δv_xy‖ only (vertical kill is
+      physical at a landing).
+    - rolling/stationary→flight: ``None`` (kick/bounce-up launch — the velocity
+      gain is the event itself).
+    - any pair involving POSSESSED: ``None`` (ball velocity is player-driven).
+    - rolling↔rolling / stationary↔rolling on the ground: horizontal ‖Δv_xy‖.
+    - any other pair: FULL ‖Δv‖ (conservative default).
+    """
+    v_prev = np.asarray(prev_end_vel, float)
+    v_next = np.asarray(next_start_vel, float)
+    dv = v_next - v_prev
+    full = float(np.linalg.norm(dv))
+    horiz = float(np.linalg.norm(dv[:2]))
+
+    _ground = (Mode.ROLLING, Mode.STATIONARY)
+
+    # Possession: ball velocity is player-controlled — never penalise.
+    if prev_mode is Mode.POSSESSED or next_mode is Mode.POSSESSED:
+        return None
+
+    # Launch off the ground (kick / bounce-up): the velocity gain is the event.
+    if prev_mode in _ground and next_mode is Mode.FLIGHT:
+        return None
+
+    # Landing: vertical velocity is killed — penalise only horizontal slip.
+    if prev_mode is Mode.FLIGHT and next_mode in _ground:
+        return horiz
+
+    # Mid-air continuation: a velocity change here is suspicious — full Δv.
+    if prev_mode is Mode.FLIGHT and next_mode is Mode.FLIGHT:
+        return full
+
+    # Ground-to-ground: motion should stay continuous — horizontal Δv.
+    if prev_mode in _ground and next_mode in _ground:
+        return horiz
+
+    # Conservative default (e.g. seed transition with prev_mode None): full Δv.
+    return full
 
 
 def transition_cost(
@@ -945,21 +1104,37 @@ def transition_cost(
        - ``bp.event_score ≈ 0`` (non-manual, non-boundary): the transition has
          no supporting event → ``+ cfg.unexplained_break_penalty``.
 
-    2. **Velocity continuity** — ``cfg.velocity_discontinuity_weight *
-       ‖next_start_vel − prev_end_vel‖`` ONLY when both velocities are
-       non-None (design note F4).  When either is None the term is zero.
+    2. **Velocity continuity (mode-pair aware — fix C1a)** — penalised by
+       ``cfg.velocity_discontinuity_weight`` times a Δv magnitude that depends
+       on the mode pair, ONLY when both velocities are non-None (design note
+       F4).  The component charged differs because not every velocity change is
+       a physics violation:
 
-    3. **Restitution awareness** — at a flight→(flight|rolling) transition
-       where BOTH boundary velocities have a defined z-component: call
-       ``ball_physics.restitution(prev_end_vel, next_start_vel)``.
+       - **flight→flight** (mid-air mode continuation): penalise the FULL
+         ‖Δv‖ — a mid-air velocity change with no real event is suspicious.
+       - **flight→rolling / flight→stationary** (a landing): penalise ONLY the
+         horizontal component ‖Δv_xy‖.  The vertical velocity is killed by the
+         landing — that is physical, not a discontinuity to be punished.
+       - **rolling/stationary→flight** (a kick / bounce-up launch): NO velocity
+         penalty — the launch is an event and the velocity gain is physical.
+       - **any transition involving POSSESSED**: NO velocity penalty — ball
+         velocity is player-controlled.
+       - **rolling→rolling / stationary↔rolling on the ground**: penalise the
+         horizontal ‖Δv_xy‖ — ground motion should stay continuous.
+       - any other pair: full ‖Δv‖ (conservative default).
+
+    3. **Restitution awareness (fix C1b)** — applied ONLY at a true bounce,
+       i.e. a flight→flight transition where BOTH boundary velocities have a
+       defined z-component: call ``ball_physics.restitution(prev_end_vel,
+       next_start_vel)``.
        - If it returns ``None`` (ball not arriving downward) → no penalty.
        - If it returns a value outside ``[restitution_min, restitution_max]``
          (defaults 0.5–0.85 from SolverCfg) → a modest out-of-envelope
          penalty equal to ``cfg.velocity_discontinuity_weight * 5.0`` (one
-         "bad" m/s Δv equivalent).  Kept modest because the transition might
-         be a mis-classified touch rather than a true bounce, and we do not
-         want to strongly penalise flight→rolling transitions at valid net/post
-         impacts which can have e > 0.85.
+         "bad" m/s Δv equivalent).
+       A flight→rolling / flight→stationary *landing* has restitution ≈ 0
+       (inelastic — the ball stops bouncing and rolls).  That is PHYSICAL, not
+       a violation, so the restitution envelope is NOT checked there.
 
     Parameters
     ----------
@@ -1001,21 +1176,20 @@ def transition_cost(
         # No supporting event and not manual/boundary → unexplained break.
         cost += cfg.unexplained_break_penalty
 
-    # --- Term 2: velocity continuity (F4) ---
+    # --- Term 2: velocity continuity — mode-pair aware (fix C1a, F4) ---
     if prev_end_vel is not None and next_start_vel is not None:
-        delta_v = np.linalg.norm(
-            np.asarray(next_start_vel, float) - np.asarray(prev_end_vel, float)
-        )
-        cost += cfg.velocity_discontinuity_weight * float(delta_v)
-
-        # --- Term 3: restitution check (flight↔ground with defined v_z) ---
-        # Only meaningful at a downward-incoming bounce; restitution() returns
-        # None when v_in_z > -0.1 (ball arriving flat).
-        _is_grounded = next_mode in (Mode.ROLLING, Mode.STATIONARY, Mode.POSSESSED)
         prev_mode = prev_seg.mode if prev_seg is not None else None
-        _prev_was_flight = prev_mode is Mode.FLIGHT
+        delta_v = _velocity_continuity_delta(prev_mode, next_mode,
+                                             prev_end_vel, next_start_vel)
+        if delta_v is not None:
+            cost += cfg.velocity_discontinuity_weight * float(delta_v)
 
-        if _prev_was_flight and (_is_grounded or next_mode is Mode.FLIGHT):
+        # --- Term 3: restitution check — flight→flight bounce ONLY (fix C1b) ---
+        # A true bounce is flight→flight; restitution() returns None when the
+        # ball is not arriving downward (v_in_z > -0.1).  A flight→ground
+        # landing has restitution ≈ 0 (inelastic) which is physical, so the
+        # envelope is NOT checked there.
+        if prev_mode is Mode.FLIGHT and next_mode is Mode.FLIGHT:
             from src.utils.ball_physics import restitution as _restitution
             e = _restitution(prev_end_vel, next_start_vel)
             if e is not None:
@@ -1127,30 +1301,67 @@ def _eligible_modes(
     return cands
 
 
-def _quant_key(hyp: Hypothesis) -> tuple[float, int, int]:
-    """Deterministic ordering key (design note F10).
+def _comparable_partition_sig(
+    hyp: Hypothesis,
+) -> tuple[tuple[int, int, int, str], ...]:
+    """Totally-orderable partition signature (fix C2).
+
+    Same content as :func:`_partition_sig` but ``player_id`` is normalised to
+    ``""`` (never ``None``) so the tuple is comparable with ``<`` — ``None`` is
+    not orderable against ``str`` inside a tuple.  Used as the final tie-break
+    field in :func:`_quant_key`.
+    """
+    return tuple(
+        (s.fa, s.fb, int(s.mode), s.player_id or "") for s in hyp.segments
+    )
+
+
+def _quant_key(
+    hyp: Hypothesis,
+) -> tuple[float, int, int, tuple[tuple[int, int, int, str], ...]]:
+    """Deterministic, TOTAL ordering key (design notes F10 + fix C2).
 
     Cost is quantized to ``_COST_QUANT_DP`` decimals so float noise below that
     magnitude cannot flip the ordering; ties then break by the last consumed
-    frame, then by the current mode's integer value (Mode ordering).
+    frame, then by the current mode's integer value (Mode ordering), then —
+    as a final STRUCTURAL tie-break — by the full partition signature
+    (per-segment ``(fa, fb, mode_int, player_id)``).
+
+    Without the partition-signature field two genuinely-different partitions
+    could tie on ``(cost, last_frame, mode_int)`` and resolve by Python list
+    append order, making the winner depend on hypothesis-insertion order rather
+    than on structure.  The signature makes the order total and reproducible.
     """
     last_frame = hyp.segments[-1].fb if hyp.segments else -1
     mode_int = int(hyp.cur_mode) if hyp.cur_mode is not None else -1
-    return (round(float(hyp.cost), _COST_QUANT_DP), last_frame, mode_int)
+    return (
+        round(float(hyp.cost), _COST_QUANT_DP),
+        last_frame,
+        mode_int,
+        _comparable_partition_sig(hyp),
+    )
 
 
 def _collapse_dominated(hyps: list[Hypothesis]) -> list[Hypothesis]:
     """Dominance collapse: among hypotheses ending at the same breakpoint with
     the same ``(cur_mode, player_id)`` keep only the lowest-cost one.
 
-    They are interchangeable going forward (the only state the next extension
-    reads is ``last_bp_idx``, ``cur_mode``, ``player_id`` and ``end_velocity``
-    — and ``end_velocity`` is a deterministic function of the last segment's
-    fit, so two hypotheses with the same mode/player at the same column have
-    the same forward behaviour).  The lower-cost survivor dominates.
+    HEURISTIC — beam approximation, NOT a strict dominance relation (fix C3).
+    The next extension's :func:`transition_cost` reads ``end_velocity`` (for the
+    velocity-continuity and restitution terms), so two hypotheses with the same
+    ``(last_bp_idx, cur_mode, player_id)`` but DIFFERENT ``end_velocity`` are
+    NOT strictly interchangeable — a higher-cost-so-far hypothesis with an
+    end-velocity that better matches the next segment could, in principle, win
+    overall.  Collapsing them by dropping ``end_velocity`` is a deliberate beam
+    pruning trade-off (it bounds branching at the cost of occasionally pruning a
+    hypothesis that a velocity-aware exact search would keep).  In practice the
+    surviving lowest-cost-so-far hypothesis is a strong proxy and the beam width
+    plus the breakpoint structure recover the right partition; the multi-impact
+    and determinism tests guard against regressions.
 
-    Deterministic: when costs tie within the quantization, the existing
-    quantized ordering picks the winner.
+    Deterministic: when costs tie within the quantization, the total
+    ``_quant_key`` ordering (including the structural partition signature, fix
+    C2) picks the survivor — never list append order.
     """
     best: dict[tuple[int, int, str | None], Hypothesis] = {}
     for h in hyps:
@@ -1236,6 +1447,12 @@ def run_beam(
 
     Raises
     ------
+    ValueError
+        If fewer than two breakpoints are supplied, or if the breakpoint
+        frames are not STRICTLY increasing (fix C4) — duplicate or
+        out-of-order frames produce zero/negative-length spans that the
+        ``fb <= fa`` skip silently drops, which can dead-end a column and
+        leave the clip unexplainable.  The caller must dedup/sort first.
     BudgetExceeded
         Propagated unchanged from ``seg_solver.fit_segment`` so Task 8 can
         catch it and fall back to the whole-shot piecewise solver (F8).
@@ -1244,6 +1461,17 @@ def run_beam(
         raise ValueError(
             "run_beam requires at least two breakpoints (frame-0 + final "
             "boundary)."
+        )
+
+    # Fix C4: breakpoint frames must be strictly increasing.  A duplicate or
+    # out-of-order frame yields a zero/negative-length span (fb <= fa) that the
+    # extension loop silently skips, which can dead-end a column and produce no
+    # complete hypothesis.  Fail fast with a clear message instead.
+    frames = [bp.frame for bp in breakpoints]
+    if any(b <= a for a, b in zip(frames, frames[1:])):
+        raise ValueError(
+            "run_beam requires breakpoints with strictly increasing frames; "
+            f"got {frames} (duplicate or out-of-order). Dedup/sort first."
         )
 
     n_bp = len(breakpoints)

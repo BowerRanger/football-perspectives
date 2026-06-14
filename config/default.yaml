@@ -561,9 +561,9 @@ ball:
     # (kick/volley) carries an explicit spin preset — the user has
     # asserted there is spin, so we don't require the same 20 % beat.
     min_residual_improvement_with_hint: 0.05
-    # Sanity bound on recovered angular speed (rad/s). Pro footballers
-    # rarely exceed ~50 rad/s on a kick; we cap conservatively at 200.
-    max_omega_rad_s: 200.0
+    # Sanity bound on recovered angular speed (rad/s). ~15 rev/s is the top
+    # of the real free-kick range; 95 rad/s (≈ 15.1 rev/s) enforces that.
+    max_omega_rad_s: 95.0
     # Lumped drag coefficient k/m used inside the Magnus integrator:
     #     a = g + (k_drag_over_m) · (ω × v)
     drag_k_over_m: 0.005

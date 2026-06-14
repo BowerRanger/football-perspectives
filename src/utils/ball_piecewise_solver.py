@@ -127,7 +127,7 @@ class SolverCfg:
     spin_min_seconds: float = 0.5
     spin_min_improve: float = 0.20
     spin_min_improve_hinted: float = 0.05
-    spin_max_omega_rad_s: float = 200.0
+    spin_max_omega_rad_s: float = 95.0
     drag_k_over_m: float = 0.005
     spin_node_max_violation_m: float = 0.15
 

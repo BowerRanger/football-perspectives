@@ -476,3 +476,72 @@ and IMM-bridged frames do not count). The old "any uv" figure for origi02
    before Phase 1 and a 72 m teleport when denser evidence re-anchored the
    IMM mid-glide; with the guard, origi02 has **zero** jumps > 2 m — better
    than pre-rework.
+
+---
+
+## Phase 1.5 validation results (2026-06-14)
+
+Implementation: commits `77ba146..238d610` on `ball-auto-physics` (Tasks 1–6
++ the two Magnus/aggregation review fixes). Full ball/anchor/tracker/quality
+suite: 344 passed, 2 skipped (unrelated Blender). Real clips: origi01+origi02
+(one sync group) and kroupi01 (single shot), CPU WASB.
+
+### Triangulation quality (origi01 ↔ origi02)
+
+| metric | value | acceptance |
+|---|---|---|
+| inlier fixes (both shots) | **31** | ≥ 8 ✓ |
+| median ray-miss | **0.199 m** | ≤ 1.0 m ✓ |
+| median parallax | **26.9°** | ≥ 8° ✓ |
+| refined offset (saved −142) | **−145.75** | flagged, disagreement 3.75 fr ✓ |
+
+The sub-frame offset refinement and gated triangulation work as designed.
+The refined offset is −145.75 (the prototype found −144 on a sparser, pre-
+second-pass detection set); ray-miss at −145.75 is 0.2 m, so the offset is
+well-determined for ray consistency, and the 3.75-frame disagreement with
+the operator's saved −142 is correctly surfaced as a review cue. The fixes
+form a coherent, physically-sensible sub-trajectory (origi02 frames 273–302:
+a low ball arc bouncing to the pitch and kicking back up).
+
+### The honest finding: fixes are inert on this clip's dense output
+
+origi02's 31 fix frames (198, 202, 273–302, 309) are **all classified
+"missing"** by the piecewise solver, and its only flight segment is
+[203, 262] — **no fix overlaps any solved flight span**. Because Phase 1.5
+feeds fixes only into flight fits *within committed spans*, the fixes never
+enter a fit: origi02's dense track is byte-identical before vs after
+(0 frames moved). The cross-view consistency tool therefore shows no change
+(flight median 25.9 m both before and after) — that 25.9 m is origi02's
+unhelped monocular arc in [203, 262], a span with no fixes.
+
+Where the fixes *can* be compared (against origi01's manual-anchored solve at
+the 31 synced frames): median 2.6 m, but bimodal — **sub-metre where the ball
+is grounded/slow** (frames 287–293, agreement 0.1–0.8 m) and **10–14 m where
+it is fast/high** (frames 198, 202, 300–302). The high-speed errors are
+consistent with a small residual sync error (metres per frame at speed) plus
+the imperfection of the anchored solve we compare against. This argues for
+**speed-aware fix weighting** in Phase 2.
+
+### Verdict
+
+- Triangulation + all plumbing (schema, fitter `world_fixes`, solver
+  threading, three-pass stage, diag, quality report): **correct, tested,
+  geometrically sound**.
+- Dense-output improvement on origi02: **not delivered** — the flight-fit-
+  only consumption is too narrow; the fixes land in regions the piecewise
+  solver leaves unsolved, and it never *creates* trajectory where the ball
+  is currently missing.
+- **The payoff is gated on Phase 2.** The global mode-sequence solver treats
+  fix-bearing frames as first-class flight evidence (creating segments
+  there), so the 273–302 ball arc — which the piecewise solver discards —
+  becomes a solved flight segment constrained by its 0.2 m-ray-miss fixes.
+  Phase 2 acceptance explicitly targets this span.
+- kroupi01 (no group): **clean no-op** — no fixes sidecar, `cross_replay:
+  null`, coverage 0.474 identical to Phase 1; no regressions.
+
+### Carried into Phase 2
+
+1. Fixes must be able to **create** solved geometry, not just refine existing
+   flight fits (a fix run is direct stereo evidence of a flight segment).
+2. **Speed-aware fix weighting**: down-weight fixes where the ball moves far
+   between frames (sub-frame sync sensitivity), up-weight slow/grounded fixes.

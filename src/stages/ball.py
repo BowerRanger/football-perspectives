@@ -60,7 +60,11 @@ from src.utils.ball_auto_anchor import (
     generate_auto_anchors,
     merge_anchors,
 )
-from src.utils.ball_auto_events import AutoEventCfg, detect_events
+from src.utils.ball_auto_events import (
+    AutoEventCfg,
+    detect_event_candidates,
+    detect_events,
+)
 from src.utils.ball_detector import BallDetector, YOLOBallDetector
 from src.utils.ball_keyframe_builder import build_ball_keyframe_set
 from src.utils.ball_mode_search import (
@@ -1463,12 +1467,27 @@ class BallStage(BaseStage):
         solver_name = str(cfg.get("solver", "piecewise"))
         mode_search_fallback = False
         if solver_name == "global":
+            # The beam re-segments the timeline, so it wants the RICHER
+            # permissive candidate set (soft-NMS, two events per window),
+            # not the greedy-merged `events` the auto-anchor path uses —
+            # otherwise the beam can't split where greedy merging hid a
+            # breakpoint (the whole point of Phase 2).
+            event_candidates = detect_event_candidates(
+                steps=steps,
+                confidences=raw_confidences,
+                player_ctx=player_ctx,
+                per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                per_frame_t=per_frame_t, distortion=distortion,
+                goal_geometry=goal_geometry,
+                cfg=event_cfg,
+                profile="permissive",
+            )
             try:
                 result = solve_modes(
                     **solve_kwargs,
                     mode_search_cfg=_mode_search_cfg(cfg),
                     player_ctx=player_ctx,
-                    events=events,
+                    events=event_candidates,
                 )
             except BudgetExceeded as exc:
                 logger.warning(

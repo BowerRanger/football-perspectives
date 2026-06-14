@@ -638,3 +638,198 @@ def fit_magnus_trajectory(
 
     mean_residual = float(np.linalg.norm(result.fun) / np.sqrt(n_obs))
     return p0_opt, v0_opt, omega_opt, mean_residual
+
+
+def _integrate_magnus_state(
+    p0: np.ndarray,
+    v0: np.ndarray,
+    omega: np.ndarray,
+    g_vec: np.ndarray,
+    drag_k_over_m: float,
+    duration_s: float,
+    substeps: int = 16,
+) -> tuple[np.ndarray, np.ndarray]:
+    """RK4-integrate ``dv/dt = g + k·(ω × v)`` to ``duration_s``.
+
+    Returns ``(p, v)`` at the final time. Mirrors
+    :func:`_integrate_magnus_positions` but also returns the terminal
+    velocity (needed to seed the post-bounce arc).
+    """
+    p = np.asarray(p0, dtype=float).copy()
+    v = np.asarray(v0, dtype=float).copy()
+    omega = np.asarray(omega, dtype=float)
+    if duration_s <= 0:
+        return p, v
+    h = duration_s / substeps
+
+    def accel(vv: np.ndarray) -> np.ndarray:
+        return g_vec + drag_k_over_m * np.cross(omega, vv)
+
+    for _ in range(substeps):
+        k1v = accel(v)
+        k1p = v
+        k2v = accel(v + 0.5 * h * k1v)
+        k2p = v + 0.5 * h * k1v
+        k3v = accel(v + 0.5 * h * k2v)
+        k3p = v + 0.5 * h * k2v
+        k4v = accel(v + h * k3v)
+        k4p = v + h * k3v
+        p = p + (h / 6.0) * (k1p + 2 * k2p + 2 * k3p + k4p)
+        v = v + (h / 6.0) * (k1v + 2 * k2v + 2 * k3v + k4v)
+    return p, v
+
+
+def fit_coupled_bounce(
+    obs_a: list[tuple[int, tuple[float, float]]],
+    obs_b: list[tuple[int, tuple[float, float]]],
+    *,
+    cams_a: tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]],
+    cams_b: tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]],
+    bounce_frame: int,
+    fps: float,
+    g: float = -9.81,
+    drag_k_over_m: float = 0.005,
+    ball_radius: float = 0.11,
+    restitution_min: float = 0.5,
+    restitution_max: float = 0.85,
+    mu_max: float = 0.7,
+    omega_max: float = 95.0,
+    p0_seed: np.ndarray | None = None,
+    v0_seed: np.ndarray | None = None,
+    omega0_seed: np.ndarray | None = None,
+    e_seed: float = 0.7,
+    mu_seed: float = 0.3,
+    max_iter: int = 100,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
+    """Jointly fit two bounce-adjacent Magnus arcs sharing a spin-coupled bounce.
+
+    Free parameters: arc A's initial state ``(p0, v0, ω0)`` (9 DOF) plus
+    the bounce parameters ``(e, μ)`` (2 DOF) — 11 DOF total.  Arc B's
+    initial state is *derived*, not free: arc A is integrated (drag+Magnus)
+    forward to ``bounce_frame`` to obtain the bounce position and inbound
+    ``(v_in, ω_in)``, then :func:`ball_physics.bounce` produces
+    ``(v_out, ω_out)``; arc B starts from the bounce position with that
+    post-bounce state.  This is what makes spin *identifiable*: the same ω
+    must explain the curvature of both arcs *and* the velocity change across
+    the bounce.
+
+    The residual is the combined pixel reprojection over BOTH arcs'
+    observations, computed with the existing Magnus integrator.
+
+    Args:
+        obs_a / obs_b: ``(frame_index, (u, v))`` pairs for each arc,
+            ordered by time.  ``bounce_frame`` is the shared node frame
+            (arc A ends there, arc B begins there).
+        cams_a / cams_b: ``(Ks, Rs, ts)`` position-parallel to ``obs_a`` /
+            ``obs_b`` respectively.
+        bounce_frame: absolute clip frame of the bounce node.
+        fps: clip frame rate.
+        g, drag_k_over_m, ball_radius: physics constants.
+        restitution_min/max, mu_max, omega_max: parameter bounds.
+        *_seed: optional warm starts.
+        max_iter: LM iteration cap.
+
+    Returns:
+        ``(p0, v0, omega0, e, mu, residual_px)`` — arc A's fitted initial
+        state, the fitted bounce params, and the combined RMS pixel residual.
+    """
+    from scipy.optimize import least_squares
+
+    from src.utils.ball_physics import bounce as _bounce
+
+    Ks_a, Rs_a, ts_a = cams_a
+    Ks_b, Rs_b, ts_b = cams_b
+    g_vec = np.array([0.0, 0.0, g])
+
+    obs_a_arr = np.array([o[1] for o in obs_a], dtype=float)
+    obs_b_arr = np.array([o[1] for o in obs_b], dtype=float)
+    fa0 = obs_a[0][0] if obs_a else bounce_frame
+    # Times for arc A relative to its first observation; arc B relative to
+    # the bounce frame.
+    dt_a = np.array([(o[0] - fa0) / fps for o in obs_a])
+    dt_b = np.array([(o[0] - bounce_frame) / fps for o in obs_b])
+    t_bounce = (bounce_frame - fa0) / fps
+
+    n_a = len(obs_a)
+    n_b = len(obs_b)
+
+    if p0_seed is None:
+        p0_seed = np.zeros(3)
+    if v0_seed is None:
+        v0_seed = np.zeros(3)
+    if omega0_seed is None:
+        omega0_seed = np.zeros(3)
+
+    def _project(pts_world, Ks, Rs, ts, obs_arr, n):
+        res = []
+        for i in range(n):
+            cam = Rs[i] @ pts_world[i] + ts[i]
+            pix = Ks[i] @ cam
+            uv = pix[:2] / pix[2]
+            res.append(uv - obs_arr[i])
+        return res
+
+    def _residuals(params: np.ndarray) -> np.ndarray:
+        p0 = params[0:3]
+        v0 = params[3:6]
+        omega0 = params[6:9]
+        e = params[9]
+        mu = params[10]
+
+        residuals: list[np.ndarray] = []
+
+        # Arc A: integrate Magnus from (p0, v0, omega0) and sample at obs A.
+        if n_a:
+            pts_a = _integrate_magnus_positions(
+                p0, v0, omega0, g_vec, drag_k_over_m, dt_a,
+            )
+            residuals.extend(_project(pts_a, Ks_a, Rs_a, ts_a, obs_a_arr, n_a))
+
+        # Integrate arc A to the bounce frame to get the bounce state.
+        p_bounce, v_in = _integrate_magnus_state(
+            p0, v0, omega0, g_vec, drag_k_over_m, t_bounce,
+        )
+        v_out, omega_out = _bounce(v_in, omega0, e, mu, ball_radius)
+
+        # Arc B starts at the bounce position with the post-bounce state.
+        if n_b:
+            pts_b = _integrate_magnus_positions(
+                p_bounce, v_out, omega_out, g_vec, drag_k_over_m, dt_b,
+            )
+            residuals.extend(_project(pts_b, Ks_b, Rs_b, ts_b, obs_b_arr, n_b))
+
+        if not residuals:
+            return np.zeros(1)
+        return np.concatenate(residuals)
+
+    x0 = np.concatenate([
+        np.asarray(p0_seed, float),
+        np.asarray(v0_seed, float),
+        np.asarray(omega0_seed, float),
+        [float(e_seed), float(mu_seed)],
+    ])
+    inf = np.inf
+    lo = np.array(
+        [-inf, -inf, -inf, -inf, -inf, -inf,
+         -omega_max, -omega_max, -omega_max,
+         restitution_min, 0.0]
+    )
+    hi = np.array(
+        [inf, inf, inf, inf, inf, inf,
+         omega_max, omega_max, omega_max,
+         restitution_max, mu_max]
+    )
+    x0 = np.clip(x0, lo, hi)
+
+    result = least_squares(
+        _residuals, x0, method="trf", bounds=(lo, hi),
+        max_nfev=max_iter * 50,
+    )
+    n_total = max(n_a + n_b, 1)
+    residual_px = float(np.linalg.norm(result.fun) / np.sqrt(n_total))
+    p0_opt = result.x[0:3]
+    v0_opt = result.x[3:6]
+    omega0_opt = result.x[6:9]
+    e_opt = float(result.x[9])
+    mu_opt = float(result.x[10])
+    return p0_opt, v0_opt, omega0_opt, e_opt, mu_opt, residual_px

@@ -535,6 +535,10 @@ ball:
     max_splits_per_span: 3
     restitution_min: 0.5
     restitution_max: 0.85
+    # Coulomb friction cap for the spin-aware bounce model
+    # (ball_physics.bounce). Used by the coupled-bounce joint refit and
+    # available for UE-side physically-correct bounce rendering.
+    mu_max: 0.7
     # Longest credible single ballistic arc (bounds launch-arc searches);
     # open-span arcs whose apex stays below the minimum are ground passes.
     max_arc_seconds: 2.5
@@ -567,6 +571,18 @@ ball:
     # Lumped drag coefficient k/m used inside the Magnus integrator:
     #     a = g + (k_drag_over_m) · (ω × v)
     drag_k_over_m: 0.005
+    # Spin-coupled bounce joint refit (Phase 3 Task 5). When enabled, a
+    # flight→flight bounce node attempts a single joint LM over both arcs'
+    # initial state + the spin-aware bounce (e, μ), accepting only if the
+    # combined pixel residual beats the two independent fits by the spin
+    # improvement gate. DEFAULT FALSE: on a single broadcast camera the
+    # 11-DOF joint fit is depth/spin degenerate — free (p0, v0) absorb the
+    # weak Magnus signal and ω runs to the bounds even on spin-free
+    # synthetics (validated in tests/test_ball_bounce_coupling.py). The
+    # bounce() model itself is always available (UE-side use); only the
+    # joint refit is gated off until a multi-view / replay-triangulated
+    # constraint pins the arc depths. Flip to true only with that in place.
+    bounce_coupling: false
   plausibility:
     z_max_m: 50.0
     horizontal_speed_max_m_s: 40.0

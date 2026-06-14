@@ -595,6 +595,8 @@ def _solver_cfg(cfg: dict, ball_radius: float) -> SolverCfg:
         spin_max_omega_rad_s=float(spin.get(
             "max_omega_rad_s", base.spin_max_omega_rad_s)),
         drag_k_over_m=float(spin.get("drag_k_over_m", base.drag_k_over_m)),
+        mu_max=float(physics.get("mu_max", base.mu_max)),
+        bounce_coupling=bool(spin.get("bounce_coupling", base.bounce_coupling)),
     )
 
 

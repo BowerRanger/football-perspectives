@@ -53,6 +53,7 @@ from src.utils.ball_plausibility import (
 )
 from src.utils.bundle_adjust import (
     _integrate_magnus_positions,
+    fit_coupled_bounce,
     fit_magnus_trajectory,
     fit_parabola_to_image_observations,
 )
@@ -131,6 +132,14 @@ class SolverCfg:
     spin_max_omega_rad_s: float = 95.0
     drag_k_over_m: float = 0.005
     spin_node_max_violation_m: float = 0.15
+    # Coulomb friction cap for the spin-aware bounce model.
+    mu_max: float = 0.7
+    # Spin-coupled joint refit of bounce-adjacent flight arcs (Phase 3
+    # Task 5). DEFAULT FALSE — the monocular 11-DOF joint fit is depth/spin
+    # degenerate (see config comment + tests). When enabled, a flight→flight
+    # bounce node attempts the joint fit and accepts only on the spin
+    # improvement gate; the bounce model itself is always available.
+    bounce_coupling: bool = False
 
 
 @dataclass(frozen=True)
@@ -1362,6 +1371,179 @@ class _Solver:
         return out
 
     # ------------------------------------------------------------------
+    # Spin-coupled bounce refit (Phase 3 Task 5)
+
+    def _obs_for_arc(self, arc: _Arc):
+        """Pixel observations + parallel cameras inside an emitted arc."""
+        obs, Ks, Rs, ts = [], [], [], []
+        for f in range(arc.fa, arc.fb + 1):
+            uv = self.uvs.get(f)
+            if uv is None or not self._has_cam(f) or f in self.gap_fill:
+                continue
+            obs.append((f, (float(uv[0]), float(uv[1]))))
+            Ks.append(self.K[f])
+            Rs.append(self.R[f])
+            ts.append(self.t[f])
+        return obs, Ks, Rs, ts
+
+    def _attempt_bounce_coupling(self, st: _CommitState) -> None:
+        """Joint spin-coupled refit at flight→flight bounce nodes.
+
+        For every interior node bracketed by two ballistic arcs that meet at
+        a ground bounce, fit both arcs jointly with a single shared spin and
+        spin-aware bounce (``fit_coupled_bounce``).  The coupled solution
+        replaces the two independent arcs ONLY when its combined pixel
+        residual improves over the independent fits by the spin improvement
+        gate; otherwise today's independent fits are kept untouched.
+
+        NOTE: gated behind ``cfg.bounce_coupling`` (default False).  The
+        monocular joint fit is depth/spin degenerate (documented in config
+        + tests); this path exists for the multi-view / replay-constrained
+        future and is a no-op in the default pipeline.
+        """
+        cfg = self.cfg
+        nodes_inner = self.nodes[1:-1] if len(self.nodes) > 2 else []
+        for node in nodes_inner:
+            arc_in = st.arcs_by_bound.get((node.frame, "in"))
+            arc_out = st.arcs_by_bound.get((node.frame, "out"))
+            if arc_in is None or arc_out is None:
+                continue
+            # Bounce node: a ground contact between two ballistic arcs.
+            if node.z > cfg.ground_z_tol_m and node.state != "bounce":
+                continue
+            obs_a, Ks_a, Rs_a, ts_a = self._obs_for_arc(arc_in)
+            obs_b, Ks_b, Rs_b, ts_b = self._obs_for_arc(arc_out)
+            if (
+                len(obs_a) < cfg.min_obs_for_lm_fit
+                or len(obs_b) < cfg.min_obs_for_lm_fit
+            ):
+                continue
+            # Independent-fit baseline: RMS pixel residual over both arcs.
+            base_resid = self._combined_arc_residual(
+                [(arc_in, obs_a), (arc_out, obs_b)]
+            )
+            if base_resid is None:
+                continue
+            seed_omega = (
+                arc_in.omega_world if arc_in.omega_world is not None
+                else np.zeros(3)
+            )
+            try:
+                p0h, v0h, omegah, eh, muh, resid = fit_coupled_bounce(
+                    obs_a, obs_b,
+                    cams_a=(Ks_a, Rs_a, ts_a),
+                    cams_b=(Ks_b, Rs_b, ts_b),
+                    bounce_frame=node.frame,
+                    fps=self.fps,
+                    drag_k_over_m=cfg.drag_k_over_m,
+                    ball_radius=cfg.ball_radius_m,
+                    restitution_min=cfg.restitution_min,
+                    restitution_max=cfg.restitution_max,
+                    mu_max=cfg.mu_max,
+                    omega_max=cfg.spin_max_omega_rad_s,
+                    p0_seed=arc_in.p0,
+                    v0_seed=arc_in.v0,
+                    omega0_seed=seed_omega,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "bounce coupling failed at frame %d: %s", node.frame, exc,
+                )
+                continue
+            omega_mag = float(np.linalg.norm(omegah))
+            if omega_mag > cfg.spin_max_omega_rad_s + 1e-6:
+                continue
+            base = base_resid if base_resid > 0 else 1e-9
+            improvement = (base_resid - resid) / base
+            if improvement < cfg.spin_min_improve:
+                # Gate not met — keep the independent fits (today's behavior).
+                continue
+            self._commit_coupled_bounce(
+                st, node, arc_in, arc_out,
+                p0h, v0h, omegah, eh, muh, resid,
+            )
+            st.diagnostics.setdefault("bounce_coupling", []).append({
+                "frame": node.frame,
+                "omega_rad_s": omega_mag,
+                "e": float(eh),
+                "mu": float(muh),
+                "residual_px": float(resid),
+                "baseline_px": float(base_resid),
+                "improvement": float(improvement),
+            })
+
+    def _combined_arc_residual(self, arc_obs_pairs) -> float | None:
+        """RMS pixel residual of given arcs over their observations."""
+        errs: list[float] = []
+        for arc, obs in arc_obs_pairs:
+            worlds = {f: arc.eval(f, self.fps) for f, _ in obs}
+            for f, _ in obs:
+                rms = self._pixel_rms(worlds, [f])
+                if rms is not None:
+                    errs.append(rms)
+        if not errs:
+            return None
+        return float(np.sqrt(np.mean(np.square(errs))))
+
+    def _commit_coupled_bounce(
+        self, st: _CommitState, node: TrajectoryNode,
+        arc_in: _Arc, arc_out: _Arc,
+        p0: np.ndarray, v0: np.ndarray, omega: np.ndarray,
+        e: float, mu: float, resid: float,
+    ) -> None:
+        """Replace the two independent arcs with the coupled solution.
+
+        Rebuilds arc A from (p0, v0, omega) and arc B from the derived
+        post-bounce state, rewrites the dense world frames they cover and the
+        corresponding ``FlightSegment`` parabola dicts in place.
+        """
+        from src.utils.ball_physics import bounce as _bounce
+        from src.utils.bundle_adjust import _integrate_magnus_state
+
+        omega_mag = float(np.linalg.norm(omega))
+        axis = (omega / omega_mag).tolist() if omega_mag > 1e-9 else None
+        new_in = _Arc(
+            fa=arc_in.fa, fb=arc_in.fb, p0=np.asarray(p0, float),
+            v0=np.asarray(v0, float), residual_px=float(resid),
+            n_obs=arc_in.n_obs, omega_world=np.asarray(omega, float),
+            spin_axis=axis, spin_omega=omega_mag if axis else None,
+            spin_confidence=1.0 if axis else None,
+            drag_k_over_m=self.cfg.drag_k_over_m,
+        )
+        t_bounce = (node.frame - arc_in.fa) / self.fps
+        p_bounce, v_in = _integrate_magnus_state(
+            np.asarray(p0, float), np.asarray(v0, float),
+            np.asarray(omega, float), G_VEC, self.cfg.drag_k_over_m, t_bounce,
+        )
+        v_out, omega_out = _bounce(v_in, omega, e, mu, self.cfg.ball_radius_m)
+        out_mag = float(np.linalg.norm(omega_out))
+        out_axis = (omega_out / out_mag).tolist() if out_mag > 1e-9 else None
+        new_out = _Arc(
+            fa=arc_out.fa, fb=arc_out.fb, p0=np.asarray(p_bounce, float),
+            v0=np.asarray(v_out, float), residual_px=float(resid),
+            n_obs=arc_out.n_obs, omega_world=np.asarray(omega_out, float),
+            spin_axis=out_axis, spin_omega=out_mag if out_axis else None,
+            spin_confidence=1.0 if out_axis else None,
+            drag_k_over_m=self.cfg.drag_k_over_m,
+        )
+        for arc, new_arc in ((arc_in, new_in), (arc_out, new_out)):
+            for f in range(new_arc.fa, new_arc.fb + 1):
+                if 0 <= f < self.n_frames and f in st.world_by_frame:
+                    _, conf = st.world_by_frame[f]
+                    st.world_by_frame[f] = (new_arc.eval(f, self.fps), conf)
+            for seg in st.segments:
+                if seg.frame_range == (arc.fa, arc.fb):
+                    seg.parabola.update({
+                        "p0": [float(x) for x in new_arc.p0],
+                        "v0": [float(x) for x in new_arc.v0],
+                        "spin_axis_world": new_arc.spin_axis,
+                        "spin_omega_rad_s": new_arc.spin_omega,
+                        "spin_confidence": new_arc.spin_confidence,
+                    })
+            st.arcs_by_bound[(new_arc.fa, "out")] = new_arc
+            st.arcs_by_bound[(new_arc.fb, "in")] = new_arc
+
+    # ------------------------------------------------------------------
 
     def solve(self) -> SolveResult:
         cfg = self.cfg
@@ -1412,6 +1594,11 @@ class _Solver:
                 self._solve_open_span(0, self.n_frames, None, False),
                 0, max(self.n_frames - 1, 0), conf=0.6,
             )
+
+        # Spin-coupled joint refit of bounce-adjacent flight arcs (gated;
+        # default off — no-op unless cfg.bounce_coupling is True).
+        if cfg.bounce_coupling:
+            self._attempt_bounce_coupling(st)
 
         # Nodes are authoritative: exact world, state from node semantics.
         apply_node_authority(st, self.nodes, self.n_frames, cfg)

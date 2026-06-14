@@ -130,6 +130,8 @@ def _ball_shot_entry(track_path: Path, shot_id: str) -> dict:
             ],
             "detection_coverage": diag.get("detection_coverage"),
             "cross_replay": diag.get("cross_replay"),
+            "mode_search": diag.get("mode_search"),
+            "out_of_view_spans": diag.get("out_of_view_spans", []),
         })
     return entry
 

@@ -25,7 +25,14 @@ from src.utils.ball_piecewise_solver import (  # noqa: F401
     FlightSegment,
     SolveResult,
     SolverCfg,
+    TrajectoryNode,
+    _Arc,
+    _CommitState,
     _Solver,
+    _SpanOutcome,
+    apply_node_authority,
+    apply_restitution_flags,
+    commit_span,
 )
 from src.utils.ball_physics import (
     G_VEC,
@@ -36,6 +43,9 @@ from src.utils.ball_physics import (
 from src.utils.bundle_adjust import fit_parabola_to_image_observations
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from src.utils.ball_auto_events import BallEvent
     from src.utils.ball_player_context import PlayerContext
 
 
@@ -1599,4 +1609,373 @@ def run_beam(
         runner_up=runner_up,
         hypotheses_explored=hypotheses_explored,
         fit_calls=seg_solver._fit_calls,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 7 — render winner to SolveResult + public ``solve_modes`` entry point
+# ---------------------------------------------------------------------------
+
+# Default minimum length (frames) for an OUT_OF_VIEW span to be surfaced to the
+# operator-feedback loop. A span shorter than this is normal detection jitter
+# and is not worth flagging; a longer one is a real evidence gap the operator
+# may want to anchor (F14). Read from ``cfg.mode_search.out_of_view_min_span``
+# when present, else this constant.
+_OUT_OF_VIEW_MIN_SPAN = 3
+
+
+def _breakpoint_priority(bp: Breakpoint) -> int:
+    """Dedup priority: manual (2) > event (1) > boundary (0).
+
+    When two breakpoints land on the same frame the highest-priority one is
+    kept (a manual anchor at an event frame stays manual/hard).
+    """
+    if bp.is_manual:
+        return 2
+    if bp.kind == "boundary":
+        return 0
+    return 1
+
+
+def build_breakpoints(
+    *,
+    nodes: "Sequence[TrajectoryNode]",
+    events: "Sequence[BallEvent]",
+    n_frames: int,
+) -> list[Breakpoint]:
+    """Assemble the sorted, deduplicated breakpoint list for the beam (F2).
+
+    NOT via ``_audit_auto_nodes`` (which self-references the greedy
+    ``_solve_span``). Instead:
+
+    * Synthetic clip-boundary breakpoints at frame 0 and ``n_frames - 1``
+      (``kind="boundary"``, ``event_score=0.0``, ``is_manual=False`` — F17).
+    * Manual anchors (``node.is_manual``) → HARD breakpoints
+      (``is_manual=True``, ``event_score=1.0``). Manual anchor frames are the
+      only forced partition points in the beam.
+    * Event candidates from :func:`detect_event_candidates` (permissive) →
+      ``kind = event.kind``, ``event_score = event.score``, ``is_manual=False``.
+
+    Non-manual auto nodes are NOT added as breakpoints: per F2 they are
+    *candidates* the beam ranks, and the event detector already surfaces the
+    velocity breaks behind them; pinning every auto node would re-introduce the
+    audit's hard-knot dependence. Only manual anchors hard-pin.
+
+    Dedup is by frame, keeping the highest-priority breakpoint
+    (manual > event > boundary). The result is STRICTLY increasing by frame —
+    the precondition ``run_beam`` enforces.
+    """
+    by_frame: dict[int, Breakpoint] = {}
+
+    def _add(bp: Breakpoint) -> None:
+        f = int(bp.frame)
+        if not (0 <= f < n_frames):
+            return
+        existing = by_frame.get(f)
+        if existing is None or _breakpoint_priority(bp) > _breakpoint_priority(existing):
+            by_frame[f] = bp
+
+    # Boundaries first (lowest priority — any event/manual on these frames wins).
+    _add(Breakpoint(frame=0, kind="boundary", event_score=0.0, is_manual=False))
+    last = max(n_frames - 1, 0)
+    _add(Breakpoint(frame=last, kind="boundary", event_score=0.0,
+                    is_manual=False))
+
+    # Manual anchors → hard breakpoints.
+    for node in nodes:
+        if node.is_manual:
+            _add(Breakpoint(frame=int(node.frame), kind=node.state or "manual",
+                            event_score=1.0, is_manual=True))
+
+    # Event candidates → ranked breakpoints.
+    for ev in events:
+        score = float(getattr(ev, "score", 0.0))
+        _add(Breakpoint(
+            frame=int(ev.frame),
+            kind=str(getattr(ev, "kind", "event")),
+            event_score=max(0.0, min(1.0, score)),
+            is_manual=False,
+        ))
+
+    return [by_frame[f] for f in sorted(by_frame)]
+
+
+def _ball_uv_at(steps) -> "callable":
+    """Closure returning the confident ball pixel at a frame (or None).
+
+    Mirrors ``_Solver``'s ``uvs`` map: last confident uv per frame (a frame
+    has at most one step, so this is just the step's uv).
+    """
+    uvs: dict[int, tuple[float, float]] = {}
+    for s in steps:
+        if getattr(s, "uv", None) is not None:
+            uvs[int(s.frame)] = (float(s.uv[0]), float(s.uv[1]))
+
+    def lookup(frame: int):
+        return uvs.get(int(frame))
+
+    return lookup
+
+
+def _segment_to_outcome(seg: Segment, fps: float) -> _SpanOutcome:
+    """Translate a winning beam :class:`Segment` into a piecewise
+    :class:`_SpanOutcome` so the Task-0 :func:`commit_span` assembler can
+    render it into the EXACT ``SolveResult`` shape ``solve_piecewise`` produces.
+
+    Mode → kind → state mapping (the kind drives ``_KIND_STATE`` in
+    ``commit_span``):
+
+    * FLIGHT      → ``"ballistic"`` → state ``"flight"``; an ``_Arc`` is built
+      from ``worlds[fa]`` (p0) and ``boundary_vel[0]`` (v0) so a FlightSegment
+      is emitted and the frames get a non-null ``flight_segment_id``.
+    * ROLLING     → ``"rolling"``    → state ``"grounded"``.
+    * POSSESSED   → ``"possessed"``  → state ``"grounded"`` (F13). NO arc, so
+      these frames are never ``"flight"``.
+    * STATIONARY  → ``"stationary"`` → state ``"grounded"``.
+    * OUT_OF_VIEW → ``"out_of_view"``→ state ``"missing"`` (F12); empty worlds,
+      so no frames are written and they keep the default ``"missing"``.
+    """
+    out = _SpanOutcome(kind=seg.kind)
+    out.worlds = {f: np.asarray(w, dtype=float) for f, w in seg.worlds.items()}
+    out.underconstrained = bool(seg.underconstrained)
+    out.residual_px = float(seg.residual_px) if seg.worlds else None
+
+    if seg.mode is Mode.FLIGHT and seg.worlds:
+        v0 = seg.boundary_vel[0]
+        p0 = seg.worlds.get(seg.fa)
+        if v0 is not None and p0 is not None:
+            out.arcs = [_Arc(
+                fa=seg.fa, fb=seg.fb,
+                p0=np.asarray(p0, dtype=float),
+                v0=np.asarray(v0, dtype=float),
+                residual_px=float(seg.residual_px),
+                n_obs=len(seg.worlds),
+            )]
+    return out
+
+
+def _flight_segment_id_by_frame(
+    st: _CommitState,
+) -> dict[int, int]:
+    """Frame → emitted FlightSegment id for every flight frame.
+
+    Walks the committed ``segments`` (each a FlightSegment with a
+    ``frame_range``) so the renderer can attach the per-frame
+    ``flight_segment_id`` exactly as the BallTrack writer expects.
+    """
+    by_frame: dict[int, int] = {}
+    for seg in st.segments:
+        lo, hi = seg.frame_range
+        for f in range(lo, hi + 1):
+            if st.state_by_frame.get(f) == "flight":
+                by_frame[f] = seg.id
+    return by_frame
+
+
+def _out_of_view_spans(
+    winner: Hypothesis,
+    min_span: int,
+) -> list[dict[str, int]]:
+    """OUT_OF_VIEW segments longer than ``min_span`` frames, as {start,end}.
+
+    Surfaced for operator feedback (F12/F14): a long span the global solver
+    could not explain with any physical mode is a cue for a manual anchor.
+    """
+    spans: list[dict[str, int]] = []
+    for seg in winner.segments:
+        if seg.mode is Mode.OUT_OF_VIEW and (seg.fb - seg.fa + 1) > min_span:
+            spans.append({"start": int(seg.fa), "end": int(seg.fb)})
+    return spans
+
+
+def render(
+    winner: Hypothesis,
+    beam: BeamResult,
+    *,
+    nodes: "Sequence[TrajectoryNode]",
+    fps: float,
+    n_frames: int,
+    cfg: SolverCfg,
+    mode_cfg: ModeSearchCfg,
+    confidences: "Mapping[int, float] | None" = None,
+    gap_fill: set[int] | None = None,
+    out_of_view_min_span: int = _OUT_OF_VIEW_MIN_SPAN,
+) -> SolveResult:
+    """Assemble the winning hypothesis into the EXACT ``SolveResult`` shape.
+
+    Reuses the Task-0 free functions (:func:`commit_span`,
+    :func:`apply_node_authority`, :func:`apply_restitution_flags`) so the dense
+    ``world_by_frame``, full-frame ``state_by_frame`` (default ``"missing"``),
+    ``flight_segments`` and ``diagnostics["segments"]`` come out byte-shape
+    identical to ``solve_piecewise``.
+
+    Adds the Phase-2 diagnostics: ``mode_search`` (search-effort metrics) and
+    ``out_of_view_spans`` (also appended to ``underconstrained_spans`` — F14).
+    """
+    st = _CommitState(
+        world_by_frame={},
+        state_by_frame={f: "missing" for f in range(n_frames)},
+        segments=[],
+        diagnostics={
+            "segments": [],
+            "bounces": [],
+            "underconstrained_spans": [],
+            "splits": 0,
+        },
+        arcs_by_bound={},
+    )
+
+    # Commit each winning segment via the shared assembler.
+    for seg in winner.segments:
+        outcome = _segment_to_outcome(seg, fps)
+        # Confidence: 0.9 weight on the segment's worlds (mirrors the
+        # node-bracketed span confidence in solve_piecewise; OUT_OF_VIEW writes
+        # no worlds so its conf is unused).
+        commit_span(
+            st, outcome, seg.fa, seg.fb, conf=0.9,
+            n_frames=n_frames,
+            confidences=confidences, gap_fill=gap_fill,
+        )
+
+    # Nodes are authoritative (manual anchors win their exact world + state).
+    apply_node_authority(st, list(nodes), n_frames, cfg)
+    apply_restitution_flags(st, list(nodes), fps, cfg)
+
+    # Per-frame flight-segment id for the BallTrack writer / overlay.
+    st.diagnostics["flight_segment_id_by_frame"] = _flight_segment_id_by_frame(st)
+
+    # Phase-2 search diagnostics.
+    runner = beam.runner_up
+    st.diagnostics["mode_search"] = {
+        "hypotheses_explored": int(beam.hypotheses_explored),
+        "beam_width": int(mode_cfg.beam_width),
+        "winning_cost": float(winner.cost),
+        "runner_up_cost": (float(runner.cost) if runner is not None else None),
+        "fit_calls": int(beam.fit_calls),
+        "budget_hit": False,
+    }
+
+    # Out-of-view spans (operator feedback). Long ones ALSO surface as
+    # underconstrained spans so the feedback loop flags them (F14).
+    oov = _out_of_view_spans(winner, out_of_view_min_span)
+    st.diagnostics["out_of_view_spans"] = oov
+    existing = {
+        (u.get("start"), u.get("end"))
+        for u in st.diagnostics["underconstrained_spans"]
+    }
+    for span in oov:
+        key = (span["start"], span["end"])
+        if key not in existing:
+            st.diagnostics["underconstrained_spans"].append({
+                "start": span["start"], "end": span["end"],
+                "residual_px": None,
+            })
+            existing.add(key)
+
+    return SolveResult(
+        world_by_frame=st.world_by_frame,
+        state_by_frame=st.state_by_frame,
+        flight_segments=tuple(st.segments),
+        diagnostics=st.diagnostics,
+    )
+
+
+def solve_modes(
+    *,
+    nodes: "Sequence[TrajectoryNode]",
+    steps,
+    confidences: "Mapping[int, float]",
+    per_frame_K: "Mapping[int, np.ndarray]",
+    per_frame_R: "Mapping[int, np.ndarray]",
+    per_frame_t: "Mapping[int, np.ndarray]",
+    distortion: tuple[float, float],
+    fps: float,
+    n_frames: int,
+    pitch_length_m: float = 105.0,
+    pitch_width_m: float = 68.0,
+    split_hints: "Sequence[tuple[int, float]]" = (),
+    z_hints: "Mapping[int, tuple[float, float]] | None" = None,
+    manual_obs_frames: set[int] | None = None,
+    world_fixes: "Mapping[int, tuple[np.ndarray, float]] | None" = None,
+    cfg: SolverCfg | None = None,
+    mode_search_cfg: ModeSearchCfg | None = None,
+    player_ctx: "PlayerContext | None" = None,
+    events: "Sequence[BallEvent] | None" = None,
+) -> SolveResult:
+    """Global mode-sequence ball solve. Mirrors ``solve_piecewise``'s signature
+    and ``SolveResult`` return (the call-site swap is one line in ``ball.py``).
+
+    Pipeline
+    --------
+    1. Build a :class:`_SegmentSolver` from the kwargs (same reader rules as
+       ``_Solver``); ``player_ctx`` enables POSSESSED branches.
+    2. :func:`build_breakpoints` — boundaries + manual-anchor hard breaks +
+       permissive event candidates (F2; NOT ``_audit_auto_nodes``). When
+       ``events`` is None and a ``player_ctx`` is available the candidates are
+       computed here via :func:`detect_event_candidates`.
+    3. :func:`run_beam` over the breakpoints (``BudgetExceeded`` propagates for
+       Task 8's whole-shot piecewise fallback — F8).
+    4. :func:`render` the winner into the EXACT ``SolveResult`` shape with the
+       Task-0 assembler + Phase-2 diagnostics.
+
+    Raises
+    ------
+    BudgetExceeded
+        From the segment fitter past ``max_segment_fit_calls`` — caught by the
+        stage seam (Task 8) which falls back to ``solve_piecewise``.
+    """
+    solver_cfg = cfg or SolverCfg()
+    mode_cfg = mode_search_cfg or ModeSearchCfg()
+
+    seg_solver = _SegmentSolver(
+        mode_cfg=mode_cfg,
+        player_ctx=player_ctx,
+        nodes=nodes, steps=steps, confidences=confidences,
+        per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+        per_frame_t=per_frame_t, distortion=distortion,
+        fps=fps, n_frames=n_frames,
+        pitch_length_m=pitch_length_m, pitch_width_m=pitch_width_m,
+        split_hints=split_hints, z_hints=z_hints,
+        manual_obs_frames=manual_obs_frames,
+        world_fixes=world_fixes,
+        cfg=solver_cfg,
+    )
+
+    # Event candidates: prefer caller-supplied; else compute permissively when
+    # a player context is available (the detector needs it for touch
+    # classification). Without a player_ctx, fall back to no events — the beam
+    # still resolves the partition from boundaries + manual anchors.
+    if events is None and player_ctx is not None:
+        from src.utils.ball_auto_events import detect_event_candidates
+        events = detect_event_candidates(
+            steps=steps,
+            confidences=dict(confidences),
+            player_ctx=player_ctx,
+            per_frame_K=per_frame_K,
+            per_frame_R=per_frame_R,
+            per_frame_t=per_frame_t,
+            distortion=distortion,
+            profile="permissive",
+        )
+    events = events or ()
+
+    breakpoints = build_breakpoints(
+        nodes=nodes, events=events, n_frames=n_frames,
+    )
+
+    ball_uv_at = _ball_uv_at(steps)
+    beam = run_beam(
+        seg_solver, breakpoints, n_frames, mode_cfg,
+        ball_uv_at=ball_uv_at,
+    )
+
+    return render(
+        beam.winner, beam,
+        nodes=nodes, fps=fps, n_frames=n_frames,
+        cfg=solver_cfg, mode_cfg=mode_cfg,
+        confidences=dict(confidences),
+        gap_fill=seg_solver._solver.gap_fill,
+        out_of_view_min_span=getattr(
+            mode_cfg, "out_of_view_min_span", _OUT_OF_VIEW_MIN_SPAN,
+        ),
     )

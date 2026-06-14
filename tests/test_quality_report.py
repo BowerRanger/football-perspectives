@@ -445,6 +445,10 @@ def test_quality_report_ball_per_shot_with_diag(tmp_path: Path) -> None:
         "detection_coverage": {"pass1": 0.8, "second_pass": 0.1, "total": 0.9},
         "cross_replay": {"partner_shots": ["origi02"], "refined_offset": -144.0,
                          "n_inlier_fixes": 11, "offset_disagreement_frames": 2.0},
+        "mode_search": {"hypotheses_explored": 42, "beam_width": 8,
+                        "winning_cost": 12.5, "runner_up_cost": 18.0,
+                        "fit_calls": 30, "budget_hit": False},
+        "out_of_view_spans": [{"start": 11, "end": 17}],
     }))
 
     write_quality_report(tmp_path)
@@ -464,3 +468,8 @@ def test_quality_report_ball_per_shot_with_diag(tmp_path: Path) -> None:
         "pass1": 0.8, "second_pass": 0.1, "total": 0.9,
     }
     assert shot["cross_replay"]["n_inlier_fixes"] == 11
+    # Phase-2 mode-search + out-of-view diagnostics surface (passthrough).
+    assert shot["mode_search"]["hypotheses_explored"] == 42
+    assert shot["mode_search"]["winning_cost"] == 12.5
+    assert shot["mode_search"]["budget_hit"] is False
+    assert shot["out_of_view_spans"] == [{"start": 11, "end": 17}]

@@ -21,13 +21,20 @@ Classification precedence at a velocity break, most-specific first:
      own, so it additionally requires a speed collapse)
   4. bounce (vertical pixel-velocity flip, nobody nearby)
   5. generic velocity_break (solver split hint; never becomes an anchor)
+
+Public API
+----------
+``detect_events`` — production greedy-NMS path (unchanged).
+``detect_event_candidates`` — soft-NMS / top-K-per-window path that
+    returns every plausible candidate (used by the global mode-search
+    beam to populate breakpoint candidates).
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Literal, Protocol, Sequence
 
 import numpy as np
 
@@ -114,10 +121,17 @@ def _window_velocity(
     return None
 
 
-def _find_breaks(
+def _raw_break_candidates(
     uvs: dict[int, np.ndarray], cfg: AutoEventCfg
 ) -> list[_Break]:
-    """Velocity-break candidates with non-max suppression by strength."""
+    """Build all velocity-break candidates WITHOUT any NMS/merge step.
+
+    Applies the direction-change and speed-change gates from *cfg* but
+    performs no suppression — every frame that clears the thresholds is
+    returned, ordered by frame number.  Both ``detect_events`` and
+    ``detect_event_candidates`` call this; they differ only in how they
+    thin the resulting list.
+    """
     candidates: list[_Break] = []
     for f in sorted(uvs):
         v_b = _window_velocity(uvs, f, cfg.event_window_frames, -1)
@@ -144,11 +158,62 @@ def _find_breaks(
             dspeed_px=dspeed, speed_before=sb, speed_after=sa,
             vy_before=float(v_b[1]), vy_after=float(v_a[1]),
         ))
+    candidates.sort(key=lambda b: b.frame)
+    return candidates
+
+
+def _find_breaks(
+    uvs: dict[int, np.ndarray], cfg: AutoEventCfg
+) -> list[_Break]:
+    """Velocity-break candidates with non-max suppression by strength.
+
+    Calls ``_raw_break_candidates`` then applies the original greedy NMS
+    (strongest-first, suppress within merge_window_frames).  Output is
+    identical to the pre-refactor implementation.
+    """
+    candidates = _raw_break_candidates(uvs, cfg)
     # Non-max suppression: strongest first, suppress within merge window.
     kept: list[_Break] = []
     for cand in sorted(candidates, key=lambda b: -b.strength):
         if all(abs(cand.frame - k.frame) > cfg.merge_window_frames for k in kept):
             kept.append(cand)
+    kept.sort(key=lambda b: b.frame)
+    return kept
+
+
+def _top_k_per_window(
+    candidates: list[_Break], merge_window_frames: int, k: int = 2
+) -> list[_Break]:
+    """Soft-NMS: within each merge window, keep up to *k* candidates
+    (ranked by strength) rather than suppressing all but the strongest.
+
+    Windows are formed by a greedy pass identical to the hard-NMS, but
+    instead of keeping exactly one winner per window we keep the top *k*
+    by strength.  Frames that fall outside any existing window are always
+    kept.  The returned list is sorted by frame number.
+    """
+    if not candidates:
+        return []
+    # Sort descending by strength so the first candidate in each window
+    # is the strongest (same order as the greedy NMS pass).
+    by_strength = sorted(candidates, key=lambda b: -b.strength)
+    # windows: list of (centre_frame, [kept breaks in this window])
+    windows: list[tuple[int, list[_Break]]] = []
+
+    for cand in by_strength:
+        # Find the first existing window this candidate falls into.
+        assigned = False
+        for w_idx, (centre, members) in enumerate(windows):
+            if abs(cand.frame - centre) <= merge_window_frames:
+                if len(members) < k:
+                    members.append(cand)
+                assigned = True
+                break
+        if not assigned:
+            # Open a new window centred on this candidate's frame.
+            windows.append((cand.frame, [cand]))
+
+    kept = [b for _, members in windows for b in members]
     kept.sort(key=lambda b: b.frame)
     return kept
 
@@ -304,6 +369,30 @@ def _stationary_spans(
     return events
 
 
+def _permissive_cfg(cfg: AutoEventCfg) -> AutoEventCfg:
+    """Return a copy of *cfg* with detection thresholds lowered for the
+    permissive profile.  Only the fields that gate whether a candidate is
+    *generated at all* are relaxed; scoring weights are unchanged so the
+    returned scores remain comparable with the default profile.
+    """
+    return AutoEventCfg(
+        touch_max_px=cfg.touch_max_px,
+        # Lower speed and direction gates so subtler breaks surface.
+        min_direction_change_deg=cfg.min_direction_change_deg * 0.5,
+        min_speed_change_px=cfg.min_speed_change_px * 0.5,
+        min_break_speed_px=cfg.min_break_speed_px * 0.5,
+        event_window_frames=cfg.event_window_frames,
+        merge_window_frames=cfg.merge_window_frames,
+        bounce_min_vy_px=cfg.bounce_min_vy_px * 0.5,
+        stationary_max_speed_px=cfg.stationary_max_speed_px,
+        stationary_min_frames=cfg.stationary_min_frames,
+        stationary_min_conf=cfg.stationary_min_conf,
+        goal_line_tolerance_m=cfg.goal_line_tolerance_m,
+        goal_net_speed_drop_ratio=cfg.goal_net_speed_drop_ratio,
+        goal_min_direction_change_deg=cfg.goal_min_direction_change_deg * 0.5,
+    )
+
+
 def detect_events(
     *,
     steps: Sequence[_SupportsUv],
@@ -353,6 +442,138 @@ def detect_events(
     if events:
         logger.info(
             "ball auto-events: %d detected (%s)",
+            len(events),
+            ", ".join(f"{e.kind}@{e.frame}" for e in events),
+        )
+    return tuple(events)
+
+
+def _classify_breaks_to_events(
+    breaks: list[_Break],
+    uvs: dict[int, np.ndarray],
+    player_ctx: _SupportsJointLookup,
+    per_frame_K: dict[int, np.ndarray],
+    per_frame_R: dict[int, np.ndarray],
+    per_frame_t: dict[int, np.ndarray],
+    distortion: tuple[float, float],
+    goal_geometry: GoalGeometry | None,
+    cfg: AutoEventCfg,
+) -> list[BallEvent]:
+    """Classify a list of ``_Break`` objects into ``BallEvent`` records.
+
+    Used by ``detect_event_candidates`` after soft-NMS thinning.
+    ``detect_events`` uses an equivalent inline loop (kept separate to
+    preserve byte-identical output).
+    """
+    events: list[BallEvent] = []
+    for brk in breaks:
+        uv = uvs.get(brk.frame)
+        if uv is None:
+            continue
+        K = per_frame_K.get(brk.frame)
+        R = per_frame_R.get(brk.frame)
+        t = per_frame_t.get(brk.frame)
+        has_cam = K is not None and R is not None and t is not None
+        event: BallEvent | None = None
+        if goal_geometry is not None and has_cam:
+            event = _classify_goal_line(
+                brk, uv, K, R, t, distortion, goal_geometry, cfg
+            )
+        if event is None:
+            event = _classify_touch(brk, uv, player_ctx, cfg)
+        if event is None and goal_geometry is not None and has_cam:
+            event = _classify_net(
+                brk, uv, K, R, t, distortion, goal_geometry, cfg
+            )
+        if event is None:
+            event = _classify_bounce(brk, cfg)
+        if event is None:
+            event = BallEvent(
+                frame=brk.frame, kind="velocity_break",
+                score=float(0.5 * brk.strength),
+            )
+        events.append(event)
+    return events
+
+
+def detect_event_candidates(
+    *,
+    steps: Sequence[_SupportsUv],
+    confidences: dict[int, float],
+    player_ctx: _SupportsJointLookup,
+    per_frame_K: dict[int, np.ndarray],
+    per_frame_R: dict[int, np.ndarray],
+    per_frame_t: dict[int, np.ndarray],
+    distortion: tuple[float, float] = (0.0, 0.0),
+    goal_geometry: GoalGeometry | None = None,
+    cfg: AutoEventCfg | None = None,
+    profile: Literal["default", "permissive"] = "default",
+) -> tuple[BallEvent, ...]:
+    """Return ALL plausible ball-event candidates for the global mode-search.
+
+    Unlike ``detect_events`` (which applies greedy NMS so that at most one
+    event survives each ``merge_window_frames``-wide window), this function
+    uses a **soft-NMS / top-K-per-window** policy: up to
+    ``_TOP_K_PER_WINDOW`` candidates per window are kept so that two events
+    that are only a few frames apart can both survive.
+
+    Parameters
+    ----------
+    profile:
+        ``"default"`` — use *cfg* thresholds unchanged (same gates as
+        ``detect_events``, but without the greedy merge step).
+        ``"permissive"`` — lower ``min_speed_change_px``,
+        ``min_direction_change_deg``, and related gates by 50 % so
+        subtler velocity breaks surface as low-score candidates.
+
+    Notes
+    -----
+    * Synthetic clip-boundary frames (frame 0 and the last frame in
+      ``steps``) are never emitted as events (F17).
+    * All returned ``score`` values are in [0, 1].
+    * The returned tuple is sorted by ``(frame, kind)``.
+    * Stationary spans are always returned (not subject to merge
+      suppression) because they cover ranges, not single frames.
+    """
+    _TOP_K_PER_WINDOW = 2
+
+    base_cfg = cfg or AutoEventCfg()
+    effective_cfg = _permissive_cfg(base_cfg) if profile == "permissive" else base_cfg
+
+    uvs: dict[int, np.ndarray] = {
+        s.frame: np.asarray(s.uv, dtype=float)
+        for s in steps if s.uv is not None
+    }
+
+    # Soft-NMS: keep top-K breaks per merge window instead of top-1.
+    # Note: boundary frames (0 / last) are already excluded naturally because
+    # _raw_break_candidates requires valid velocity windows on both sides of
+    # the candidate frame (v_b and v_a both None-checked).
+    raw_breaks = _raw_break_candidates(uvs, effective_cfg)
+    thinned_breaks = _top_k_per_window(
+        raw_breaks, effective_cfg.merge_window_frames, k=_TOP_K_PER_WINDOW
+    )
+
+    events: list[BallEvent] = _classify_breaks_to_events(
+        thinned_breaks,
+        uvs=uvs,
+        player_ctx=player_ctx,
+        per_frame_K=per_frame_K,
+        per_frame_R=per_frame_R,
+        per_frame_t=per_frame_t,
+        distortion=distortion,
+        goal_geometry=goal_geometry,
+        cfg=effective_cfg,
+    )
+
+    # Stationary spans: not subject to merge suppression.
+    events.extend(_stationary_spans(uvs, confidences, effective_cfg))
+
+    events.sort(key=lambda e: (e.frame, e.kind))
+    if events:
+        logger.debug(
+            "ball event candidates (%s): %d (%s)",
+            profile,
             len(events),
             ", ".join(f"{e.kind}@{e.frame}" for e in events),
         )

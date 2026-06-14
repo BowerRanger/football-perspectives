@@ -146,9 +146,13 @@ def interpolate_events(
             "roll", "carry", "free_flight",
         ):
             _eval_linear(seg, p0, p1, world)
-        elif seg.kind == "rest" and p0 is not None:
+        elif seg.kind == "rest" and (p0 is not None or p1 is not None):
+            # Hold a constant position. Works from whichever endpoint has a
+            # keyframe so clip-boundary holds (open start has only the end
+            # keyframe; open end has only the start keyframe) both resolve.
+            anchor = p0 if p0 is not None else p1
             for f in range(seg.start_frame, seg.end_frame + 1):
-                world[f] = p0
+                world[f] = anchor
         else:
             # Underdetermined (e.g. free_flight with an unknown endpoint):
             # interior frames have no world position.

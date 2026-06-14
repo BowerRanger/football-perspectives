@@ -341,23 +341,25 @@ class _SegmentSolver:
     pins them as hard knots — exactly the endpoint dependence design note
     F7 forbids for free-floating breakpoints (it would make the cache key
     depend on a non-frame-determined world).  ``_rolling_span`` likewise
-    pins ``a[:2]`` / ``b[:2]`` as exact roll endpoints.  So FLIGHT calls
-    ``fit_parabola_to_image_observations`` directly with NO endpoint knot
-    (unless ``fa``/``fb`` is a *manual* anchor, whose world is deterministic
-    from its frame), and ROLLING calls ``fit_rolling_segment`` over ground
-    ray-casts seeded from the first/last interior observation rather than
-    pinned node endpoints.  This keeps the fit a pure function of
-    ``(fa, fb, mode, interior obs, in-range fixes)`` — all frame-determined
-    — so a frame-keyed cache is sound.
+    pins ``a[:2]`` / ``b[:2]`` as exact roll endpoints.  So for a free-floating
+    breakpoint FLIGHT calls ``fit_parabola_to_image_observations`` directly with
+    NO endpoint knot, and ROLLING seeds its endpoints from the first/last
+    interior ground ray-cast rather than a pinned node endpoint.  When ``fa`` /
+    ``fb`` lands on a *resolved anchor node* (manual OR auto — its world is
+    deterministic from the frame, not the search path) that world IS passed as a
+    knot: a FLIGHT knot (the depth-critical pin) and a ROLLING endpoint XY.  This
+    keeps the fit a pure function of ``(fa, fb, mode, interior obs, in-range
+    fixes, anchor-present?)`` — all frame-determined — so a frame-keyed cache is
+    sound.
 
     Cache soundness (F7)
     --------------------
     Key = ``(fa, fb, mode, player_id, fa_anchor?, fb_anchor?, wfixes_sig)``.
     Endpoint-free fits depend only on frame-determined inputs; the *only*
-    endpoint dependence is when ``fa``/``fb`` is a manual anchor (then its
-    world is a knot), and the anchor world is deterministic from the frame,
-    so the boolean flag captures it.  ``wfixes_sig`` hashes only the
-    in-range fix *frames* (fix values are deterministic from frame).
+    endpoint dependence is when ``fa``/``fb`` is a resolved anchor node (then its
+    world is a knot/endpoint), and that world is deterministic from the frame, so
+    the boolean flag plus the frame fully capture it.  ``wfixes_sig`` hashes only
+    the in-range fix *frames* (fix values are deterministic from frame).
     """
 
     def __init__(
@@ -388,10 +390,11 @@ class _SegmentSolver:
         """Fit ``[fa, fb]`` under ``mode``; memoized + budget-gated.
 
         **Precondition (cache soundness — design note F7):**
-        ``fa_anchor_world`` and ``fb_anchor_world`` MUST be *manual-anchor*
-        worlds — i.e. worlds whose value is deterministically derived from
-        the frame index alone (operator-placed anchors looked up from the
-        ``BallAnchorSet``).  Do NOT pass a path-dependent world such as the
+        ``fa_anchor_world`` and ``fb_anchor_world`` MUST be *resolved-node*
+        worlds — i.e. worlds whose value is deterministically derived from the
+        frame index alone (manual operator anchors OR resolved auto-anchors
+        looked up from the fixed node set; both are a function of the frame, not
+        of the search path).  Do NOT pass a path-dependent world such as the
         endpoint of a previously solved segment: the cache key records only
         whether an anchor is present (``True``/``False``), not its value, so
         a different world for the same frame produces a silent cache hit with
@@ -434,7 +437,7 @@ class _SegmentSolver:
         if mode is Mode.FLIGHT:
             return self._fit_flight(fa, fb, fa_anchor_world, fb_anchor_world)
         if mode is Mode.ROLLING:
-            return self._fit_rolling(fa, fb)
+            return self._fit_rolling(fa, fb, fa_anchor_world, fb_anchor_world)
         if mode is Mode.STATIONARY:
             return self._fit_stationary(fa, fb)
         if mode is Mode.OUT_OF_VIEW:
@@ -502,9 +505,9 @@ class _SegmentSolver:
         """Endpoint-free gravity-arc fit from interior pixels + world fixes.
 
         No endpoint knot is added for a free-floating breakpoint (F7).  A
-        manual anchor at ``fa``/``fb`` is passed as a soft knot — its world
-        is deterministic from the frame, so the cache key's anchor-bool
-        captures it.
+        resolved anchor node (manual OR auto) at ``fa``/``fb`` is passed as a
+        soft knot — its world is deterministic from the frame, so the cache
+        key's anchor-bool captures it.
         """
         solver = self._solver
         fps = solver.fps
@@ -628,11 +631,21 @@ class _SegmentSolver:
     # ------------------------------------------------------------------
     # ROLLING
 
-    def _fit_rolling(self, fa: int, fb: int) -> SegmentFit:
-        """Endpoint-free constant-decel roll over ground ray-casts.
+    def _fit_rolling(
+        self,
+        fa: int,
+        fb: int,
+        fa_anchor_world: np.ndarray | None = None,
+        fb_anchor_world: np.ndarray | None = None,
+    ) -> SegmentFit:
+        """Constant-decel roll over ground ray-casts.
 
-        Endpoints are seeded from the first/last in-pitch ground ray-cast
-        (not pinned node worlds), so the fit stays frame-determined.
+        When ``fa``/``fb`` lands on a resolved anchor node its world XY pins
+        the corresponding roll endpoint (mirroring piecewise's ``_rolling_span``
+        which takes the node worlds ``a``/``b`` directly); the ground plane
+        already fixes z.  A non-anchor endpoint is seeded from the first/last
+        in-pitch ground ray-cast.  Anchor worlds are frame-deterministic, so the
+        fit stays frame-determined and the cache stays sound (F7).
         """
         solver = self._solver
         fps = solver.fps
@@ -654,8 +667,16 @@ class _SegmentSolver:
             obs.append(((f - fa) / fps, ground[:2]))
             obs_frames.append(f)
 
-        a_xy = self._endpoint_xy(fa, obs)
-        b_xy = self._endpoint_xy(fb, obs, prefer_last=True)
+        a_xy = (
+            np.asarray(fa_anchor_world, float)[:2]
+            if fa_anchor_world is not None
+            else self._endpoint_xy(fa, obs)
+        )
+        b_xy = (
+            np.asarray(fb_anchor_world, float)[:2]
+            if fb_anchor_world is not None
+            else self._endpoint_xy(fb, obs, prefer_last=True)
+        )
 
         fit = fit_rolling_segment(
             a_xy, b_xy, max(T, 1e-6), obs, cfg.rolling_decel_max_m_s2,
@@ -1399,6 +1420,7 @@ def run_beam(
     cfg: ModeSearchCfg,
     *,
     ball_uv_at,
+    node_world_by_frame: "Mapping[int, np.ndarray] | None" = None,
 ) -> BeamResult:
     """Left-to-right beam search over timeline partitions.
 
@@ -1448,6 +1470,21 @@ def run_beam(
 
     Determinism: no randomness; every ordering uses the quantized key.
 
+    Resolved-anchor depth (regression fix)
+    --------------------------------------
+    ``node_world_by_frame`` maps a resolved trajectory-node frame (manual
+    anchor OR auto-anchor) to its resolved world ``xyz``.  When a segment
+    boundary ``fa``/``fb`` lands on such a node, that node's world is passed
+    to ``fit_segment`` as ``fa_anchor_world``/``fb_anchor_world`` — pinning the
+    flight arc's endpoint exactly as piecewise's ``_fit_arc`` does, so the
+    anchor DEPTH constraint is honoured across the span (without it, anchored
+    flight spans fit endpoint-free → underconstrained/high-residual → lose to
+    OUT_OF_VIEW).  NON-node breakpoints (events / velocity-breaks) get no knot
+    (``.get`` returns ``None``) and stay endpoint-free.  A node's world is
+    *frame-deterministic* (a function of the frame index, not of the search
+    path), so the cache key's ``fa_anchor``/``fb_anchor`` booleans plus the
+    frame fully determine the knot — the cache stays sound (design note F7).
+
     Design decision — skip ∩ manual-anchor interaction
     --------------------------------------------------
     When a manual anchor is one of the intermediate breakpoints of a candidate
@@ -1472,6 +1509,10 @@ def run_beam(
             "run_beam requires at least two breakpoints (frame-0 + final "
             "boundary)."
         )
+
+    # Resolved-node worlds keyed by frame (manual + auto anchors).  Each value
+    # is frame-deterministic, so passing it as a flight knot is cache-sound.
+    node_worlds: "Mapping[int, np.ndarray]" = node_world_by_frame or {}
 
     # Fix C4: breakpoint frames must be strictly increasing.  A duplicate or
     # out-of-order frame yields a zero/negative-length span (fb <= fa) that the
@@ -1544,8 +1585,18 @@ def run_beam(
                 for s in range(i + 1, j)
             )
 
+            # Pin endpoints to resolved anchor worlds where a segment boundary
+            # lands on a node (regression fix).  Non-node breakpoints return
+            # None and stay endpoint-free.  The fitter only consumes these for
+            # FLIGHT (depth-critical) and ROLLING (anchor XY); other modes
+            # ignore them.  Worlds are frame-deterministic → cache-sound (F7).
+            fa_world = node_worlds.get(fa)
+            fb_world = node_worlds.get(fb)
             for mode, pid in modes:
-                fit = seg_solver.fit_segment(fa, fb, mode, player_id=pid)
+                fit = seg_solver.fit_segment(
+                    fa, fb, mode, player_id=pid,
+                    fa_anchor_world=fa_world, fb_anchor_world=fb_world,
+                )
                 n_seg = fb - fa + 1
                 s_cost = segment_cost(fit, mode, n_seg, cfg)
 
@@ -1944,10 +1995,25 @@ def solve_modes(
         nodes=nodes, events=events, n_frames=n_frames,
     )
 
+    # Resolved-node worlds keyed by frame — manual anchors AND auto-anchors.
+    # A node's resolved world is frame-deterministic (a function of the frame,
+    # not the search path), so it is safe to pass as a flight/rolling knot:
+    # the segment-fit cache key carries fa_anchor/fb_anchor booleans, and
+    # frame + bool fully determine the knot (design note F7).  Threading these
+    # pins anchored flight-segment endpoints so the depth constraint survives
+    # the beam (without it, anchored spans fit endpoint-free and lose to
+    # OUT_OF_VIEW — the coverage regression this fixes).
+    node_world_by_frame: dict[int, np.ndarray] = {
+        int(n.frame): np.asarray(n.world_xyz, float)
+        for n in nodes
+        if n.world_xyz is not None
+    }
+
     ball_uv_at = _ball_uv_at(steps)
     beam = run_beam(
         seg_solver, breakpoints, n_frames, mode_cfg,
         ball_uv_at=ball_uv_at,
+        node_world_by_frame=node_world_by_frame,
     )
 
     return render(

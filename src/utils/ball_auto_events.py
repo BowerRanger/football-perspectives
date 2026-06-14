@@ -203,7 +203,7 @@ def _top_k_per_window(
     for cand in by_strength:
         # Find the first existing window this candidate falls into.
         assigned = False
-        for w_idx, (centre, members) in enumerate(windows):
+        for centre, members in windows:
             if abs(cand.frame - centre) <= merge_window_frames:
                 if len(members) < k:
                     members.append(cand)
@@ -528,8 +528,11 @@ def detect_event_candidates(
 
     Notes
     -----
-    * Synthetic clip-boundary frames (frame 0 and the last frame in
-      ``steps``) are never emitted as events (F17).
+    * Velocity-break events at synthetic clip boundaries (frame 0 and the
+      last frame in ``steps``) are never emitted — ``_window_velocity``
+      requires a valid window on both sides (F17). A stationary span that
+      begins at frame 0 is still reported (its ``frame`` is the span start,
+      a legitimate breakpoint, not a synthetic event).
     * All returned ``score`` values are in [0, 1].
     * The returned tuple is sorted by ``(frame, kind)``.
     * Stationary spans are always returned (not subject to merge

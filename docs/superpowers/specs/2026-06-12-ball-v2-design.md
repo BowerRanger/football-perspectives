@@ -545,3 +545,70 @@ the imperfection of the anchored solve we compare against. This argues for
    flight fits (a fix run is direct stereo evidence of a flight segment).
 2. **Speed-aware fix weighting**: down-weight fixes where the ball moves far
    between frames (sub-frame sync sensitivity), up-weight slow/grounded fixes.
+
+---
+
+## Phase 3 validation results (2026-06-14)
+
+Implementation: commits `690251e..816ac71` on `ball-auto-physics` (Tasks
+1–5). Full ball/spin/orientation/gltf/quality suite: **524 passed, 2
+skipped** (the 2 skips are the pre-existing unrelated Blender player-FBX
+test). All changes additive — the default piecewise solve output is
+unchanged except the new optional `quat_wxyz` per frame.
+
+### What shipped (the visible win)
+
+- **Bounded spin** (T1): the Magnus cap dropped 200→95 rad/s (~15 rev/s,
+  the top of the real free-kick range). Hard optimizer bound + post-fit
+  guard.
+- **Per-frame ball orientation** (T2): new `ball_orientation.py` integrates
+  a continuous unit quaternion over the dense track — flight from fitted ω,
+  grounded from rolling-consistent ω = v/r (contact-point slip ≈ 0,
+  asserted), stationary constant — written to the schema-additive
+  `BallFrame.quat_wxyz`.
+- **Rotation export** (T3): the glTF ball node gains a rotation animation
+  channel (wxyz→xyz,w conversion, explicitly tested on known values); the
+  FBX exporter keys `rotation_quaternion`; `_ball_keyframes.json` carries
+  per-flight `omega_rad_s` for UE-side curl. The UE preset path is
+  untouched (additive `.get`-read keys).
+- **Geometric touch-typing spin seeds** (T4): foot-contact curl/backspin
+  and header-zero seeds derived from in/out velocity geometry, feeding the
+  Magnus fit's hinted-improvement gate; a manual preset still wins.
+
+### Real-clip check (origi01/origi02, default piecewise)
+
+| metric | origi01 | origi02 |
+|---|---|---|
+| frames with unit quaternion | 489/506 (norm err 2e-16) | 82/334 |
+| ball visibly rotates | **yes** | **yes** |
+| max fitted \|ω\| (cap 95) | 0.0 (none fitted) | 0.0 (none fitted) |
+| spin within cap | ✓ | ✓ |
+
+The ball now carries a continuous, unit-norm orientation and **visibly
+rotates** in the viewer/UE — the headline Phase-3 goal. The visible
+rotation on these clips comes from the rolling-consistent ω (the ball is
+mostly grounded / in short flights); **no Magnus flight-spin was fitted**
+because origi/kroupi contain no long curving free kicks where the spin
+signal is identifiable. The Magnus recovery machinery is validated by the
+synthetic round-trips (T1/T4 unit tests: known ω recovered within tolerance;
+spin-free synthetics report |ω| < 1 rev/s — no hallucination).
+
+### Bounce coupling (T5): shipped OFF, model available
+
+The spin-aware `bounce(v_in, ω_in, e, μ)` rigid-sphere impulse model is
+implemented and unit-tested (7 cases: normal restitution, top/back-spin
+tangential coupling). The **joint bounce-coupled refit is monocular-
+degenerate** — even with the true seed and zero noise, the weak Magnus
+deflection (~0.3 m over a 0.6 s arc) is freely absorbed by the unconstrained
+monocular depth, so |ω| walks far from truth. This is the same fundamental
+single-view limit seen in Phase 1.5's spin prototype. Therefore
+`ball.spin.bounce_coupling` ships **default false**, with the degeneracy
+pinned by a regression test (`test_monocular_degeneracy_is_real`). The
+`bounce()` model itself is valid and ready for UE-side physically-correct
+bounce rendering.
+
+**Natural future synergy:** bounce-coupled spin becomes identifiable once
+arc depth is pinned by an external constraint — exactly what Phase 1.5's
+cross-replay triangulated fixes provide. The degeneracy test will flag when
+that combination makes the joint fit converge, at which point
+`bounce_coupling` can be enabled on replay-covered events.

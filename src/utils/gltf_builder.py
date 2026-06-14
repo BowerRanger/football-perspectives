@@ -413,6 +413,28 @@ def _rotmat_to_quat(R: np.ndarray) -> np.ndarray:
     return q / max(float(np.linalg.norm(q)), 1e-12)
 
 
+_IDENTITY_QUAT_XYZW = (0.0, 0.0, 0.0, 1.0)
+
+
+def _ball_quats_xyzw(ball_frames: list) -> np.ndarray:
+    """Per-frame glTF rotation quaternions for the animated ball node.
+
+    ``BallFrame.quat_wxyz`` is scalar-first ``(w, x, y, z)``; glTF stores
+    quaternions scalar-LAST ``(x, y, z, w)``, so each component is
+    reordered here.  Frames whose ``quat_wxyz`` is ``None`` hold the
+    previous quaternion; a leading run of ``None`` holds the identity.
+    """
+    out: list[tuple[float, float, float, float]] = []
+    last = _IDENTITY_QUAT_XYZW
+    for f in ball_frames:
+        q = getattr(f, "quat_wxyz", None)
+        if q is not None:
+            w, x, y, z = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+            last = (x, y, z, w)
+        out.append(last)
+    return np.array(out, dtype=np.float32)
+
+
 def _camera_world_position(R: np.ndarray, t_world: np.ndarray) -> np.ndarray:
     """t_world is the world-space camera centre (consistent with rest of pipeline)."""
     return np.asarray(t_world, dtype=np.float64).reshape(3)
@@ -518,17 +540,28 @@ def build_glb(bundle: SceneBundle) -> tuple[bytes, dict]:
                 times = np.array([f.frame for f in ball_frames], dtype=np.float32) / max(ball_fps, 1e-6)
                 positions = np.array([f.world_xyz for f in ball_frames], dtype=np.float32)
                 init_pos = positions[0].tolist()
+                # Per-frame rotation: BallFrame.quat_wxyz -> glTF xyz,w.
+                quats_xyzw = _ball_quats_xyzw(ball_frames)
+                init_q = quats_xyzw[0].tolist()
                 node_idx = g.add_node({
                     "name": "ball",
                     "mesh": ball_mesh,
                     "translation": [float(init_pos[0]), float(init_pos[1]), float(init_pos[2])],
+                    "rotation": [float(q) for q in init_q],
                 })
                 time_acc = g.add_accessor_scalar_f32(times)
                 trans_acc = g.add_accessor_vec3_f32(positions)
+                rot_acc = g.add_accessor_vec4_f32(quats_xyzw)
                 g.add_animation(
                     name="ball_anim",
-                    samplers=[{"input": time_acc, "output": trans_acc, "interpolation": "LINEAR"}],
-                    channels=[{"sampler": 0, "target": {"node": node_idx, "path": "translation"}}],
+                    samplers=[
+                        {"input": time_acc, "output": trans_acc, "interpolation": "LINEAR"},
+                        {"input": time_acc, "output": rot_acc, "interpolation": "LINEAR"},
+                    ],
+                    channels=[
+                        {"sampler": 0, "target": {"node": node_idx, "path": "translation"}},
+                        {"sampler": 1, "target": {"node": node_idx, "path": "rotation"}},
+                    ],
                 )
                 ball_meta = {
                     "num_frames": int(len(ball_frames)),

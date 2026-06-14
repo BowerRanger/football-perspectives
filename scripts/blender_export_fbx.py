@@ -122,6 +122,41 @@ def iter_player_fbx_entries(
         }
 
 
+def prepare_ball_keys(ball_frames: list[dict]) -> list[dict]:
+    """Turn ball-track JSON frame dicts into per-frame FBX keys.
+
+    Pure (no ``bpy``/``numpy``) so the FBX ball rotation contract is
+    unit-testable outside Blender.  Each output dict has:
+
+    - ``frame`` (int): the frame index;
+    - ``location`` (list[float]): the ball world position ``world_xyz``;
+    - ``rotation_quaternion`` (list[float]): the ball orientation in
+      Blender's ``(w, x, y, z)`` scalar-first order.  This MATCHES our
+      ``BallFrame.quat_wxyz`` convention, so the quaternion is passed
+      through unchanged (no reordering — unlike the glTF ``(x, y, z, w)``
+      path).
+
+    Frames with a null ``world_xyz`` are dropped (no position to key).
+    Frames missing ``quat_wxyz`` hold the previous rotation; a leading run
+    of missing quats holds the identity ``(1, 0, 0, 0)``.
+    """
+    keys: list[dict] = []
+    last_quat = [1.0, 0.0, 0.0, 0.0]
+    for f in ball_frames:
+        world = f.get("world_xyz")
+        if not world:
+            continue
+        q = f.get("quat_wxyz")
+        if q is not None:
+            last_quat = [float(q[0]), float(q[1]), float(q[2]), float(q[3])]
+        keys.append({
+            "frame": int(f["frame"]),
+            "location": [float(world[0]), float(world[1]), float(world[2])],
+            "rotation_quaternion": list(last_quat),
+        })
+    return keys
+
+
 def _load_shot_ids(output_dir: Path) -> set[str]:
     """Shot ids from shots_manifest.json (empty set for legacy single-shot)."""
     manifest_path = output_dir / "shots" / "shots_manifest.json"
@@ -653,25 +688,33 @@ def main(argv: list[str]) -> int:
             ball_track_paths.append(("", legacy))
         for shot_id, ball_path in ball_track_paths:
             ball = json.loads(ball_path.read_text())
-            ball_frames = [f for f in ball["frames"] if f.get("world_xyz")]
-            if not ball_frames:
+            ball_keys = prepare_ball_keys(ball["frames"])
+            if not ball_keys:
                 continue
             _reset_scene()
             _set_unit_scale_metres()
             scene = bpy.context.scene
-            scene.frame_start = int(ball_frames[0]["frame"])
-            scene.frame_end = int(ball_frames[-1]["frame"])
+            scene.frame_start = int(ball_keys[0]["frame"])
+            scene.frame_end = int(ball_keys[-1]["frame"])
             scene.render.fps = int(round(fps))
             obj = _add_simple_armature("ball")
+            # Key the ball's spin alongside its position. Blender's
+            # rotation_quaternion is (w, x, y, z) scalar-first, which
+            # matches BallFrame.quat_wxyz, so prepare_ball_keys passes the
+            # quaternion through unchanged.
+            obj.rotation_mode = "QUATERNION"
             # UE rejects skeleton-only FBX imports — bind a tiny
             # placeholder mesh to the armature's default bone ("Bone",
             # from bpy.ops.object.armature_add) so the FBX is a valid
             # SkeletalMesh+Anim asset on the UE side. The placeholder
             # mesh is discarded; BP_BallActor provides the real sphere.
             placeholder = _add_placeholder_skinned_mesh(obj, "ball", bone_name="Bone")
-            for f in ball_frames:
-                obj.location = tuple(f["world_xyz"])
-                obj.keyframe_insert(data_path="location", frame=int(f["frame"]))
+            for k in ball_keys:
+                fr = int(k["frame"])
+                obj.location = tuple(k["location"])
+                obj.keyframe_insert(data_path="location", frame=fr)
+                obj.rotation_quaternion = Quaternion(tuple(k["rotation_quaternion"]))
+                obj.keyframe_insert(data_path="rotation_quaternion", frame=fr)
             bpy.ops.object.select_all(action="DESELECT")
             obj.select_set(True)
             placeholder.select_set(True)

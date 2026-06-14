@@ -72,6 +72,7 @@ from src.utils.ball_mode_search import (
     _mode_search_cfg,
     solve_modes,
 )
+from src.utils.ball_orientation import integrate_orientation
 from src.utils.ball_piecewise_solver import (
     SolverCfg,
     TrajectoryNode,
@@ -349,10 +350,14 @@ def _emit_ball_keyframes(
     per_frame_t: dict[int, np.ndarray],
     distortion: tuple[float, float],
     ground_touch_frames: set[int],
+    flight_segments: "tuple" = (),
 ) -> None:
     """Write the sparse ``*_ball_keyframes.json`` sidecar next to the dense
     track. ``world_xyz`` for each anchor is taken from the already-built
     dense ``per_frame_out`` so the two artifacts agree exactly.
+
+    ``flight_segments`` lets keyframes on a spinning flight carry the fitted
+    Magnus ``omega_rad_s`` so the engine can drive physically-correct curl.
     """
     world_by_frame = {
         bf.frame: bf.world_xyz
@@ -370,6 +375,7 @@ def _emit_ball_keyframes(
         per_frame_t=per_frame_t,
         distortion=distortion,
         ground_touch_frames=ground_touch_frames,
+        flight_segments=flight_segments,
     )
     kf_path = ball_out_path.with_name(
         ball_out_path.name.replace("ball_track", "ball_keyframes")
@@ -1569,6 +1575,19 @@ class BallStage(BaseStage):
                     flight_segment_id=segment_by_frame.get(fi),
                 ))
 
+        # Integrate a per-frame unit quaternion over the dense track so the
+        # exported ball visibly rotates/curls. ω comes from physics (flight
+        # Magnus spin / rolling-consistent ground spin), never a measured
+        # ball-spin observation; see ball_orientation.integrate_orientation.
+        quat_by_frame = integrate_orientation(
+            per_frame_out, result.flight_segments,
+            artifacts.camera_fps, ball_radius,
+        )
+        per_frame_out = [
+            dataclasses.replace(bf, quat_wxyz=quat_by_frame.get(bf.frame))
+            for bf in per_frame_out
+        ]
+
         track = BallTrack(
             clip_id=artifacts.camera_clip_id,
             fps=artifacts.camera_fps,
@@ -1590,6 +1609,7 @@ class BallStage(BaseStage):
                 per_frame_t=per_frame_t,
                 distortion=distortion,
                 ground_touch_frames=ground_touch_frames,
+                flight_segments=result.flight_segments,
             )
         except Exception as exc:  # noqa: BLE001 — sidecar is enrichment, never block the stage
             logger.warning(

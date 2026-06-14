@@ -5,10 +5,14 @@ only needs a single call after it has saved the dense track.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 
 from src.schemas.ball_anchor import BallAnchor
 from src.schemas.ball_keyframes import BallKeyframe, BallKeyframeSet, DepthSource
+from src.schemas.ball_track import FlightSegment
+from src.utils.ball_orientation import _flight_omega
 
 _AIRBORNE_STATES = frozenset(
     {"airborne_low", "airborne_mid", "airborne_high"}
@@ -79,6 +83,26 @@ def _depth_source(
     return "ground"
 
 
+def _omega_for_frame(
+    frame: int, flight_segments: Sequence[FlightSegment],
+) -> tuple[float, float, float] | None:
+    """Fitted Magnus spin vector (rad/s) for a keyframe on a flight segment.
+
+    Returns ``spin_omega_rad_s * unit(spin_axis_world)`` (reusing the same
+    ``_flight_omega`` helper that drives orientation integration) when
+    ``frame`` falls inside a flight segment that recovered a spin; ``None``
+    otherwise (no covering flight, or a flight without spin).
+    """
+    for seg in flight_segments:
+        lo, hi = seg.frame_range
+        if lo <= frame <= hi:
+            omega = _flight_omega(seg)
+            if float(np.linalg.norm(omega)) <= 0.0:
+                return None
+            return (float(omega[0]), float(omega[1]), float(omega[2]))
+    return None
+
+
 def build_ball_keyframe_set(
     *,
     clip_id: str,
@@ -91,6 +115,7 @@ def build_ball_keyframe_set(
     per_frame_t: dict[int, np.ndarray],
     distortion: tuple[float, float],
     ground_touch_frames: set[int] | None = None,
+    flight_segments: Sequence[FlightSegment] = (),
 ) -> BallKeyframeSet:
     """Collect one ``BallKeyframe`` per manual anchor.
 
@@ -141,6 +166,7 @@ def build_ball_keyframe_set(
                 goal_element=anc.goal_element,
                 touch_type=anc.touch_type,
                 spin=anc.spin,
+                omega_rad_s=_omega_for_frame(fi, flight_segments),
             )
         )
     return BallKeyframeSet(

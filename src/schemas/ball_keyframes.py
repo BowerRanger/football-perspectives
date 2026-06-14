@@ -55,6 +55,11 @@ class BallKeyframe:
     touch_type: str | None = None
     spin: str | None = None
     confidence: float = 1.0
+    # Fitted Magnus spin vector (rad/s) in world frame for a keyframe that
+    # sits on a flight segment (``spin_omega_rad_s * spin_axis_world``);
+    # ``None`` for non-flight keyframes or flights without a recovered spin.
+    # Additive — the UE ``ball_motion.py`` preset path ignores it.
+    omega_rad_s: tuple[float, float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -143,4 +148,8 @@ def _load_keyframe(k: dict) -> BallKeyframe:
         touch_type=k.get("touch_type"),
         spin=k.get("spin"),
         confidence=float(k.get("confidence", 1.0)),
+        omega_rad_s=(
+            _as_tuple3(k["omega_rad_s"])
+            if k.get("omega_rad_s") is not None else None
+        ),
     )

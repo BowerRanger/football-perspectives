@@ -26,6 +26,12 @@ DepthSource = Literal["ground", "ray_physics", "player_bone", "goal_geometry"]
 
 _VALID_DEPTH_SOURCES: frozenset[str] = frozenset(get_args(DepthSource))
 
+# Interpolation segment kinds — how the engine (or the Python reference
+# interpolator) moves the ball BETWEEN two consecutive keyframes.
+SegmentKind = Literal["ballistic", "roll", "carry", "rest", "free_flight"]
+
+_VALID_SEGMENT_KINDS: frozenset[str] = frozenset(get_args(SegmentKind))
+
 # (ray_origin_xyz, ray_dir_xyz); dir is a unit vector in world frame.
 Ray = tuple[tuple[float, float, float], tuple[float, float, float]]
 
@@ -60,6 +66,29 @@ class BallKeyframe:
     # ``None`` for non-flight keyframes or flights without a recovered spin.
     # Additive — the UE ``ball_motion.py`` preset path ignores it.
     omega_rad_s: tuple[float, float, float] | None = None
+    # Inclusive end frame for a span keyframe (e.g. a ``carry``/possession
+    # dribble); ``None`` for point keyframes.
+    end_frame: int | None = None
+
+
+@dataclass(frozen=True)
+class BallSegment:
+    """One interpolation segment between two consecutive keyframes.
+
+    Describes HOW the ball travels from the keyframe at ``start_frame`` to
+    the one at ``end_frame``. ``kind`` selects the physics model; ``hints``
+    carries model parameters (e.g. ``gravity``, ``restitution``,
+    ``omega_rad_s``, ``apex``, ``player_id`` for carry, and the
+    ``open_ended``/``inferred`` flags for clip-boundary segments). Derived
+    from the keyframes by the resolver, so the UE side and the Python
+    reference interpolator agree on segmentation rather than each
+    re-deriving it.
+    """
+
+    start_frame: int
+    end_frame: int
+    kind: SegmentKind
+    hints: dict
 
 
 @dataclass(frozen=True)
@@ -68,6 +97,7 @@ class BallKeyframeSet:
     fps: float
     image_size: tuple[int, int]
     keyframes: tuple[BallKeyframe, ...]
+    segments: tuple[BallSegment, ...] = ()
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,11 +114,13 @@ class BallKeyframeSet:
         with path.open() as fh:
             data = json.load(fh)
         keyframes = tuple(_load_keyframe(k) for k in data.get("keyframes", []))
+        segments = tuple(_load_segment(s) for s in data.get("segments", []))
         return cls(
             clip_id=str(data["clip_id"]),
             fps=float(data["fps"]),
             image_size=(int(data["image_size"][0]), int(data["image_size"][1])),
             keyframes=keyframes,
+            segments=segments,
         )
 
 
@@ -100,6 +132,18 @@ def _load_ray(v) -> Ray | None:
     if v is None:
         return None
     return (_as_tuple3(v[0]), _as_tuple3(v[1]))
+
+
+def _load_segment(s: dict) -> BallSegment:
+    kind = str(s["kind"])
+    if kind not in _VALID_SEGMENT_KINDS:
+        raise ValueError(f"unknown ball segment kind: {kind!r}")
+    return BallSegment(
+        start_frame=int(s["start_frame"]),
+        end_frame=int(s["end_frame"]),
+        kind=kind,  # type: ignore[arg-type]
+        hints=dict(s.get("hints", {})),
+    )
 
 
 def _load_keyframe(k: dict) -> BallKeyframe:
@@ -151,5 +195,8 @@ def _load_keyframe(k: dict) -> BallKeyframe:
         omega_rad_s=(
             _as_tuple3(k["omega_rad_s"])
             if k.get("omega_rad_s") is not None else None
+        ),
+        end_frame=(
+            int(k["end_frame"]) if k.get("end_frame") is not None else None
         ),
     )

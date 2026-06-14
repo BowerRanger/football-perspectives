@@ -22,7 +22,7 @@ manual one dropped — the operator has looked at that moment.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -374,8 +374,15 @@ def generate_auto_anchors(
         old_key = (_STATE_RANK.get(existing.anchor.state, 0), existing.score)
         if new_key > old_key:
             by_frame[cand.anchor.frame] = cand
+    # Carry each candidate's detector score onto the anchor as its
+    # confidence (clamped to [0, 1]) so the web editor can render auto
+    # suggestions distinctly from confirmed/manual anchors.
     anchors = tuple(
-        by_frame[f].anchor for f in sorted(by_frame)
+        replace(
+            by_frame[f].anchor,
+            confidence=min(1.0, max(0.0, float(by_frame[f].score))),
+        )
+        for f in sorted(by_frame)
     )
     logger.info("ball auto-anchor: %d anchors generated", len(anchors))
     return anchors

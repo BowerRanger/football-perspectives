@@ -84,6 +84,17 @@ class TestEventMapping:
         assert touch[0].image_xy is not None
         np.testing.assert_allclose(touch[0].image_xy, pixels[30], atol=1e-6)
 
+    def test_event_score_becomes_anchor_confidence(self):
+        worlds, pixels, steps = _rolling_scene()
+        ctx = FakePlayerContext({
+            30: [_joint("P004", "r_foot", worlds[30], pixels[30])],
+        })
+        events = (BallEvent(frame=30, kind="touch", score=0.73,
+                            player_id="P004", bone="r_foot"),)
+        anchors = _generate(events, steps, 60, ctx=ctx)
+        touch = [a for a in anchors if a.state == "player_touch"][0]
+        assert abs(touch.confidence - 0.73) < 1e-6
+
     def test_fast_outbound_touch_is_tagged_shot(self):
         n = 60
         K, R, t = broadcast_camera()

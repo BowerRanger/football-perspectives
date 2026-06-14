@@ -831,3 +831,223 @@ def nearest_players(
 
     ordered = sorted(best.items(), key=lambda kv: kv[1])
     return [pid for pid, _ in ordered[:k]]
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — Scoring functions
+# ---------------------------------------------------------------------------
+
+def segment_cost(
+    fit: SegmentFit,
+    mode: Mode,
+    n_frames_in_segment: int,
+    cfg: ModeSearchCfg,
+) -> float:
+    """Cost of assigning ``mode`` to a segment whose fitter returned ``fit``.
+
+    Formula (all terms are additive):
+
+    1. **Raw-pixel residual** — ``fit.residual_px`` used directly (design note
+       F5: NOT gate-normalised; a 4 px FLIGHT fit must beat a 7 px ROLLING fit
+       regardless of their respective gate thresholds).
+
+    2. **Parsimony constant** — ``cfg.segment_cost_constant`` (BIC-style; one
+       fixed cost per segment to penalise over-segmentation).
+
+    3. **OUT_OF_VIEW frame penalty** — ``cfg.out_of_view_frame_penalty *
+       n_frames_in_segment`` only when ``mode is Mode.OUT_OF_VIEW``.  This
+       encourages the beam to prefer a short out-of-view span over a long one,
+       and prevents collapsing the whole shot into a single OUT_OF_VIEW segment.
+
+    4. **Underconstrained flag penalty** — when ``fit.underconstrained`` is
+       ``True``, add ``cfg.unexplained_break_penalty`` as a cost.  We reuse the
+       ``unexplained_break_penalty`` magnitude (10.0) because both signal
+       "something went wrong with this segment that a better partition would
+       avoid": an underconstrained fit and an unexplained break are comparably
+       undesirable.  A dedicated constant (e.g. ``underconstrained_penalty``)
+       was considered but would bloat the config for no modelling benefit in v1.
+
+    **Kind weight (v1)** — intentionally flat (1.0) for all modes (design note
+    F6).  This avoids over-fitting the weight vector to the 3 validation clips.
+    A non-uniform kind_weight would require per-mode calibration data; until
+    that data exists, raw-pixel residual provides the only cross-mode
+    discriminator.
+
+    Parameters
+    ----------
+    fit:
+        The :class:`SegmentFit` returned by the segment fitter.
+    mode:
+        The mode being scored (used for the OUT_OF_VIEW branch).
+    n_frames_in_segment:
+        Inclusive frame count ``fb - fa + 1`` for the OUT_OF_VIEW penalty.
+    cfg:
+        Scoring hyper-parameters.
+
+    Returns
+    -------
+    float
+        Non-negative cost (lower = better fit for this partition).
+    """
+    # --- Term 1: raw-px residual (F5) ---
+    cost = float(fit.residual_px)
+
+    # --- Term 2: BIC parsimony ---
+    cost += cfg.segment_cost_constant
+
+    # --- Term 3: OUT_OF_VIEW per-frame penalty ---
+    if mode is Mode.OUT_OF_VIEW:
+        cost += cfg.out_of_view_frame_penalty * n_frames_in_segment
+
+    # --- Term 4: underconstrained flag ---
+    if fit.underconstrained:
+        # Reuse unexplained_break_penalty magnitude — see docstring.
+        cost += cfg.unexplained_break_penalty
+
+    return cost
+
+
+def transition_cost(
+    prev_seg: "Segment | None",
+    bp: Breakpoint,
+    next_mode: Mode,
+    prev_end_vel: "np.ndarray | None",
+    next_start_vel: "np.ndarray | None",
+    cfg: ModeSearchCfg,
+) -> float:
+    """Cost of inserting a mode transition at breakpoint ``bp``.
+
+    This function is the **only** place where inter-segment structure is
+    penalised; segment_cost handles intra-segment fit quality.
+
+    Formula:
+
+    1. **Event agreement** — depends on ``bp``:
+
+       - ``bp.is_manual = True``: the operator explicitly placed this break;
+         it is always legitimate.  No penalty, no bonus.
+       - ``bp.kind == "boundary"``: synthetic clip-boundary breakpoints are
+         neither events nor surprises (design note F17).  No penalty, no bonus.
+       - ``bp.event_score`` high: transition coincides with a detected event →
+         a **bonus** (negative cost) of ``−cfg.unexplained_break_penalty *
+         bp.event_score``.  The bonus is scaled by event_score so a
+         high-confidence touch/bounce is more rewarded than a marginal one.
+       - ``bp.event_score ≈ 0`` (non-manual, non-boundary): the transition has
+         no supporting event → ``+ cfg.unexplained_break_penalty``.
+
+    2. **Velocity continuity** — ``cfg.velocity_discontinuity_weight *
+       ‖next_start_vel − prev_end_vel‖`` ONLY when both velocities are
+       non-None (design note F4).  When either is None the term is zero.
+
+    3. **Restitution awareness** — at a flight→(flight|rolling) transition
+       where BOTH boundary velocities have a defined z-component: call
+       ``ball_physics.restitution(prev_end_vel, next_start_vel)``.
+       - If it returns ``None`` (ball not arriving downward) → no penalty.
+       - If it returns a value outside ``[restitution_min, restitution_max]``
+         (defaults 0.5–0.85 from SolverCfg) → a modest out-of-envelope
+         penalty equal to ``cfg.velocity_discontinuity_weight * 5.0`` (one
+         "bad" m/s Δv equivalent).  Kept modest because the transition might
+         be a mis-classified touch rather than a true bounce, and we do not
+         want to strongly penalise flight→rolling transitions at valid net/post
+         impacts which can have e > 0.85.
+
+    Parameters
+    ----------
+    prev_seg:
+        The :class:`Segment` ending at this breakpoint, or ``None`` for the
+        very first (seed) transition.
+    bp:
+        The :class:`Breakpoint` at the transition frame.
+    next_mode:
+        The mode of the incoming segment.
+    prev_end_vel:
+        Velocity at the *end* of the previous segment (m/s, world coords).
+        May be ``None`` when the previous segment is ``OUT_OF_VIEW`` or the
+        fitter could not determine velocity.
+    next_start_vel:
+        Velocity at the *start* of the next segment.  Same caveats.
+    cfg:
+        Scoring hyper-parameters.
+
+    Returns
+    -------
+    float
+        Signed cost delta (may be negative = bonus).
+    """
+    # --- Term 1: event agreement ---
+    cost = 0.0
+
+    if bp.is_manual:
+        # Forced break — always legitimate; neither penalty nor bonus.
+        pass
+    elif bp.kind == "boundary":
+        # Synthetic clip-boundary — neutral (design note F17).
+        pass
+    elif bp.event_score > 0.0:
+        # Event-backed transition: bonus proportional to confidence.
+        # A high-confidence touch should be cheaper than a no-event break.
+        cost -= cfg.unexplained_break_penalty * bp.event_score
+    else:
+        # No supporting event and not manual/boundary → unexplained break.
+        cost += cfg.unexplained_break_penalty
+
+    # --- Term 2: velocity continuity (F4) ---
+    if prev_end_vel is not None and next_start_vel is not None:
+        delta_v = np.linalg.norm(
+            np.asarray(next_start_vel, float) - np.asarray(prev_end_vel, float)
+        )
+        cost += cfg.velocity_discontinuity_weight * float(delta_v)
+
+        # --- Term 3: restitution check (flight↔ground with defined v_z) ---
+        # Only meaningful at a downward-incoming bounce; restitution() returns
+        # None when v_in_z > -0.1 (ball arriving flat).
+        _is_grounded = next_mode in (Mode.ROLLING, Mode.STATIONARY, Mode.POSSESSED)
+        prev_mode = prev_seg.mode if prev_seg is not None else None
+        _prev_was_flight = prev_mode is Mode.FLIGHT
+
+        if _prev_was_flight and (_is_grounded or next_mode is Mode.FLIGHT):
+            from src.utils.ball_physics import restitution as _restitution
+            e = _restitution(prev_end_vel, next_start_vel)
+            if e is not None:
+                # Import SolverCfg defaults for the physical envelope.
+                e_min = SolverCfg().restitution_min   # 0.5
+                e_max = SolverCfg().restitution_max   # 0.85
+                if not (e_min <= e <= e_max):
+                    # Modest penalty: equivalent to ~5 m/s Δv anomaly.
+                    cost += cfg.velocity_discontinuity_weight * 5.0
+
+    return cost
+
+
+def ignored_event_cost(bp: Breakpoint, cfg: ModeSearchCfg) -> float:
+    """Cost the beam adds when it SKIPS a breakpoint without a matching transition.
+
+    The beam loop calls this helper for every breakpoint it does *not*
+    consume when extending a hypothesis — it charges the hypothesis for
+    ignoring a potentially important event.
+
+    Formula: ``cfg.ignored_event_penalty * bp.event_score``
+
+    A low-confidence or zero-score breakpoint contributes little; a
+    high-confidence event that the beam skips incurs the full
+    ``ignored_event_penalty``.
+
+    Note: Manual breakpoints are never skipped (they are forced partition
+    points in the beam), so in practice the beam never calls this for them.
+    The function is stateless and returns a non-zero value for any
+    ``bp.event_score > 0``, regardless of ``is_manual``, to keep the helper
+    simple and composable.
+
+    Parameters
+    ----------
+    bp:
+        The :class:`Breakpoint` being skipped.
+    cfg:
+        Scoring hyper-parameters.
+
+    Returns
+    -------
+    float
+        Non-negative cost to be added to the skipping hypothesis.
+    """
+    return cfg.ignored_event_penalty * float(bp.event_score)

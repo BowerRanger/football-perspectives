@@ -638,8 +638,7 @@ class _SegmentSolver:
         fa_anchor_world: np.ndarray | None = None,
         fb_anchor_world: np.ndarray | None = None,
     ) -> SegmentFit:
-        """Grounded fit: a clean constant-decel roll when it applies, else a
-        per-frame ground ray-cast fallback (fix F16).
+        """Constant-decel roll over ground ray-casts.
 
         When ``fa``/``fb`` lands on a resolved anchor node its world XY pins
         the corresponding roll endpoint (mirroring piecewise's ``_rolling_span``
@@ -647,24 +646,6 @@ class _SegmentSolver:
         already fixes z.  A non-anchor endpoint is seeded from the first/last
         in-pitch ground ray-cast.  Anchor worlds are frame-deterministic, so the
         fit stays frame-determined and the cache stays sound (F7).
-
-        Fix F16 — grounded ray-cast fallback
-        ------------------------------------
-        The constant-decel roll model is the *preferred* grounded explanation —
-        a real roll is smoother than raw ray-casts.  But where the grounded ball
-        is NOT a tidy roll (it jitters, changes speed, or there are too few
-        interior obs for a roll), the roll fit comes out high-residual /
-        speed-violating → underconstrained, which loses to OUT_OF_VIEW (cost ∝
-        observed frames) and the ball goes MISSING despite being detected on the
-        ground.  Piecewise never has this gap: its open-span fallback ray-casts
-        every non-flight observed frame to the pitch plane (z = ball radius),
-        which reprojects EXACTLY to the observed pixel.  When the clean roll does
-        not apply we mirror that fallback here — per-frame ground ray-casts with
-        the SAME guards (skip ``_ground_raycast``→None, gap-fill, and off-pitch
-        landings) — so a grounded observed span costs ≈0 residual and stays
-        GROUNDED instead of collapsing to OUT_OF_VIEW.  This depends only on
-        ``(fa, fb, frozen obs/cameras)`` — frame-determined — so the cache key
-        stays sound (F7).
         """
         solver = self._solver
         fps = solver.fps
@@ -673,9 +654,15 @@ class _SegmentSolver:
 
         obs: list[tuple[float, np.ndarray]] = []
         obs_frames: list[int] = []
+        m = cfg.pitch_margin_m
         for f in range(fa + 1, fb):
-            ground = self._inpitch_raycast(f)
-            if ground is None:
+            ground = solver._ground_raycast(f)
+            if ground is None or f in solver.gap_fill:
+                continue
+            if not (
+                -m <= ground[0] <= solver.pitch.length_m + m
+                and -m <= ground[1] <= solver.pitch.width_m + m
+            ):
                 continue
             obs.append(((f - fa) / fps, ground[:2]))
             obs_frames.append(f)
@@ -703,267 +690,22 @@ class _SegmentSolver:
 
         resid = solver._pixel_rms(worlds, obs_frames)
         residual_px = float(resid) if resid is not None else 0.0
-        v_a = self._roll_velocity(fit, 0.0, z, fps)
-        v_b = self._roll_velocity(fit, T, z, fps)
+        underconstrained = (
+            resid is not None and resid > cfg.rolling_max_residual_px
+        )
 
-        # Fix: lob-degeneracy guard from ``_rolling_span``.  A roll faster than
-        # any realistic ground pass is physically impossible — the usual culprit
-        # is a LOB whose ground projection happens to fit the rolling model in
-        # pixels (monocular degeneracy).  Such a span is airborne, so its ground
-        # ray-casts are a knowingly-wrong depth; flag the roll underconstrained
-        # (ceding to FLIGHT) and do NOT engage the grounded fallback — emitting
-        # pixel-exact ground worlds would re-create the very degeneracy this
-        # guard exists to prevent (mirror in ball_piecewise_solver._rolling_span
-        # line ~896–899; the open-span loop likewise refuses ground ray-casts on
-        # flight-posterior frames, lines ~1260–1264).
-        speed_violation = False
-        if len(pts) >= 2:
+        # Fix: restore lob-degeneracy guard from ``_rolling_span``.
+        # A roll faster than any realistic ground pass is physically impossible
+        # — the usual culprit is a lob whose ground projection happens to fit
+        # the rolling model in pixels (monocular degeneracy).  Mirror the check
+        # in ball_piecewise_solver._rolling_span (line ~896–899).
+        if not underconstrained and len(pts) >= 2:
             speeds = np.linalg.norm(np.diff(pts[:, :2], axis=0), axis=1) * fps
             if float(np.max(speeds)) > cfg.rolling_max_speed_m_s:
-                speed_violation = True
-        if speed_violation:
-            return SegmentFit(
-                worlds=worlds,
-                residual_px=residual_px,
-                underconstrained=True,
-                kind="rolling",
-                boundary_vel=(v_a, v_b),
-            )
+                underconstrained = True
 
-        # Clean roll preferred when it applies — a real roll is smoother than
-        # raw ray-casts.
-        clean_roll = (
-            resid is not None
-            and resid <= cfg.rolling_max_residual_px
-            and len(obs) >= cfg.min_obs_for_lm_fit
-        )
-        if clean_roll:
-            return SegmentFit(
-                worlds=worlds,
-                residual_px=residual_px,
-                underconstrained=False,
-                kind="rolling",
-                boundary_vel=(v_a, v_b),
-            )
-
-        # Airborne-anchor gate: when a resolved anchor node at either endpoint
-        # places the ball clearly above the pitch plane (z > ground tol), the
-        # span has DEPTH evidence that it is a flight.  Its ground ray-casts are
-        # then a knowingly-wrong depth, so the grounded fallback must not engage
-        # (it would undercut the anchor-backed FLIGHT with a pixel-exact but
-        # depth-wrong roll).  Cede to FLIGHT by flagging the roll underconstrained
-        # — exactly what happened before F16 on anchored airborne spans.  Anchor
-        # worlds are frame-deterministic → cache-sound (F7).
-        airborne_anchor = (
-            (fa_anchor_world is not None
-             and float(np.asarray(fa_anchor_world, float)[2]) > cfg.ground_z_tol_m)
-            or (fb_anchor_world is not None
-                and float(np.asarray(fb_anchor_world, float)[2]) > cfg.ground_z_tol_m)
-        )
-        if airborne_anchor:
-            return SegmentFit(
-                worlds=worlds,
-                residual_px=residual_px,
-                underconstrained=True,
-                kind="rolling",
-                boundary_vel=(v_a, v_b),
-            )
-
-        # Clean-flight gate: a high gravity arc's ground ray-casts fit a "roll"
-        # in pixels just as well as the true flight (monocular degeneracy), so
-        # the grounded fallback would tie a clean FLIGHT on residual and steal
-        # the span on the mode tie-break.  Mirror piecewise's flight promotion +
-        # apex test (``open_span_min_apex_m``): if a FLIGHT fit over the SAME
-        # span is clean (not underconstrained) AND rises to a real apex, the ball
-        # is airborne — cede to FLIGHT and do not emit depth-wrong ground worlds.
-        # ``_fit_flight`` is memoized on the same frame-determined key, so this is
-        # cheap and cache-sound (F7).
-        if self._clean_flight_exists(fa, fb, fa_anchor_world, fb_anchor_world):
-            return SegmentFit(
-                worlds=worlds,
-                residual_px=residual_px,
-                underconstrained=True,
-                kind="rolling",
-                boundary_vel=(v_a, v_b),
-            )
-
-        # Raw-raycast plausibility gate: a high gravity arc (a bounce, a long
-        # lob) projects to a ground track that SWEEPS implausibly fast — its
-        # frame-to-frame ray-cast speed blows past any real ground pass.  The
-        # smoothed roll-fit speed guard above under-reports this (the LM fit
-        # damps it), so test the RAW ray-cast speeds directly: if the grounded
-        # track is physically impossible the span is airborne and its ground
-        # ray-casts are a wrong-depth teleport — cede to FLIGHT rather than emit
-        # them.  This is what keeps the fallback from explaining a bounce arc or
-        # a roll+flight span as one cheap grounded roll (mirror of piecewise's
-        # rolling speed / open-span apex guards).
-        if self._raw_raycast_implausibly_fast(fa, fb):
-            return SegmentFit(
-                worlds=worlds,
-                residual_px=residual_px,
-                underconstrained=True,
-                kind="rolling",
-                boundary_vel=(v_a, v_b),
-            )
-
-        # Fallback (F16): the clean roll does not apply (high residual or too
-        # few obs), no airborne anchor, no clean flight, and the grounded track
-        # is physically plausible — the ball IS detected on the ground, so cover
-        # it with per-frame ground ray-casts and keep it grounded instead of
-        # collapsing to OUT_OF_VIEW.
-        return self._grounded_raycast_fallback(fa, fb, roll_fit=fit, T=T)
-
-    def _raw_raycast_implausibly_fast(self, fa: int, fb: int) -> bool:
-        """True when the span's RAW ground ray-cast track moves faster than any
-        real ground pass (``rolling_max_speed_m_s``) — the tell-tale of an arc
-        whose projection only *looks* grounded (monocular degeneracy).
-
-        Speed is measured between consecutive in-pitch ray-cast frames (the same
-        admission rules as the fallback), normalised by their frame gap so a
-        single dropped frame does not inflate the estimate.  Frame-determined →
-        cache-sound (F7).
-        """
-        solver = self._solver
-        cfg: SolverCfg = solver.cfg
-        fps = solver.fps
-        prev_f: int | None = None
-        prev_xy: np.ndarray | None = None
-        for f in range(fa, fb + 1):
-            ground = self._inpitch_raycast(f)
-            if ground is None:
-                continue
-            xy = np.asarray(ground, float)[:2]
-            if prev_f is not None and prev_xy is not None:
-                speed = float(np.linalg.norm(xy - prev_xy)) * fps / (f - prev_f)
-                if speed > cfg.rolling_max_speed_m_s:
-                    return True
-            prev_f, prev_xy = f, xy
-        return False
-
-    def _clean_flight_exists(
-        self,
-        fa: int,
-        fb: int,
-        fa_anchor_world: np.ndarray | None,
-        fb_anchor_world: np.ndarray | None,
-    ) -> bool:
-        """True when a FLIGHT fit over ``[fa, fb]`` is a genuinely airborne
-        explanation of the span's pixels — used to keep the grounded ray-cast
-        fallback from stealing a true flight span on the residual tie (mirror of
-        piecewise's ``open_span_min_apex_m`` flight test).
-
-        We test the flight's PIXEL residual and its apex, NOT its
-        ``underconstrained`` flag: a single long arc with no bounce overshoots
-        the ground at its tail and is flagged underconstrained for that reason
-        alone, even though it explains the pixels perfectly and is unmistakably
-        airborne (the beam would emit it as a shorter sub-arc).  Distinguishing
-        the two cases needs the residual+apex pair:
-
-        - true airborne arc → low pixel residual AND a real apex
-          (``>= open_span_min_apex_m``);
-        - grounded jitter    → the flight cannot fit the pixels (high residual)
-          and its recovered arc has an absurd / sub-ground apex.
-
-        Delegates to the memoized :meth:`_fit_flight` so the cost is
-        cache-amortised and frame-determined (cache-sound, F7).
-        """
-        cfg: SolverCfg = self._solver.cfg
-        flight = self.fit_segment(
-            fa, fb, Mode.FLIGHT,
-            fa_anchor_world=fa_anchor_world, fb_anchor_world=fb_anchor_world,
-        )
-        if not flight.worlds:
-            return False
-        if flight.residual_px > cfg.flight_max_residual_px:
-            return False
-        apex = max(float(w[2]) for w in flight.worlds.values())
-        return apex >= cfg.open_span_min_apex_m
-
-    def _inpitch_raycast(self, f: int) -> np.ndarray | None:
-        """Ground ray-cast for frame ``f``, gated by the same admission rules
-        the roll/open-span loops use: skip gap-fill (synthesised) frames, frames
-        with no valid ground ray-cast, and ray-casts landing outside the pitch +
-        margin (avoids near-horizon teleports).  ``None`` when excluded.
-
-        Mirrors ``ball_piecewise_solver._rolling_span`` /
-        ``_solve_open_span``'s grounded guard (fix a181dd5).
-        """
-        solver = self._solver
-        if f in solver.gap_fill:
-            return None
-        ground = solver._ground_raycast(f)
-        if ground is None:
-            return None
-        m = solver.cfg.pitch_margin_m
-        if not (
-            -m <= ground[0] <= solver.pitch.length_m + m
-            and -m <= ground[1] <= solver.pitch.width_m + m
-        ):
-            return None
-        return ground
-
-    def _grounded_raycast_fallback(
-        self, fa: int, fb: int, roll_fit, T: float,
-    ) -> SegmentFit:
-        """Per-frame ground ray-cast coverage for a grounded-but-not-cleanly-
-        rolling span (fix F16) — the global-solver mirror of piecewise's
-        open-span grounded fallback.
-
-        Ray-casts every frame in the inclusive range that survives
-        :meth:`_inpitch_raycast`'s guards (no gap-fill, no off-pitch landing)
-        AND does not carry a high IMM flight posterior (an airborne frame's
-        ground ray-cast is a knowingly-wrong depth — piecewise's open-span loop
-        refuses it too, lines ~1260–1264).  The accepted ray-casts ARE the
-        worlds; ``_pixel_rms`` over them is ≈0 because each ray-cast reprojects
-        to its own observed pixel, so the span decisively beats OUT_OF_VIEW.
-        ``underconstrained`` is False when at least ``min_obs_for_lm_fit`` frames
-        ray-cast cleanly (enough grounded evidence); otherwise the span has too
-        little evidence and stays flagged.  Boundary velocities are a
-        finite-difference of the ray-cast worlds.
-        """
-        solver = self._solver
-        fps = solver.fps
-        cfg: SolverCfg = solver.cfg
-
-        worlds: dict[int, np.ndarray] = {}
-        for f in range(fa, fb + 1):
-            if solver.p_flight.get(f, 0.0) >= 0.5:
-                # Airborne posterior: a grounded ray-cast would teleport the
-                # ball to the wrong depth.  Leave the frame for FLIGHT/missing.
-                continue
-            ground = self._inpitch_raycast(f)
-            if ground is None:
-                continue
-            worlds[f] = np.asarray(ground, dtype=float)
-
-        if not worlds:
-            # No grounded evidence at all — keep the roll fit's worlds so the
-            # renderer is not empty, but flag it (same posture as the old path).
-            z = cfg.ball_radius_m
-            roll_worlds: dict[int, np.ndarray] = {}
-            times = np.array([(f - fa) / fps for f in range(fa, fb + 1)])
-            pts = roll_fit.eval(times, z)
-            for i, f in enumerate(range(fa, fb + 1)):
-                roll_worlds[f] = pts[i]
-            return SegmentFit(
-                worlds=roll_worlds,
-                residual_px=0.0,
-                underconstrained=True,
-                kind="rolling",
-                boundary_vel=(
-                    self._roll_velocity(roll_fit, 0.0, z, fps),
-                    self._roll_velocity(roll_fit, T, z, fps),
-                ),
-            )
-
-        frames_sorted = sorted(worlds)
-        resid = solver._pixel_rms(worlds, frames_sorted)
-        residual_px = float(resid) if resid is not None else 0.0
-        # Enough clean ray-casts → the grounded explanation is well-supported.
-        underconstrained = len(worlds) < cfg.min_obs_for_lm_fit
-
-        v_a = self._fd_world_velocity(worlds, frames_sorted, frames_sorted[0])
-        v_b = self._fd_world_velocity(worlds, frames_sorted, frames_sorted[-1])
+        v_a = self._roll_velocity(fit, 0.0, z, fps)
+        v_b = self._roll_velocity(fit, T, z, fps)
         return SegmentFit(
             worlds=worlds,
             residual_px=residual_px,
@@ -971,22 +713,6 @@ class _SegmentSolver:
             kind="rolling",
             boundary_vel=(v_a, v_b),
         )
-
-    def _fd_world_velocity(
-        self,
-        worlds: dict[int, np.ndarray],
-        frames_sorted: list[int],
-        centre: int,
-    ) -> np.ndarray:
-        """Finite-difference world velocity (m/s) at ``centre`` over the
-        ray-cast worlds — uses the neighbouring covered frames."""
-        fps = self._solver.fps
-        idx = frames_sorted.index(centre)
-        lo = frames_sorted[max(0, idx - 1)]
-        hi = frames_sorted[min(len(frames_sorted) - 1, idx + 1)]
-        if hi == lo:
-            return np.zeros(3)
-        return (worlds[hi] - worlds[lo]) / ((hi - lo) / fps)
 
     def _endpoint_xy(
         self, frame: int, obs: list[tuple[float, np.ndarray]],

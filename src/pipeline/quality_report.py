@@ -129,6 +129,7 @@ def _ball_shot_entry(track_path: Path, shot_id: str) -> dict:
                 e for e in events if e.get("kind") == "goal_impact"
             ],
             "detection_coverage": diag.get("detection_coverage"),
+            "cross_replay": diag.get("cross_replay"),
         })
     return entry
 

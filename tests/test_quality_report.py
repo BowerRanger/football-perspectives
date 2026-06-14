@@ -443,6 +443,8 @@ def test_quality_report_ball_per_shot_with_diag(tmp_path: Path) -> None:
         ],
         "anchors": {"manual": 1, "auto_generated": 4, "merged": 5, "nodes": 5},
         "detection_coverage": {"pass1": 0.8, "second_pass": 0.1, "total": 0.9},
+        "cross_replay": {"partner_shots": ["origi02"], "refined_offset": -144.0,
+                         "n_inlier_fixes": 11, "offset_disagreement_frames": 2.0},
     }))
 
     write_quality_report(tmp_path)
@@ -461,3 +463,4 @@ def test_quality_report_ball_per_shot_with_diag(tmp_path: Path) -> None:
     assert shot["detection_coverage"] == {
         "pass1": 0.8, "second_pass": 0.1, "total": 0.9,
     }
+    assert shot["cross_replay"]["n_inlier_fixes"] == 11

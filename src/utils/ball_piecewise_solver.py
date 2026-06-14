@@ -213,6 +213,178 @@ class _SpanOutcome:
     fixes_used: int = 0
 
 
+# ----------------------------------------------------------------------
+# Output assembler — extracted from the former ``_Solver.solve()`` closure
+# (Phase-2 Task 0). These free functions own the dense-track + segments +
+# diagnostics assembly so the mode-search renderer can reuse the EXACT same
+# logic ``solve_piecewise`` uses. They are behavior-identical to the closure.
+
+
+@dataclass
+class _CommitState:
+    """Mutable accumulator threaded through the assembler functions.
+
+    Holds everything the former closure closed over: the dense world track,
+    the per-frame state map, the emitted flight segments, the diagnostics
+    dict, and the (frame, side) → arc index used by the node-authority and
+    restitution passes.
+    """
+
+    world_by_frame: dict[int, tuple[np.ndarray, float]]
+    state_by_frame: dict[int, str]
+    segments: list[FlightSegment]
+    diagnostics: dict
+    arcs_by_bound: dict[tuple[int, str], _Arc]
+
+
+# span-kind → per-frame BallFrame.State. The legacy piecewise kinds are
+# "rolling"/"ballistic"/"open"; the Phase-2 renderer additionally emits
+# "possessed"/"stationary"/"out_of_view", which map onto the existing
+# BallFrame.State literals. The "open" kind is deliberately absent — it
+# keeps its per-arc state-membership rule (see ``commit_span``).
+_KIND_STATE = {
+    "rolling": "grounded",
+    "ballistic": "flight",
+    "possessed": "grounded",
+    "stationary": "grounded",
+    "out_of_view": "missing",
+}
+
+
+def commit_span(
+    st: _CommitState,
+    outcome: _SpanOutcome,
+    fa: int,
+    fb: int,
+    conf: float,
+    n_frames: int,
+    confidences: Mapping[int, float] | None = None,
+    gap_fill: set[int] | None = None,
+) -> None:
+    """Assemble one span's outcome into the dense track + segments + diag.
+
+    Identical logic to the former ``_Solver.solve()`` ``_commit_span``
+    closure. For ``outcome.kind`` in :data:`_KIND_STATE` the mapped state
+    is used; the legacy ``"open"`` kind keeps its per-arc membership rule
+    (flight inside an emitted arc, grounded otherwise) and its detection-
+    confidence weighting.
+    """
+    confidences = confidences if confidences is not None else {}
+    gap_fill = gap_fill if gap_fill is not None else set()
+    for f, w in outcome.worlds.items():
+        if 0 <= f < n_frames:
+            base_conf = conf
+            if outcome.kind == "open":
+                det = confidences.get(f, 0.5)
+                base_conf = det * (0.3 if f in gap_fill else 1.0)
+            st.world_by_frame[f] = (np.asarray(w, dtype=float), base_conf)
+            if outcome.kind == "open":
+                st.state_by_frame[f] = (
+                    "flight"
+                    if any(a.fa <= f <= a.fb for a in outcome.arcs)
+                    else "grounded"
+                )
+            else:
+                st.state_by_frame[f] = _KIND_STATE.get(outcome.kind, "grounded")
+    for arc in outcome.arcs:
+        sid = len(st.segments)
+        st.segments.append(FlightSegment(
+            id=sid,
+            frame_range=(arc.fa, arc.fb),
+            parabola={
+                "p0": [float(x) for x in arc.p0],
+                "v0": [float(x) for x in arc.v0],
+                "g": -9.81,
+                "spin_axis_world": arc.spin_axis,
+                "spin_omega_rad_s": arc.spin_omega,
+                "spin_confidence": arc.spin_confidence,
+            },
+            fit_residual_px=float(arc.residual_px),
+        ))
+        st.arcs_by_bound[(arc.fa, "out")] = arc
+        st.arcs_by_bound[(arc.fb, "in")] = arc
+    st.diagnostics["splits"] += outcome.splits
+    st.diagnostics["segments"].append({
+        "start": fa, "end": fb, "kind": outcome.kind,
+        "residual_px": outcome.residual_px,
+        "underconstrained": outcome.underconstrained,
+        "fixes_used": outcome.fixes_used,
+    })
+    if outcome.underconstrained:
+        st.diagnostics["underconstrained_spans"].append({
+            "start": fa, "end": fb,
+            "residual_px": outcome.residual_px,
+        })
+
+
+def apply_node_authority(
+    st: _CommitState,
+    nodes: Sequence[TrajectoryNode],
+    n_frames: int,
+    cfg: SolverCfg,
+) -> None:
+    """Overwrite node frames with their authoritative world + state.
+
+    Identical to the former inline node-authority block: a kick/bounce/
+    contact frame that bookends an emitted arc belongs to the flight; an
+    explicit grounded (or ground-touch) anchor stays grounded no matter
+    what surrounds it.
+    """
+    ballistic_frames: set[int] = set()
+    for arc in st.arcs_by_bound.values():
+        ballistic_frames.update(range(arc.fa, arc.fb + 1))
+    for node in nodes:
+        f = node.frame
+        if not (0 <= f < n_frames):
+            continue
+        st.world_by_frame[f] = (
+            np.asarray(node.world_xyz, dtype=float), node.confidence,
+        )
+        ground_pinned = node.state == "grounded" or (
+            node.state == "player_touch" and node.z <= cfg.ground_z_tol_m
+        )
+        if ground_pinned:
+            st.state_by_frame[f] = "grounded"
+        elif f in ballistic_frames or node.z > cfg.ground_z_tol_m:
+            st.state_by_frame[f] = "flight"
+        else:
+            st.state_by_frame[f] = "grounded"
+
+
+def apply_restitution_flags(
+    st: _CommitState,
+    nodes: Sequence[TrajectoryNode],
+    fps: float,
+    cfg: SolverCfg,
+) -> None:
+    """Record/flag restitution at ground nodes between two ballistic arcs.
+
+    Identical to the former inline restitution block.
+    """
+    for node in nodes[1:-1] if len(nodes) > 2 else []:
+        arc_in = st.arcs_by_bound.get((node.frame, "in"))
+        arc_out = st.arcs_by_bound.get((node.frame, "out"))
+        if arc_in is None or arc_out is None:
+            continue
+        if node.z > cfg.ground_z_tol_m and node.state != "bounce":
+            continue
+        e = restitution(arc_in.end_velocity(fps), arc_out.v0)
+        if e is None:
+            continue
+        flagged = not (cfg.restitution_min <= e <= cfg.restitution_max)
+        st.diagnostics["bounces"].append({
+            "frame": node.frame,
+            "restitution": float(e),
+            "flagged": bool(flagged),
+        })
+        if flagged:
+            logger.warning(
+                "ball solver: bounce at frame %d has restitution %.2f "
+                "outside [%.2f, %.2f] — check the bracketing anchors",
+                node.frame, e, cfg.restitution_min, cfg.restitution_max,
+            )
+
+
 class _Solver:
     """One-shot solver; all inputs read-only after construction."""
 
@@ -1109,67 +1281,25 @@ class _Solver:
 
     def solve(self) -> SolveResult:
         cfg = self.cfg
-        world_by_frame: dict[int, tuple[np.ndarray, float]] = {}
-        state_by_frame: dict[int, str] = {
-            f: "missing" for f in range(self.n_frames)
-        }
-        segments: list[FlightSegment] = []
-        diagnostics: dict = {
-            "segments": [],
-            "bounces": [],
-            "underconstrained_spans": [],
-            "splits": 0,
-        }
-        arcs_by_bound: dict[tuple[int, str], _Arc] = {}
+        st = _CommitState(
+            world_by_frame={},
+            state_by_frame={f: "missing" for f in range(self.n_frames)},
+            segments=[],
+            diagnostics={
+                "segments": [],
+                "bounces": [],
+                "underconstrained_spans": [],
+                "splits": 0,
+            },
+            arcs_by_bound={},
+        )
 
         def _commit_span(outcome: _SpanOutcome, fa: int, fb: int,
                          conf: float) -> None:
-            for f, w in outcome.worlds.items():
-                if 0 <= f < self.n_frames:
-                    base_conf = conf
-                    if outcome.kind == "open":
-                        det = self.confidences.get(f, 0.5)
-                        base_conf = det * (0.3 if f in self.gap_fill else 1.0)
-                    world_by_frame[f] = (np.asarray(w, dtype=float), base_conf)
-                    if outcome.kind == "rolling":
-                        state_by_frame[f] = "grounded"
-                    elif outcome.kind == "ballistic":
-                        state_by_frame[f] = "flight"
-                    else:
-                        state_by_frame[f] = (
-                            "flight"
-                            if any(a.fa <= f <= a.fb for a in outcome.arcs)
-                            else "grounded"
-                        )
-            for arc in outcome.arcs:
-                sid = len(segments)
-                segments.append(FlightSegment(
-                    id=sid,
-                    frame_range=(arc.fa, arc.fb),
-                    parabola={
-                        "p0": [float(x) for x in arc.p0],
-                        "v0": [float(x) for x in arc.v0],
-                        "g": -9.81,
-                        "spin_axis_world": arc.spin_axis,
-                        "spin_omega_rad_s": arc.spin_omega,
-                        "spin_confidence": arc.spin_confidence,
-                    },
-                    fit_residual_px=float(arc.residual_px),
-                ))
-                arcs_by_bound[(arc.fa, "out")] = arc
-                arcs_by_bound[(arc.fb, "in")] = arc
-            diagnostics["splits"] += outcome.splits
-            diagnostics["segments"].append({
-                "start": fa, "end": fb, "kind": outcome.kind,
-                "residual_px": outcome.residual_px,
-                "underconstrained": outcome.underconstrained,
-                "fixes_used": outcome.fixes_used,
-            })
-            if outcome.underconstrained:
-                diagnostics["underconstrained_spans"].append({
-                    "start": fa, "end": fb,
-                    "residual_px": outcome.residual_px,
-                })
+            commit_span(
+                st, outcome, fa, fb, conf, self.n_frames,
+                confidences=self.confidences, gap_fill=self.gap_fill,
+            )
 
         if self.nodes:
             self._audit_auto_nodes()
@@ -1200,58 +1330,16 @@ class _Solver:
             )
 
         # Nodes are authoritative: exact world, state from node semantics.
-        # A kick/bounce/contact frame that bookends an emitted arc belongs
-        # to the flight; an explicit grounded (or ground-touch) anchor
-        # stays grounded no matter what surrounds it.
-        ballistic_frames: set[int] = set()
-        for arc in arcs_by_bound.values():
-            ballistic_frames.update(range(arc.fa, arc.fb + 1))
-        for node in self.nodes:
-            f = node.frame
-            if not (0 <= f < self.n_frames):
-                continue
-            world_by_frame[f] = (
-                np.asarray(node.world_xyz, dtype=float), node.confidence,
-            )
-            ground_pinned = node.state == "grounded" or (
-                node.state == "player_touch" and node.z <= cfg.ground_z_tol_m
-            )
-            if ground_pinned:
-                state_by_frame[f] = "grounded"
-            elif f in ballistic_frames or node.z > cfg.ground_z_tol_m:
-                state_by_frame[f] = "flight"
-            else:
-                state_by_frame[f] = "grounded"
+        apply_node_authority(st, self.nodes, self.n_frames, cfg)
 
         # Restitution at ground nodes between two ballistic arcs.
-        for node in self.nodes[1:-1] if len(self.nodes) > 2 else []:
-            arc_in = arcs_by_bound.get((node.frame, "in"))
-            arc_out = arcs_by_bound.get((node.frame, "out"))
-            if arc_in is None or arc_out is None:
-                continue
-            if node.z > cfg.ground_z_tol_m and node.state != "bounce":
-                continue
-            e = restitution(arc_in.end_velocity(self.fps), arc_out.v0)
-            if e is None:
-                continue
-            flagged = not (cfg.restitution_min <= e <= cfg.restitution_max)
-            diagnostics["bounces"].append({
-                "frame": node.frame,
-                "restitution": float(e),
-                "flagged": bool(flagged),
-            })
-            if flagged:
-                logger.warning(
-                    "ball solver: bounce at frame %d has restitution %.2f "
-                    "outside [%.2f, %.2f] — check the bracketing anchors",
-                    node.frame, e, cfg.restitution_min, cfg.restitution_max,
-                )
+        apply_restitution_flags(st, self.nodes, self.fps, cfg)
 
         return SolveResult(
-            world_by_frame=world_by_frame,
-            state_by_frame=state_by_frame,
-            flight_segments=tuple(segments),
-            diagnostics=diagnostics,
+            world_by_frame=st.world_by_frame,
+            state_by_frame=st.state_by_frame,
+            flight_segments=tuple(st.segments),
+            diagnostics=st.diagnostics,
         )
 
 

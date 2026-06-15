@@ -435,12 +435,17 @@ ball:
   # used only in tests via dependency injection.
   detector: wasb
   ball_radius_m: 0.11
-  # Trajectory solver backend (Phase 2). piecewise (default) is the greedy
-  # event-classification + per-span physical solve. global is the Phase-2
-  # mode-sequence beam search (rolling/flight/possessed/stationary/out_of_view
-  # partitions); it is opt-in until validated. On any global-solve failure or
-  # fit-budget overrun the stage falls back to a whole-shot piecewise solve.
-  solver: piecewise
+  # Ball back-end: events | piecewise | global.
+  #   events    (default) — resolve a sparse set of 3-D events (player
+  #              touches body-pinned to the contacting joint, plus bounce/
+  #              goal/rest waypoints), then render a DERIVED dense track via
+  #              the reference interpolator; UE interpolates between events.
+  #              See docs/superpowers/specs/2026-06-15-ball-touch-events-design.md.
+  #   piecewise — the greedy event-classification + per-span physical solve
+  #              (the dense monocular trajectory solver).
+  #   global    — Phase-2 mode-sequence beam search; falls back to whole-shot
+  #              piecewise on any failure or fit-budget overrun.
+  solver: events
   # Beam mode-sequence search tuning (only consulted when solver: global).
   # Each field maps onto ModeSearchCfg in src/utils/ball_mode_search.py.
   mode_search:

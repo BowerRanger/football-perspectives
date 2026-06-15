@@ -78,6 +78,7 @@ from src.utils.ball_piecewise_solver import (
     TrajectoryNode,
     solve_piecewise,
 )
+from src.utils.ball_event_resolver import resolve_events
 from src.utils.ball_player_context import PlayerContext
 from src.utils.ball_tracker import BallTracker, TrackerStep
 from src.utils.camera_projection import (
@@ -1473,9 +1474,23 @@ class BallStage(BaseStage):
             world_fixes=fixes or None,
         )
 
-        solver_name = str(cfg.get("solver", "piecewise"))
+        solver_name = str(cfg.get("solver", "events"))
         mode_search_fallback = False
-        if solver_name == "global":
+        if solver_name == "events":
+            # Default: resolve the sparse event set (touches body-pinned,
+            # waypoints via ray∩geometry), then render a DERIVED dense track
+            # from the §10 reference interpolator. No monocular depth solve.
+            result = resolve_events(
+                anchor_by_frame=anchor_by_frame,
+                player_ctx=player_ctx,
+                per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                per_frame_t=per_frame_t, distortion=distortion,
+                ball_radius=ball_radius, goal_geometry=goal_geometry,
+                n_frames=n_frames, fps=artifacts.camera_fps,
+                clip_id=artifacts.camera_clip_id,
+                image_size=artifacts.camera_image_size,
+            )
+        elif solver_name == "global":
             # The beam re-segments the timeline, so it wants the RICHER
             # permissive candidate set (soft-NMS, two events per window),
             # not the greedy-merged `events` the auto-anchor path uses —
@@ -1512,8 +1527,13 @@ class BallStage(BaseStage):
                 )
                 mode_search_fallback = True
                 result = solve_piecewise(**solve_kwargs)
-        else:
+        elif solver_name == "piecewise":
             result = solve_piecewise(**solve_kwargs)
+        else:
+            raise ValueError(
+                f"Unknown ball.solver={solver_name!r}; "
+                "expected 'events', 'piecewise', or 'global'"
+            )
         world_by_frame = dict(result.world_by_frame)
         state_by_frame = dict(result.state_by_frame)
 
@@ -1600,20 +1620,30 @@ class BallStage(BaseStage):
         track.save(ball_out_path)
 
         try:
-            _emit_ball_keyframes(
-                ball_out_path=ball_out_path,
-                clip_id=artifacts.camera_clip_id,
-                fps=artifacts.camera_fps,
-                image_size=artifacts.camera_image_size,
-                per_frame_out=per_frame_out,
-                anchor_by_frame=anchor_by_frame,
-                per_frame_K=per_frame_K,
-                per_frame_R=per_frame_R,
-                per_frame_t=per_frame_t,
-                distortion=distortion,
-                ground_touch_frames=ground_touch_frames,
-                flight_segments=result.flight_segments,
-            )
+            event_keyframes = getattr(result, "keyframe_set", None)
+            if solver_name == "events" and event_keyframes is not None:
+                # Events mode: the resolver already built the authoritative
+                # sparse keyframes WITH interpolation segments — write them
+                # directly so the segments reach UE / the reference interp.
+                kf_path = ball_out_path.with_name(
+                    ball_out_path.name.replace("ball_track", "ball_keyframes")
+                )
+                event_keyframes.save(kf_path)
+            else:
+                _emit_ball_keyframes(
+                    ball_out_path=ball_out_path,
+                    clip_id=artifacts.camera_clip_id,
+                    fps=artifacts.camera_fps,
+                    image_size=artifacts.camera_image_size,
+                    per_frame_out=per_frame_out,
+                    anchor_by_frame=anchor_by_frame,
+                    per_frame_K=per_frame_K,
+                    per_frame_R=per_frame_R,
+                    per_frame_t=per_frame_t,
+                    distortion=distortion,
+                    ground_touch_frames=ground_touch_frames,
+                    flight_segments=result.flight_segments,
+                )
         except Exception as exc:  # noqa: BLE001 — sidecar is enrichment, never block the stage
             logger.warning(
                 "ball: failed to write keyframes sidecar for %s: %s",
@@ -1646,6 +1676,9 @@ class BallStage(BaseStage):
         )
         diag: dict = {
             "solver": solver_name,
+            # In events mode the dense ``ball_track.json`` is rendered by the
+            # reference interpolator from the sparse keyframes, not solved.
+            "derived": solver_name == "events",
             "underconstrained_spans": result.diagnostics.get(
                 "underconstrained_spans", []),
             "segments": result.diagnostics.get("segments", []),

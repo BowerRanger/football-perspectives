@@ -64,6 +64,10 @@ def _minimal_cfg() -> dict:
     return {
         "ball": {
             "detector": "fake",
+            # These tests validate the dense piecewise trajectory solver
+            # (parabola fits, bone-driven flight, restitution). Pin it
+            # explicitly now that ``events`` is the default ball mode.
+            "solver": "piecewise",
             "ball_radius_m": 0.11,
             "max_gap_frames": 6,
             "flight_max_residual_px": 5.0,

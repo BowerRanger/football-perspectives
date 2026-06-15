@@ -215,9 +215,10 @@ def test_global_solver_budget_falls_back_to_piecewise(tmp_path: Path):
 
 
 @pytest.mark.integration
-def test_default_solver_matches_explicit_piecewise(tmp_path: Path):
-    """No ``solver`` key (default) == explicit ``solver: piecewise`` — the
-    default path is byte-comparable to today (no behaviour change)."""
+def test_default_solver_is_events(tmp_path: Path):
+    """No ``solver`` key (default) resolves to the new ``events`` mode and
+    flags the dense track as derived; explicit ``solver: piecewise`` still
+    runs the old dense solve unchanged."""
     n = 40
 
     default_dir = tmp_path / "default"
@@ -225,28 +226,40 @@ def test_default_solver_matches_explicit_piecewise(tmp_path: Path):
     det_default = _build_scene(default_dir, n=n)
     default_track, default_diag = _run(default_dir, det_default, solver=None)
 
+    assert default_diag["solver"] == "events"
+    assert default_diag["derived"] is True
+    _assert_track_valid(default_track, n)
+
     piecewise_dir = tmp_path / "piecewise"
     piecewise_dir.mkdir()
     det_pw = _build_scene(piecewise_dir, n=n)
     pw_track, pw_diag = _run(piecewise_dir, det_pw, solver="piecewise")
-
-    # Default reports solver: "piecewise" (the resolved value).
-    assert default_diag["solver"] == "piecewise"
     assert pw_diag["solver"] == "piecewise"
+    assert pw_diag.get("derived", False) is False
 
-    default_pos = _world_positions(default_track)
-    pw_pos = _world_positions(pw_track)
-    assert default_pos.keys() == pw_pos.keys()
-    for f in default_pos:
-        a, b = default_pos[f], pw_pos[f]
-        if a is None or b is None:
-            assert (a is None) == (b is None), f"frame {f}: {a} vs {b}"
-            continue
-        np.testing.assert_allclose(
-            np.asarray(a, float), np.asarray(b, float), atol=1e-9,
-            err_msg=f"frame {f} world mismatch default vs explicit piecewise",
-        )
-    # State streams identical too.
-    default_states = {f.frame: f.state for f in default_track.frames}
-    pw_states = {f.frame: f.state for f in pw_track.frames}
-    assert default_states == pw_states
+
+@pytest.mark.integration
+def test_events_mode_writes_keyframes_with_segments(tmp_path: Path):
+    """Events mode emits a sparse keyframes sidecar carrying interpolation
+    segments (the authoritative product UE consumes)."""
+    n = 40
+    detections = _build_scene(tmp_path, n=n)
+    _track, diag = _run(tmp_path, detections, solver="events")
+    assert diag["solver"] == "events"
+
+    from src.schemas.ball_keyframes import BallKeyframeSet
+    kf = BallKeyframeSet.load(tmp_path / "ball" / "ball_keyframes.json")
+    # A rolling ball with grounded sampling yields at least one keyframe and
+    # at least one derived segment between / around them.
+    assert len(kf.keyframes) >= 1
+    assert len(kf.segments) >= 1
+    assert all(s.kind in {"ballistic", "roll", "carry", "rest", "free_flight"}
+               for s in kf.segments)
+
+
+@pytest.mark.integration
+def test_unknown_solver_raises(tmp_path: Path):
+    n = 10
+    detections = _build_scene(tmp_path, n=n)
+    with pytest.raises(ValueError, match="Unknown ball.solver"):
+        _run(tmp_path, detections, solver="banana")

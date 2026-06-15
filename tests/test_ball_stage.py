@@ -137,7 +137,8 @@ def test_ball_stage_bridges_bracketed_gap_and_marks_trailing_missing(tmp_path: P
             detections.append((u, v, 0.9))
 
     stage = BallStage(
-        config={"ball": {"detector": "fake", "max_gap_frames": 3,
+        config={"ball": {"detector": "fake", "solver": "piecewise",
+                         "max_gap_frames": 3,
                          "auto_anchors": {"enabled": True,
                                           "grounded_interval": 8},
                          "second_pass": {"enabled": False},
@@ -342,6 +343,7 @@ def test_aerial_arc_promotes_grounded_run_to_flight(tmp_path: Path):
         config={
             "ball": {
                 "detector": "fake",
+                "solver": "piecewise",
                 "ball_radius_m": 0.11,
                 "max_gap_frames": 6,
                 "flight_max_residual_px": 200.0,
@@ -472,6 +474,10 @@ def test_auto_touch_anchors_flight_to_players_foot(tmp_path: Path):
             # at this camera geometry, and the test isolates the contact
             # pipeline (pose -> touch event -> anchor -> launch arc).
             "ball": {"detector": "fake",
+                     # Validates the piecewise contact -> launch-arc fit
+                     # (a parabola through the post-touch detections without
+                     # a far knot); events mode needs a bracketing keyframe.
+                     "solver": "piecewise",
                      "auto_anchors": {"grounded_min_conf": 2.0},
                      # Disable the appearance bridge: the all-green clip
                      # gives a uniform NCC surface that confuses it.

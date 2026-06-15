@@ -50,6 +50,9 @@ def _full_cfg() -> dict:
     return {
         "ball": {
             "detector": "fake",
+            # Validates the dense piecewise solver (flight bracketed by the
+            # touch and the bounce); pin it now that ``events`` is default.
+            "solver": "piecewise",
             "ball_radius_m": 0.11,
             "max_gap_frames": 2,
             "flight_max_residual_px": 5.0,

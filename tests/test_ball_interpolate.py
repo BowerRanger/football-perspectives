@@ -67,6 +67,25 @@ def test_free_flight_with_unknown_endpoint_leaves_gap_none():
     assert track.frames[5].state == "flight"
 
 
+def test_carry_segment_uses_linear_interpolation_in_phase_1():
+    """Characterisation test: a ``carry`` span interpolates LINEARLY in
+    Phase 1 (the §10 player-foot-path target is a Phase-3 follow-up). This
+    pins the current behaviour so the Phase-3 change is a deliberate, visible
+    edit rather than a silent one."""
+    ks = BallKeyframeSet(
+        clip_id="c", fps=10.0, image_size=(100, 100),
+        keyframes=(
+            _kf(0, (0.0, 0.0, 0.2), state="player_touch", depth="player_bone"),
+            _kf(10, (10.0, 4.0, 0.2), state="player_touch", depth="player_bone"),
+        ),
+        segments=(BallSegment(0, 10, "carry", {"player_id": "P1"}),),
+    )
+    track = interpolate_events(ks)
+    f5 = track.frames[5]
+    assert abs(f5.world_xyz[0] - 5.0) < 1e-6
+    assert abs(f5.world_xyz[1] - 2.0) < 1e-6
+
+
 def test_frames_are_contiguous_and_span_clip():
     ks = BallKeyframeSet(
         clip_id="c", fps=10.0, image_size=(100, 100),

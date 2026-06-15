@@ -145,6 +145,12 @@ def interpolate_events(
         elif p0 is not None and p1 is not None and seg.kind in (
             "roll", "carry", "free_flight",
         ):
+            # NOTE: ``carry`` interpolates LINEARLY here as a deliberate P1
+            # interim. The §10 design target is to follow the owning
+            # player's foot/ground path; that needs the player context
+            # threaded into the interpolator (a Phase-3 follow-up). Linear
+            # between two nearby same-player touches (gap ≤15 fr, ≤3 m by
+            # detect_carry_spans) is a reasonable approximation until then.
             _eval_linear(seg, p0, p1, world)
         elif seg.kind == "rest" and (p0 is not None or p1 is not None):
             # Hold a constant position. Works from whichever endpoint has a

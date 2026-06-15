@@ -86,12 +86,14 @@ def _resolve_touch_world(
         return None
     base = np.asarray(bone_world, dtype=float)
     have_cam = K is not None and R is not None and t is not None
-    # Lateral refine onto the ball pixel ray when a confident pixel exists;
-    # otherwise (occlusion) use the joint position directly.
+    # With a confident ball pixel: refine laterally onto its ray, then push
+    # the ball centre a radius toward the camera so the surface (not the
+    # joint centre) sits on the sight-line. Occluded (no pixel): resolve
+    # straight to the joint position — there is no ray to define the offset
+    # direction meaningfully (spec §7, occlusion robustness).
     if anc.image_xy is not None and have_cam:
         uv = (float(anc.image_xy[0]), float(anc.image_xy[1]))
         base = project_point_onto_pixel_ray(base, uv, K, R, t, distortion)
-    if have_cam:
         base = _offset_toward_camera(base, R, t, ball_radius)
     return base
 

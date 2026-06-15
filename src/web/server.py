@@ -2079,6 +2079,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                         goal_element=a.goal_element,
                         touch_type=a.touch_type,
                         spin=a.spin,
+                        confidence=float(a.confidence),
+                        end_frame=a.end_frame,
                     ) for a in payload.anchors
                 )
                 aset = BallAnchorSet(

@@ -201,7 +201,7 @@ A **single, precisely specified** per-segment interpolation, implemented twice (
 
 - **ballistic** (between a launch event — kick/shot/header/volley — and the next contact): gravity parabola through both 3-D endpoints with `g` from hints; **two body-pinned endpoints + gravity fully determine the arc** (the same identifiability the old solver relied on, but the endpoints are now reliable). Optional Magnus curl from `spin`/`omega_rad_s`.
 - **roll** (between two grounded events): along-ground path with bounded deceleration (`rolling_decel`), ease to rest if the next event is `rest`.
-- **carry** (a `carry` span): ball position = owning player's foot/ground path offset by ball radius; the ball "sticks" near the dribbler rather than cutting straight lines.
+- **carry** (a `carry` span): the design target is ball position = owning player's foot/ground path offset by ball radius, so the ball "sticks" near the dribbler rather than cutting straight lines. **Phase-1 interim:** the reference interpolator evaluates a carry span *linearly* between its two touch endpoints (a reasonable approximation given carry spans are short — ≤15 frames, ≤3 m by `detect_carry_spans`); player-foot-path following needs the player context threaded into the interpolator and is a Phase-3 follow-up (the `carry` segment label is already emitted so UE / a later pass can honour it).
 - **rest:** constant position.
 - **free_flight** (a bracket includes `off_screen_flight`): gravity arc between the bracketing 3-D events; lateral unconstrained beyond the endpoints.
 

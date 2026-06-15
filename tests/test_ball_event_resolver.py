@@ -72,7 +72,9 @@ def test_occluded_touch_still_resolves_to_joint():
     world, _conf = res.world_by_frame[0]
     assert world is not None
     d = np.linalg.norm(np.asarray(world) - np.asarray(joint))
-    assert d <= _RADIUS + 1e-6
+    # Occluded: resolve straight to the joint position, no camera offset
+    # (no ball pixel to define a lateral ray). Spec §7.
+    assert d < 1e-6
 
 
 def test_touch_keyframe_depth_source_is_player_bone():

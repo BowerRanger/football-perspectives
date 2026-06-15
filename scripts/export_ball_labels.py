@@ -18,10 +18,13 @@ docs/superpowers/specs/2026-06-15-ball-finetune-README.md).
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
-from src.schemas.ball_anchor import BallAnchorSet
-from src.utils.ball_finetune_export import export_dataset
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.schemas.ball_anchor import BallAnchorSet  # noqa: E402
+from src.utils.ball_finetune_export import export_dataset  # noqa: E402
 
 
 def _anchor_path(output: Path, clip_id: str) -> Path:

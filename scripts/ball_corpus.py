@@ -12,9 +12,12 @@ what's accumulated and extracts frames before training.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
-from src.utils.ball_label_corpus import load_manifest, materialize_frames
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.utils.ball_label_corpus import load_manifest, materialize_frames  # noqa: E402
 
 
 def main() -> None:

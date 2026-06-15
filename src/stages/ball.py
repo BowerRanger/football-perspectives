@@ -79,6 +79,7 @@ from src.utils.ball_piecewise_solver import (
     solve_piecewise,
 )
 from src.utils.ball_event_resolver import resolve_events
+from src.utils.ball_highres_detect import HighResDetector, improve_detection
 from src.utils.ball_player_context import PlayerContext
 from src.utils.ball_tracker import BallTracker, TrackerStep
 from src.utils.camera_projection import (
@@ -738,6 +739,29 @@ class BallStage(BaseStage):
         bridge = AppearanceBridge(bridge_cfg)
         consecutive_misses = 0
 
+        # High-res detection (Phase A): zoom-refine around the predicted ball
+        # and tile-relocate after a long miss run. Only wraps a detector that
+        # can re-detect on an arbitrary crop (real WASB/YOLO, not the scripted
+        # fake) — see BallDetector.SUPPORTS_REDETECT.
+        hr_cfg = cfg.get("highres", {}) or {}
+        hr_trigger_max_conf = float(hr_cfg.get("trigger_max_conf", 0.5))
+        hr_tile_gap = int(hr_cfg.get("tile_on_gap_frames", 6))
+        hr_always_zoom = bool(hr_cfg.get("always_zoom_when_located", True))
+        hr: HighResDetector | None = None
+        if (
+            hr_cfg.get("enabled", True)
+            and getattr(detector, "SUPPORTS_REDETECT", True)
+            and hasattr(detector, "detect_candidates")
+        ):
+            hr = HighResDetector(
+                detector,
+                zoom_crop_px=int(hr_cfg.get("zoom_crop_px", 320)),
+                tile=int(hr_cfg.get("tile_px", 416)),
+                overlap=int(hr_cfg.get("tile_overlap_px", 96)),
+                top_k=int(hr_cfg.get("top_k", 5)),
+                min_score=float(hr_cfg.get("min_score", 0.05)),
+            )
+
         steps: list[TrackerStep] = []
         raw_confidences: dict[int, float] = {}
         sources: dict[int, str] = {}
@@ -770,6 +794,26 @@ class BallStage(BaseStage):
                         h_img, w_img = frame.shape[:2]
                         if not (0.0 <= det[0] < w_img and 0.0 <= det[1] < h_img):
                             det = None
+                    det_source = "detector"
+                    if hr is not None:
+                        center = None
+                        if det is not None:
+                            center = (float(det[0]), float(det[1]))
+                        elif steps and steps[-1].uv is not None:
+                            center = (float(steps[-1].uv[0]), float(steps[-1].uv[1]))
+                        det, hires_src = improve_detection(
+                            det, center=center, frame=frame, hr=hr,
+                            consecutive_misses=consecutive_misses,
+                            trigger_max_conf=hr_trigger_max_conf,
+                            tile_on_gap_frames=hr_tile_gap,
+                            always_zoom_when_located=hr_always_zoom,
+                        )
+                        if det is not None:
+                            h_img, w_img = frame.shape[:2]
+                            if not (0.0 <= det[0] < w_img and 0.0 <= det[1] < h_img):
+                                det = None
+                        if hires_src is not None:
+                            det_source = hires_src
                     if det is None:
                         consecutive_misses += 1
                         bridge_result = bridge.try_bridge(
@@ -791,7 +835,7 @@ class BallStage(BaseStage):
                         consecutive_misses = 0
                         uv = (float(det[0]), float(det[1]))
                         raw_confidences[frame_idx] = float(det[2])
-                        sources[frame_idx] = "detector"
+                        sources[frame_idx] = det_source
                         bridge.update_template(
                             frame=frame_idx,
                             frame_image=frame,

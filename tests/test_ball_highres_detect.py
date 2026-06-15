@@ -59,3 +59,61 @@ def test_relocate_tiles_and_returns_candidates():
     assert cands  # at least one candidate from the tile sweep
     # candidates are in full-frame coordinates
     assert all(0 <= u <= 1000 and 0 <= v <= 600 for u, v, _ in cands)
+
+
+class _StubHR:
+    """Stub of the HighResDetector decision surface for improve_detection."""
+
+    def __init__(self, refine_ret=None, relocate_ret=None):
+        self._refine_ret = refine_ret
+        self._relocate_ret = relocate_ret or []
+        self.refine_calls = 0
+        self.relocate_calls = 0
+
+    def refine(self, frame, center):
+        self.refine_calls += 1
+        return self._refine_ret
+
+    def relocate(self, frame):
+        self.relocate_calls += 1
+        return self._relocate_ret
+
+
+def test_improve_detection_zoom_rescues_coarse_miss():
+    from src.utils.ball_highres_detect import improve_detection
+    hr = _StubHR(refine_ret=(640.0, 360.0, 0.8))
+    det, src = improve_detection(
+        None, center=(640.0, 360.0), frame=np.zeros((720, 1280, 3), np.uint8),
+        hr=hr, consecutive_misses=0,
+    )
+    assert det == (640.0, 360.0, 0.8) and src == "detector_hires"
+    assert hr.refine_calls == 1
+
+
+def test_improve_detection_keeps_confident_coarse():
+    from src.utils.ball_highres_detect import improve_detection
+    hr = _StubHR(refine_ret=(10.0, 10.0, 0.4))  # weaker than coarse
+    coarse = (640.0, 360.0, 0.9)
+    det, src = improve_detection(
+        coarse, center=(640.0, 360.0), frame=np.zeros((720, 1280, 3), np.uint8),
+        hr=hr, consecutive_misses=0, always_zoom_when_located=True,
+    )
+    assert det == coarse and src is None  # coarse wins, caller tags "detector"
+
+
+def test_improve_detection_relocates_when_lost():
+    from src.utils.ball_highres_detect import improve_detection
+    hr = _StubHR(relocate_ret=[(500.0, 300.0, 0.7)])
+    det, src = improve_detection(
+        None, center=None, frame=np.zeros((720, 1280, 3), np.uint8),
+        hr=hr, consecutive_misses=8, tile_on_gap_frames=6,
+    )
+    assert det == (500.0, 300.0, 0.7) and src == "tile"
+    assert hr.relocate_calls == 1
+
+
+def test_improve_detection_noop_without_hr():
+    from src.utils.ball_highres_detect import improve_detection
+    coarse = (1.0, 2.0, 0.5)
+    assert improve_detection(coarse, center=(1.0, 2.0), frame=None, hr=None,
+                             consecutive_misses=0) == (coarse, None)

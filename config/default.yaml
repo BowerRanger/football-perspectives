@@ -506,6 +506,14 @@ ball:
   segment:
     enabled: true
     max_residual_px: 6.0
+  # Phase C: pose-anchored touch attribution. A direction-change break is
+  # attributed to the nearest active body part within relaxed_radius_px,
+  # ranked by a kinematic bonus (a fast-moving foot near the break is the
+  # likely toucher). High recall — the editor prunes false positives.
+  pose_touch:
+    enabled: true
+    relaxed_radius_px: 60.0
+    kinematic_bonus_weight: 0.3
   # Automatic anchoring (camera auto-anchor analogy): velocity breaks on
   # the pixel track are classified as player touches / bounces / goal
   # impacts using the players' FK contact joints and the goal geometry,

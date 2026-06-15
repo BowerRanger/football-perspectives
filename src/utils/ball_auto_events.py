@@ -82,6 +82,12 @@ class AutoEventCfg:
     # fit (ball_traj_segment) instead of fragile local velocity windows.
     use_segmentation: bool = True
     segment_max_residual_px: float = 6.0
+    # Phase C: pose-anchored touch attribution. Relax the joint-proximity gate
+    # and rank candidate joints by a kinematic bonus (a fast-moving foot near a
+    # direction change is the likely toucher). High recall — prune in editor.
+    use_pose_touch: bool = True
+    touch_relaxed_px: float = 60.0
+    kinematic_bonus_weight: float = 0.3
 
 
 @dataclass(frozen=True)
@@ -200,6 +206,17 @@ def _select_breaks(uvs: dict[int, np.ndarray], cfg: AutoEventCfg) -> list[_Break
         )
         return _greedy_nms(raw, cfg)
     return _find_breaks(uvs, cfg)
+
+
+def _dispatch_touch(brk, uv, player_ctx, cfg):
+    """Pose-anchored attribution (Phase C) when enabled, else the legacy
+    nearest-joint-within-25px classifier."""
+    if getattr(cfg, "use_pose_touch", False):
+        from src.utils.ball_pose_touch import (  # lazy import: avoid cycle
+            classify_touch as _pose_classify_touch,
+        )
+        return _pose_classify_touch(brk, uv, player_ctx, cfg)
+    return _classify_touch(brk, uv, player_ctx, cfg)
 
 
 def _top_k_per_window(
@@ -454,7 +471,7 @@ def detect_events(
                 brk, uv, K, R, t, distortion, goal_geometry, cfg
             )
         if event is None:
-            event = _classify_touch(brk, uv, player_ctx, cfg)
+            event = _dispatch_touch(brk, uv, player_ctx, cfg)
         if event is None and goal_geometry is not None and has_cam:
             event = _classify_net(
                 brk, uv, K, R, t, distortion, goal_geometry, cfg
@@ -510,7 +527,7 @@ def _classify_breaks_to_events(
                 brk, uv, K, R, t, distortion, goal_geometry, cfg
             )
         if event is None:
-            event = _classify_touch(brk, uv, player_ctx, cfg)
+            event = _dispatch_touch(brk, uv, player_ctx, cfg)
         if event is None and goal_geometry is not None and has_cam:
             event = _classify_net(
                 brk, uv, K, R, t, distortion, goal_geometry, cfg

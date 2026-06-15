@@ -76,3 +76,32 @@ def test_ue_evaluator_matches_pipeline_interpolator():
         a, b = ue_world[fr], pipe[fr]
         for x, y in zip(a, b):
             assert abs(x - y) < 1e-6, f"frame {fr}: UE {a} vs pipeline {b}"
+
+
+def test_ue_interpolate_keyframe_set_bakes_dense_keys():
+    """interpolate_keyframe_set() (what load_reconstruction._load_ball_motion
+    calls) bakes one dense key per covered frame from a keyframe set carrying
+    segments. A pipeline BallKeyframeSet is shape-compatible (.keyframes with
+    .frame/.world_xyz, .segments with .start_frame/.end_frame/.kind/.hints,
+    .fps), so it stands in for the UE-side set here."""
+    ue = _load_ue_module()
+    keyframes, segments = _scenario()
+    ks = BallKeyframeSet(
+        clip_id="c", fps=30.0, image_size=(1280, 720),
+        keyframes=keyframes, segments=segments,
+    )
+    pos = ue.interpolate_keyframe_set(ks)
+    frames = sorted(pos)
+    assert frames == list(range(0, 31))  # contiguous over the covered span
+    # ballistic mid-arc rises above the grounded endpoints
+    assert pos[7][2] > 0.11
+
+
+def test_ue_interpolate_keyframe_set_empty_segments_yields_no_dense_keys():
+    ue = _load_ue_module()
+    ks = BallKeyframeSet(
+        clip_id="c", fps=30.0, image_size=(1280, 720),
+        keyframes=(_kf(0, (0.0, 0.0, 0.11)),), segments=(),
+    )
+    # No segments -> only the lone keyframe's own frame is "covered".
+    assert set(ue.interpolate_keyframe_set(ks)) == {0}

@@ -1111,19 +1111,31 @@ class BallStage(BaseStage):
                         ball_near_foot_px=float(foot_cfg.get("ball_near_foot_px", 45.0)),
                         min_score=float(foot_cfg.get("min_score", 0.25)),
                     )
-                    if fdets:
+                    # Temporal NMS: a real touch is isolated — you can't touch
+                    # the ball every frame. Collapse dense clusters of
+                    # foot-guided hits (running feet finding stray white blobs)
+                    # to the strongest per window, which keeps the genuine
+                    # isolated touches and discards the over-fire.
+                    nms_win = int(foot_cfg.get("nms_window_frames", 8))
+                    kept: list = []
+                    for det in sorted(fdets, key=lambda d: -d[4]):
+                        if all(abs(det[0] - k[0]) > nms_win for k in kept):
+                            kept.append(det)
+                    kept.sort(key=lambda d: d[0])
+                    if kept:
                         cur_uv = {s.frame: s.uv for s in steps if s.uv is not None}
-                        for fr, _pid, _bone, buv, score in fdets:
+                        for fr, _pid, _bone, buv, score in kept:
                             cur_uv[fr] = buv
                             raw_confidences[fr] = max(
                                 raw_confidences.get(fr, 0.0), score)
                             sources[fr] = "foot_guided"
                         steps = _resmooth_observations(cur_uv, n_clip, cfg)
                         foot_touches = tuple(
-                            (fr, pid, bone) for fr, pid, bone, _, _ in fdets)
+                            (fr, pid, bone) for fr, pid, bone, _, _ in kept)
                         logger.info(
                             "ball: foot-guided recovered %d ball-at-foot "
-                            "touches for %s", len(fdets), shot_id or "(legacy)",
+                            "touches (%d raw) for %s",
+                            len(kept), len(fdets), shot_id or "(legacy)",
                         )
             except Exception as exc:  # noqa: BLE001 — foot-guided is enrichment
                 logger.warning("ball: foot-guided pass failed: %s", exc)

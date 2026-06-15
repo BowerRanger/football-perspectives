@@ -515,11 +515,17 @@ ball:
   # contact joints to recover the ball at touches (WASB's global hit there
   # is often a confident false positive). A recovered ball-at-foot becomes a
   # touch directly. Only runs for re-detect-capable detectors (WASB/YOLO).
+  # Default OFF: validated that the mechanism recovers the ball at real
+  # touches, but inference-only it over-fires (a zoom finds white blobs near
+  # many running feet and the score can't disambiguate the ball), so it adds
+  # false touches. Re-enable once the detector is reliable (post fine-tuning),
+  # when ball-at-foot becomes trustworthy. See the detection-rework spec.
   foot_guided:
-    enabled: true
+    enabled: false
     min_foot_speed_px: 8.0      # gate: contact-joint pixel speed (a kick/contact)
     ball_near_foot_px: 45.0     # accept a zoomed ball within this of the foot
     min_score: 0.25
+    nms_window_frames: 8        # temporal NMS: a touch is isolated, not every frame
   # Phase C: pose-anchored touch attribution. A direction-change break is
   # attributed to the nearest active body part within relaxed_radius_px,
   # ranked by a kinematic bonus (a fast-moving foot near the break is the

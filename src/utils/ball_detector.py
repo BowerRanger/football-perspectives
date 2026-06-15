@@ -14,6 +14,12 @@ import numpy as np
 class BallDetector(ABC):
     """Detects the ball in a single frame and returns its pixel position."""
 
+    # True for detectors that re-detect meaningfully on an arbitrary crop
+    # (WASB/YOLO). The foot-guided zoom pass re-queries the detector on
+    # crops around player feet, so it only runs for such detectors — never
+    # the scripted FakeBallDetector (re-querying would desync its cycle).
+    SUPPORTS_REDETECT: bool = True
+
     @abstractmethod
     def detect(self, frame: np.ndarray) -> tuple[float, float, float] | None:
         """Returns ``(u, v, confidence)`` or ``None`` if no detection."""
@@ -115,6 +121,8 @@ class FakeBallDetector(BallDetector):
     ``candidates`` (a parallel cycle of candidate lists) scripts
     :meth:`detect_candidates`; ``reset_count`` records :meth:`reset` calls.
     """
+
+    SUPPORTS_REDETECT: bool = False  # scripted cycle — never re-query on crops
 
     def __init__(
         self,

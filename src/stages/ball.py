@@ -62,6 +62,7 @@ from src.utils.ball_auto_anchor import (
 )
 from src.utils.ball_auto_events import (
     AutoEventCfg,
+    BallEvent,
     detect_event_candidates,
     detect_events,
 )
@@ -79,6 +80,7 @@ from src.utils.ball_piecewise_solver import (
     solve_piecewise,
 )
 from src.utils.ball_event_resolver import resolve_events
+from src.utils.ball_foot_guided import foot_ball_detections, gated_feet
 from src.utils.ball_player_context import PlayerContext
 from src.utils.ball_tracker import BallTracker, TrackerStep
 from src.utils.camera_projection import (
@@ -142,6 +144,10 @@ class _DetectArtifacts:
 
     # Manual anchors
     manual_by_frame: dict[int, object]  # dict[int, BallAnchor]
+
+    # Foot-guided touches recovered in the detect phase: (frame, player_id,
+    # bone). The solve pass turns these into touch BallEvents.
+    foot_touches: tuple = ()
 
 
 def _accepted_obs_and_cams(
@@ -944,6 +950,36 @@ class BallStage(BaseStage):
         detector.reset()
         return best
 
+    def _foot_guided_loop(
+        self,
+        clip_path: Path,
+        gated: dict,
+        detector: BallDetector,
+        sp_cfg: SecondPassCfg,
+        ball_near_foot_px: float,
+        min_score: float,
+    ) -> list[tuple[int, str, str, tuple[float, float], float]]:
+        """Zoom around each gated foot (buffer-safe via ``_zoom_detect``) to
+        recover the ball where a touch is plausible. The corridor cov is sized
+        so the zoom only accepts a ball within ``ball_near_foot_px``."""
+        cov = np.eye(2) * (ball_near_foot_px / 3.0) ** 2
+        cap = cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open clip: {clip_path}")
+        try:
+            def zoom_fn(frame: int, foot_uv: tuple[float, float]):
+                return self._zoom_detect(
+                    cap, frame, np.asarray(foot_uv, dtype=float), cov,
+                    detector, sp_cfg,
+                )
+            return foot_ball_detections(
+                gated, zoom_fn,
+                ball_near_foot_px=ball_near_foot_px, min_score=min_score,
+            )
+        finally:
+            detector.reset()
+            cap.release()
+
     def _detect_shot(
         self,
         shot_id: str,
@@ -1048,6 +1084,50 @@ class BallStage(BaseStage):
                     )
                     steps = _resmooth_observations(merged_uv, n_clip, cfg)
 
+        # --- 1c. Foot-guided pass: zoom around fast-moving player feet to
+        # recover the ball where a touch is plausible. WASB's global hit at a
+        # touch is often wrong (confident, on the wrong object), but the true
+        # ball sits ~15px from a contact joint — so we look there.
+        foot_touches: tuple = ()
+        foot_cfg = cfg.get("foot_guided", {}) or {}
+        if (
+            foot_cfg.get("enabled", True)
+            and getattr(detector, "SUPPORTS_REDETECT", True)
+            and per_frame_K
+        ):
+            try:
+                pctx = PlayerContext.load(
+                    self.output_dir, shot_id,
+                    per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                    per_frame_t=per_frame_t, distortion=distortion,
+                )
+                gated = gated_feet(
+                    pctx, n_clip,
+                    min_foot_speed_px=float(foot_cfg.get("min_foot_speed_px", 8.0)),
+                )
+                if gated:
+                    fdets = self._foot_guided_loop(
+                        clip_path, gated, detector, sp_cfg,
+                        ball_near_foot_px=float(foot_cfg.get("ball_near_foot_px", 45.0)),
+                        min_score=float(foot_cfg.get("min_score", 0.25)),
+                    )
+                    if fdets:
+                        cur_uv = {s.frame: s.uv for s in steps if s.uv is not None}
+                        for fr, _pid, _bone, buv, score in fdets:
+                            cur_uv[fr] = buv
+                            raw_confidences[fr] = max(
+                                raw_confidences.get(fr, 0.0), score)
+                            sources[fr] = "foot_guided"
+                        steps = _resmooth_observations(cur_uv, n_clip, cfg)
+                        foot_touches = tuple(
+                            (fr, pid, bone) for fr, pid, bone, _, _ in fdets)
+                        logger.info(
+                            "ball: foot-guided recovered %d ball-at-foot "
+                            "touches for %s", len(fdets), shot_id or "(legacy)",
+                        )
+            except Exception as exc:  # noqa: BLE001 — foot-guided is enrichment
+                logger.warning("ball: foot-guided pass failed: %s", exc)
+
         # Coverage counts ACCEPTED evidence: pass1 counts frames whose raw
         # observation survived gating (outlier-rejected frames are not
         # covered even though their source reads "detector").
@@ -1086,6 +1166,7 @@ class BallStage(BaseStage):
             per_frame_R=per_frame_R,
             per_frame_t=per_frame_t,
             manual_by_frame=manual_by_frame,
+            foot_touches=foot_touches,
         )
 
     def _triangulate_groups(
@@ -1338,6 +1419,16 @@ class BallStage(BaseStage):
             cfg=event_cfg,
             image_size=artifacts.camera_image_size,
         )
+        # Foot-guided recoveries are touches by construction (a ball found at
+        # a fast-moving contact joint). Merge as touch events, winning over a
+        # same-frame event from the (less reliable) global ball track.
+        if artifacts.foot_touches:
+            ft_frames = {fr for fr, _, _ in artifacts.foot_touches}
+            events = tuple(e for e in events if e.frame not in ft_frames) + tuple(
+                BallEvent(frame=fr, kind="touch", score=0.7,
+                          player_id=pid, bone=bone)
+                for fr, pid, bone in artifacts.foot_touches
+            )
         auto_by_frame: dict[int, BallAnchor] = {}
         if anchor_cfg.enabled:
             try:

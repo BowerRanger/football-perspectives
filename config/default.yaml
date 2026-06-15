@@ -511,6 +511,15 @@ ball:
     # ball pixel-speed budget (scaled by frame gap).
     clean_track: true
     max_jump_px: 250.0
+  # Foot-guided detection: zoom the detector around fast-moving player
+  # contact joints to recover the ball at touches (WASB's global hit there
+  # is often a confident false positive). A recovered ball-at-foot becomes a
+  # touch directly. Only runs for re-detect-capable detectors (WASB/YOLO).
+  foot_guided:
+    enabled: true
+    min_foot_speed_px: 8.0      # gate: contact-joint pixel speed (a kick/contact)
+    ball_near_foot_px: 45.0     # accept a zoomed ball within this of the foot
+    min_score: 0.25
   # Phase C: pose-anchored touch attribution. A direction-change break is
   # attributed to the nearest active body part within relaxed_radius_px,
   # ranked by a kinematic bonus (a fast-moving foot near the break is the

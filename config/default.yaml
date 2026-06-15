@@ -435,22 +435,6 @@ ball:
   # used only in tests via dependency injection.
   detector: wasb
   ball_radius_m: 0.11
-  # High-resolution detection (Phase A of the direction-change rework). The
-  # base detector letterboxes the whole frame to 512x288, shrinking the ball
-  # to ~2-4px; these passes feed it crops so it sees a usable ~10-15px ball.
-  # Only applied to re-detect-capable detectors (WASB/YOLO), never the
-  # scripted test fake. See
-  # docs/superpowers/specs/2026-06-15-ball-detection-direction-changes-design.md.
-  highres:
-    enabled: true
-    zoom_crop_px: 320          # zoom window around the predicted ball
-    trigger_max_conf: 0.5      # refine when coarse confidence is below this
-    always_zoom_when_located: true  # recall-max: refine whenever locatable
-    tile_on_gap_frames: 6      # after this many consecutive misses, tile-relocate
-    tile_px: 416               # tile size for the relocate sweep
-    tile_overlap_px: 96
-    top_k: 5
-    min_score: 0.05
   # Ball back-end: events | piecewise | global.
   #   events    (default) — resolve a sparse set of 3-D events (player
   #              touches body-pinned to the contacting joint, plus bounce/
@@ -510,6 +494,11 @@ ball:
     accept_min: 0.25
     zoom_min_ball_px: 8.0
     zoom_crop_px: 320
+    # Phase A (direction-change rework): revisit weak low-confidence pass-1
+    # frames too, not just gaps — the zoom often sharpens a barely-detected
+    # ball — replacing a pass-1 hit only when the zoom is strictly stronger.
+    redetect_low_conf: true
+    redetect_max_conf: 0.5
   # Automatic anchoring (camera auto-anchor analogy): velocity breaks on
   # the pixel track are classified as player touches / bounces / goal
   # impacts using the players' FK contact joints and the goal geometry,

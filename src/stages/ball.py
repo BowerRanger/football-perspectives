@@ -79,7 +79,6 @@ from src.utils.ball_piecewise_solver import (
     solve_piecewise,
 )
 from src.utils.ball_event_resolver import resolve_events
-from src.utils.ball_highres_detect import HighResDetector, improve_detection
 from src.utils.ball_player_context import PlayerContext
 from src.utils.ball_tracker import BallTracker, TrackerStep
 from src.utils.camera_projection import (
@@ -103,6 +102,7 @@ from src.utils.ball_second_pass import (
     corridor_predictions,
     filter_in_bounds,
     find_gap_runs,
+    find_revisit_runs,
     map_crop_candidates,
 )
 from src.utils.foot_anchor import ankle_ray_to_pitch
@@ -471,6 +471,8 @@ def _second_pass_cfg(cfg: dict) -> SecondPassCfg:
         accept_min=float(sp.get("accept_min", base.accept_min)),
         zoom_min_ball_px=float(sp.get("zoom_min_ball_px", base.zoom_min_ball_px)),
         zoom_crop_px=int(sp.get("zoom_crop_px", base.zoom_crop_px)),
+        redetect_low_conf=bool(sp.get("redetect_low_conf", base.redetect_low_conf)),
+        redetect_max_conf=float(sp.get("redetect_max_conf", base.redetect_max_conf)),
     )
 
 
@@ -739,29 +741,6 @@ class BallStage(BaseStage):
         bridge = AppearanceBridge(bridge_cfg)
         consecutive_misses = 0
 
-        # High-res detection (Phase A): zoom-refine around the predicted ball
-        # and tile-relocate after a long miss run. Only wraps a detector that
-        # can re-detect on an arbitrary crop (real WASB/YOLO, not the scripted
-        # fake) — see BallDetector.SUPPORTS_REDETECT.
-        hr_cfg = cfg.get("highres", {}) or {}
-        hr_trigger_max_conf = float(hr_cfg.get("trigger_max_conf", 0.5))
-        hr_tile_gap = int(hr_cfg.get("tile_on_gap_frames", 6))
-        hr_always_zoom = bool(hr_cfg.get("always_zoom_when_located", True))
-        hr: HighResDetector | None = None
-        if (
-            hr_cfg.get("enabled", True)
-            and getattr(detector, "SUPPORTS_REDETECT", True)
-            and hasattr(detector, "detect_candidates")
-        ):
-            hr = HighResDetector(
-                detector,
-                zoom_crop_px=int(hr_cfg.get("zoom_crop_px", 320)),
-                tile=int(hr_cfg.get("tile_px", 416)),
-                overlap=int(hr_cfg.get("tile_overlap_px", 96)),
-                top_k=int(hr_cfg.get("top_k", 5)),
-                min_score=float(hr_cfg.get("min_score", 0.05)),
-            )
-
         steps: list[TrackerStep] = []
         raw_confidences: dict[int, float] = {}
         sources: dict[int, str] = {}
@@ -794,26 +773,6 @@ class BallStage(BaseStage):
                         h_img, w_img = frame.shape[:2]
                         if not (0.0 <= det[0] < w_img and 0.0 <= det[1] < h_img):
                             det = None
-                    det_source = "detector"
-                    if hr is not None:
-                        center = None
-                        if det is not None:
-                            center = (float(det[0]), float(det[1]))
-                        elif steps and steps[-1].uv is not None:
-                            center = (float(steps[-1].uv[0]), float(steps[-1].uv[1]))
-                        det, hires_src = improve_detection(
-                            det, center=center, frame=frame, hr=hr,
-                            consecutive_misses=consecutive_misses,
-                            trigger_max_conf=hr_trigger_max_conf,
-                            tile_on_gap_frames=hr_tile_gap,
-                            always_zoom_when_located=hr_always_zoom,
-                        )
-                        if det is not None:
-                            h_img, w_img = frame.shape[:2]
-                            if not (0.0 <= det[0] < w_img and 0.0 <= det[1] < h_img):
-                                det = None
-                        if hires_src is not None:
-                            det_source = hires_src
                     if det is None:
                         consecutive_misses += 1
                         bridge_result = bridge.try_bridge(
@@ -835,7 +794,7 @@ class BallStage(BaseStage):
                         consecutive_misses = 0
                         uv = (float(det[0]), float(det[1]))
                         raw_confidences[frame_idx] = float(det[2])
-                        sources[frame_idx] = det_source
+                        sources[frame_idx] = "detector"
                         bridge.update_template(
                             frame=frame_idx,
                             frame_image=frame,
@@ -1029,31 +988,49 @@ class BallStage(BaseStage):
         n_zoom = 0
         ball_radius = float(cfg.get("ball_radius_m", 0.11))
         if sp_cfg.enabled:
-            gap_runs = find_gap_runs(sources, outliers, n_clip)
-            if gap_runs:
+            # Phase A: revisit weak (low-confidence) frames too, not only
+            # gaps — the buffer-safe zoom often sharpens a barely-detected
+            # ball. Falls back to gaps-only when the flag is off.
+            if sp_cfg.redetect_low_conf:
+                revisit_runs = find_revisit_runs(
+                    sources, outliers, raw_confidences, n_clip,
+                    sp_cfg.redetect_max_conf,
+                )
+            else:
+                revisit_runs = find_gap_runs(sources, outliers, n_clip)
+            if revisit_runs:
                 corridors = corridor_predictions(
                     pass1_uv, n_clip,
                     tracker_factory=lambda: _build_tracker(
                         cfg, max_gap_frames=10 ** 6),
                 )
                 sp_dets = self._second_pass_loop(
-                    clip_path, gap_runs, corridors, per_frame_K, per_frame_R,
+                    clip_path, revisit_runs, corridors, per_frame_K, per_frame_R,
                     per_frame_t, distortion, detector, sp_cfg, ball_radius,
                 )
                 if sp_dets:
-                    n_second_pass = len(sp_dets)
-                    n_zoom = sum(1 for d in sp_dets if d.used_zoom)
-                    logger.info(
-                        "ball: second pass recovered %d/%d gap frames for %s",
-                        n_second_pass,
-                        sum(e - s + 1 for s, e in gap_runs),
-                        shot_id or "(legacy)",
-                    )
                     merged_uv = dict(pass1_uv)
+                    accepted = 0
                     for d in sp_dets:
+                        # On a frame that already had a pass-1 detection, only
+                        # replace it when the zoom is strictly more confident.
+                        was_pass1 = sources.get(d.frame) in (
+                            "detector", "anchor", "bridge")
+                        prev = raw_confidences.get(d.frame)
+                        if was_pass1 and prev is not None and d.combined_score <= prev:
+                            continue
                         merged_uv[d.frame] = d.uv
                         raw_confidences[d.frame] = d.combined_score
                         sources[d.frame] = "second_pass"
+                        accepted += 1
+                    n_second_pass = accepted
+                    n_zoom = sum(1 for d in sp_dets if d.used_zoom)
+                    logger.info(
+                        "ball: second pass accepted %d/%d revisited frames for %s",
+                        accepted,
+                        sum(e - s + 1 for s, e in revisit_runs),
+                        shot_id or "(legacy)",
+                    )
                     steps = _resmooth_observations(merged_uv, n_clip, cfg)
 
         # Coverage counts ACCEPTED evidence: pass1 counts frames whose raw

@@ -175,3 +175,18 @@ def test_filter_in_bounds_drops_outside_image():
         (10.0, 20.0, 0.9),
         (1919.9, 1079.9, 0.5),
     ]
+
+
+def test_find_revisit_runs_includes_gaps_and_low_conf():
+    from src.utils.ball_second_pass import find_revisit_runs
+    sources = {0: "detector", 1: "detector", 2: "none", 3: "detector", 4: "detector"}
+    conf = {0: 0.9, 1: 0.2, 3: 0.95, 4: 0.1}  # gap@2, low-conf@1,4
+    runs = find_revisit_runs(sources, set(), conf, n_frames=5, max_conf=0.5)
+    assert runs == [(1, 2), (4, 4)]
+
+
+def test_find_revisit_runs_skips_confident_and_anchors():
+    from src.utils.ball_second_pass import find_revisit_runs
+    sources = {0: "detector", 1: "anchor", 2: "detector"}
+    conf = {0: 0.9, 1: 1.0, 2: 0.8}
+    assert find_revisit_runs(sources, set(), conf, n_frames=3, max_conf=0.5) == []

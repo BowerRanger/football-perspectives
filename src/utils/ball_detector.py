@@ -14,13 +14,6 @@ import numpy as np
 class BallDetector(ABC):
     """Detects the ball in a single frame and returns its pixel position."""
 
-    # Whether the detector re-detects meaningfully on an arbitrary crop, so
-    # the high-res zoom/tile path (ball_highres_detect) may re-query it.
-    # True for real detectors (WASB/YOLO run on whatever pixels they're
-    # given); False for the scripted FakeBallDetector, which cycles a fixed
-    # list and cannot model a crop — re-querying it would desync its script.
-    SUPPORTS_REDETECT: bool = True
-
     @abstractmethod
     def detect(self, frame: np.ndarray) -> tuple[float, float, float] | None:
         """Returns ``(u, v, confidence)`` or ``None`` if no detection."""
@@ -122,10 +115,6 @@ class FakeBallDetector(BallDetector):
     ``candidates`` (a parallel cycle of candidate lists) scripts
     :meth:`detect_candidates`; ``reset_count`` records :meth:`reset` calls.
     """
-
-    # Scripted cycle — cannot honor re-detect-on-crop, so the high-res path
-    # must not re-query it (would advance the script and desync tests).
-    SUPPORTS_REDETECT: bool = False
 
     def __init__(
         self,

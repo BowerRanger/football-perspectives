@@ -32,6 +32,11 @@ class SecondPassCfg:
     accept_min: float = 0.25
     zoom_min_ball_px: float = 8.0
     zoom_crop_px: int = 320
+    # Phase A: also revisit weak (low-confidence) pass-1 frames, not only
+    # gaps, with the buffer-safe zoom — and only replace a pass-1 detection
+    # when the zoom is strictly more confident.
+    redetect_low_conf: bool = True
+    redetect_max_conf: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -122,6 +127,41 @@ def find_gap_runs(
         else:
             runs.append((f, f))
     return runs
+
+
+def _group_runs(frames: list[int]) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    for f in frames:
+        if runs and f == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], f)
+        else:
+            runs.append((f, f))
+    return runs
+
+
+def find_revisit_runs(
+    sources: dict[int, str],
+    outlier_frames: set[int],
+    confidences: dict[int, float],
+    n_frames: int,
+    max_conf: float,
+) -> list[tuple[int, int]]:
+    """Runs of frames worth re-detecting at high resolution: detection gaps
+    PLUS frames with an accepted pass-1 detection whose confidence is below
+    ``max_conf`` (the ball was found but weakly — a zoom often sharpens it).
+
+    Phase A of the direction-change rework: promotes the buffer-safe
+    second-pass zoom from gaps-only to all weak frames.
+    """
+    need = [
+        f for f in range(n_frames)
+        if (sources.get(f) not in PASS1_SOURCES or f in outlier_frames)
+        or (
+            sources.get(f) in PASS1_SOURCES
+            and float(confidences.get(f, 0.0)) < max_conf
+        )
+    ]
+    return _group_runs(need)
 
 
 def best_gated_candidate(

@@ -76,13 +76,18 @@ def derive_segments(
     *,
     n_frames: int,
     fps: float,
+    carry_spans: Sequence[tuple[int, int]] = (),
 ) -> tuple[BallSegment, ...]:
     """Return ordered segments covering the clip.
 
     ``keyframes`` need not be pre-sorted; they are sorted by frame here.
+    ``carry_spans`` are ``(start_frame, end_frame)`` pairs (from
+    :func:`ball_possession.detect_carry_spans`) that force the segment
+    between those two touch keyframes to be a ``carry``.
     """
     if not keyframes:
         return ()
+    carry_set = set(carry_spans or ())
     kfs = sorted(keyframes, key=lambda k: k.frame)
     segments: list[BallSegment] = []
 
@@ -97,7 +102,7 @@ def derive_segments(
     for a, b in zip(kfs, kfs[1:]):
         if b.frame <= a.frame:
             continue
-        kind = _between_kind(a, b)
+        kind = "carry" if (a.frame, b.frame) in carry_set else _between_kind(a, b)
         segments.append(BallSegment(
             start_frame=a.frame, end_frame=b.frame, kind=kind,
             hints=_hints_for(a, kind),

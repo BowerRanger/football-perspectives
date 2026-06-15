@@ -59,6 +59,19 @@ def test_open_start_and_end_emit_boundary_holds():
     assert starts[(8, 11)].hints.get("open_ended") is True
 
 
+def test_carry_span_classified_as_carry():
+    kfs = (
+        _kf(0, (0.0, 0.0, 0.2), state="player_touch", depth="player_bone",
+            player_id="P1", bone="r_foot"),
+        _kf(8, (1.0, 0.0, 0.2), state="player_touch", depth="player_bone",
+            player_id="P1", bone="r_foot"),
+    )
+    segs = derive_segments(kfs, n_frames=9, fps=25.0, carry_spans=[(0, 8)])
+    between = [s for s in segs if s.start_frame == 0 and s.end_frame == 8][0]
+    assert between.kind == "carry"
+    assert between.hints.get("player_id") == "P1"
+
+
 def test_empty_keyframes_yields_no_segments():
     assert derive_segments((), n_frames=10, fps=25.0) == ()
 

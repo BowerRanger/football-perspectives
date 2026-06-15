@@ -27,6 +27,7 @@ from src.schemas.ball_keyframes import BallKeyframeSet
 from src.schemas.ball_track import FlightSegment
 from src.utils.ball_interpolate import interpolate_events
 from src.utils.ball_keyframe_builder import build_ball_keyframe_set
+from src.utils.ball_possession import detect_carry_spans
 from src.utils.ball_segments import derive_segments
 from src.utils.camera_projection import project_point_onto_pixel_ray
 from src.utils.foot_anchor import ankle_ray_to_pitch
@@ -187,8 +188,10 @@ def resolve_events(
         ground_touch_frames=set(),
         flight_segments=(),
     )
+    carry_spans = detect_carry_spans(keyframe_set.keyframes)
     segments = derive_segments(
         keyframe_set.keyframes, n_frames=n_frames, fps=fps,
+        carry_spans=carry_spans,
     )
     keyframe_set = dataclasses.replace(keyframe_set, segments=segments)
 

@@ -1885,6 +1885,11 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         # "shot" or "volley"; categorical spin preset consumed by the
         # Magnus seed in the ball stage.
         spin: str | None = None
+        # Detector score for an auto event (1.0 for manual/confirmed); used
+        # by the editor to render suggestions distinctly.
+        confidence: float = 1.0
+        # Inclusive end frame for a span event (e.g. carry); None otherwise.
+        end_frame: int | None = None
 
     class BallAnchorPayload(BaseModel):
         clip_id: str
@@ -1952,6 +1957,49 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             )
         return data
 
+    @app.get("/joints-near")
+    def joints_near(shot: str, frame: int, u: float, v: float, r: float = 40.0):
+        """Contact joints whose projected pixel is within ``r`` px of
+        ``(u, v)`` at ``frame`` for ``shot`` — the editor's click-to-suggest
+        for player-touch authoring. Best-effort: returns an empty list when
+        the camera track or player poses are unavailable."""
+        import numpy as np
+        from src.schemas.camera_track import CameraTrack
+        from src.utils.ball_player_context import PlayerContext
+
+        try:
+            cam_path = output_dir / "camera" / f"{shot}_camera_track.json"
+            if not cam_path.exists():
+                cam_path = output_dir / "camera" / "camera_track.json"
+            if not cam_path.exists():
+                return {"joints": []}
+            camera = CameraTrack.load(cam_path)
+            per_frame_K = {f.frame: np.array(f.K) for f in camera.frames}
+            per_frame_R = {f.frame: np.array(f.R) for f in camera.frames}
+            t_world = np.array(camera.t_world)
+            per_frame_t = {
+                f.frame: (np.array(f.t) if f.t is not None else t_world)
+                for f in camera.frames
+            }
+            ctx = PlayerContext.load(
+                output_dir, shot,
+                per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                per_frame_t=per_frame_t, distortion=camera.distortion,
+            )
+            hits = ctx.joints_near_pixel(int(frame), (float(u), float(v)), float(r))
+            return {"joints": [
+                {
+                    "player_id": s.player_id,
+                    "bone": s.bone,
+                    "uv": list(s.uv) if s.uv is not None else None,
+                    "confidence": s.confidence,
+                }
+                for s in hits
+            ]}
+        except Exception as exc:  # noqa: BLE001 — suggestion helper, never 500s
+            logger.debug("joints-near failed for shot %s: %s", shot, exc)
+            return {"joints": []}
+
     @app.post("/ball-anchors/{shot_id}")
     def post_ball_anchors_for_shot(shot_id: str, payload: BallAnchorPayload):
         tmp = output_dir / "ball" / f".{shot_id}_ball_anchors.tmp.json"
@@ -1967,6 +2015,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     goal_element=a.goal_element,
                     touch_type=a.touch_type,
                     spin=a.spin,
+                    confidence=float(a.confidence),
+                    end_frame=a.end_frame,
                 ))
             aset = BallAnchorSet(
                 clip_id=str(payload.clip_id),

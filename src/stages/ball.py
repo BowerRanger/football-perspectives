@@ -529,6 +529,9 @@ def _auto_event_cfg(
             "goal_net_speed_drop_ratio", base.goal_net_speed_drop_ratio)),
         goal_min_direction_change_deg=float(auto_cfg.get(
             "goal_min_direction_change_deg", base.goal_min_direction_change_deg)),
+        clean_track=bool(seg_cfg.get("clean_track", base.clean_track)),
+        track_max_jump_px=float(seg_cfg.get(
+            "max_jump_px", base.track_max_jump_px)),
         use_segmentation=bool(seg_cfg.get("enabled", base.use_segmentation)),
         segment_max_residual_px=float(seg_cfg.get(
             "max_residual_px", base.segment_max_residual_px)),
@@ -1333,6 +1336,7 @@ class BallStage(BaseStage):
             per_frame_t=per_frame_t, distortion=distortion,
             goal_geometry=goal_geometry,
             cfg=event_cfg,
+            image_size=artifacts.camera_image_size,
         )
         auto_by_frame: dict[int, BallAnchor] = {}
         if anchor_cfg.enabled:

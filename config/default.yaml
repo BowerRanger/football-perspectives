@@ -506,6 +506,11 @@ ball:
   segment:
     enabled: true
     max_residual_px: 6.0
+    # Track outlier rejection before segmentation: drop out-of-image
+    # positions + isolated teleport spikes. max_jump_px is the per-frame
+    # ball pixel-speed budget (scaled by frame gap).
+    clean_track: true
+    max_jump_px: 250.0
   # Phase C: pose-anchored touch attribution. A direction-change break is
   # attributed to the nearest active body part within relaxed_radius_px,
   # ranked by a kinematic bonus (a fast-moving foot near the break is the

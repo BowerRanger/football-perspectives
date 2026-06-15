@@ -78,6 +78,10 @@ class AutoEventCfg:
     goal_line_tolerance_m: float = 0.35
     goal_net_speed_drop_ratio: float = 0.55
     goal_min_direction_change_deg: float = 45.0
+    # Cleanup: reject out-of-image positions + isolated teleport spikes from
+    # the pixel track before segmentation (ball_track_clean).
+    clean_track: bool = True
+    track_max_jump_px: float = 250.0
     # Phase B: derive direction-change breaks from a global robust piecewise
     # fit (ball_traj_segment) instead of fragile local velocity windows.
     use_segmentation: bool = True
@@ -442,6 +446,7 @@ def detect_events(
     distortion: tuple[float, float] = (0.0, 0.0),
     goal_geometry: GoalGeometry | None = None,
     cfg: AutoEventCfg | None = None,
+    image_size: tuple[int, int] | None = None,
 ) -> tuple[BallEvent, ...]:
     """Detect ball events for one shot. See module docstring."""
     cfg = cfg or AutoEventCfg()
@@ -449,6 +454,13 @@ def detect_events(
         s.frame: np.asarray(s.uv, dtype=float)
         for s in steps if s.uv is not None
     }
+    if getattr(cfg, "clean_track", False):
+        from src.utils.ball_track_clean import clean_pixel_track
+        cleaned = clean_pixel_track(
+            {f: (float(v[0]), float(v[1])) for f, v in uvs.items()},
+            image_size=image_size, max_jump_px=cfg.track_max_jump_px,
+        )
+        uvs = {f: np.asarray(v, dtype=float) for f, v in cleaned.items()}
     events: list[BallEvent] = []
     for brk in _select_breaks(uvs, cfg):
         uv = uvs.get(brk.frame)

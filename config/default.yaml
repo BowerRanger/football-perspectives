@@ -499,6 +499,13 @@ ball:
     # ball — replacing a pass-1 hit only when the zoom is strictly stronger.
     redetect_low_conf: true
     redetect_max_conf: 0.5
+  # Phase B: direction-change segmentation. Corners of a robust piecewise
+  # fit of the ball track are the touch/bounce candidates (replaces fragile
+  # local velocity-break windows). max_residual_px is the piecewise-linear
+  # fit budget — larger merges more aggressively (fewer, blunter corners).
+  segment:
+    enabled: true
+    max_residual_px: 6.0
   # Automatic anchoring (camera auto-anchor analogy): velocity breaks on
   # the pixel track are classified as player touches / bounces / goal
   # impacts using the players' FK contact joints and the goal geometry,

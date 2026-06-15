@@ -26,21 +26,24 @@ import numpy as np
 from src.utils.ball_auto_events import AutoEventCfg, _Break
 
 
-def _fit_line(pts: list[tuple[float, float, float]]) -> tuple[np.ndarray, float]:
+def _fit_line(
+    pts: list[tuple[float, float, float]],
+) -> tuple[np.ndarray, np.ndarray, float]:
     """Fit x(t), y(t) linear over points ``(t, x, y)``; return
-    ``(velocity=(vx, vy) px/frame, max_residual_px)``."""
+    ``(velocity=(vx, vy), intercept=(bx, by), max_residual_px)`` where
+    ``pos(t) = velocity * t + intercept``."""
     t = np.array([p[0] for p in pts], float)
     x = np.array([p[1] for p in pts], float)
     y = np.array([p[2] for p in pts], float)
     if len(pts) == 1:
-        return np.zeros(2), 0.0
+        return np.zeros(2), np.array([x[0], y[0]]), 0.0
     A = np.vstack([t, np.ones_like(t)]).T
     (ax, bx), _, _, _ = np.linalg.lstsq(A, x, rcond=None)
     (ay, by), _, _, _ = np.linalg.lstsq(A, y, rcond=None)
     rx = x - (ax * t + bx)
     ry = y - (ay * t + by)
     resid = float(np.max(np.hypot(rx, ry))) if len(pts) > 2 else 0.0
-    return np.array([ax, ay]), resid
+    return np.array([ax, ay]), np.array([bx, by]), resid
 
 
 def _breaks_from_segments(
@@ -50,8 +53,8 @@ def _breaks_from_segments(
 ) -> list[_Break]:
     breaks: list[_Break] = []
     for j in range(len(bounds) - 1):
-        v_b, _ = _fit_line(pts[bounds[j][0]: bounds[j][1] + 1])
-        v_a, _ = _fit_line(pts[bounds[j + 1][0]: bounds[j + 1][1] + 1])
+        v_b, b_b, _ = _fit_line(pts[bounds[j][0]: bounds[j][1] + 1])
+        v_a, b_a, _ = _fit_line(pts[bounds[j + 1][0]: bounds[j + 1][1] + 1])
         sb = float(np.linalg.norm(v_b))
         sa = float(np.linalg.norm(v_a))
         dspeed = abs(sa - sb)
@@ -63,7 +66,20 @@ def _breaks_from_segments(
         if dir_change < cfg.min_direction_change_deg and dspeed < cfg.min_speed_change_px:
             continue
         e = bounds[j][1]
-        corner = int(round((pts[e][0] + pts[e + 1][0]) / 2.0))
+        # Corner = where the two fitted lines intersect in t (the real
+        # direction-change instant), clamped to the boundary frames. This
+        # places a kick at its launch frame even when a detection gap
+        # straddles the boundary — unlike the naive midpoint.
+        dv = v_b - v_a
+        db = b_b - b_a
+        den = float(np.dot(dv, dv))
+        f_lo, f_hi = pts[e][0], pts[e + 1][0]
+        if den > 1e-9:
+            t_star = -float(np.dot(dv, db)) / den
+            t_star = max(f_lo, min(f_hi, t_star))
+        else:
+            t_star = (f_lo + f_hi) / 2.0
+        corner = int(round(t_star))
         strength = min(
             1.0,
             0.5 * (dir_change / 90.0)
@@ -102,7 +118,7 @@ def segment_track(
     # Bottom-up merge by lowest residual until the cheapest exceeds the budget.
     while len(bounds) > 1:
         costs = [
-            _fit_line(pts[bounds[k][0]: bounds[k + 1][1] + 1])[1]
+            _fit_line(pts[bounds[k][0]: bounds[k + 1][1] + 1])[2]
             for k in range(len(bounds) - 1)
         ]
         j = int(np.argmin(costs))

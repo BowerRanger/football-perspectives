@@ -497,8 +497,9 @@ def _cross_replay_cfg(cfg: dict) -> CrossReplayCfg:
     )
 
 
-def _auto_event_cfg(auto_cfg: dict) -> AutoEventCfg:
+def _auto_event_cfg(auto_cfg: dict, seg_cfg: dict | None = None) -> AutoEventCfg:
     base = AutoEventCfg()
+    seg_cfg = seg_cfg or {}
     return AutoEventCfg(
         touch_max_px=float(auto_cfg.get("touch_max_px", base.touch_max_px)),
         min_direction_change_deg=float(auto_cfg.get(
@@ -525,6 +526,9 @@ def _auto_event_cfg(auto_cfg: dict) -> AutoEventCfg:
             "goal_net_speed_drop_ratio", base.goal_net_speed_drop_ratio)),
         goal_min_direction_change_deg=float(auto_cfg.get(
             "goal_min_direction_change_deg", base.goal_min_direction_change_deg)),
+        use_segmentation=bool(seg_cfg.get("enabled", base.use_segmentation)),
+        segment_max_residual_px=float(seg_cfg.get(
+            "max_residual_px", base.segment_max_residual_px)),
     )
 
 
@@ -1294,7 +1298,7 @@ class BallStage(BaseStage):
         pitch_cfg = self.config.get("pitch", {})
         goal_geometry = GoalGeometry.from_pitch_config(pitch_cfg)
         auto_cfg_dict = cfg.get("auto_anchors", {})
-        event_cfg = _auto_event_cfg(auto_cfg_dict)
+        event_cfg = _auto_event_cfg(auto_cfg_dict, cfg.get("segment", {}))
         anchor_cfg = _auto_anchor_cfg(auto_cfg_dict, ball_radius)
         solver_cfg = _solver_cfg(cfg, ball_radius)
 

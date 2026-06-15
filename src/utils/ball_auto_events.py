@@ -78,6 +78,10 @@ class AutoEventCfg:
     goal_line_tolerance_m: float = 0.35
     goal_net_speed_drop_ratio: float = 0.55
     goal_min_direction_change_deg: float = 45.0
+    # Phase B: derive direction-change breaks from a global robust piecewise
+    # fit (ball_traj_segment) instead of fragile local velocity windows.
+    use_segmentation: bool = True
+    segment_max_residual_px: float = 6.0
 
 
 @dataclass(frozen=True)
@@ -172,13 +176,30 @@ def _find_breaks(
     identical to the pre-refactor implementation.
     """
     candidates = _raw_break_candidates(uvs, cfg)
-    # Non-max suppression: strongest first, suppress within merge window.
+    return _greedy_nms(candidates, cfg)
+
+
+def _greedy_nms(candidates: list[_Break], cfg: AutoEventCfg) -> list[_Break]:
+    """Strongest-first suppression within ``merge_window_frames``."""
     kept: list[_Break] = []
     for cand in sorted(candidates, key=lambda b: -b.strength):
         if all(abs(cand.frame - k.frame) > cfg.merge_window_frames for k in kept):
             kept.append(cand)
     kept.sort(key=lambda b: b.frame)
     return kept
+
+
+def _select_breaks(uvs: dict[int, np.ndarray], cfg: AutoEventCfg) -> list[_Break]:
+    """Direction-change breaks: robust global segmentation when
+    ``cfg.use_segmentation`` (Phase B), else the local velocity-break path.
+    Both are greedy-NMS'd identically."""
+    if getattr(cfg, "use_segmentation", False):
+        from src.utils.ball_traj_segment import segment_track  # lazy: avoid cycle
+        raw = segment_track(
+            uvs, cfg=cfg, max_residual_px=cfg.segment_max_residual_px
+        )
+        return _greedy_nms(raw, cfg)
+    return _find_breaks(uvs, cfg)
 
 
 def _top_k_per_window(
@@ -412,8 +433,17 @@ def detect_events(
         for s in steps if s.uv is not None
     }
     events: list[BallEvent] = []
-    for brk in _find_breaks(uvs, cfg):
-        uv = uvs[brk.frame]
+    for brk in _select_breaks(uvs, cfg):
+        uv = uvs.get(brk.frame)
+        if uv is None:
+            # Segmentation can place a corner on a frame with no raw obs
+            # (between two sparse points); skip cam/touch lookups that need
+            # the pixel and emit a bare velocity_break.
+            events.append(BallEvent(
+                frame=brk.frame, kind="velocity_break",
+                score=float(0.5 * brk.strength),
+            ))
+            continue
         K = per_frame_K.get(brk.frame)
         R = per_frame_R.get(brk.frame)
         t = per_frame_t.get(brk.frame)

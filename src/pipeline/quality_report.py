@@ -115,6 +115,10 @@ def _ball_shot_entry(track_path: Path, shot_id: str) -> dict:
             )
         contact_gaps = [g.get("gap_m", 0.0) for g in diag.get("contact_gaps", [])]
         entry.update({
+            # Ball back-end and whether the dense track was rendered by the
+            # reference interpolator (events mode) vs solved (piecewise/global).
+            "mode": diag.get("solver", "piecewise"),
+            "derived": bool(diag.get("derived", False)),
             "anchors": diag.get("anchors", {}),
             "events": event_counts,
             "underconstrained_spans": diag.get("underconstrained_spans", []),

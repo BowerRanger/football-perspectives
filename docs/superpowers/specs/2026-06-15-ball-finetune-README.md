@@ -10,15 +10,22 @@ The operator's `*_ball_anchors.json` records the **clicked ball pixel** per fram
 
 ## Workflow
 
-### 1. Label
-Place/curate manual ball anchors in `output/ball/<clip>_ball_anchors.json` via the web editor (`/ball-anchor-editor?shot=<clip>`). For a real fine-tune, label **several clips** and aim for **hundreds–thousands** of labelled frames — one clip's ~60 anchors is too thin to move the detector (the export script warns under 200). Densest yield comes from labelling contiguous frames (WASB trains on 3-frame stacks).
+### 1. Label — and accumulate automatically (the flywheel)
+Place/curate manual ball anchors via the web editor (`/ball-anchor-editor?shot=<clip>`). **Every save auto-appends** those gold labels to a growing WASB-format corpus at `output/ball_finetune/` (`POST /ball-anchors` → `ball_label_corpus.record_labels`; the save response reports `labels_recorded`). No extra step — the labelling you do for a good reconstruction *is* the training set, and it's targeted at the detector's failure frames (touches).
 
-### 2. Export to WASB soccer format
+Check what's accumulated:
 ```bash
-python scripts/export_ball_labels.py --output ./output --clip-id gberch \
-    --dataset-root ./output/ball_finetune
-# repeat per clip; writes frames/<clip>/*.png + annos/<clip>.xml
+python scripts/ball_corpus.py status        # clips + total labels
 ```
+For a real fine-tune, keep reconstructing clips until you have **hundreds–thousands** of labels (the status warns under 200). Labelling contiguous frames yields the densest training signal (WASB uses 3-frame stacks; only the centre frame needs a label, so sparse labels are fine — each is one sample).
+
+### 2. Materialize frames (batch, before training)
+Saving only writes labels (cheap). Extract the frames once before training:
+```bash
+python scripts/ball_corpus.py materialize --output ./output
+# extracts frames/<clip>/*.png for every clip in the corpus manifest
+```
+(Or for a single clip outside the flywheel: `python scripts/export_ball_labels.py --clip-id <clip> --dataset-root ./output/ball_finetune`.)
 
 ### 3. Fine-tune (vendored WASB repo, GPU)
 WASB is Hydra-configured (`third_party/wasb_sbdt/src/main.py`). Fine-tune = train with the soccer loader pointed at the export, **initialised from the pretrained checkpoint**:

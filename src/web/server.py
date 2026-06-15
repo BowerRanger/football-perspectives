@@ -2035,7 +2035,22 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=f"Invalid ball anchors: {exc}")
         final = output_dir / "ball" / f"{shot_id}_ball_anchors.json"
         tmp.replace(final)
-        return {"saved": True, "path": str(final), "count": len(aset.anchors)}
+        # Fine-tuning flywheel: the operator's clicked ball pixels are gold
+        # labels targeted at the detector's failure frames. Accumulate them to
+        # a growing WASB-format corpus as a byproduct of saving — best-effort,
+        # never block the save.
+        labels_recorded = 0
+        try:
+            from src.utils.ball_label_corpus import record_labels
+            entry = record_labels(
+                output_dir / "ball_finetune", shot_id,
+                f"shots/{shot_id}.mp4", aset.anchors,
+            )
+            labels_recorded = entry["n_labels"] if entry else 0
+        except Exception as exc:  # noqa: BLE001 — accumulation must never break a save
+            logger.debug("ball label corpus accumulation failed: %s", exc)
+        return {"saved": True, "path": str(final),
+                "count": len(aset.anchors), "labels_recorded": labels_recorded}
 
     @app.post("/ball-anchors/{shot_id}/preview")
     def preview_ball_anchors(shot_id: str, payload: BallAnchorPayload):

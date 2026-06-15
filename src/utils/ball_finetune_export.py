@@ -47,6 +47,29 @@ def anchors_to_cvat_xml(clip_id: str, anchors: Sequence[BallAnchor]) -> str:
     return "\n".join(lines)
 
 
+def extract_frames(clip_path: Path, frames_dir: Path) -> int:
+    """Extract every frame of ``clip_path`` to ``frames_dir/{fid:05d}.png``.
+    Returns the frame count. OpenCV import is local so the pure XML helper
+    stays dependency-free."""
+    import cv2
+
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    cap = cv2.VideoCapture(str(clip_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"cannot open clip: {clip_path}")
+    idx = 0
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            cv2.imwrite(str(frames_dir / f"{idx:05d}.png"), frame)
+            idx += 1
+    finally:
+        cap.release()
+    return idx
+
+
 def export_dataset(
     *,
     clip_path: Path,
@@ -55,42 +78,18 @@ def export_dataset(
     video_id: str,
 ) -> dict:
     """Write a WASB soccer-format dataset for one clip: extract frames to
-    ``frames/{video_id}/{fid:05d}.png`` and the anno to ``annos/{video_id}.xml``.
-
-    Returns ``{n_frames, n_labels, anno_path, frames_dir}``. Frame extraction
-    uses OpenCV; kept import-local so the pure XML helper stays dependency-free.
-    """
-    import cv2
-
-    frames_dir = out_root / "frames" / video_id
+    ``frames/{video_id}/{fid:05d}.png`` and the anno to ``annos/{video_id}.xml``."""
     annos_dir = out_root / "annos"
-    frames_dir.mkdir(parents=True, exist_ok=True)
     annos_dir.mkdir(parents=True, exist_ok=True)
-
-    cap = cv2.VideoCapture(str(clip_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"cannot open clip: {clip_path}")
-    n = 0
-    try:
-        idx = 0
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            cv2.imwrite(str(frames_dir / f"{idx:05d}.png"), frame)
-            idx += 1
-        n = idx
-    finally:
-        cap.release()
-
+    n = extract_frames(clip_path, out_root / "frames" / video_id)
     anno_path = annos_dir / f"{video_id}.xml"
     anno_path.write_text(anchors_to_cvat_xml(video_id, anchors))
     return {
         "n_frames": n,
         "n_labels": sum(1 for a in anchors if a.image_xy is not None),
         "anno_path": str(anno_path),
-        "frames_dir": str(frames_dir),
+        "frames_dir": str(out_root / "frames" / video_id),
     }
 
 
-__all__ = ["anchors_to_cvat_xml", "export_dataset"]
+__all__ = ["anchors_to_cvat_xml", "export_dataset", "extract_frames"]

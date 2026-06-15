@@ -36,3 +36,24 @@ def test_joints_near_graceful_without_player_data(tmp_path: Path):
     )
     assert r.status_code == 200
     assert r.json().get("joints") == []
+
+
+def test_saving_anchors_accumulates_label_corpus(tmp_path: Path):
+    client = _client(tmp_path)
+    payload = {
+        "clip_id": "gberch", "image_size": [1280, 720],
+        "anchors": [
+            {"frame": 5, "image_xy": [100.0, 200.0], "state": "grounded"},
+            {"frame": 10, "image_xy": [300.0, 400.0], "state": "player_touch",
+             "player_id": "P1", "bone": "r_foot"},
+        ],
+    }
+    r = client.post("/ball-anchors/gberch", json=payload)
+    assert r.status_code == 200, r.text
+    assert r.json()["labels_recorded"] == 2
+
+    from src.utils.ball_label_corpus import load_manifest
+    m = load_manifest(tmp_path / "ball_finetune")
+    assert "gberch" in m["clips"]
+    assert m["clips"]["gberch"]["n_labels"] == 2
+    assert (tmp_path / "ball_finetune" / "annos" / "gberch.xml").exists()

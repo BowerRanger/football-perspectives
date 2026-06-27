@@ -4,6 +4,7 @@ import pytest
 from src.utils.ball_kinematic_touch import (
     KinematicTouchCfg,
     interpolate_ball_uvs,
+    kinematic_gate,
     local_minima_below,
     ray_gap_series,
 )
@@ -101,3 +102,34 @@ def test_ray_gap_skips_low_fk_conf():
     ctx = PlayerContext(samples, ("P1",))
     series = ray_gap_series(ctx, ball_uvs, K, R, t, (0.0, 0.0), min_fk_conf=0.3)
     assert ("P1", "r_foot") not in series
+
+
+def _foot_ctx(positions_uv, world=(0.0, 0.0, 9.0)):
+    # positions_uv: dict frame -> (u, v) for the foot bone of P1.
+    samples = {
+        f: (JointSample("P1", "r_foot", world, uv, 0.9),)
+        for f, uv in positions_uv.items()
+    }
+    return PlayerContext(samples, ("P1",))
+
+
+def test_kicking_foot_passes_gate():
+    # foot u moves 20 px/frame -> central-diff speed 20 at frame 1.
+    ctx = _foot_ctx({0: (900.0, 540.0), 1: (920.0, 540.0), 2: (940.0, 540.0)})
+    passed, strength = kinematic_gate(ctx, 1, "P1", "r_foot", KinematicTouchCfg())
+    assert passed is True
+    assert strength > 0.0
+
+
+def test_planted_foot_fails_gate():
+    ctx = _foot_ctx({0: (900.0, 540.0), 1: (900.2, 540.0), 2: (900.4, 540.0)})
+    passed, _ = kinematic_gate(ctx, 1, "P1", "r_foot", KinematicTouchCfg())
+    assert passed is False
+
+
+def test_keeper_hand_always_passes():
+    samples = {1: (JointSample("P1", "l_hand", (0.0, 0.0, 1.5), (500.0, 300.0), 0.9),)}
+    ctx = PlayerContext(samples, ("P1",))
+    passed, strength = kinematic_gate(ctx, 1, "P1", "l_hand", KinematicTouchCfg())
+    assert passed is True
+    assert strength == pytest.approx(0.5)

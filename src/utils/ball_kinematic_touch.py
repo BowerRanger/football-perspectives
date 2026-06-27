@@ -17,10 +17,21 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from src.utils.ball_pose_touch import joint_pixel_velocity
 from src.utils.camera_projection import point_to_pixel_ray_distance
 
 if TYPE_CHECKING:
     from src.utils.ball_player_context import PlayerContext
+
+FOOT_BONES = ("l_foot", "r_foot")
+KNEE_BONES = ("l_knee", "r_knee")
+SPEED_GATED_BONES = FOOT_BONES + KNEE_BONES
+HEAD_BONES = ("head",)
+
+# pixel speed (px/frame) at which a foot is "clearly kicking" — strength saturates
+_KICK_SPEED_PX = 12.0
+# head 3-D speed (m/frame) at which a header strength saturates
+_HEAD_SPEED_SAT_M = 0.15
 
 
 @dataclass(frozen=True)
@@ -124,3 +135,38 @@ def local_minima_below(series: dict[int, float], threshold: float) -> list[int]:
         if v < left and v <= right:
             minima.append(f)
     return minima
+
+
+def _peak_foot_speed(player_ctx: "PlayerContext", frame: int, player_id: str, bone: str,
+                     window: int) -> float:
+    """Max central-difference foot pixel speed within +/- window of frame."""
+    peak = 0.0
+    for f in range(frame - window, frame + window + 1):
+        vel = joint_pixel_velocity(player_ctx, f, player_id, bone)
+        if vel is not None:
+            peak = max(peak, hypot(vel[0], vel[1]))
+    return peak
+
+
+def _head_speed_m(player_ctx: "PlayerContext", frame: int, player_id: str, bone: str) -> float:
+    """Central-difference 3-D speed (m/frame) of a bone, 0 if unavailable."""
+    prev = player_ctx.joint_world(frame - 1, player_id, bone)
+    nxt = player_ctx.joint_world(frame + 1, player_id, bone)
+    if prev is None or nxt is None:
+        return 0.0
+    return float(np.linalg.norm((nxt - prev) / 2.0))
+
+
+def kinematic_gate(player_ctx: "PlayerContext", frame: int, player_id: str, bone: str,
+                   cfg: KinematicTouchCfg) -> tuple[bool, float]:
+    """(passed, strength in [0,1]) for the bone's contact signature."""
+    if bone in SPEED_GATED_BONES:
+        peak = _peak_foot_speed(player_ctx, frame, player_id, bone, cfg.kin_window)
+        return (peak >= cfg.kin_min_foot_speed, min(1.0, peak / _KICK_SPEED_PX))
+    if bone in HEAD_BONES:
+        speed = _head_speed_m(player_ctx, frame, player_id, bone)
+        return (speed >= cfg.kin_min_head_speed_m,
+                min(1.0, speed / _HEAD_SPEED_SAT_M))
+    # hands / shoulders / chest: a body part on the ball line is a contact;
+    # no speed requirement (keeper saves, blocks).
+    return (True, 0.5)

@@ -227,6 +227,10 @@ def test_propose_rescues_touch_when_ball_occluded_at_contact():
         player_ctx=ctx, ball_uvs=ball_uvs, per_frame_K=K, per_frame_R=R,
         per_frame_t=t, confirm_frames=frozenset(),
         detected_frames=frozenset(filled), cfg=cfg)
+    # One-frame drop: the ball is visible either side, so ball_confirm DOWNWEIGHTS
+    # (visible-unchanged), yet the body signal (gap + kinematic gate) still carries
+    # the touch over min_emit_score. The fully-occluded no-penalty path is unit-
+    # tested separately in test_confirm_no_penalty_when_occluded.
     assert any(e.bone == "r_foot" and abs(e.frame - 3) <= 1 for e in touches)
 
 

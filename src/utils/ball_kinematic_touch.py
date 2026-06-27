@@ -234,6 +234,8 @@ def propose_touches(
     confidence (boost on agreement, no penalty when occluded, downweight when
     visible-but-unchanged).
     """
+    # No ball pixels => nothing to interpolate or measure; the detected_frames
+    # default below is irrelevant in that case, so the early return is safe.
     if not cfg.enabled or not ball_uvs:
         return []
     if detected_frames is None:
@@ -276,4 +278,4 @@ def nms_touches(events: list[BallEvent], window: int) -> list[BallEvent]:
             if all(abs(e.frame - c.frame) > window for c in claimed):
                 claimed.append(e)
         kept.extend(claimed)
-    return sorted(kept, key=lambda e: e.frame)
+    return sorted(kept, key=lambda e: (e.frame, e.player_id or "", e.bone or ""))

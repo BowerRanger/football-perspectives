@@ -12,8 +12,11 @@ out.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import hypot
 
 import numpy as np
+
+from src.utils.camera_projection import point_to_pixel_ray_distance
 
 
 @dataclass(frozen=True)
@@ -69,3 +72,50 @@ def interpolate_ball_uvs(
             filled[f] = pa * (1.0 - w) + pb * w
             interp.add(f)
     return filled, frozenset(interp)
+
+
+def ray_gap_series(
+    player_ctx,
+    ball_uvs: dict[int, np.ndarray],
+    per_frame_K: dict[int, np.ndarray],
+    per_frame_R: dict[int, np.ndarray],
+    per_frame_t: dict[int, np.ndarray],
+    distortion: tuple[float, float],
+    min_fk_conf: float,
+) -> dict[tuple[str, str], dict[int, tuple[float, float, float]]]:
+    """Per-(player, bone) frame -> (gap3d_m, pixgap_px, fk_conf)."""
+    out: dict[tuple[str, str], dict[int, tuple[float, float, float]]] = {}
+    for frame, ball_uv in ball_uvs.items():
+        K = per_frame_K.get(frame)
+        R = per_frame_R.get(frame)
+        t = per_frame_t.get(frame)
+        if K is None or R is None or t is None:
+            continue
+        for s in player_ctx.joints_at(frame):
+            if s.confidence < min_fk_conf or s.uv is None:
+                continue
+            world = np.asarray(s.world_xyz, dtype=float)
+            gap3d = point_to_pixel_ray_distance(world, ball_uv, K, R, t, distortion)
+            pixgap = hypot(s.uv[0] - float(ball_uv[0]), s.uv[1] - float(ball_uv[1]))
+            out.setdefault((s.player_id, s.bone), {})[frame] = (
+                float(gap3d),
+                float(pixgap),
+                float(s.confidence),
+            )
+    return out
+
+
+def local_minima_below(series: dict[int, float], threshold: float) -> list[int]:
+    """Frames that are strict local minima over present neighbours and <=
+    ``threshold``. Endpoints count if strictly below their one neighbour."""
+    frames = sorted(series)
+    minima: list[int] = []
+    for i, f in enumerate(frames):
+        v = series[f]
+        if v > threshold:
+            continue
+        left = series[frames[i - 1]] if i > 0 else float("inf")
+        right = series[frames[i + 1]] if i < len(frames) - 1 else float("inf")
+        if v < left and v <= right:
+            minima.append(f)
+    return minima

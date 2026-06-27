@@ -1,7 +1,14 @@
 import numpy as np
 import pytest
 
-from src.utils.ball_kinematic_touch import KinematicTouchCfg, interpolate_ball_uvs
+from src.utils.ball_kinematic_touch import (
+    KinematicTouchCfg,
+    interpolate_ball_uvs,
+    local_minima_below,
+    ray_gap_series,
+)
+from src.utils.ball_player_context import JointSample, PlayerContext
+from src.utils.camera_projection import project_world_to_image
 
 
 def test_cfg_defaults_are_high_recall():
@@ -37,3 +44,60 @@ def test_interpolate_exact_boundary():
     uvs2 = {0: np.array([0.0, 0.0]), 8: np.array([8.0, 0.0])}
     _filled2, interp2 = interpolate_ball_uvs(uvs2, max_gap_frames=6)
     assert interp2 == frozenset()
+
+
+def _cam(frames):
+    K = np.array([[1000.0, 0, 960.0], [0, 1000.0, 540.0], [0, 0, 1.0]])
+    R = np.eye(3)
+    t = np.zeros(3)
+    return ({f: K for f in frames}, {f: R for f in frames}, {f: t for f in frames})
+
+
+def _ball_uv(world):
+    K = np.array([[1000.0, 0, 960.0], [0, 1000.0, 540.0], [0, 0, 1.0]])
+    return np.asarray(
+        project_world_to_image(K, np.eye(3), np.zeros(3), (0.0, 0.0), np.asarray([world]))[0],
+        dtype=float,
+    )
+
+
+def test_local_minima_below_picks_the_dip():
+    series = {0: 0.5, 1: 0.3, 2: 0.1, 3: 0.25, 4: 0.4}
+    assert local_minima_below(series, 0.3) == [2]
+    assert local_minima_below(series, 0.05) == []
+
+
+def test_ray_gap_zero_when_bone_on_ball_ray():
+    frames = range(5)
+    K, R, t = _cam(frames)
+    # ball fixed at world (0,0,10) -> uv (960,540); ray is the +z axis.
+    ball_world = (0.0, 0.0, 10.0)
+    ball_uvs = {f: _ball_uv(ball_world) for f in frames}
+    # foot x sweeps toward the z-axis (gap == |x|), nearest at frame 3.
+    xs = {0: 0.5, 1: 0.3, 2: 0.12, 3: 0.04, 4: 0.2}
+    samples = {
+        f: (
+            JointSample("P1", "r_foot", (xs[f], 0.0, 9.0), (960.0, 540.0), 0.9),
+        )
+        for f in frames
+    }
+    ctx = PlayerContext(samples, ("P1",))
+    series = ray_gap_series(ctx, ball_uvs, K, R, t, (0.0, 0.0), min_fk_conf=0.3)
+    gaps = {f: g for f, (g, _px, _c) in series[("P1", "r_foot")].items()}
+    assert gaps[3] == pytest.approx(0.04, abs=1e-6)
+    assert local_minima_below(gaps, 0.30) == [3]
+
+
+def test_ray_gap_skips_low_fk_conf():
+    frames = range(3)
+    K, R, t = _cam(frames)
+    ball_uvs = {f: _ball_uv((0.0, 0.0, 10.0)) for f in frames}
+    samples = {
+        f: (
+            JointSample("P1", "r_foot", (0.0, 0.0, 9.0), (960.0, 540.0), 0.1),
+        )
+        for f in frames
+    }
+    ctx = PlayerContext(samples, ("P1",))
+    series = ray_gap_series(ctx, ball_uvs, K, R, t, (0.0, 0.0), min_fk_conf=0.3)
+    assert ("P1", "r_foot") not in series

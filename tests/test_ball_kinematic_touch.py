@@ -3,10 +3,12 @@ import pytest
 
 from src.utils.ball_kinematic_touch import (
     KinematicTouchCfg,
+    ball_confirm,
     interpolate_ball_uvs,
     kinematic_gate,
     local_minima_below,
     ray_gap_series,
+    touch_score,
 )
 from src.utils.ball_player_context import JointSample, PlayerContext
 from src.utils.camera_projection import project_world_to_image
@@ -148,3 +150,35 @@ def test_missing_foot_data_fails_gate():
     passed, strength = kinematic_gate(ctx, 1, "P1", "r_foot", KinematicTouchCfg())
     assert passed is False
     assert strength == pytest.approx(0.0)
+
+
+def test_confirm_boost_when_break_nearby():
+    cfg = KinematicTouchCfg()
+    assert ball_confirm(10, cfg, confirm_frames=frozenset({11}),
+                        interp_frames=frozenset(),
+                        detected_frames=frozenset(range(0, 30))) == 1.0
+
+
+def test_confirm_no_penalty_when_occluded():
+    cfg = KinematicTouchCfg()
+    # frame 10 + neighbours not in detected_frames -> occluded -> 0.0
+    assert ball_confirm(10, cfg, confirm_frames=frozenset(),
+                        interp_frames=frozenset({9, 10, 11}),
+                        detected_frames=frozenset()) == 0.0
+
+
+def test_confirm_downweight_when_visible_unchanged():
+    cfg = KinematicTouchCfg()
+    assert ball_confirm(10, cfg, confirm_frames=frozenset(),
+                        interp_frames=frozenset(),
+                        detected_frames=frozenset(range(0, 30))) == -1.0
+
+
+def test_score_monotonic_and_clipped():
+    cfg = KinematicTouchCfg()
+    good = touch_score(0.02, 1.0, 1.0, 0.9, False, cfg)
+    poor = touch_score(0.29, 0.0, -1.0, 0.3, True, cfg)
+    assert 0.0 <= poor < good <= 1.0
+    assert good == pytest.approx(
+        min(1.0, cfg.w_gap * (1 - 0.02 / cfg.contact_gap_m)
+            + cfg.w_kin * 1.0 + cfg.w_confirm * 1.0 + cfg.w_fk * 0.9), abs=1e-9)

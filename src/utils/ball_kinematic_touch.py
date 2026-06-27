@@ -174,3 +174,40 @@ def kinematic_gate(player_ctx: "PlayerContext", frame: int, player_id: str, bone
     # hands / shoulders / chest: a body part on the ball line is a contact;
     # no speed requirement (keeper saves, blocks).
     return (True, 0.5)
+
+
+def ball_confirm(
+    frame: int,
+    cfg: KinematicTouchCfg,
+    confirm_frames: frozenset[int],
+    interp_frames: frozenset[int],
+    detected_frames: frozenset[int],
+) -> float:
+    """+1 boost / 0 no-penalty (occluded) / -1 downweight (visible-unchanged)."""
+    if any(abs(frame - cf) <= cfg.confirm_window for cf in confirm_frames):
+        return 1.0
+    window = range(frame - cfg.confirm_window, frame + cfg.confirm_window + 1)
+    visible = [w for w in window if w in detected_frames and w not in interp_frames]
+    if len(visible) >= 2:
+        return -1.0
+    return 0.0
+
+
+def touch_score(
+    gap3d_min: float,
+    kin_strength: float,
+    confirm: float,
+    fk_conf: float,
+    is_interp: bool,
+    cfg: KinematicTouchCfg,
+) -> float:
+    """Blended confidence in [0, 1]."""
+    gap_term = max(0.0, 1.0 - gap3d_min / cfg.contact_gap_m)
+    score = (
+        cfg.w_gap * gap_term
+        + cfg.w_kin * kin_strength
+        + cfg.w_confirm * confirm
+        + cfg.w_fk * fk_conf
+        - (cfg.w_interp if is_interp else 0.0)
+    )
+    return float(min(1.0, max(0.0, score)))

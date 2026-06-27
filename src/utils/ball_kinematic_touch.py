@@ -13,10 +13,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import hypot
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from src.utils.camera_projection import point_to_pixel_ray_distance
+
+if TYPE_CHECKING:
+    from src.utils.ball_player_context import PlayerContext
 
 
 @dataclass(frozen=True)
@@ -75,7 +79,7 @@ def interpolate_ball_uvs(
 
 
 def ray_gap_series(
-    player_ctx,
+    player_ctx: "PlayerContext",
     ball_uvs: dict[int, np.ndarray],
     per_frame_K: dict[int, np.ndarray],
     per_frame_R: dict[int, np.ndarray],
@@ -106,8 +110,9 @@ def ray_gap_series(
 
 
 def local_minima_below(series: dict[int, float], threshold: float) -> list[int]:
-    """Frames that are strict local minima over present neighbours and <=
-    ``threshold``. Endpoints count if strictly below their one neighbour."""
+    """Frames that are strict-left, non-strict-right local minima over present
+    neighbours and <= ``threshold``. Endpoints count if below their one
+    neighbour."""
     frames = sorted(series)
     minima: list[int] = []
     for i, f in enumerate(frames):

@@ -26,3 +26,14 @@ def test_interpolate_leaves_long_gap_empty():
     filled, interp = interpolate_ball_uvs(uvs, max_gap_frames=6)
     assert set(filled) == {0, 10}
     assert interp == frozenset()
+
+
+def test_interpolate_exact_boundary():
+    # Gap of exactly max_gap_frames (6) interior frames -> fill
+    uvs = {0: np.array([0.0, 0.0]), 7: np.array([7.0, 0.0])}
+    _filled, interp = interpolate_ball_uvs(uvs, max_gap_frames=6)
+    assert len(interp) == 6
+    # Gap of max_gap_frames + 1 (7) interior frames -> leave empty
+    uvs2 = {0: np.array([0.0, 0.0]), 8: np.array([8.0, 0.0])}
+    _filled2, interp2 = interpolate_ball_uvs(uvs2, max_gap_frames=6)
+    assert interp2 == frozenset()

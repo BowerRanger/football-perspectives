@@ -22,6 +22,10 @@ class KinematicTouchCfg:
 
     Pixel units are px/frame; gaps are 3-D metres; speeds for feet are
     px/frame, for the head metres/frame.
+
+    Score weights: ``w_gap + w_kin + w_confirm + w_fk == 1.0`` are the positive
+    contributors (a perfect touch scores 1.0); ``w_interp`` is a separate
+    subtractive penalty applied when the ball pixel was interpolated.
     """
 
     enabled: bool = True

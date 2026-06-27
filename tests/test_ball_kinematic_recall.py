@@ -1,4 +1,4 @@
-from scripts.ball_touch_recall_report import recall_table
+from scripts.ball_touch_recall_report import proposer_only_touches, recall_table
 
 
 def test_union_recall_at_least_break_only():
@@ -13,3 +13,10 @@ def test_union_recall_at_least_break_only():
     assert table["break_only"]["recall"] <= table["union"]["recall"]
     assert table["union"]["recall"] > table["break_only"]["recall"]
     assert table["union"]["recall"] == 1.0
+
+
+def test_proposer_only_is_union_minus_break_only():
+    break_only = [(10, "P1", "r_foot")]
+    union = [(10, "P1", "r_foot"), (41, "P1", "l_foot"), (70, "P2", "head")]
+    assert proposer_only_touches(break_only, union) == [
+        (41, "P1", "l_foot"), (70, "P2", "head")]

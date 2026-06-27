@@ -5,7 +5,8 @@ pseudo-ground-truth. See the body-kinematics-touch-proposer spec, section 8.
 Usage:
     python scripts/ball_touch_recall_report.py \
         output/ball/<shot>_ball_anchors.json \
-        output/ball/<shot>_ball_anchors_auto.json
+        output/ball/<shot>_ball_anchors_auto_break_only.json \
+        output/ball/<shot>_ball_anchors_auto_union.json
 """
 
 from __future__ import annotations
@@ -43,13 +44,26 @@ def _print_table(table: dict[str, dict]) -> None:
               f"{m['true_positive']:>5}{m['false_positive']:>5}")
 
 
+def proposer_only_touches(break_only: list[Touch], union: list[Touch]) -> list[Touch]:
+    """Touches present in the proposer-on (union) set but not in the
+    proposer-off (break-only) set, matched exactly on (frame, player, bone)."""
+    bo = set(break_only)
+    return [t for t in union if t not in bo]
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("usage: ball_touch_recall_report.py <manual.json> <auto.json>")
+    if len(sys.argv) != 4:
+        print(
+            "usage: ball_touch_recall_report.py "
+            "<manual.json> <break_only_auto.json> <union_auto.json>\n"
+            "  break_only_auto.json: auto anchors produced with "
+            "ball.kinematic_touch.enabled=false\n"
+            "  union_auto.json:      auto anchors produced with "
+            "ball.kinematic_touch.enabled=true"
+        )
         raise SystemExit(2)
     manual = touches_from_anchor_set(sys.argv[1])
-    auto = touches_from_anchor_set(sys.argv[2])
-    # With only the merged auto set on disk we report union vs the empty
-    # break-only baseline; pass a break-only file as auto to compare paths.
-    table = recall_table(manual, [], [], auto)
-    _print_table(table)
+    break_only = touches_from_anchor_set(sys.argv[2])
+    union = touches_from_anchor_set(sys.argv[3])
+    proposer_only = proposer_only_touches(break_only, union)
+    _print_table(recall_table(manual, break_only, proposer_only, union))

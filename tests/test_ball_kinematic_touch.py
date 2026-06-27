@@ -8,6 +8,7 @@ from src.utils.ball_kinematic_touch import (
     interpolate_ball_uvs,
     kinematic_gate,
     local_minima_below,
+    merge_touch_events,
     nms_touches,
     propose_touches,
     ray_gap_series,
@@ -265,3 +266,23 @@ def test_nms_keeps_highest_score_per_bone_in_window():
     assert (10, "P1", "r_foot") not in {(e.frame, e.player_id, e.bone) for e in kept}
     assert len(kept) == 3  # P1@11, P1@40, P2@11
     assert [e.frame for e in kept] == sorted(e.frame for e in kept)
+
+
+def test_merge_unions_touches_and_preserves_non_touch():
+    existing = (
+        BallEvent(frame=5, kind="bounce", score=0.6),
+        BallEvent(frame=12, kind="touch", score=0.3, player_id="P1", bone="r_foot"),
+        BallEvent(frame=20, kind="goal_impact", score=0.7, goal_element="post"),
+    )
+    kin = [
+        BallEvent(frame=12, kind="touch", score=0.9, player_id="P1", bone="r_foot"),
+        BallEvent(frame=30, kind="touch", score=0.5, player_id="P2", bone="head"),
+    ]
+    merged = merge_touch_events(existing, kin, nms_window=2)
+    kinds = [e.kind for e in merged]
+    assert kinds.count("bounce") == 1 and kinds.count("goal_impact") == 1
+    # the higher-score touch at frame 12 wins over the existing 0.3
+    t12 = [e for e in merged if e.kind == "touch" and e.frame == 12]
+    assert len(t12) == 1 and t12[0].score == pytest.approx(0.9)
+    assert any(e.kind == "touch" and e.frame == 30 for e in merged)
+    assert [e.frame for e in merged] == sorted(e.frame for e in merged)

@@ -279,3 +279,16 @@ def nms_touches(events: list[BallEvent], window: int) -> list[BallEvent]:
                 claimed.append(e)
         kept.extend(claimed)
     return sorted(kept, key=lambda e: (e.frame, e.player_id or "", e.bone or ""))
+
+
+def merge_touch_events(
+    existing: "tuple[BallEvent, ...] | list[BallEvent]",
+    kin_touches: list[BallEvent],
+    nms_window: int,
+) -> tuple[BallEvent, ...]:
+    """Union existing touch events with proposer touches (NMS by player+bone);
+    keep all non-touch events untouched. Returns a frame-sorted tuple."""
+    touches = [e for e in existing if e.kind == "touch"] + list(kin_touches)
+    others = [e for e in existing if e.kind != "touch"]
+    merged = others + nms_touches(touches, nms_window)
+    return tuple(sorted(merged, key=lambda e: (e.frame, e.kind)))

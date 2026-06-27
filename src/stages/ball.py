@@ -83,6 +83,7 @@ from src.utils.ball_event_resolver import resolve_events
 from src.utils.ball_foot_guided import foot_ball_detections, gated_feet
 from src.utils.ball_kinematic_touch import (
     KinematicTouchCfg,
+    merge_touch_events,
     propose_touches,
 )
 from src.utils.ball_player_context import PlayerContext
@@ -1470,6 +1471,36 @@ class BallStage(BaseStage):
                           player_id=pid, bone=bone)
                 for fr, pid, bone in artifacts.foot_touches
             )
+        # Body-kinematics touch proposer: recover contacts the ball-pixel
+        # break path missed (occlusion/blur at contact). Additive recall;
+        # operator/manual anchors still win downstream via merge_anchors.
+        kin_cfg = _kinematic_touch_cfg(cfg.get("kinematic_touch", {}))
+        if kin_cfg.enabled and player_ctx.player_ids:
+            ball_uvs = {
+                s.frame: np.asarray(s.uv, dtype=float)
+                for s in steps if s.uv is not None
+            }
+            detected_frames = frozenset(
+                f for f, c in raw_confidences.items() if c > 0.0
+            )
+            confirm_frames = frozenset(
+                e.frame for e in events
+                if e.kind in ("touch", "bounce", "goal_impact", "velocity_break")
+            )
+            try:
+                kin_touches = propose_touches(
+                    player_ctx=player_ctx, ball_uvs=ball_uvs,
+                    per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                    per_frame_t=per_frame_t, distortion=distortion,
+                    confirm_frames=confirm_frames,
+                    detected_frames=detected_frames, cfg=kin_cfg,
+                )
+                events = merge_touch_events(events, kin_touches, kin_cfg.nms_window)
+            except Exception as exc:  # noqa: BLE001 — never kill the stage
+                logger.warning(
+                    "ball stage: kinematic touch proposer failed (%s) — "
+                    "continuing with ball-break touches only", exc,
+                )
         auto_by_frame: dict[int, BallAnchor] = {}
         if anchor_cfg.enabled:
             try:

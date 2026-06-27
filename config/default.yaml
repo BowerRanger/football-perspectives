@@ -534,6 +534,23 @@ ball:
     enabled: true
     relaxed_radius_px: 60.0
     kinematic_bonus_weight: 0.3
+  kinematic_touch:
+    enabled: true            # body-kinematics touch proposer (additive recall)
+    contact_gap_m: 0.30      # max bone<->ball-ray 3-D gap for a contact (m)
+    touch_relaxed_px: 60.0   # max bone<->ball pixel distance at the minimum
+    max_ball_gap_frames: 6   # longest ball-pixel gap we interpolate across
+    min_fk_conf: 0.3         # min bone FK confidence to consider
+    kin_window: 2            # +/- frames to find the kinematic peak
+    kin_min_foot_speed: 8.0  # min foot pixel-speed (px/frame) for a kick
+    kin_min_head_speed_m: 0.05  # min head 3-D speed (m/frame) for a header
+    confirm_window: 3        # +/- frames to look for a ball-pixel break
+    nms_window: 2            # temporal NMS half-width (frames)
+    w_gap: 0.35
+    w_kin: 0.30
+    w_confirm: 0.25
+    w_fk: 0.10
+    w_interp: 0.15
+    min_emit_score: 0.25     # high-recall emission floor
   # Automatic anchoring (camera auto-anchor analogy): velocity breaks on
   # the pixel track are classified as player touches / bounces / goal
   # impacts using the players' FK contact joints and the goal geometry,

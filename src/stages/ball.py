@@ -81,6 +81,10 @@ from src.utils.ball_piecewise_solver import (
 )
 from src.utils.ball_event_resolver import resolve_events
 from src.utils.ball_foot_guided import foot_ball_detections, gated_feet
+from src.utils.ball_kinematic_touch import (
+    KinematicTouchCfg,
+    propose_touches,
+)
 from src.utils.ball_player_context import PlayerContext
 from src.utils.ball_tracker import BallTracker, TrackerStep
 from src.utils.camera_projection import (
@@ -546,6 +550,31 @@ def _auto_event_cfg(
             "relaxed_radius_px", base.touch_relaxed_px)),
         kinematic_bonus_weight=float(pose_cfg.get(
             "kinematic_bonus_weight", base.kinematic_bonus_weight)),
+    )
+
+
+def _kinematic_touch_cfg(cfg_dict: dict) -> KinematicTouchCfg:
+    """Build a KinematicTouchCfg from the ``ball.kinematic_touch`` sub-tree,
+    falling back to dataclass defaults for any missing key."""
+    base = KinematicTouchCfg()
+    d = cfg_dict or {}
+    return KinematicTouchCfg(
+        enabled=bool(d.get("enabled", base.enabled)),
+        contact_gap_m=float(d.get("contact_gap_m", base.contact_gap_m)),
+        touch_relaxed_px=float(d.get("touch_relaxed_px", base.touch_relaxed_px)),
+        max_ball_gap_frames=int(d.get("max_ball_gap_frames", base.max_ball_gap_frames)),
+        min_fk_conf=float(d.get("min_fk_conf", base.min_fk_conf)),
+        kin_window=int(d.get("kin_window", base.kin_window)),
+        kin_min_foot_speed=float(d.get("kin_min_foot_speed", base.kin_min_foot_speed)),
+        kin_min_head_speed_m=float(d.get("kin_min_head_speed_m", base.kin_min_head_speed_m)),
+        confirm_window=int(d.get("confirm_window", base.confirm_window)),
+        nms_window=int(d.get("nms_window", base.nms_window)),
+        w_gap=float(d.get("w_gap", base.w_gap)),
+        w_kin=float(d.get("w_kin", base.w_kin)),
+        w_confirm=float(d.get("w_confirm", base.w_confirm)),
+        w_fk=float(d.get("w_fk", base.w_fk)),
+        w_interp=float(d.get("w_interp", base.w_interp)),
+        min_emit_score=float(d.get("min_emit_score", base.min_emit_score)),
     )
 
 

@@ -118,7 +118,7 @@ def test_kicking_foot_passes_gate():
     ctx = _foot_ctx({0: (900.0, 540.0), 1: (920.0, 540.0), 2: (940.0, 540.0)})
     passed, strength = kinematic_gate(ctx, 1, "P1", "r_foot", KinematicTouchCfg())
     assert passed is True
-    assert strength > 0.0
+    assert strength == pytest.approx(1.0)  # 20 px/frame > _KICK_SPEED_PX (12)
 
 
 def test_planted_foot_fails_gate():
@@ -133,3 +133,18 @@ def test_keeper_hand_always_passes():
     passed, strength = kinematic_gate(ctx, 1, "P1", "l_hand", KinematicTouchCfg())
     assert passed is True
     assert strength == pytest.approx(0.5)
+
+
+def test_foot_strength_proportional_below_saturation():
+    # central diff at frame 1 = (915 - 895) / 2 = 10 px/frame
+    ctx = _foot_ctx({0: (895.0, 540.0), 1: (905.0, 540.0), 2: (915.0, 540.0)})
+    passed, strength = kinematic_gate(ctx, 1, "P1", "r_foot", KinematicTouchCfg())
+    assert passed is True            # 10 >= kin_min_foot_speed (8)
+    assert strength == pytest.approx(10.0 / 12.0)
+
+
+def test_missing_foot_data_fails_gate():
+    ctx = PlayerContext({}, ())
+    passed, strength = kinematic_gate(ctx, 1, "P1", "r_foot", KinematicTouchCfg())
+    assert passed is False
+    assert strength == pytest.approx(0.0)

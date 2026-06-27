@@ -159,7 +159,11 @@ def _head_speed_m(player_ctx: "PlayerContext", frame: int, player_id: str, bone:
 
 def kinematic_gate(player_ctx: "PlayerContext", frame: int, player_id: str, bone: str,
                    cfg: KinematicTouchCfg) -> tuple[bool, float]:
-    """(passed, strength in [0,1]) for the bone's contact signature."""
+    """(passed, strength in [0,1]) for the bone's contact signature.
+
+    ``cfg.kin_min_foot_speed`` is the gate-pass threshold; ``_KICK_SPEED_PX`` is
+    the separate speed at which the returned strength saturates to 1.0.
+    """
     if bone in SPEED_GATED_BONES:
         peak = _peak_foot_speed(player_ctx, frame, player_id, bone, cfg.kin_window)
         return (peak >= cfg.kin_min_foot_speed, min(1.0, peak / _KICK_SPEED_PX))

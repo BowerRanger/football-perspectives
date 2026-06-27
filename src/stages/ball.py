@@ -1998,12 +1998,17 @@ class BallStage(BaseStage):
                 if anc_a.state not in _NON_GROUNDED or anc_b.state not in _NON_GROUNDED:
                     continue
                 # If BOTH endpoints are ground-level (e.g. bounce→kick,
-                # kick→bounce), the ground-level linear-interp pass
+                # kick→bounce, or a ground pass between two ground-touch
+                # player_touches), the ground-level linear-interp pass
                 # already filled the world XY at z=0.11. Don't clobber
                 # it — that pair represents the ball rolling, not flying.
+                # A ground-touch player_touch is at ground level even
+                # though `player_touch` is not in GROUND_LEVEL_STATES, so
+                # it counts here exactly as the interp / Phase 2 filter
+                # treat it (via ``ground_touch_frames``).
                 if (
-                    anc_a.state in GROUND_LEVEL_STATES
-                    and anc_b.state in GROUND_LEVEL_STATES
+                    (anc_a.state in GROUND_LEVEL_STATES or fa in ground_touch_frames)
+                    and (anc_b.state in GROUND_LEVEL_STATES or fb in ground_touch_frames)
                 ):
                     continue
                 if fb - fa <= 1:

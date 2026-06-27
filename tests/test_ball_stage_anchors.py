@@ -182,6 +182,63 @@ def test_off_screen_flight_anchor_skips_pixel(tmp_path: Path):
 
 
 @pytest.mark.integration
+def test_ground_pass_between_two_player_touches_stays_grounded(tmp_path: Path):
+    """A ground passing sequence — grounded → player_touch → player_touch →
+    grounded, all at ground level — must keep the frames BETWEEN the two
+    ground-touch player_touch anchors grounded with a world position.
+
+    Regression: the Phase 1 forced-flight pass only skipped pairs whose
+    endpoints were both in GROUND_LEVEL_STATES, which excludes a
+    ground-touch player_touch. So the gap between two passes was marked
+    state="flight" with world_xyz=None — the ball vanished/floated between
+    every pass instead of rolling along the pitch.
+    """
+    K, R, t = _camera_pose()
+    out = tmp_path / "out"
+    n_frames = 50
+    _write_blank_clip(out / "shots" / "play.mp4", n_frames)
+    _save_camera_track(out / "camera" / "play_camera_track.json", K, R, t, n_frames)
+    _save_manifest(out / "shots" / "shots_manifest.json", n_frames)
+
+    # WASB returns a plausible on-pitch ground pixel near the anchor line.
+    detections = [(640.0, 360.0, 0.85) for _ in range(n_frames)]
+
+    # grounded → pt → pt → grounded, all near the pitch centre line. With a
+    # grounded anchor bookending the chain, every player_touch classifies
+    # as a ground-touch (not airborne both sides).
+    anchors = (
+        BallAnchor(frame=5, image_xy=(600.0, 360.0), state="grounded"),
+        BallAnchor(frame=15, image_xy=(640.0, 360.0), state="player_touch",
+                   player_id="P1", bone="l_foot"),
+        BallAnchor(frame=30, image_xy=(680.0, 360.0), state="player_touch",
+                   player_id="P1", bone="r_foot"),
+        BallAnchor(frame=45, image_xy=(720.0, 360.0), state="grounded"),
+    )
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720), anchors=anchors,
+    ).save(out / "ball" / "play_ball_anchors.json")
+
+    BallStage(
+        config=_minimal_cfg(), output_dir=out,
+        ball_detector=FakeBallDetector(detections),
+    ).run()
+
+    track = BallTrack.load(out / "ball" / "play_ball_track.json")
+    by_frame = {f.frame: f for f in track.frames}
+    # The gap between the two ground-touch passes (frames 16..29) is the ball
+    # rolling on the pitch — it must not be flight, and must have a position.
+    between = [by_frame[fi] for fi in range(16, 30)]
+    assert all(f.state == "grounded" for f in between), (
+        f"ground pass between two touches must stay grounded, got: "
+        f"{[(f.frame, f.state) for f in between]}"
+    )
+    assert all(f.world_xyz is not None for f in between), (
+        "rolling ball between two ground touches must have a world position, "
+        f"got None at: {[f.frame for f in between if f.world_xyz is None]}"
+    )
+
+
+@pytest.mark.integration
 def test_kick_event_anchored_pins_p0(tmp_path: Path, monkeypatch):
     """A 'kick' anchor at the start of a flight segment pins p0 to the
     pixel ray-cast at z=0.11.

@@ -816,6 +816,39 @@ def test_camera_stage_complete_requires_every_shot_track(client):
 
 
 @pytest.mark.unit
+def test_camera_stage_complete_ignores_excluded_shots(client):
+    """Excluded shots (reaction/transition/close-up) are never processed
+    by the pipeline — every stage iterates ``active_shots()`` — so they
+    will never get a ``{shot}_camera_track.json``. The camera completeness
+    check must therefore consider only ACTIVE shots; otherwise a highlights
+    reel with any excluded shot can never flip camera to complete, which
+    permanently greys out the camera-dependent run buttons (ball, export)."""
+    c, tmp_path = client
+
+    shots_dir = tmp_path / "shots"
+    shots_dir.mkdir()
+    (shots_dir / "shots_manifest.json").write_text(
+        '{"source_file":"x","fps":30,"total_frames":0,"shots":['
+        '{"id":"live","start_frame":0,"end_frame":0,"start_time":0.0,'
+        '"end_time":0.0,"clip_file":"shots/live.mp4"},'
+        '{"id":"reaction","start_frame":0,"end_frame":0,"start_time":0.0,'
+        '"end_time":0.0,"clip_file":"shots/reaction.mp4","excluded":true}]}'
+    )
+
+    cam_dir = tmp_path / "camera"
+    cam_dir.mkdir()
+
+    def stage_complete(stage_name):
+        body = c.get("/api/stages").json()
+        return next(s for s in body if s["name"] == stage_name)["complete"]
+
+    # Only the active shot has a track; the excluded one never will. Camera
+    # must still report complete.
+    (cam_dir / "live_camera_track.json").write_text("{}")
+    assert stage_complete("camera") is True
+
+
+@pytest.mark.unit
 def test_upload_shots_writes_files_and_dispatches_job(client, monkeypatch):
     """POST /api/shots/upload saves uploaded .mp4 files into shots/ and
     fires a prepare_shots job that runs without wiping the directory."""

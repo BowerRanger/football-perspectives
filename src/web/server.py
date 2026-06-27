@@ -91,15 +91,21 @@ STAGE_ORDER: list[str] = [
     "export",
 ]
 
-def _manifest_shot_ids(output_dir: Path) -> list[str]:
-    """Return the shot ids from ``shots_manifest.json``, or [] if absent."""
+def _active_manifest_shot_ids(output_dir: Path) -> list[str]:
+    """Ids of the shots the pipeline actually processes — i.e. the manifest's
+    ``active_shots()`` (``excluded`` shots removed), or [] if absent.
+
+    Completeness checks must use this rather than every manifest shot:
+    excluded shots (reaction/transition/close-up) are never fed to any stage,
+    so they never get per-shot outputs. Counting them would leave a highlights
+    reel permanently "incomplete" and grey out the run buttons forever."""
     from src.schemas.shots import ShotsManifest
 
     manifest_path = output_dir / "shots" / "shots_manifest.json"
     if not manifest_path.exists():
         return []
     try:
-        return [s.id for s in ShotsManifest.load(manifest_path).shots]
+        return [s.id for s in ShotsManifest.load(manifest_path).active_shots()]
     except Exception:
         return []
 
@@ -129,7 +135,7 @@ def _camera_complete(output_dir: Path) -> bool:
     """Camera stage is green only when every shot in the manifest has a
     ``{shot_id}_camera_track.json`` on disk. With no manifest we fall
     back to the legacy singular ``camera_track.json``."""
-    shot_ids = _manifest_shot_ids(output_dir)
+    shot_ids = _active_manifest_shot_ids(output_dir)
     if not shot_ids:
         return (output_dir / "camera" / "camera_track.json").exists()
     return all(
@@ -1362,7 +1368,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         # shots manifest, with a quiet fallback when no manifest exists
         # so the dashboard's GET still has something useful to return
         # mid-bootstrap (e.g. before the first prepare_shots run).
-        return _manifest_shot_ids(output_dir)
+        return _active_manifest_shot_ids(output_dir)
 
     def _manifest_group_members() -> dict[str, list[str]]:
         """Map ``group_id`` → member shot ids (manifest shot order).

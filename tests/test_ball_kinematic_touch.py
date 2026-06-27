@@ -1,12 +1,15 @@
 import numpy as np
 import pytest
 
+from src.utils.ball_auto_events import BallEvent
 from src.utils.ball_kinematic_touch import (
     KinematicTouchCfg,
     ball_confirm,
     interpolate_ball_uvs,
     kinematic_gate,
     local_minima_below,
+    nms_touches,
+    propose_touches,
     ray_gap_series,
     touch_score,
 )
@@ -182,3 +185,79 @@ def test_score_monotonic_and_clipped():
     assert good == pytest.approx(
         min(1.0, cfg.w_gap * (1 - 0.02 / cfg.contact_gap_m)
             + cfg.w_kin * 1.0 + cfg.w_confirm * 1.0 + cfg.w_fk * 0.9), abs=1e-9)
+
+
+def _kick_scene(drop_contact_frame=None):
+    """Foot sweeps fast through a fixed ball at frame 3; optionally drop the
+    ball detection at the contact frame (the headline occlusion case)."""
+    frames = list(range(7))
+    K, R, t = _cam(frames)
+    ball_world = (0.0, 0.0, 10.0)
+    ball_uvs = {f: _ball_uv(ball_world) for f in frames}
+    if drop_contact_frame is not None:
+        del ball_uvs[drop_contact_frame]
+    # foot x sweeps 0.6 -> -0.6 (fast), nearest the z-axis ray at frame 3,
+    # and its projected uv moves fast (kick signature).
+    xs = {0: 0.6, 1: 0.4, 2: 0.2, 3: 0.03, 4: -0.2, 5: -0.4, 6: -0.6}
+    samples = {}
+    for f in frames:
+        uv = _ball_uv((xs[f], 0.0, 9.0))
+        samples[f] = (JointSample("P1", "r_foot", (xs[f], 0.0, 9.0),
+                                  (float(uv[0]), float(uv[1])), 0.9),)
+    ctx = PlayerContext(samples, ("P1",))
+    return ctx, ball_uvs, K, R, t
+
+
+def test_propose_detects_kick_when_ball_present():
+    ctx, ball_uvs, K, R, t = _kick_scene()
+    cfg = KinematicTouchCfg()
+    # ball visible + no break -> downweight; raise recall floor for the test.
+    touches = propose_touches(
+        player_ctx=ctx, ball_uvs=ball_uvs, per_frame_K=K, per_frame_R=R,
+        per_frame_t=t, confirm_frames=frozenset({3}), cfg=cfg)
+    assert any(e.player_id == "P1" and e.bone == "r_foot" and abs(e.frame - 3) <= 1
+               for e in touches)
+
+
+def test_propose_rescues_touch_when_ball_occluded_at_contact():
+    ctx, ball_uvs, K, R, t = _kick_scene(drop_contact_frame=3)
+    filled = set(ball_uvs)  # detections that survived
+    cfg = KinematicTouchCfg()
+    touches = propose_touches(
+        player_ctx=ctx, ball_uvs=ball_uvs, per_frame_K=K, per_frame_R=R,
+        per_frame_t=t, confirm_frames=frozenset(),
+        detected_frames=frozenset(filled), cfg=cfg)
+    assert any(e.bone == "r_foot" and abs(e.frame - 3) <= 1 for e in touches)
+
+
+def test_propose_rejects_planted_foot_ball_grazing():
+    frames = list(range(7))
+    K, R, t = _cam(frames)
+    # ball moves across; foot planted at small fixed offset (gap dips < 0.3)
+    # but foot pixel speed ~0 -> kinematic gate fails.
+    foot_world = (0.08, 0.0, 9.0)
+    foot_uv = _ball_uv(foot_world)
+    ball_xs = {0: 0.6, 1: 0.4, 2: 0.2, 3: 0.08, 4: -0.1, 5: -0.3, 6: -0.5}
+    ball_uvs = {f: _ball_uv((ball_xs[f], 0.0, 10.0)) for f in frames}
+    samples = {f: (JointSample("P1", "r_foot", foot_world,
+                               (float(foot_uv[0]), float(foot_uv[1])), 0.9),)
+               for f in frames}
+    ctx = PlayerContext(samples, ("P1",))
+    touches = propose_touches(
+        player_ctx=ctx, ball_uvs=ball_uvs, per_frame_K=K, per_frame_R=R,
+        per_frame_t=t, cfg=KinematicTouchCfg())
+    assert touches == []
+
+
+def test_nms_keeps_highest_score_per_bone_in_window():
+    evs = [
+        BallEvent(frame=10, kind="touch", score=0.4, player_id="P1", bone="r_foot"),
+        BallEvent(frame=11, kind="touch", score=0.8, player_id="P1", bone="r_foot"),
+        BallEvent(frame=40, kind="touch", score=0.5, player_id="P1", bone="r_foot"),
+        BallEvent(frame=11, kind="touch", score=0.9, player_id="P2", bone="l_foot"),
+    ]
+    kept = nms_touches(evs, window=2)
+    assert (11, "P1", "r_foot") in {(e.frame, e.player_id, e.bone) for e in kept}
+    assert (10, "P1", "r_foot") not in {(e.frame, e.player_id, e.bone) for e in kept}
+    assert len(kept) == 3  # P1@11, P1@40, P2@11
+    assert [e.frame for e in kept] == sorted(e.frame for e in kept)

@@ -11,12 +11,14 @@ out.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from math import hypot
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from src.utils.ball_auto_events import BallEvent
 from src.utils.ball_pose_touch import joint_pixel_velocity
 from src.utils.camera_projection import point_to_pixel_ray_distance
 
@@ -211,3 +213,67 @@ def touch_score(
         - (cfg.w_interp if is_interp else 0.0)
     )
     return float(min(1.0, max(0.0, score)))
+
+
+def propose_touches(
+    *,
+    player_ctx: "PlayerContext",
+    ball_uvs: dict[int, np.ndarray],
+    per_frame_K: dict[int, np.ndarray],
+    per_frame_R: dict[int, np.ndarray],
+    per_frame_t: dict[int, np.ndarray],
+    distortion: tuple[float, float] = (0.0, 0.0),
+    confirm_frames: frozenset[int] = frozenset(),
+    detected_frames: frozenset[int] | None = None,
+    cfg: KinematicTouchCfg,
+) -> list[BallEvent]:
+    """Body-kinematics touch candidates for one shot.
+
+    The body is the trigger: a closest-approach minimum of the bone-to-ball-ray
+    gap, gated on a kinematic contact signature. The ball only modifies
+    confidence (boost on agreement, no penalty when occluded, downweight when
+    visible-but-unchanged).
+    """
+    if not cfg.enabled or not ball_uvs:
+        return []
+    if detected_frames is None:
+        detected_frames = frozenset(ball_uvs)
+    filled, interp_frames = interpolate_ball_uvs(ball_uvs, cfg.max_ball_gap_frames)
+    series = ray_gap_series(
+        player_ctx, filled, per_frame_K, per_frame_R, per_frame_t,
+        distortion, cfg.min_fk_conf,
+    )
+    out: list[BallEvent] = []
+    for (pid, bone), per_frame in series.items():
+        gaps = {f: g for f, (g, _px, _c) in per_frame.items()}
+        for f in local_minima_below(gaps, cfg.contact_gap_m):
+            gap3d, pixgap, fk_conf = per_frame[f]
+            if pixgap > cfg.touch_relaxed_px:
+                continue
+            passed, strength = kinematic_gate(player_ctx, f, pid, bone, cfg)
+            if not passed:
+                continue
+            confirm = ball_confirm(
+                f, cfg, confirm_frames, interp_frames, detected_frames)
+            score = touch_score(
+                gap3d, strength, confirm, fk_conf, f in interp_frames, cfg)
+            if score >= cfg.min_emit_score:
+                out.append(BallEvent(
+                    frame=f, kind="touch", score=score,
+                    player_id=pid, bone=bone))
+    return sorted(out, key=lambda e: (e.frame, e.player_id, e.bone))
+
+
+def nms_touches(events: list[BallEvent], window: int) -> list[BallEvent]:
+    """Temporal NMS keyed by (player_id, bone); higher score wins."""
+    by_key: dict[tuple[str | None, str | None], list[BallEvent]] = defaultdict(list)
+    for e in events:
+        by_key[(e.player_id, e.bone)].append(e)
+    kept: list[BallEvent] = []
+    for evs in by_key.values():
+        claimed: list[BallEvent] = []
+        for e in sorted(evs, key=lambda e: -e.score):
+            if all(abs(e.frame - c.frame) > window for c in claimed):
+                claimed.append(e)
+        kept.extend(claimed)
+    return sorted(kept, key=lambda e: e.frame)

@@ -36,6 +36,8 @@ def fit_parabola_to_image_observations(
     knot_frames: dict[int, np.ndarray] | None = None,
     z_range_frames: dict[int, tuple[float, float]] | None = None,
     z_range_weight: float = 200.0,
+    seed: tuple[np.ndarray, np.ndarray] | None = None,
+    world_fixes: list[tuple[int, np.ndarray, float]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Fit a 3D parabola to per-frame image observations.
 
@@ -77,6 +79,16 @@ def fit_parabola_to_image_observations(
         z_range_weight: per-metre weight for the ``z_range_frames`` hinge.
             Defaults to 200 — strong enough to enforce typical bucket
             widths against pixel reprojection noise.
+        seed: optional ``(p0, v0)`` warm start at the first observation
+            frame, overriding the ground-projection seeding heuristic.
+        world_fixes: optional list of ``(frame_index, xyz, weight_px_per_m)``
+            triples. ``frame_index`` is in absolute clip-frame space (same
+            as ``observations``). For each fix, a 3-residual block
+            ``weight * (pos(t_fix) - xyz)`` is appended after the pixel
+            residuals, where ``pos`` is evaluated closed-form from the
+            parabola. Fixes whose frame falls outside the observation range
+            are still valid (extrapolation). ``None`` or ``[]`` leaves
+            the residual vector byte-identical to the unfixed call.
 
     Returns:
         ``(p0, v0, mean_residual_px)`` where ``mean_residual_px`` is
@@ -127,6 +139,12 @@ def fit_parabola_to_image_observations(
                 below = max(0.0, z_min - z_k)
                 above = max(0.0, z_k - z_max)
                 residuals.append(np.array([z_range_weight * (below + above)]))
+        if world_fixes:
+            for fix_frame, fix_xyz, fix_weight in world_fixes:
+                dt_f = (fix_frame - frame_idx[0]) / fps
+                pos_f = p0 + v0 * dt_f + 0.5 * (dt_f ** 2) * g_vec
+                target = np.asarray(fix_xyz, dtype=float)
+                residuals.append(fix_weight * (pos_f - target))
         return np.concatenate(residuals)
 
     # Seed from start/end image points -> ground projection (rough).
@@ -152,6 +170,13 @@ def fit_parabola_to_image_observations(
     v_horiz = (p_end - p_start) / duration
     v0_seed = np.array([v_horiz[0], v_horiz[1], 0.5 * abs(g) * duration])
     p0_seed = p_start
+    if seed is not None:
+        # Caller-supplied warm start (e.g. the analytic two-knot arc).
+        # The default ground-projection heuristic regularly lands in a
+        # depth-flipped local minimum on monocular data; a seed in the
+        # right basin is worth more than any weighting.
+        p0_seed = np.asarray(seed[0], dtype=float)
+        v0_seed = np.asarray(seed[1], dtype=float)
 
     if p0_fixed is None:
         result = least_squares(
@@ -186,6 +211,12 @@ def fit_parabola_to_image_observations(
                     below = max(0.0, z_min - z_k)
                     above = max(0.0, z_k - z_max)
                     residuals.append(np.array([z_range_weight * (below + above)]))
+            if world_fixes:
+                for fix_frame, fix_xyz, fix_weight in world_fixes:
+                    dt_f = (fix_frame - frame_idx[0]) / fps
+                    pos_f = p0_pin + v0 * dt_f + 0.5 * (dt_f ** 2) * g_vec
+                    target = np.asarray(fix_xyz, dtype=float)
+                    residuals.append(fix_weight * (pos_f - target))
             return np.concatenate(residuals)
 
         result = least_squares(
@@ -249,6 +280,53 @@ def _integrate_magnus_positions(
     return out
 
 
+def _integrate_magnus_backward(
+    p0: np.ndarray,
+    v0: np.ndarray,
+    omega: np.ndarray,
+    g_vec: np.ndarray,
+    drag_k_over_m: float,
+    neg_times: np.ndarray,
+    substeps_per_interval: int = 4,
+) -> np.ndarray:
+    """RK4-integrate backward from (p0, v0) at t=0 to each time in neg_times.
+
+    ``neg_times`` must be strictly negative and sorted in *descending* order
+    (i.e. closest-to-zero first: e.g. [-0.04, -0.08, -0.12]).  The same ODE
+    stage formulas work with a negative step h — the physics is time-reversible
+    for this form of the equation.
+
+    Returns positions of shape ``(len(neg_times), 3)``.
+    """
+    out = np.zeros((len(neg_times), 3))
+
+    def accel(v: np.ndarray) -> np.ndarray:
+        return g_vec + drag_k_over_m * np.cross(omega, v)
+
+    p, v = p0.astype(float).copy(), v0.astype(float).copy()
+    t_cur = 0.0
+    for i, t_target in enumerate(neg_times):
+        total = t_target - t_cur  # negative
+        if total >= 0:
+            out[i] = p
+            continue
+        h = total / substeps_per_interval  # negative step
+        for _ in range(substeps_per_interval):
+            k1v = accel(v)
+            k1p = v
+            k2v = accel(v + 0.5 * h * k1v)
+            k2p = v + 0.5 * h * k1v
+            k3v = accel(v + 0.5 * h * k2v)
+            k3p = v + 0.5 * h * k2v
+            k4v = accel(v + h * k3v)
+            k4p = v + h * k3v
+            p = p + (h / 6.0) * (k1p + 2 * k2p + 2 * k3p + k4p)
+            v = v + (h / 6.0) * (k1v + 2 * k2v + 2 * k3v + k4v)
+        t_cur = t_target
+        out[i] = p
+    return out
+
+
 def fit_magnus_trajectory(
     observations: list[tuple[int, tuple[float, float]]],
     *,
@@ -268,6 +346,7 @@ def fit_magnus_trajectory(
     omega_axis_fixed: np.ndarray | None = None,
     omega_mag_bound: float | None = None,
     v0_abs_bound: float | None = None,
+    world_fixes: list[tuple[int, np.ndarray, float]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """Fit a Magnus-augmented 3D trajectory to per-frame image observations.
 
@@ -329,19 +408,95 @@ def fit_magnus_trajectory(
     if omega_seed is None:
         omega_seed = np.zeros(3)
 
+    # Build an augmented sample-times grid that includes fix times so
+    # the RK4 integrator visits each fix frame exactly once — no double
+    # integration required.  For each augmented time we track whether it
+    # is an observation slot (obs_indices) or a fix slot (fix_slots).
+    _active_fixes: list[tuple[float, np.ndarray, float]] = []  # (dt, xyz, w)
+    if world_fixes:
+        for fix_frame, fix_xyz, fix_weight in world_fixes:
+            _active_fixes.append((
+                (fix_frame - frame_idx[0]) / fps,
+                np.asarray(fix_xyz, dtype=float),
+                float(fix_weight),
+            ))
+
+    if _active_fixes:
+        # Merge obs dts and fix dts into a sorted unique grid.
+        # Fixes with negative dt (before the first observation) are placed
+        # in the grid as-is; fixes at or after the first obs are merged
+        # into the forward integration grid normally.
+        #
+        # When negative fix times are present the grid spans
+        # [min_neg_fix_dt, ..., 0.0, ..., max_obs_dt].  A helper
+        # evaluates positions at negative slots by backward RK4 from
+        # (p0, v0) at t=0; the forward integrator covers t ≥ 0.
+        _fix_dts = [(fdt, fxyz, fw) for fdt, fxyz, fw in _active_fixes]
+        _neg_fix_dts = [(fdt, fxyz, fw) for fdt, fxyz, fw in _fix_dts if fdt < 0.0]
+        _pos_fix_dts = [(fdt, fxyz, fw) for fdt, fxyz, fw in _fix_dts if fdt >= 0.0]
+
+        # Forward grid: obs times + non-negative fix times (must include 0.0).
+        _pos_fix_times_only = [fdt for fdt, _, _ in _pos_fix_dts]
+        _all_fwd_set: list[float] = sorted(
+            set(list(dt)) | set(_pos_fix_times_only)
+        )
+        _aug_times = np.array(_all_fwd_set)
+        # obs_indices[i] → position of dt[i] in the forward augmented grid.
+        _obs_indices = np.searchsorted(_aug_times, dt)
+        # fix_indices for non-negative fixes → position in forward grid.
+        if _pos_fix_dts:
+            _pos_fix_indices = np.searchsorted(
+                _aug_times, np.array([fdt for fdt, _, _ in _pos_fix_dts])
+            )
+        else:
+            _pos_fix_indices = np.empty(0, dtype=int)
+
+        # Backward grid: negative fix times sorted descending (closest to 0 first)
+        # so the backward RK4 steps away from t=0 one slot at a time.
+        _neg_fix_sorted = sorted(_neg_fix_dts, key=lambda x: x[0], reverse=True)
+        _neg_times_arr = np.array([fdt for fdt, _, _ in _neg_fix_sorted])
+    else:
+        _aug_times = dt
+        _obs_indices = np.arange(len(dt), dtype=int)
+        _pos_fix_indices = np.empty(0, dtype=int)
+        _pos_fix_dts = []
+        _neg_fix_sorted = []
+        _neg_times_arr = np.empty(0)
+
+    def _eval_fixes(fwd_pts: np.ndarray, p0_node: np.ndarray,
+                    v0_node: np.ndarray, omega: np.ndarray) -> list:
+        """Return residual blocks for all active fixes.
+
+        fwd_pts: positions on the forward grid (t ≥ 0), shape (N, 3).
+        p0_node, v0_node: state at t=0 (= first obs frame) used as the
+            seed for backward extrapolation to negative fix times.
+        """
+        blocks: list = []
+        for j, (_, fix_xyz, fix_weight) in enumerate(_pos_fix_dts):
+            pos_f = fwd_pts[_pos_fix_indices[j]]
+            blocks.append(fix_weight * (pos_f - fix_xyz))
+        if _neg_fix_sorted:
+            neg_pts = _integrate_magnus_backward(
+                p0_node, v0_node, omega, g_vec, drag_k_over_m, _neg_times_arr,
+            )
+            for k, (_, fix_xyz, fix_weight) in enumerate(_neg_fix_sorted):
+                blocks.append(fix_weight * (neg_pts[k] - fix_xyz))
+        return blocks
+
     def _residuals(params: np.ndarray) -> np.ndarray:
         p0 = params[:3]
         v0 = params[3:6]
         omega = params[6:9]
         pts = _integrate_magnus_positions(
-            p0, v0, omega, g_vec, drag_k_over_m, dt,
+            p0, v0, omega, g_vec, drag_k_over_m, _aug_times,
         )
         residuals = []
         for i in range(n_obs):
-            cam = Rs[i] @ pts[i] + ts[i]
+            cam = Rs[i] @ pts[_obs_indices[i]] + ts[i]
             pix = Ks[i] @ cam
             uv = pix[:2] / pix[2]
             residuals.append(uv - obs_array[i])
+        residuals.extend(_eval_fixes(pts, p0, v0, omega))
         return np.concatenate(residuals)
 
     # Three parametrizations of the spin DOF, from most-to-least free:
@@ -400,14 +555,15 @@ def fit_magnus_trajectory(
             v0 = params[:3]
             omega = params[3:6]
             positions = _integrate_magnus_positions(
-                p0_pin, v0, omega, g_vec, drag_k_over_m, dt,
+                p0_pin, v0, omega, g_vec, drag_k_over_m, _aug_times,
             )
             residuals = []
             for i in range(n_obs):
-                cam = Rs[i] @ positions[i] + ts[i]
+                cam = Rs[i] @ positions[_obs_indices[i]] + ts[i]
                 pix = Ks[i] @ cam
                 uv = pix[:2] / pix[2]
                 residuals.append(uv - obs_array[i])
+            residuals.extend(_eval_fixes(positions, p0_pin, v0, omega))
             return np.concatenate(residuals)
 
         x0 = np.concatenate([v0_seed, omega_seed])
@@ -430,14 +586,15 @@ def fit_magnus_trajectory(
                 v0 = params[3:6]
                 omega = params[6] * axis_unit
                 pts = _integrate_magnus_positions(
-                    p0, v0, omega, g_vec, drag_k_over_m, dt,
+                    p0, v0, omega, g_vec, drag_k_over_m, _aug_times,
                 )
                 residuals = []
                 for i in range(n_obs):
-                    cam = Rs[i] @ pts[i] + ts[i]
+                    cam = Rs[i] @ pts[_obs_indices[i]] + ts[i]
                     pix = Ks[i] @ cam
                     uv = pix[:2] / pix[2]
                     residuals.append(uv - obs_array[i])
+                residuals.extend(_eval_fixes(pts, p0, v0, omega))
                 return np.concatenate(residuals)
 
             x0 = np.concatenate([p0_seed, v0_seed, [scalar_seed]])
@@ -455,14 +612,15 @@ def fit_magnus_trajectory(
                 v0 = params[:3]
                 omega = params[3] * axis_unit
                 pts = _integrate_magnus_positions(
-                    p0_pin, v0, omega, g_vec, drag_k_over_m, dt,
+                    p0_pin, v0, omega, g_vec, drag_k_over_m, _aug_times,
                 )
                 residuals = []
                 for i in range(n_obs):
-                    cam = Rs[i] @ pts[i] + ts[i]
+                    cam = Rs[i] @ pts[_obs_indices[i]] + ts[i]
                     pix = Ks[i] @ cam
                     uv = pix[:2] / pix[2]
                     residuals.append(uv - obs_array[i])
+                residuals.extend(_eval_fixes(pts, p0_pin, v0, omega))
                 return np.concatenate(residuals)
 
             x0 = np.concatenate([v0_seed, [scalar_seed]])
@@ -480,3 +638,198 @@ def fit_magnus_trajectory(
 
     mean_residual = float(np.linalg.norm(result.fun) / np.sqrt(n_obs))
     return p0_opt, v0_opt, omega_opt, mean_residual
+
+
+def _integrate_magnus_state(
+    p0: np.ndarray,
+    v0: np.ndarray,
+    omega: np.ndarray,
+    g_vec: np.ndarray,
+    drag_k_over_m: float,
+    duration_s: float,
+    substeps: int = 16,
+) -> tuple[np.ndarray, np.ndarray]:
+    """RK4-integrate ``dv/dt = g + k·(ω × v)`` to ``duration_s``.
+
+    Returns ``(p, v)`` at the final time. Mirrors
+    :func:`_integrate_magnus_positions` but also returns the terminal
+    velocity (needed to seed the post-bounce arc).
+    """
+    p = np.asarray(p0, dtype=float).copy()
+    v = np.asarray(v0, dtype=float).copy()
+    omega = np.asarray(omega, dtype=float)
+    if duration_s <= 0:
+        return p, v
+    h = duration_s / substeps
+
+    def accel(vv: np.ndarray) -> np.ndarray:
+        return g_vec + drag_k_over_m * np.cross(omega, vv)
+
+    for _ in range(substeps):
+        k1v = accel(v)
+        k1p = v
+        k2v = accel(v + 0.5 * h * k1v)
+        k2p = v + 0.5 * h * k1v
+        k3v = accel(v + 0.5 * h * k2v)
+        k3p = v + 0.5 * h * k2v
+        k4v = accel(v + h * k3v)
+        k4p = v + h * k3v
+        p = p + (h / 6.0) * (k1p + 2 * k2p + 2 * k3p + k4p)
+        v = v + (h / 6.0) * (k1v + 2 * k2v + 2 * k3v + k4v)
+    return p, v
+
+
+def fit_coupled_bounce(
+    obs_a: list[tuple[int, tuple[float, float]]],
+    obs_b: list[tuple[int, tuple[float, float]]],
+    *,
+    cams_a: tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]],
+    cams_b: tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]],
+    bounce_frame: int,
+    fps: float,
+    g: float = -9.81,
+    drag_k_over_m: float = 0.005,
+    ball_radius: float = 0.11,
+    restitution_min: float = 0.5,
+    restitution_max: float = 0.85,
+    mu_max: float = 0.7,
+    omega_max: float = 95.0,
+    p0_seed: np.ndarray | None = None,
+    v0_seed: np.ndarray | None = None,
+    omega0_seed: np.ndarray | None = None,
+    e_seed: float = 0.7,
+    mu_seed: float = 0.3,
+    max_iter: int = 100,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
+    """Jointly fit two bounce-adjacent Magnus arcs sharing a spin-coupled bounce.
+
+    Free parameters: arc A's initial state ``(p0, v0, ω0)`` (9 DOF) plus
+    the bounce parameters ``(e, μ)`` (2 DOF) — 11 DOF total.  Arc B's
+    initial state is *derived*, not free: arc A is integrated (drag+Magnus)
+    forward to ``bounce_frame`` to obtain the bounce position and inbound
+    ``(v_in, ω_in)``, then :func:`ball_physics.bounce` produces
+    ``(v_out, ω_out)``; arc B starts from the bounce position with that
+    post-bounce state.  This is what makes spin *identifiable*: the same ω
+    must explain the curvature of both arcs *and* the velocity change across
+    the bounce.
+
+    The residual is the combined pixel reprojection over BOTH arcs'
+    observations, computed with the existing Magnus integrator.
+
+    Args:
+        obs_a / obs_b: ``(frame_index, (u, v))`` pairs for each arc,
+            ordered by time.  ``bounce_frame`` is the shared node frame
+            (arc A ends there, arc B begins there).
+        cams_a / cams_b: ``(Ks, Rs, ts)`` position-parallel to ``obs_a`` /
+            ``obs_b`` respectively.
+        bounce_frame: absolute clip frame of the bounce node.
+        fps: clip frame rate.
+        g, drag_k_over_m, ball_radius: physics constants.
+        restitution_min/max, mu_max, omega_max: parameter bounds.
+        *_seed: optional warm starts.
+        max_iter: LM iteration cap.
+
+    Returns:
+        ``(p0, v0, omega0, e, mu, residual_px)`` — arc A's fitted initial
+        state, the fitted bounce params, and the combined RMS pixel residual.
+    """
+    from scipy.optimize import least_squares
+
+    from src.utils.ball_physics import bounce as _bounce
+
+    Ks_a, Rs_a, ts_a = cams_a
+    Ks_b, Rs_b, ts_b = cams_b
+    g_vec = np.array([0.0, 0.0, g])
+
+    obs_a_arr = np.array([o[1] for o in obs_a], dtype=float)
+    obs_b_arr = np.array([o[1] for o in obs_b], dtype=float)
+    fa0 = obs_a[0][0] if obs_a else bounce_frame
+    # Times for arc A relative to its first observation; arc B relative to
+    # the bounce frame.
+    dt_a = np.array([(o[0] - fa0) / fps for o in obs_a])
+    dt_b = np.array([(o[0] - bounce_frame) / fps for o in obs_b])
+    t_bounce = (bounce_frame - fa0) / fps
+
+    n_a = len(obs_a)
+    n_b = len(obs_b)
+
+    if p0_seed is None:
+        p0_seed = np.zeros(3)
+    if v0_seed is None:
+        v0_seed = np.zeros(3)
+    if omega0_seed is None:
+        omega0_seed = np.zeros(3)
+
+    def _project(pts_world, Ks, Rs, ts, obs_arr, n):
+        res = []
+        for i in range(n):
+            cam = Rs[i] @ pts_world[i] + ts[i]
+            pix = Ks[i] @ cam
+            uv = pix[:2] / pix[2]
+            res.append(uv - obs_arr[i])
+        return res
+
+    def _residuals(params: np.ndarray) -> np.ndarray:
+        p0 = params[0:3]
+        v0 = params[3:6]
+        omega0 = params[6:9]
+        e = params[9]
+        mu = params[10]
+
+        residuals: list[np.ndarray] = []
+
+        # Arc A: integrate Magnus from (p0, v0, omega0) and sample at obs A.
+        if n_a:
+            pts_a = _integrate_magnus_positions(
+                p0, v0, omega0, g_vec, drag_k_over_m, dt_a,
+            )
+            residuals.extend(_project(pts_a, Ks_a, Rs_a, ts_a, obs_a_arr, n_a))
+
+        # Integrate arc A to the bounce frame to get the bounce state.
+        p_bounce, v_in = _integrate_magnus_state(
+            p0, v0, omega0, g_vec, drag_k_over_m, t_bounce,
+        )
+        v_out, omega_out = _bounce(v_in, omega0, e, mu, ball_radius)
+
+        # Arc B starts at the bounce position with the post-bounce state.
+        if n_b:
+            pts_b = _integrate_magnus_positions(
+                p_bounce, v_out, omega_out, g_vec, drag_k_over_m, dt_b,
+            )
+            residuals.extend(_project(pts_b, Ks_b, Rs_b, ts_b, obs_b_arr, n_b))
+
+        if not residuals:
+            return np.zeros(1)
+        return np.concatenate(residuals)
+
+    x0 = np.concatenate([
+        np.asarray(p0_seed, float),
+        np.asarray(v0_seed, float),
+        np.asarray(omega0_seed, float),
+        [float(e_seed), float(mu_seed)],
+    ])
+    inf = np.inf
+    lo = np.array(
+        [-inf, -inf, -inf, -inf, -inf, -inf,
+         -omega_max, -omega_max, -omega_max,
+         restitution_min, 0.0]
+    )
+    hi = np.array(
+        [inf, inf, inf, inf, inf, inf,
+         omega_max, omega_max, omega_max,
+         restitution_max, mu_max]
+    )
+    x0 = np.clip(x0, lo, hi)
+
+    result = least_squares(
+        _residuals, x0, method="trf", bounds=(lo, hi),
+        max_nfev=max_iter * 50,
+    )
+    n_total = max(n_a + n_b, 1)
+    residual_px = float(np.linalg.norm(result.fun) / np.sqrt(n_total))
+    p0_opt = result.x[0:3]
+    v0_opt = result.x[3:6]
+    omega0_opt = result.x[6:9]
+    e_opt = float(result.x[9])
+    mu_opt = float(result.x[10])
+    return p0_opt, v0_opt, omega0_opt, e_opt, mu_opt, residual_px

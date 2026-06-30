@@ -292,6 +292,16 @@ Drives a per-player overlay GIF in `output/hmr_world/debug/PXXX_overlay.gif` and
 
 ## 5. Ball reconstruction (`ball` stage)
 
+> **Superseded (2026-06-12).** The ball stage was reworked into an
+> automatic, physically-correct piecewise solve: auto-anchors from
+> detected events (player touches via refined_poses FK, bounces,
+> goal-frame impacts) feed a node-bracketed solver with rolling/
+> ballistic primitives, continuity at every node, and restitution
+> checks. The section below describes the original design; the current
+> architecture is specified in
+> `docs/superpowers/specs/2026-06-12-ball-auto-physics-design.md` and
+> summarised in CLAUDE.md.
+
 Most algorithmic work already exists; this stage rewires it onto the new camera track.
 
 ### Inputs and output

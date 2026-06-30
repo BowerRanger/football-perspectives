@@ -61,6 +61,16 @@ class BallAnchor:
     stage maps to an angular-velocity seed for the Magnus fitter and
     that relaxes the Magnus-acceptance threshold for the flight
     segment containing the anchor.
+
+    ``confidence`` is the detector's score for an auto-generated anchor
+    (carried over from ``BallEvent.score``), clamped to ``[0, 1]``.
+    Manual anchors are user-supplied ground truth and default to ``1.0``.
+    The web editor uses it to render auto suggestions distinctly from
+    confirmed/manual entries.
+
+    ``end_frame`` is the inclusive end of a *span* event (e.g. a
+    ``carry``/possession dribble); ``None`` for point events. When set it
+    must be greater than ``frame``.
     """
     frame: int
     # None only when state == "off_screen_flight".
@@ -71,6 +81,8 @@ class BallAnchor:
     goal_element: str | None = None
     touch_type: str | None = None
     spin: str | None = None
+    confidence: float = 1.0
+    end_frame: int | None = None
 
 
 @dataclass(frozen=True)
@@ -164,6 +176,15 @@ class BallAnchorSet:
                         f"unknown spin preset {spin!r}; "
                         f"valid: {sorted(VALID_SPIN_PRESETS)}"
                     )
+            confidence = float(a.get("confidence", 1.0))
+            confidence = min(1.0, max(0.0, confidence))
+            raw_end = a.get("end_frame")
+            end_frame = int(raw_end) if raw_end is not None else None
+            if end_frame is not None and end_frame <= int(a["frame"]):
+                raise ValueError(
+                    f"end_frame ({end_frame}) must be greater than frame "
+                    f"({a['frame']})"
+                )
             anchors.append(BallAnchor(
                 frame=int(a["frame"]),
                 image_xy=image_xy,
@@ -173,6 +194,8 @@ class BallAnchorSet:
                 goal_element=str(goal_element) if goal_element else None,
                 touch_type=str(touch_type) if touch_type else None,
                 spin=str(spin) if spin else None,
+                confidence=confidence,
+                end_frame=end_frame,
             ))
         return cls(
             clip_id=str(data["clip_id"]),

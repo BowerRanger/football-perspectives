@@ -24,6 +24,7 @@ class BallFrame:
     state: State
     confidence: float
     flight_segment_id: int | None = None
+    quat_wxyz: tuple[float, float, float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,11 @@ class BallTrack:
                 state=f["state"],
                 confidence=float(f["confidence"]),
                 flight_segment_id=f.get("flight_segment_id"),
+                quat_wxyz=(
+                    tuple(f["quat_wxyz"])
+                    if f.get("quat_wxyz") is not None
+                    else None
+                ),
             )
             for f in data["frames"]
         )

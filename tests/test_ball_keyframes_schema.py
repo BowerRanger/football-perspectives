@@ -42,6 +42,42 @@ def test_round_trip_preserves_all_fields(tmp_path: Path):
     assert back == src
 
 
+def test_omega_rad_s_defaults_none_and_round_trips(tmp_path: Path):
+    # Default (omitted) -> None; explicit vector round-trips exactly.
+    kf_none = _grounded()
+    assert kf_none.omega_rad_s is None
+    kf_omega = BallKeyframe(
+        frame=30,
+        state="airborne_high",
+        world_xyz=(20.0, 10.0, 5.0),
+        image_xy=(910.0, 280.0),
+        depth_source="ray_physics",
+        omega_rad_s=(0.0, 0.0, 42.0),
+    )
+    src = BallKeyframeSet(
+        clip_id="clipA", fps=25.0, image_size=(1920, 1080),
+        keyframes=(kf_none, kf_omega),
+    )
+    path = tmp_path / "ball_keyframes_omega.json"
+    src.save(path)
+    back = BallKeyframeSet.load(path)
+    assert back == src
+    assert back.keyframes[0].omega_rad_s is None
+    assert back.keyframes[1].omega_rad_s == (0.0, 0.0, 42.0)
+
+
+def test_omega_rad_s_absent_in_legacy_json_loads_none(tmp_path: Path):
+    # A pre-Phase-3 keyframe JSON has no omega_rad_s key -> None on load.
+    path = tmp_path / "kf.json"
+    path.write_text(
+        '{"clip_id":"c","fps":25.0,"image_size":[1920,1080],'
+        '"keyframes":[{"frame":1,"state":"grounded","depth_source":"ground",'
+        '"world_xyz":[1.0,2.0,0.0],"image_xy":[800.0,600.0]}]}'
+    )
+    back = BallKeyframeSet.load(path)
+    assert back.keyframes[0].omega_rad_s is None
+
+
 def test_player_touch_requires_player_and_bone(tmp_path: Path):
     path = tmp_path / "kf.json"
     BallKeyframeSet(

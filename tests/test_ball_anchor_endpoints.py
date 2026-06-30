@@ -295,3 +295,25 @@ def test_post_spin_without_touch_type_rejected(client):
     }
     r = c.post("/ball-anchors/play", json=payload)
     assert r.status_code == 400, r.text
+
+
+def test_get_auto_ball_anchors(tmp_path):
+    """The read-only auto-anchor sidecar is served beside the manual set."""
+    from fastapi.testclient import TestClient
+    from src.web.server import create_app
+
+    (tmp_path / "ball").mkdir(parents=True)
+    (tmp_path / "ball" / "s1_ball_anchors_auto.json").write_text(json.dumps({
+        "clip_id": "s1", "image_size": [1280, 720],
+        "anchors": [
+            {"frame": 12, "image_xy": [100.0, 200.0], "state": "bounce"},
+        ],
+    }))
+    client = TestClient(create_app(tmp_path))
+    r = client.get("/ball-anchors/s1/auto")
+    assert r.status_code == 200
+    assert r.json()["anchors"][0]["state"] == "bounce"
+    # Missing sidecar -> empty set, not an error.
+    r = client.get("/ball-anchors/nope/auto")
+    assert r.status_code == 200
+    assert r.json()["anchors"] == []

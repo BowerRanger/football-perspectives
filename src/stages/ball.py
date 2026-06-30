@@ -1,30 +1,37 @@
-"""Ball stage: per-frame detection, IMM smoothing, ground projection,
-and 3D trajectory reconstruction.
-
-The stage owns the entire ball pipeline.  It reads only the clip video
-files (via the shots manifest) and the camera track from earlier
-stages; it does **not** read any ball detections from
-``output/tracks/``.
+"""Ball stage: detection, automatic anchoring, and a piecewise-physical
+3D trajectory solve.
 
 Run flow per shot:
 
-1. **Detect** — iterate the clip frames and ask the configured
-   :class:`BallDetector` for ``(u, v, confidence)`` per frame.
-2. **Smooth** — feed the per-frame detections through
-   :class:`BallTracker`, a 2-mode IMM Kalman filter. Output includes a
-   per-frame mode posterior ``p_flight`` and bounded gap-fill.
-3. **Reconstruct 3D position** — ground-project each smoothed pixel to
-   the world frame at ``z = ball_radius_m`` via
-   :func:`src.utils.foot_anchor.ankle_ray_to_pitch`.
-4. **Flight fit** — run-length encode frames where ``p_flight >= 0.5``;
-   for each run run a parabola fit and (when the segment is long
-   enough) a Magnus refinement. Accept Magnus only if it improves the
-   pixel residual by ``ball.spin.min_residual_improvement`` and
-   ``|ω|`` is within ``ball.spin.max_omega_rad_s``.
+1. **Detect** — iterate the clip frames through the configured
+   :class:`BallDetector` (WASB), bridging short gaps by appearance
+   template matching, and smooth with the 2-mode IMM
+   :class:`BallTracker`. Manual anchor pixels are injected as
+   detections. The raw observations are persisted to a
+   ``*_ball_observations.json`` sidecar.
+2. **Player context** — forward-kinematics world+pixel positions of
+   every player's contact joints from ``refined_poses`` (fallback
+   ``hmr_world``), via :class:`PlayerContext`.
+3. **Auto events** — velocity breaks on the pixel track classified as
+   player touches, bounces, goal impacts or stationary spans
+   (:func:`detect_events`).
+4. **Auto anchors** — events plus confidently-grounded samples become
+   validated :class:`BallAnchor` records
+   (:func:`generate_auto_anchors`), persisted to
+   ``*_ball_anchors_auto.json`` and merged with the operator's manual
+   anchors — manual always wins.
+5. **Solve** — merged hard-knot anchors are resolved to world positions
+   (goal geometry, SMPL bone on the clicked ray, ground ray-cast) and
+   become :class:`TrajectoryNode`s for the piecewise solver
+   (:func:`solve_piecewise`): endpoint-exact rolling, two-knot gravity
+   arcs, bounce restitution checks, split-and-retry at velocity breaks.
+6. **Emit** — dense ``BallTrack`` (schema unchanged), sparse keyframes
+   sidecar, and a diagnostics sidecar consumed by the quality report.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 from pathlib import Path
@@ -33,49 +40,147 @@ import cv2
 import numpy as np
 
 from src.pipeline.base import BaseStage
-from src.schemas.ball_track import BallFrame, BallTrack, FlightSegment
+from src.schemas.ball_anchor import BallAnchor, BallAnchorSet
+from src.schemas.ball_track import BallFrame, BallTrack
 from src.schemas.camera_track import CameraTrack
 from src.schemas.shots import ShotsManifest
-from src.schemas.ball_anchor import BallAnchor, BallAnchorSet
-from src.utils.ball_keyframe_builder import build_ball_keyframe_set
 from src.utils.ball_anchor_heights import (
     AIRBORNE_STATES,
-    EVENT_STATES,
-    GROUND_LEVEL_STATES,
     HARD_KNOT_STATES,
     airborne_bucket_range,
     state_to_height,
-)
-from src.utils.ball_detector import BallDetector, YOLOBallDetector
-from src.utils.ball_tracker import BallTracker, TrackerStep
-from src.utils.ball_plausibility import (
-    GroundPromotionCfg,
-    GroundedRun,
-    PitchDims,
-    PlausibilityCfg,
-    find_implausible_grounded_runs,
-    is_plausible_trajectory,
-)
-from src.utils.bundle_adjust import (
-    _integrate_magnus_positions,
-    fit_magnus_trajectory,
-    fit_parabola_to_image_observations,
 )
 from src.utils.ball_appearance_bridge import (
     AppearanceBridge,
     AppearanceBridgeCfg,
 )
-from src.utils.ball_kick_anchor import KickAnchorCfg, find_kick_anchor
-from src.utils.camera_projection import project_world_to_image
+from src.utils.ball_auto_anchor import (
+    AutoAnchorCfg,
+    auto_anchor_path,
+    generate_auto_anchors,
+    merge_anchors,
+)
+from src.utils.ball_auto_events import (
+    AutoEventCfg,
+    BallEvent,
+    detect_event_candidates,
+    detect_events,
+)
+from src.utils.ball_detector import BallDetector, YOLOBallDetector
+from src.utils.ball_keyframe_builder import build_ball_keyframe_set
+from src.utils.ball_mode_search import (
+    BudgetExceeded,
+    _mode_search_cfg,
+    solve_modes,
+)
+from src.utils.ball_orientation import integrate_orientation
+from src.utils.ball_piecewise_solver import (
+    SolverCfg,
+    TrajectoryNode,
+    solve_piecewise,
+)
+from src.utils.ball_event_resolver import resolve_events
+from src.utils.ball_foot_guided import foot_ball_detections, gated_feet
+from src.utils.ball_kinematic_touch import (
+    KinematicTouchCfg,
+    merge_touch_events,
+    propose_touches,
+)
+from src.utils.ball_player_context import PlayerContext
+from src.utils.ball_tracker import BallTracker, TrackerStep
+from src.utils.camera_projection import (
+    point_to_pixel_ray_distance,
+    project_point_onto_pixel_ray,
+    project_world_to_image,
+)
+from src.schemas.ball_fixes import BallFix, BallFixSet
+from src.schemas.sync_map import SyncMap
+from src.utils.ball_cross_replay import (
+    CrossReplayCfg,
+    PairFix,
+    refine_pair_offset,
+    triangulate_pair,
+)
+from src.utils.ball_second_pass import (
+    SecondPassCfg,
+    SecondPassDetection,
+    apparent_ball_px,
+    best_gated_candidate,
+    corridor_predictions,
+    filter_in_bounds,
+    find_gap_runs,
+    find_revisit_runs,
+    map_crop_candidates,
+)
 from src.utils.foot_anchor import ankle_ray_to_pitch
 from src.utils.goal_geometry import GoalGeometry, resolve_goal_impact_world
-from src.utils.ball_spin_presets import (
-    SPIN_ENABLED_STATES,
-    omega_seed_from_preset,
-)
-
 
 logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass(frozen=True)
+class _DetectArtifacts:
+    """Everything produced by the detect pass for one shot.
+
+    Carries the raw detection output, camera matrices, manual anchors, and
+    the paths needed by the solve pass — so detect and solve can run in
+    two separate loops.
+    """
+
+    shot_id: str
+    ball_out_path: Path
+    camera_clip_id: str
+    camera_fps: float
+    camera_image_size: tuple[int, int]
+    distortion: tuple[float, float]
+    n_clip: int
+    n_frames: int
+
+    # Detection output
+    steps: list  # list[TrackerStep]
+    raw_confidences: dict[int, float]
+    sources: dict[int, str]
+    detection_coverage: dict[str, float]
+
+    # Camera matrices (per frame)
+    per_frame_K: dict[int, object]
+    per_frame_R: dict[int, object]
+    per_frame_t: dict[int, object]
+
+    # Manual anchors
+    manual_by_frame: dict[int, object]  # dict[int, BallAnchor]
+
+    # Foot-guided touches recovered in the detect phase: (frame, player_id,
+    # bone). The solve pass turns these into touch BallEvents.
+    foot_touches: tuple = ()
+
+
+def _accepted_obs_and_cams(
+    arts: "_DetectArtifacts",
+) -> tuple[dict[int, tuple[tuple[float, float], float]], dict[int, tuple]]:
+    """Accepted-evidence observation + camera maps for triangulation.
+
+    Observations are frames with a non-outlier detection carrying a source
+    (detector/bridge/anchor/second_pass) — the same accepted-evidence
+    filter the second-pass corridor uses. Cameras are the shot's per-frame
+    (K, R, t).
+    """
+    obs = {
+        s.frame: (s.uv, arts.raw_confidences.get(s.frame, 0.0))
+        for s in arts.steps
+        if (s.uv is not None and s.frame in arts.sources and not s.is_outlier)
+    }
+    cams = {
+        f: (arts.per_frame_K[f], arts.per_frame_R[f], arts.per_frame_t[f])
+        for f in arts.per_frame_K
+    }
+    return obs, cams
+
+
+# Kept as module-level names: the ray-faithfulness tests (and the C1/C4
+# behaviours they pin) exercise these directly.
+_project_point_onto_pixel_ray = project_point_onto_pixel_ray
+_snap_world_onto_pixel_ray = project_point_onto_pixel_ray
 
 
 def _build_detector(cfg: dict) -> BallDetector:
@@ -97,112 +202,10 @@ def _build_detector(cfg: dict) -> BallDetector:
     raise ValueError(f"Unknown ball.detector backend: {backend!r}")
 
 
-def _demote_run_to_missing(
-    per_frame_world: dict[int, tuple[np.ndarray, float]],
-    a: int,
-    b: int,
-) -> None:
-    """Drop world positions for frames [a, b] so they emit state='missing'."""
-    for fi in range(a, b + 1):
-        per_frame_world.pop(fi, None)
-
-
-def _underconstrained_spans(
-    spans: list[tuple[int, int, int]],
-    min_hard_knots: int,
-) -> list[tuple[int, int, int]]:
-    """Return flight spans ``(fa, fb, n_hard_knots)`` with fewer than
-    ``min_hard_knots`` hard 3D knots — monocularly depth-under-determined.
-    Adding a bracketing kick/bounce/goal_impact/grounded anchor lets the
-    physics-first fit (C2) resolve their depth exactly.
-    """
-    return [s for s in spans if s[2] < min_hard_knots]
-
-
-def _project_point_onto_pixel_ray(
-    point: np.ndarray,
-    uv: tuple[float, float],
-    K: np.ndarray,
-    R: np.ndarray,
-    t: np.ndarray,
-    distortion: tuple[float, float],
-) -> np.ndarray:
-    """Return the point on the camera ray through pixel ``uv`` that lies at
-    ``point``'s along-ray depth. Keeps the user's clicked lateral position
-    (the result reprojects to ``uv``) while taking depth from ``point``.
-    """
-    from src.utils.camera_projection import undistort_pixel
-
-    uv_arr = np.asarray(uv, dtype=float)
-    if distortion != (0.0, 0.0):
-        uv_arr = undistort_pixel(uv_arr, K, distortion)
-    C = -R.T @ t
-    d_world = R.T @ (np.linalg.inv(K) @ np.array([uv_arr[0], uv_arr[1], 1.0]))
-    d_hat = d_world / np.linalg.norm(d_world)
-    depth = float(np.dot(np.asarray(point, dtype=float) - C, d_hat))
-    return C + depth * d_hat
-
-
-def _snap_world_onto_pixel_ray(
-    world: np.ndarray,
-    uv: tuple[float, float],
-    K: np.ndarray,
-    R: np.ndarray,
-    t: np.ndarray,
-    distortion: tuple[float, float],
-) -> np.ndarray:
-    """Move ``world`` onto the camera ray through ``uv``, preserving its
-    along-ray depth (lateral error -> 0). Same math as
-    :func:`_project_point_onto_pixel_ray`; named separately for the C4 pass.
-    """
-    return _project_point_onto_pixel_ray(world, uv, K, R, t, distortion)
-
-
-def _load_foot_uvs_for_shot(
-    output_dir: Path, shot_id: str
-) -> dict[int, list[tuple[float, float]]]:
-    """Aggregate ankle pixel positions across all players for a shot.
-
-    Reads ``output/hmr_world/<shot>__<player>_kp2d.json`` files (COCO-17
-    keypoints; indices 15 = left_ankle, 16 = right_ankle). Returns a dict
-    keyed by frame index with a list of ankle pixel positions, ignoring
-    any with confidence below 0.3.
-    """
-    hmr_dir = output_dir / "hmr_world"
-    if not hmr_dir.exists():
-        return {}
-    if shot_id:
-        pattern = f"{shot_id}__*_kp2d.json"
-    else:
-        pattern = "*_kp2d.json"
-    feet_by_frame: dict[int, list[tuple[float, float]]] = {}
-    for path in hmr_dir.glob(pattern):
-        try:
-            payload = json.loads(path.read_text())
-        except Exception:
-            continue
-        for entry in payload.get("frames", []):
-            fi = int(entry.get("frame", -1))
-            if fi < 0:
-                continue
-            kps = entry.get("keypoints", [])
-            for idx in (15, 16):
-                if idx >= len(kps):
-                    continue
-                kp = kps[idx]
-                if len(kp) < 3 or kp[2] < 0.3:
-                    continue
-                feet_by_frame.setdefault(fi, []).append((float(kp[0]), float(kp[1])))
-    return feet_by_frame
-
-
 def _load_ball_anchors(
     output_dir: Path, shot_id: str
 ) -> dict[int, BallAnchor]:
-    """Load per-frame ball anchors keyed by frame index.
-
-    Returns an empty dict when no anchor file exists.
-    """
+    """Load per-frame manual ball anchors keyed by frame index."""
     if shot_id:
         path = output_dir / "ball" / f"{shot_id}_ball_anchors.json"
     else:
@@ -217,231 +220,49 @@ def _load_ball_anchors(
     return {a.frame: a for a in aset.anchors}
 
 
-class _MagnusRefinement:
-    """Result of attempting a Magnus refinement on a flight segment.
-
-    The caller uses ``effective_p0`` / ``effective_v0`` / ``effective_resid``
-    for per-frame evaluation and reporting, ``omega_world`` to decide
-    whether to integrate via Magnus vs. plain parabola, and the
-    ``spin_axis`` / ``spin_omega`` / ``spin_confidence`` triple to
-    populate ``FlightSegment.parabola``. When ``omega_world is None``
-    the refinement was rejected and the inputs (parabola fit) win.
-    """
-
-    __slots__ = (
-        "effective_p0", "effective_v0", "effective_resid",
-        "omega_world", "spin_axis", "spin_omega", "spin_confidence",
-    )
-
-    def __init__(
-        self,
-        effective_p0: np.ndarray,
-        effective_v0: np.ndarray,
-        effective_resid: float,
-        omega_world: np.ndarray | None,
-        spin_axis: list[float] | None,
-        spin_omega: float | None,
-        spin_confidence: float | None,
-    ) -> None:
-        self.effective_p0 = effective_p0
-        self.effective_v0 = effective_v0
-        self.effective_resid = effective_resid
-        self.omega_world = omega_world
-        self.spin_axis = spin_axis
-        self.spin_omega = spin_omega
-        self.spin_confidence = spin_confidence
+# Player_touch ground/air classification by surrounding anchors. The
+# ball is at ground level at a touch UNLESS the touch sits between two
+# airborne-implying anchors (volley between airborne anchors, header in
+# a bounce chain). See the per-set notes for the asymmetric kick rule.
+_PREV_AIRBORNE_STATES = frozenset({
+    "airborne_low", "airborne_mid", "airborne_high",
+    "header", "volley", "chest", "catch", "off_screen_flight",
+    "bounce", "kick", "goal_impact",
+})
+_NEXT_AIRBORNE_STATES = frozenset({
+    "airborne_low", "airborne_mid", "airborne_high",
+    "header", "volley", "chest", "catch", "off_screen_flight",
+    "bounce", "goal_impact",
+})
 
 
-def _refine_with_magnus(
-    *,
-    obs: list[tuple[int, tuple[float, float]]],
-    Ks_seg: list[np.ndarray],
-    Rs_seg: list[np.ndarray],
-    ts_seg: list[np.ndarray],
-    fps: float,
-    drag: float,
-    plaus_cfg: PlausibilityCfg,
-    pitch_dims: PitchDims,
-    p0: np.ndarray,
-    v0: np.ndarray,
-    parab_resid: float,
-    anchor_world: np.ndarray | None,
-    duration_s: float,
-    spin_enabled: bool,
-    spin_min_seconds: float,
-    spin_max_omega: float,
-    spin_min_improve: float,
-    spin_min_improve_hinted: float,
-    omega_seed: np.ndarray,
-    hint_provided: bool,
-    segment_label: str,
-    knot_frames: dict[int, np.ndarray] | None = None,
-    knot_max_violation_m: float = 2.0,
-) -> _MagnusRefinement:
-    """Attempt a Magnus refinement of a parabola fit on a flight segment.
-
-    When ``hint_provided`` is True (the segment's start anchor carries an
-    explicit spin preset), the accept threshold relaxes from
-    ``spin_min_improve`` to ``spin_min_improve_hinted`` — the user has
-    asserted that this flight has spin, so we lower the bar for ω ≠ 0.
-    """
-    fallback = _MagnusRefinement(
-        effective_p0=p0,
-        effective_v0=v0,
-        effective_resid=parab_resid,
-        omega_world=None,
-        spin_axis=None,
-        spin_omega=None,
-        spin_confidence=None,
-    )
-    if not spin_enabled or duration_s < spin_min_seconds:
-        return fallback
-    # When the user explicitly requests knuckle (no spin), skip the LM
-    # entirely — Magnus would only ever drift away from omega=0.
-    if hint_provided and np.linalg.norm(omega_seed) < 1e-9:
-        # Knuckle case (preset == 'knuckle'): zero seed + hint. Trust the
-        # user and stick with the parabola fit.
-        return fallback
-    # Two modes:
-    #   - hint_provided: lock the spin axis to the preset direction
-    #     (omega_seed is a non-zero vector from omega_seed_from_preset),
-    #     letting the LM optimise only the spin magnitude alongside v0.
-    #     The user told us the curl direction; we trust that.
-    #   - no hint: bound each omega component to spin_max_omega / √3 so
-    #     the recovered |omega| can't exceed spin_max_omega even at the
-    #     cube corner. Without this the LM ran off to |omega| ≈ 700+
-    #     rad/s on real-world data and got silently rejected.
-    seed_norm = float(np.linalg.norm(omega_seed))
-    try:
-        if hint_provided and seed_norm > 1e-9:
-            mp0, mv0, momega, magnus_resid = fit_magnus_trajectory(
-                obs,
-                Ks=Ks_seg, Rs=Rs_seg, t_world=ts_seg,
-                fps=fps, drag_k_over_m=drag,
-                p0_seed=p0, v0_seed=v0,
-                omega_seed=omega_seed,
-                p0_fixed=anchor_world,
-                omega_axis_fixed=omega_seed / seed_norm,
-                omega_mag_bound=spin_max_omega,
-                # Keep v0 inside the same physical envelope as the
-                # plausibility check (horizontal_speed_max + ~50% margin
-                # for vertical component) so the LM can't fit by
-                # inventing 80 m/s velocities.
-                v0_abs_bound=max(
-                    plaus_cfg.horizontal_speed_max_m_s * 1.5,
-                    40.0,
-                ),
-            )
-        else:
-            mp0, mv0, momega, magnus_resid = fit_magnus_trajectory(
-                obs,
-                Ks=Ks_seg, Rs=Rs_seg, t_world=ts_seg,
-                fps=fps, drag_k_over_m=drag,
-                p0_seed=p0, v0_seed=v0,
-                omega_seed=omega_seed,
-                p0_fixed=anchor_world,
-                omega_abs_bound=spin_max_omega / np.sqrt(3.0),
-            )
-    except Exception as exc:
-        logger.debug("magnus fit failed on %s: %s", segment_label, exc)
-        return fallback
-    omega_mag = float(np.linalg.norm(momega))
-    improvement = (
-        (parab_resid - magnus_resid) / parab_resid
-        if parab_resid > 0 else 0.0
-    )
-    # When a hint is provided the LM is already box-bounded on v0 and on
-    # the omega scalar (with the axis locked to the preset direction),
-    # so any fit it produces is physically inside the same envelope the
-    # plausibility check enforces. Skipping the strict plausibility gate
-    # here lets a locked-axis fit through when the LM saturated at the
-    # v0 bound — common on hard real data where no single Magnus arc
-    # exactly fits the user's pixel obs. Without a hint the LM is freer
-    # so plausibility remains as the safety net.
-    if hint_provided:
-        magnus_plausible = True
-    else:
-        magnus_plausible = is_plausible_trajectory(
-            mp0, mv0, omega=momega,
-            duration_s=duration_s, fps=fps,
-            cfg=plaus_cfg, pitch=pitch_dims,
-        )
-    accept_threshold = spin_min_improve_hinted if hint_provided else spin_min_improve
-    # Validate against any anchor-derived knot constraints. Magnus
-    # itself optimises only against pixel residuals (no knot support),
-    # so on a Phase 2 span with kick + goal_impact knots the LM happily
-    # produces a v0 that satisfies the airborne pixels at the cost of
-    # missing the goal — apex z dives below ground, x flies off-pitch.
-    # If Magnus violates any knot by more than ``knot_max_violation_m``,
-    # reject and keep the parabola fit (which DOES respect the knots).
-    knot_violation_ok = True
-    if knot_frames:
-        g_vec_local = np.array([0.0, 0.0, -9.81])
-        for rel_idx, target_world in knot_frames.items():
-            dt_k = rel_idx / fps
-            positions = _integrate_magnus_positions(
-                mp0, mv0, momega,
-                g_vec_local,
-                drag,
-                np.array([0.0, dt_k]),
-            )
-            pos_at_knot = positions[-1]
-            err = float(np.linalg.norm(
-                np.asarray(pos_at_knot) - np.asarray(target_world)
-            ))
-            if err > knot_max_violation_m:
-                logger.info(
-                    "magnus refinement on %s violates knot at rel=%d by "
-                    "%.2f m > %.2f m — rejecting, keeping parabola",
-                    segment_label, rel_idx, err, knot_max_violation_m,
-                )
-                knot_violation_ok = False
-                break
-    if not (
-        knot_violation_ok
-        and omega_mag > 0
-        and omega_mag <= spin_max_omega
-        and improvement >= accept_threshold
-        and magnus_plausible
-    ):
-        return fallback
-    duration_factor = min(1.0, duration_s / 1.0)
-    spin_confidence = float(min(1.0, (improvement / 0.5) * duration_factor))
-    return _MagnusRefinement(
-        effective_p0=mp0,
-        effective_v0=mv0,
-        effective_resid=magnus_resid,
-        omega_world=momega,
-        spin_axis=list((momega / omega_mag).astype(float)),
-        spin_omega=omega_mag,
-        spin_confidence=spin_confidence,
-    )
-
-
-def _spin_seed_for_segment(
+def _classify_ground_touches(
     anchor_by_frame: dict[int, BallAnchor],
-    a: int,
-    b: int,
-    *,
-    v0: np.ndarray | None,
-) -> tuple[np.ndarray, bool]:
-    """Find a player_touch anchor with a ``spin`` preset inside the
-    [a, b] flight segment and translate it to an angular-velocity seed.
+) -> set[int]:
+    """Frames whose ``player_touch`` anchor is a ground-level contact."""
+    sorted_frames = sorted(anchor_by_frame.keys())
 
-    Spin is carried on ``player_touch`` anchors whose ``touch_type`` is
-    ``"shot"`` or ``"volley"`` — the schema validates that pairing.
-    Returns ``(omega_seed, hint_provided)``. ``hint_provided`` is True
-    when an explicit non-``"none"`` preset was found — that flag drives
-    the relaxed Magnus-acceptance threshold downstream.
-    """
-    for fi in range(a, b + 1):
-        anc = anchor_by_frame.get(fi)
-        if anc is None or anc.state not in SPIN_ENABLED_STATES:
+    def _neighbor_implies_flight(
+        idx: int, step: int, airborne_set: frozenset[str]
+    ) -> bool:
+        j = idx + step
+        while 0 <= j < len(sorted_frames):
+            anc_j = anchor_by_frame[sorted_frames[j]]
+            if anc_j.state != "player_touch":
+                return anc_j.state in airborne_set
+            j += step
+        return False
+
+    ground_touch_frames: set[int] = set()
+    for idx, fi in enumerate(sorted_frames):
+        anc = anchor_by_frame[fi]
+        if anc.state != "player_touch":
             continue
-        if not anc.spin or anc.spin == "none":
-            continue
-        return omega_seed_from_preset(anc.spin, v0), True
-    return np.zeros(3, dtype=float), False
+        prev_flight = _neighbor_implies_flight(idx, -1, _PREV_AIRBORNE_STATES)
+        next_flight = _neighbor_implies_flight(idx, +1, _NEXT_AIRBORNE_STATES)
+        if not (prev_flight and next_flight):
+            ground_touch_frames.add(fi)
+    return ground_touch_frames
 
 
 def _resolve_anchor_world(
@@ -449,7 +270,7 @@ def _resolve_anchor_world(
     anc: BallAnchor,
     fi: int,
     ground_touch_frames: set[int],
-    bone_lookup: "_BoneWorldLookup",
+    player_ctx: PlayerContext,
     per_frame_K: dict[int, np.ndarray],
     per_frame_R: dict[int, np.ndarray],
     per_frame_t: dict[int, np.ndarray],
@@ -458,25 +279,20 @@ def _resolve_anchor_world(
     goal_geometry: GoalGeometry,
 ) -> np.ndarray | None:
     """Single source of truth for resolving a hard-knot anchor to its
-    world position. Called from every site that needs anchor world
-    coordinates: the initial pin pass, the IMM-segment knot setup, the
-    Phase 2 span knot setup, and the final end-of-run override.
+    world position.
 
     Rules:
       • ``goal_impact`` → intersect clicked-pixel ray with the goal
-        element geometry (post / crossbar / back_net / side_net).
-        Fallback (rare: ray parallel to surface) is ankle_ray_to_pitch
-        at z = state_to_height("goal_impact") = 2.44 m.
+        element geometry; fallback (ray parallel to surface) is the
+        ray-cast at the goal-impact canonical height.
       • ``player_touch`` ground-touch → clicked-pixel ray-cast at
-        z = ball_radius. SMPL bone XY drifts 0.5–2 m due to monocular
-        HMR depth ambiguity, so using it rubber-bands every dribble.
-      • ``player_touch`` airborne → SMPL bone XYZ at the named body
-        part. Fallback (bone lookup unavailable: missing player track,
-        out-of-range frame, bad bone name) is ankle_ray_to_pitch at
-        the player_touch default height of 1.0 m — NOT ball_radius,
-        which would teleport the airborne touch to ground level.
-      • All other hard-knot states → ankle_ray_to_pitch at the state's
-        canonical height.
+        z = ball_radius (bone XY drifts with monocular HMR depth).
+      • ``player_touch`` airborne → SMPL bone projected onto the
+        clicked-pixel ray (C1: click is authoritative for lateral,
+        the player provides depth). Fallback is the ray-cast at the
+        player_touch default height.
+      • All other hard-knot states → ray-cast at the state's canonical
+        height.
     """
     if anc.image_xy is None:
         return None
@@ -502,22 +318,18 @@ def _resolve_anchor_world(
                 "ball goal_impact resolver failed at frame %d (%s): %s",
                 fi, anc.goal_element, exc,
             )
-            # Fall through to ankle_ray_to_pitch fallback below.
+            # Fall through to the ray-cast fallback below.
 
     if anc.state == "player_touch" and fi not in ground_touch_frames:
-        bone_world = bone_lookup.bone_world(anc)
-        if bone_world is not None:
-            # C1: keep the user's clicked lateral position; take only the
-            # depth from the (HMR-drifting) bone. Projecting the bone onto
-            # the clicked-pixel ray drives lateral error -> 0 while the
-            # ball stays at the contacting player's depth.
-            return _project_point_onto_pixel_ray(
-                np.asarray(bone_world, dtype=float), uv,
-                K, R, t, distortion,
-            )
-        # Fall through to fallback ray-cast at z=1.0 below.
+        if anc.player_id and anc.bone:
+            bone_world = player_ctx.joint_world(fi, anc.player_id, anc.bone)
+            if bone_world is not None:
+                return project_point_onto_pixel_ray(
+                    np.asarray(bone_world, dtype=float), uv,
+                    K, R, t, distortion,
+                )
+        # Fall through to the fallback ray-cast at z=1.0 below.
 
-    # Ray-cast fallback path. Plane height depends on state semantics.
     if anc.state == "player_touch" and fi in ground_touch_frames:
         plane_z = ball_radius
     else:
@@ -538,186 +350,6 @@ def _resolve_anchor_world(
         return None
 
 
-def _apply_hard_knot_anchor_overrides(
-    *,
-    per_frame_world: dict[int, tuple[np.ndarray, float]],
-    anchor_by_frame: dict[int, BallAnchor],
-    ground_touch_frames: set[int],
-    bone_lookup: "_BoneWorldLookup",
-    per_frame_K: dict[int, np.ndarray],
-    per_frame_R: dict[int, np.ndarray],
-    per_frame_t: dict[int, np.ndarray],
-    distortion: tuple[float, float],
-    ball_radius: float,
-    goal_geometry: GoalGeometry,
-) -> None:
-    """Pin per-frame world positions for HARD_KNOT_STATES anchors.
-
-    Idempotent. Every trajectory-writing pass (IMM parabola fit,
-    promotion refit, Phase 2 fit, ground-level interp) is allowed to
-    overwrite arbitrary frames; this helper then pulls anchored
-    hard-knot frames back to the user's clicked pixel + state-height
-    ray-cast (or SMPL bone for ``player_touch``, or goal-element
-    geometry for ``goal_impact``). Anchors are the user's ground truth,
-    so they win.
-    """
-    for fi, anc in anchor_by_frame.items():
-        if anc.state not in HARD_KNOT_STATES:
-            continue
-        world = _resolve_anchor_world(
-            anc=anc, fi=fi,
-            ground_touch_frames=ground_touch_frames,
-            bone_lookup=bone_lookup,
-            per_frame_K=per_frame_K,
-            per_frame_R=per_frame_R,
-            per_frame_t=per_frame_t,
-            distortion=distortion,
-            ball_radius=ball_radius,
-            goal_geometry=goal_geometry,
-        )
-        if world is None:
-            continue
-        per_frame_world[fi] = (world, 1.0)
-
-
-class _BoneWorldLookup:
-    """Resolve ``player_touch`` anchors to bone world positions via SMPL FK.
-
-    Prefers ``output/refined_poses/{player}_refined.npz`` (the cleaned,
-    lean-corrected, smoothed pose track) so player_touch bone positions
-    land where the actual limb is rather than on raw HMR jitter. Falls
-    back to ``output/hmr_world/{shot}__{player}_smpl_world.npz`` when
-    no refined output is available (e.g. refined_poses hasn't been run
-    yet, or the player_id never made it through that stage).
-
-    Refined tracks are keyed by ``player_id`` only and indexed on the
-    shared reference timeline; ball anchors carry shot-local frame
-    indices. We apply ``sync_map.offset_for(shot)`` to translate local
-    anchor frames into the reference timeline before looking them up
-    in the refined track's ``frames`` array.
-
-    Caches per-player loads to avoid repeated NPZ reads. Returns
-    ``None`` when the player track, the requested frame, or the bone
-    name is unavailable — caller falls back to the pixel-only
-    behaviour for that anchor.
-    """
-
-    def __init__(self, output_dir: Path, shot_id: str) -> None:
-        from src.utils.ball_anchor_heights import BONE_TO_SMPL_INDEX
-
-        self._output_dir = output_dir
-        self._shot_id = shot_id
-        self._bone_map = BONE_TO_SMPL_INDEX
-        # Each cache entry is ``(track, frame_offset)`` where
-        # ``frame_offset`` is added to the anchor's local frame index
-        # to get the lookup key. hmr_world tracks carry shot-local
-        # frames so the offset is 0; refined tracks carry reference-
-        # timeline frames so we subtract the shot's sync offset.
-        self._tracks: dict[str, tuple[object | None, int]] = {}
-
-    def _sync_offset(self) -> int:
-        from src.schemas.sync_map import SyncMap
-
-        sync_path = self._output_dir / "shots" / "sync_map.json"
-        if not sync_path.exists():
-            return 0
-        try:
-            return SyncMap.load(sync_path).offset_for(self._shot_id)
-        except Exception as exc:
-            logger.warning(
-                "ball stage: sync_map.json failed to load (%s) — defaulting "
-                "offset 0 for shot %r", exc, self._shot_id,
-            )
-            return 0
-
-    def _load_track(self, player_id: str) -> tuple[object | None, int]:
-        if player_id in self._tracks:
-            return self._tracks[player_id]
-        # Refined first (post-HMR cleanup applied).
-        refined_path = (
-            self._output_dir / "refined_poses" / f"{player_id}_refined.npz"
-        )
-        if refined_path.exists():
-            from src.schemas.refined_pose import RefinedPose
-
-            try:
-                track = RefinedPose.load(refined_path)
-            except Exception as exc:
-                logger.warning(
-                    "ball stage: failed to load refined track %s: %s",
-                    refined_path, exc,
-                )
-                track = None
-            if track is not None:
-                # Refined frames live on the reference timeline; ball
-                # anchors are shot-local. ``local = ref + offset`` per
-                # SyncMap, so to translate local → ref we ADD ``-offset``.
-                ref_lookup_shift = -self._sync_offset()
-                self._tracks[player_id] = (track, ref_lookup_shift)
-                return self._tracks[player_id]
-        # Fallback: raw hmr_world track for this (shot, player).
-        from src.schemas.smpl_world import SmplWorldTrack
-        candidates = []
-        if self._shot_id:
-            candidates.append(
-                self._output_dir
-                / "hmr_world"
-                / f"{self._shot_id}__{player_id}_smpl_world.npz"
-            )
-        candidates.append(
-            self._output_dir / "hmr_world" / f"{player_id}_smpl_world.npz"
-        )
-        for path in candidates:
-            if path.exists():
-                try:
-                    track = SmplWorldTrack.load(path)
-                except Exception as exc:
-                    logger.warning(
-                        "ball stage: failed to load SMPL track %s: %s",
-                        path, exc,
-                    )
-                    self._tracks[player_id] = (None, 0)
-                    return self._tracks[player_id]
-                self._tracks[player_id] = (track, 0)
-                return self._tracks[player_id]
-        logger.warning(
-            "ball stage: no SMPL track (refined or hmr_world) for player %r "
-            "(shot=%r)", player_id, self._shot_id,
-        )
-        self._tracks[player_id] = (None, 0)
-        return self._tracks[player_id]
-
-    def bone_world(self, anchor: BallAnchor) -> np.ndarray | None:
-        from src.utils.smpl_skeleton import compute_joint_world
-
-        if anchor.state != "player_touch":
-            return None
-        if not anchor.player_id or not anchor.bone:
-            return None
-        joint_idx = self._bone_map.get(anchor.bone)
-        if joint_idx is None:
-            return None
-        track, frame_shift = self._load_track(anchor.player_id)
-        if track is None:
-            return None
-        frames = np.asarray(track.frames)  # type: ignore[attr-defined]
-        lookup_frame = int(anchor.frame) + frame_shift
-        match = np.where(frames == lookup_frame)[0]
-        if len(match) == 0:
-            logger.debug(
-                "ball stage: SMPL track for %s has no frame %d (lookup=%d)",
-                anchor.player_id, anchor.frame, lookup_frame,
-            )
-            return None
-        i = int(match[0])
-        return compute_joint_world(
-            track.thetas[i],         # type: ignore[attr-defined]
-            track.root_R[i],         # type: ignore[attr-defined]
-            track.root_t[i],         # type: ignore[attr-defined]
-            joint_idx,
-        )
-
-
 def _emit_ball_keyframes(
     *,
     ball_out_path: Path,
@@ -731,13 +363,14 @@ def _emit_ball_keyframes(
     per_frame_t: dict[int, np.ndarray],
     distortion: tuple[float, float],
     ground_touch_frames: set[int],
+    flight_segments: "tuple" = (),
 ) -> None:
     """Write the sparse ``*_ball_keyframes.json`` sidecar next to the dense
     track. ``world_xyz`` for each anchor is taken from the already-built
     dense ``per_frame_out`` so the two artifacts agree exactly.
 
-    The dense track is the stage contract; this sidecar is enrichment.
-    Callers should treat a failure here as non-fatal (wrap in try/except).
+    ``flight_segments`` lets keyframes on a spinning flight carry the fitted
+    Magnus ``omega_rad_s`` so the engine can drive physically-correct curl.
     """
     world_by_frame = {
         bf.frame: bf.world_xyz
@@ -755,12 +388,271 @@ def _emit_ball_keyframes(
         per_frame_t=per_frame_t,
         distortion=distortion,
         ground_touch_frames=ground_touch_frames,
+        flight_segments=flight_segments,
     )
     kf_path = ball_out_path.with_name(
         ball_out_path.name.replace("ball_track", "ball_keyframes")
     )
     kfset.save(kf_path)
     logger.debug("ball: wrote %d keyframes to %s", len(kfset.keyframes), kf_path)
+
+
+def _write_observations_sidecar(
+    path: Path,
+    clip_id: str,
+    fps: float,
+    steps: list[TrackerStep],
+    confidences: dict[int, float],
+    sources: dict[int, str],
+) -> None:
+    """Persist the raw detection/tracking pass so re-solves and the
+    dashboard don't need to re-run the detector."""
+    payload = {
+        "clip_id": clip_id,
+        "fps": fps,
+        "frames": [
+            {
+                "frame": s.frame,
+                "uv": (
+                    [float(s.uv[0]), float(s.uv[1])]
+                    if s.uv is not None else None
+                ),
+                "confidence": float(confidences.get(s.frame, 0.0)),
+                "p_flight": float(s.p_flight),
+                "gap_fill": bool(s.is_gap_fill),
+                "source": sources.get(s.frame, "none"),
+            }
+            for s in steps
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+
+
+def _build_tracker(cfg: dict, max_gap_frames: int | None = None) -> BallTracker:
+    """IMM tracker from the ball config; optional max-gap override for
+    corridor prediction (predictions must persist through long gaps)."""
+    tracker_cfg = cfg.get("tracker", {})
+    return BallTracker(
+        process_noise_grounded_px=float(tracker_cfg.get("process_noise_grounded_px", 4.0)),
+        process_noise_flight_px=float(tracker_cfg.get("process_noise_flight_px", 12.0)),
+        measurement_noise_px=float(tracker_cfg.get("measurement_noise_px", 2.0)),
+        gating_sigma=float(tracker_cfg.get("gating_sigma", 4.0)),
+        max_gap_frames=(
+            int(cfg.get("max_gap_frames", 6))
+            if max_gap_frames is None else int(max_gap_frames)
+        ),
+        initial_p_flight=float(tracker_cfg.get("initial_p_flight", 0.1)),
+    )
+
+
+def _resmooth_observations(
+    per_frame_uv: dict[int, tuple[float, float] | None],
+    n_frames: int,
+    cfg: dict,
+) -> list[TrackerStep]:
+    """Fresh IMM pass over a merged observation set (no video access).
+
+    Applies the same raw-uv override rule as the streaming detect loop:
+    fits must see raw measurements, the tracker only bridges misses.
+    """
+    tracker = _build_tracker(cfg)
+    steps: list[TrackerStep] = []
+    for f in range(n_frames):
+        uv = per_frame_uv.get(f)
+        step = tracker.update(f, uv)
+        if uv is not None and not step.is_outlier:
+            step = TrackerStep(
+                frame=step.frame, uv=uv, p_flight=step.p_flight,
+                is_outlier=step.is_outlier, is_gap_fill=step.is_gap_fill,
+                pos_cov=step.pos_cov,
+            )
+        steps.append(step)
+    return steps
+
+
+def _second_pass_cfg(cfg: dict) -> SecondPassCfg:
+    sp = cfg.get("second_pass", {})
+    base = SecondPassCfg()
+    return SecondPassCfg(
+        enabled=bool(sp.get("enabled", base.enabled)),
+        candidate_min_score=float(sp.get("candidate_min_score", base.candidate_min_score)),
+        top_k=int(sp.get("top_k", base.top_k)),
+        corridor_sigma=float(sp.get("corridor_sigma", base.corridor_sigma)),
+        accept_min=float(sp.get("accept_min", base.accept_min)),
+        zoom_min_ball_px=float(sp.get("zoom_min_ball_px", base.zoom_min_ball_px)),
+        zoom_crop_px=int(sp.get("zoom_crop_px", base.zoom_crop_px)),
+        redetect_low_conf=bool(sp.get("redetect_low_conf", base.redetect_low_conf)),
+        redetect_max_conf=float(sp.get("redetect_max_conf", base.redetect_max_conf)),
+    )
+
+
+def _cross_replay_cfg(cfg: dict) -> CrossReplayCfg:
+    """Map ball.cross_replay.* to a :class:.
+
+    Pattern: same as _second_pass_cfg in this module.
+    """
+    cr = cfg.get("cross_replay", {})
+    base = CrossReplayCfg()
+    return CrossReplayCfg(
+        enabled=bool(cr.get("enabled", base.enabled)),
+        min_conf=float(cr.get("min_conf", base.min_conf)),
+        max_ray_miss_m=float(cr.get("max_ray_miss_m", base.max_ray_miss_m)),
+        min_parallax_deg=float(cr.get("min_parallax_deg", base.min_parallax_deg)),
+        offset_search_radius_frames=float(cr.get(
+            "offset_search_radius_frames", base.offset_search_radius_frames)),
+        offset_search_step=float(cr.get("offset_search_step", base.offset_search_step)),
+        min_pairs_for_refine=int(cr.get(
+            "min_pairs_for_refine", base.min_pairs_for_refine)),
+        fix_weight_px_per_m=float(cr.get("fix_weight_px_per_m", base.fix_weight_px_per_m)),
+    )
+
+
+def _auto_event_cfg(
+    auto_cfg: dict, seg_cfg: dict | None = None, pose_cfg: dict | None = None,
+) -> AutoEventCfg:
+    base = AutoEventCfg()
+    seg_cfg = seg_cfg or {}
+    pose_cfg = pose_cfg or {}
+    return AutoEventCfg(
+        touch_max_px=float(auto_cfg.get("touch_max_px", base.touch_max_px)),
+        min_direction_change_deg=float(auto_cfg.get(
+            "min_direction_change_deg", base.min_direction_change_deg)),
+        min_speed_change_px=float(auto_cfg.get(
+            "min_speed_change_px", base.min_speed_change_px)),
+        event_window_frames=int(auto_cfg.get(
+            "event_window_frames", base.event_window_frames)),
+        merge_window_frames=int(auto_cfg.get(
+            "merge_window_frames", base.merge_window_frames)),
+        min_break_speed_px=float(auto_cfg.get(
+            "min_break_speed_px", base.min_break_speed_px)),
+        bounce_min_vy_px=float(auto_cfg.get(
+            "bounce_min_vy_px", base.bounce_min_vy_px)),
+        stationary_max_speed_px=float(auto_cfg.get(
+            "stationary_max_speed_px", base.stationary_max_speed_px)),
+        stationary_min_frames=int(auto_cfg.get(
+            "stationary_min_frames", base.stationary_min_frames)),
+        stationary_min_conf=float(auto_cfg.get(
+            "stationary_min_conf", base.stationary_min_conf)),
+        goal_line_tolerance_m=float(auto_cfg.get(
+            "goal_line_tolerance_m", base.goal_line_tolerance_m)),
+        goal_net_speed_drop_ratio=float(auto_cfg.get(
+            "goal_net_speed_drop_ratio", base.goal_net_speed_drop_ratio)),
+        goal_min_direction_change_deg=float(auto_cfg.get(
+            "goal_min_direction_change_deg", base.goal_min_direction_change_deg)),
+        clean_track=bool(seg_cfg.get("clean_track", base.clean_track)),
+        track_max_jump_px=float(seg_cfg.get(
+            "max_jump_px", base.track_max_jump_px)),
+        use_segmentation=bool(seg_cfg.get("enabled", base.use_segmentation)),
+        segment_max_residual_px=float(seg_cfg.get(
+            "max_residual_px", base.segment_max_residual_px)),
+        use_pose_touch=bool(pose_cfg.get("enabled", base.use_pose_touch)),
+        touch_relaxed_px=float(pose_cfg.get(
+            "relaxed_radius_px", base.touch_relaxed_px)),
+        kinematic_bonus_weight=float(pose_cfg.get(
+            "kinematic_bonus_weight", base.kinematic_bonus_weight)),
+    )
+
+
+def _kinematic_touch_cfg(cfg_dict: dict) -> KinematicTouchCfg:
+    """Build a KinematicTouchCfg from the ``ball.kinematic_touch`` sub-tree,
+    falling back to dataclass defaults for any missing key."""
+    base = KinematicTouchCfg()
+    d = cfg_dict or {}
+    return KinematicTouchCfg(
+        enabled=bool(d.get("enabled", base.enabled)),
+        contact_gap_m=float(d.get("contact_gap_m", base.contact_gap_m)),
+        touch_relaxed_px=float(d.get("touch_relaxed_px", base.touch_relaxed_px)),
+        max_ball_gap_frames=int(d.get("max_ball_gap_frames", base.max_ball_gap_frames)),
+        min_fk_conf=float(d.get("min_fk_conf", base.min_fk_conf)),
+        kin_window=int(d.get("kin_window", base.kin_window)),
+        kin_min_foot_speed=float(d.get("kin_min_foot_speed", base.kin_min_foot_speed)),
+        kin_min_head_speed_m=float(d.get("kin_min_head_speed_m", base.kin_min_head_speed_m)),
+        confirm_window=int(d.get("confirm_window", base.confirm_window)),
+        nms_window=int(d.get("nms_window", base.nms_window)),
+        w_gap=float(d.get("w_gap", base.w_gap)),
+        w_kin=float(d.get("w_kin", base.w_kin)),
+        w_confirm=float(d.get("w_confirm", base.w_confirm)),
+        w_fk=float(d.get("w_fk", base.w_fk)),
+        w_interp=float(d.get("w_interp", base.w_interp)),
+        min_emit_score=float(d.get("min_emit_score", base.min_emit_score)),
+    )
+
+
+def _auto_anchor_cfg(auto_cfg: dict, ball_radius: float) -> AutoAnchorCfg:
+    base = AutoAnchorCfg()
+    return AutoAnchorCfg(
+        enabled=bool(auto_cfg.get("enabled", True)),
+        min_event_score=float(auto_cfg.get(
+            "min_event_score", base.min_event_score)),
+        grounded_interval=int(auto_cfg.get(
+            "grounded_interval", base.grounded_interval)),
+        grounded_min_conf=float(auto_cfg.get(
+            "grounded_min_conf", base.grounded_min_conf)),
+        contact_max_gap_m=float(auto_cfg.get(
+            "contact_max_gap_m", base.contact_max_gap_m)),
+        shot_speed_px=float(auto_cfg.get(
+            "shot_speed_px", base.shot_speed_px)),
+        suppress_radius_frames=int(auto_cfg.get(
+            "suppress_radius_frames", base.suppress_radius_frames)),
+        post_event_suppress_frames=int(auto_cfg.get(
+            "post_event_suppress_frames", base.post_event_suppress_frames)),
+        grounded_max_p_flight=float(auto_cfg.get(
+            "grounded_max_p_flight", base.grounded_max_p_flight)),
+        max_speed_m_s=float(auto_cfg.get(
+            "max_speed_m_s", base.max_speed_m_s)),
+        max_ground_speed_m_s=float(auto_cfg.get(
+            "max_ground_speed_m_s", base.max_ground_speed_m_s)),
+        ball_radius_m=ball_radius,
+    )
+
+
+def _solver_cfg(cfg: dict, ball_radius: float) -> SolverCfg:
+    base = SolverCfg()
+    physics = cfg.get("physics", {})
+    plaus = cfg.get("plausibility", {})
+    spin = cfg.get("spin", {})
+    tracker = cfg.get("tracker", {})
+    return SolverCfg(
+        ball_radius_m=ball_radius,
+        ground_z_tol_m=float(physics.get("ground_z_tol_m", base.ground_z_tol_m)),
+        rolling_max_residual_px=float(physics.get(
+            "rolling_max_residual_px", base.rolling_max_residual_px)),
+        rolling_decel_max_m_s2=float(physics.get(
+            "rolling_decel_max_m_s2", base.rolling_decel_max_m_s2)),
+        rolling_max_speed_m_s=float(physics.get(
+            "rolling_max_speed_m_s", base.rolling_max_speed_m_s)),
+        max_arc_seconds=float(physics.get(
+            "max_arc_seconds", base.max_arc_seconds)),
+        open_span_min_apex_m=float(physics.get(
+            "open_span_min_apex_m", base.open_span_min_apex_m)),
+        flight_max_residual_px=float(cfg.get(
+            "flight_max_residual_px", base.flight_max_residual_px)),
+        max_splits_per_span=int(physics.get(
+            "max_splits_per_span", base.max_splits_per_span)),
+        min_flight_frames=int(tracker.get(
+            "min_flight_frames", base.min_flight_frames)),
+        restitution_min=float(physics.get(
+            "restitution_min", base.restitution_min)),
+        restitution_max=float(physics.get(
+            "restitution_max", base.restitution_max)),
+        z_max_m=float(plaus.get("z_max_m", base.z_max_m)),
+        horizontal_speed_max_m_s=float(plaus.get(
+            "horizontal_speed_max_m_s", base.horizontal_speed_max_m_s)),
+        pitch_margin_m=float(plaus.get("pitch_margin_m", base.pitch_margin_m)),
+        spin_enabled=bool(spin.get("enabled", base.spin_enabled)),
+        spin_min_seconds=float(spin.get(
+            "min_flight_seconds", base.spin_min_seconds)),
+        spin_min_improve=float(spin.get(
+            "min_residual_improvement", base.spin_min_improve)),
+        spin_min_improve_hinted=float(spin.get(
+            "min_residual_improvement_with_hint", base.spin_min_improve_hinted)),
+        spin_max_omega_rad_s=float(spin.get(
+            "max_omega_rad_s", base.spin_max_omega_rad_s)),
+        drag_k_over_m=float(spin.get("drag_k_over_m", base.drag_k_over_m)),
+        mu_max=float(physics.get("mu_max", base.mu_max)),
+        bounce_coupling=bool(spin.get("bounce_coupling", base.bounce_coupling)),
+    )
 
 
 class BallStage(BaseStage):
@@ -800,12 +692,18 @@ class BallStage(BaseStage):
                     f"ball stage requires manifest at {manifest_path}; run prepare_shots first"
                 )
             clip_path = self._guess_legacy_clip()
-            self._run_shot("", clip_path, cam_path, ball_out, cfg, detector)
+            arts = self._detect_shot("", clip_path, cam_path, ball_out, cfg, detector)
+            if arts is not None:
+                self._solve_shot(arts, cfg, fixes=None)
             return
 
         manifest = ShotsManifest.load(manifest_path)
         shot_filter = getattr(self, "shot_filter", None)
-        for shot in manifest.active_shots():
+
+        # --- Pass 1: detect all shots ------------------------------------
+        artifacts_by_shot: dict[str, _DetectArtifacts] = {}
+        active_shots = manifest.active_shots()
+        for shot in active_shots:
             if shot_filter is not None and shot.id != shot_filter:
                 continue
             cam_path = self.output_dir / "camera" / f"{shot.id}_camera_track.json"
@@ -823,7 +721,43 @@ class BallStage(BaseStage):
                     shot.id, clip_path,
                 )
                 continue
-            self._run_shot(shot.id, clip_path, cam_path, ball_out, cfg, detector)
+            arts = self._detect_shot(shot.id, clip_path, cam_path, ball_out, cfg, detector)
+            if arts is not None:
+                artifacts_by_shot[shot.id] = arts
+
+        # --- Pass 2: triangulate per sync-group --------------------------
+        fixes_by_shot, cr_summaries = self._triangulate_groups(
+            artifacts_by_shot, cfg,
+        )
+
+        # --- Pass 3: solve all shots with fixes --------------------------
+        for shot_id, arts in artifacts_by_shot.items():
+            self._solve_shot(
+                arts, cfg,
+                fixes=fixes_by_shot.get(shot_id),
+                cr_summary=cr_summaries.get(shot_id),
+            )
+
+    def _run_shot(
+        self,
+        shot_id: str,
+        clip_path: Path,
+        camera_path: Path,
+        ball_out_path: Path,
+        cfg: dict,
+        detector: BallDetector,
+    ) -> None:
+        """Compatibility shim: detect then solve for one shot.
+
+        Retained for callers (e.g. real-clip acceptance tests) that invoke
+        the method directly.  The three-pass run() path uses
+        _detect_shot / _triangulate_groups / _solve_shot instead.
+        """
+        arts = self._detect_shot(
+            shot_id, clip_path, camera_path, ball_out_path, cfg, detector,
+        )
+        if arts is not None:
+            self._solve_shot(arts, cfg, fixes=None)
 
     def _guess_legacy_clip(self) -> Path:
         """Find a clip file under shots/ for the legacy no-manifest path."""
@@ -835,165 +769,17 @@ class BallStage(BaseStage):
             )
         return candidates[0]
 
-    def _run_shot(
+    # ------------------------------------------------------------------
+
+    def _detect_loop(
         self,
-        shot_id: str,
         clip_path: Path,
-        camera_path: Path,
-        ball_out_path: Path,
         cfg: dict,
         detector: BallDetector,
-    ) -> None:
-        camera = CameraTrack.load(camera_path)
-        per_frame_K = {f.frame: np.array(f.K) for f in camera.frames}
-        per_frame_R = {f.frame: np.array(f.R) for f in camera.frames}
-        t_world_fallback = np.array(camera.t_world)
-        per_frame_t = {
-            f.frame: (np.array(f.t) if f.t is not None else t_world_fallback)
-            for f in camera.frames
-        }
-        distortion = camera.distortion
-        n_frames = max(per_frame_K) + 1 if per_frame_K else 0
-
-        ball_radius = float(cfg.get("ball_radius_m", 0.11))
-        tracker_cfg = cfg.get("tracker", {})
-        spin_cfg = cfg.get("spin", {})
-        max_residual = float(cfg.get("flight_max_residual_px", 5.0))
-        plaus_cfg = PlausibilityCfg(
-            z_max_m=float(cfg.get("plausibility", {}).get("z_max_m", 50.0)),
-            horizontal_speed_max_m_s=float(cfg.get("plausibility", {}).get("horizontal_speed_max_m_s", 40.0)),
-            pitch_margin_m=float(cfg.get("plausibility", {}).get("pitch_margin_m", 5.0)),
-        )
-        pitch_cfg = self.config.get("pitch", {})
-        pitch_dims = PitchDims(
-            length_m=float(pitch_cfg.get("length_m", 105.0)),
-            width_m=float(pitch_cfg.get("width_m", 68.0)),
-        )
-        goal_geometry = GoalGeometry.from_pitch_config(pitch_cfg)
-        # C2: free p0 in the Phase-2 fit when a span has >= this many hard
-        # knots (gravity + 2 knots fully determine the arc, depth included).
-        free_p0_min_hard_knots = int(cfg.get("free_p0_min_hard_knots", 2))
-        # C3a: flight spans with fewer hard knots than this are monocularly
-        # depth-under-determined; recorded for the quality report so the user
-        # can add a bracketing anchor.
-        min_hard_knots_warn = int(cfg.get("min_hard_knots_warn", 2))
-        span_knot_counts: list[tuple[int, int, int]] = []
-
-        tracker = BallTracker(
-            process_noise_grounded_px=float(tracker_cfg.get("process_noise_grounded_px", 4.0)),
-            process_noise_flight_px=float(tracker_cfg.get("process_noise_flight_px", 12.0)),
-            measurement_noise_px=float(tracker_cfg.get("measurement_noise_px", 2.0)),
-            gating_sigma=float(tracker_cfg.get("gating_sigma", 4.0)),
-            max_gap_frames=int(cfg.get("max_gap_frames", 6)),
-            initial_p_flight=float(tracker_cfg.get("initial_p_flight", 0.1)),
-        )
-
-        feet_pixel_by_frame = _load_foot_uvs_for_shot(self.output_dir, shot_id)
-        anchor_by_frame = _load_ball_anchors(self.output_dir, shot_id)
-        bone_lookup = _BoneWorldLookup(self.output_dir, shot_id)
-        if anchor_by_frame:
-            logger.info(
-                "ball stage: loaded %d anchors for shot %s",
-                len(anchor_by_frame), shot_id or "(legacy)",
-            )
-
-        # Classify each player_touch by the surrounding anchors. The
-        # ball is at ground level (z = ball radius) UNLESS the touch
-        # sits between two airborne-implying anchors — only then is
-        # the ball mid-flight at the contact (e.g. a volley between
-        # two airborne anchors, a header between airborne_mid and
-        # airborne_high). A ground-to-air transition (grounded → pt
-        # → airborne) keeps the ball at ground level on the touch
-        # frame: the kick launches it on the next frame, not at the
-        # touch frame itself. This is robust to HMR foot Z drift
-        # (~0.1–1.5 m depending on pose).
-        # For a pt to be "mid-flight" (ball at bone height at the
-        # contact), the ball must be airborne BOTH approaching and
-        # leaving the touch.
-        #   - approaching airborne: previous anchor is airborne_*,
-        #     header/volley/chest/catch, off_screen_flight, bounce
-        #     (ball was descending into the bounce), or kick (kick
-        #     launches the ball — anything after kick until the next
-        #     ground state is in flight).
-        #   - leaving airborne: next anchor is airborne_*,
-        #     header/volley/chest/catch, off_screen_flight, or bounce
-        #     (ball was airborne until it hit the ground at bounce).
-        #     NOT kick — kick is "ball on the ground here, then
-        #     launches", which means the ball was on the ground at the
-        #     pt frame.
-        _PREV_AIRBORNE_STATES = frozenset({
-            "airborne_low", "airborne_mid", "airborne_high",
-            "header", "volley", "chest", "catch", "off_screen_flight",
-            "bounce", "kick",
-        })
-        _NEXT_AIRBORNE_STATES = frozenset({
-            "airborne_low", "airborne_mid", "airborne_high",
-            "header", "volley", "chest", "catch", "off_screen_flight",
-            "bounce",
-        })
-        sorted_anchor_frames = sorted(anchor_by_frame.keys())
-
-        def _neighbor_implies_flight(
-            idx: int, step: int, airborne_set: frozenset[str]
-        ) -> bool:
-            """Walk through any adjacent player_touch chain; return True
-            if the first non-pt anchor in that direction is in the
-            given airborne-implying set."""
-            j = idx + step
-            while 0 <= j < len(sorted_anchor_frames):
-                anc_j = anchor_by_frame[sorted_anchor_frames[j]]
-                if anc_j.state != "player_touch":
-                    return anc_j.state in airborne_set
-                j += step
-            return False
-
-        ground_touch_frames: set[int] = set()
-        for idx in range(len(sorted_anchor_frames)):
-            fi = sorted_anchor_frames[idx]
-            anc = anchor_by_frame[fi]
-            if anc.state != "player_touch":
-                continue
-            prev_flight = _neighbor_implies_flight(idx, -1, _PREV_AIRBORNE_STATES)
-            next_flight = _neighbor_implies_flight(idx, +1, _NEXT_AIRBORNE_STATES)
-            if not (prev_flight and next_flight):
-                ground_touch_frames.add(fi)
-        if ground_touch_frames:
-            logger.info(
-                "ball stage: %d player_touch anchor(s) classified as ground-level",
-                len(ground_touch_frames),
-            )
-        if ground_touch_frames:
-            logger.info(
-                "ball stage: %d player_touch anchor(s) classified as ground-level",
-                len(ground_touch_frames),
-            )
-
-        forced_flight: set[int] = {
-            fi for fi, a in anchor_by_frame.items()
-            if a.state in AIRBORNE_STATES and fi not in ground_touch_frames
-        }
-        # Raw anchor pixels keyed by frame for exact world-position override
-        # after the tracker loop. Off_screen_flight anchors have no pixel and
-        # are excluded here.
-        anchor_pixels: dict[int, tuple[float, float]] = {
-            fi: (float(a.image_xy[0]), float(a.image_xy[1]))
-            for fi, a in anchor_by_frame.items()
-            if a.image_xy is not None
-        }
-        kick_cfg = KickAnchorCfg(
-            enabled=bool(cfg.get("kick_anchor", {}).get("enabled", True))
-                    and bool(feet_pixel_by_frame),
-            max_pixel_distance_px=float(cfg.get("kick_anchor", {}).get("max_pixel_distance_px", 30.0)),
-            lookahead_frames=int(cfg.get("kick_anchor", {}).get("lookahead_frames", 4)),
-            min_pixel_acceleration_px_per_frame=float(cfg.get("kick_anchor", {}).get("min_pixel_acceleration_px_per_frame", 6.0)),
-            foot_anchor_z_m=float(cfg.get("kick_anchor", {}).get("foot_anchor_z_m", 0.11)),
-        )
-        if not feet_pixel_by_frame and cfg.get("kick_anchor", {}).get("enabled", True):
-            logger.warning(
-                "ball stage: kick_anchor enabled but no kp2d sidecars found under %s",
-                self.output_dir / "hmr_world",
-            )
-
+        anchor_by_frame: dict[int, BallAnchor],
+    ) -> tuple[list[TrackerStep], dict[int, float], dict[int, str]]:
+        """Per-frame detection + appearance bridging + IMM smoothing."""
+        tracker = _build_tracker(cfg)
         bridge_cfg = AppearanceBridgeCfg(
             enabled=bool(cfg.get("appearance_bridge", {}).get("enabled", True)),
             max_gap_frames=int(cfg.get("appearance_bridge", {}).get("max_gap_frames", 8)),
@@ -1008,6 +794,7 @@ class BallStage(BaseStage):
 
         steps: list[TrackerStep] = []
         raw_confidences: dict[int, float] = {}
+        sources: dict[int, str] = {}
         cap = cv2.VideoCapture(str(clip_path))
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open clip: {clip_path}")
@@ -1020,12 +807,12 @@ class BallStage(BaseStage):
                 anchor = anchor_by_frame.get(frame_idx)
                 if anchor is not None:
                     if anchor.state == "off_screen_flight":
-                        # No pixel; let the IMM predict, but record the
-                        # forced flight marker for the flight-run pass below.
+                        # No pixel; let the IMM predict.
                         uv: tuple[float, float] | None = None
                     else:
                         uv = (float(anchor.image_xy[0]), float(anchor.image_xy[1]))
                         raw_confidences[frame_idx] = 1.0
+                        sources[frame_idx] = "anchor"
                         bridge.update_template(
                             frame=frame_idx, frame_image=frame,
                             uv=uv, confidence=1.0,
@@ -1033,6 +820,10 @@ class BallStage(BaseStage):
                     consecutive_misses = 0
                 else:
                     det = detector.detect(frame)
+                    if det is not None:
+                        h_img, w_img = frame.shape[:2]
+                        if not (0.0 <= det[0] < w_img and 0.0 <= det[1] < h_img):
+                            det = None
                     if det is None:
                         consecutive_misses += 1
                         bridge_result = bridge.try_bridge(
@@ -1049,10 +840,12 @@ class BallStage(BaseStage):
                         else:
                             uv, bridged_conf = bridge_result
                             raw_confidences[frame_idx] = bridged_conf
+                            sources[frame_idx] = "bridge"
                     else:
                         consecutive_misses = 0
                         uv = (float(det[0]), float(det[1]))
                         raw_confidences[frame_idx] = float(det[2])
+                        sources[frame_idx] = "detector"
                         bridge.update_template(
                             frame=frame_idx,
                             frame_image=frame,
@@ -1060,1135 +853,1062 @@ class BallStage(BaseStage):
                             confidence=float(det[2]),
                         )
                 step = tracker.update(frame_idx, uv)
+                # The IMM smooths and lags the pixel track (visibly so
+                # right after a kick); fits must see the raw measurement.
+                # Keep the tracker's uv only where it bridges a miss.
+                if uv is not None and not step.is_outlier:
+                    step = TrackerStep(
+                        frame=step.frame, uv=uv, p_flight=step.p_flight,
+                        is_outlier=step.is_outlier,
+                        is_gap_fill=step.is_gap_fill,
+                        pos_cov=step.pos_cov,
+                    )
                 steps.append(step)
                 frame_idx += 1
         finally:
             cap.release()
+        return steps, raw_confidences, sources
 
-        if frame_idx == 0:
-            logger.warning("ball stage: clip %s contained no frames", clip_path)
-            return
+    def _second_pass_loop(
+        self,
+        clip_path: Path,
+        gap_runs: list[tuple[int, int]],
+        corridors: dict[int, tuple[np.ndarray, np.ndarray]],
+        per_frame_K: dict[int, np.ndarray],
+        per_frame_R: dict[int, np.ndarray],
+        per_frame_t: dict[int, np.ndarray],
+        distortion: tuple[float, float],
+        detector: BallDetector,
+        sp_cfg: SecondPassCfg,
+        ball_radius: float,
+    ) -> list[SecondPassDetection]:
+        """Revisit evidence gaps with corridor-gated candidate detection.
 
-        n_frames = max(n_frames, frame_idx)
+        Full-frame pass first (run-grouped so the detector's temporal
+        buffer is primed once per run), then a zoom retry on frames where
+        nothing cleared the gate and the predicted ball is small.
+        """
+        accepted: list[SecondPassDetection] = []
+        zoom_targets: list[int] = []
+        prime_offset = getattr(detector, "_frames_in", 3) - 1
+        cap = cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open clip: {clip_path}")
+        try:
+            for start, end in gap_runs:
+                prime = max(0, start - prime_offset)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, prime)
+                detector.reset()
+                for f in range(prime, end + 1):
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    cands = detector.detect_candidates(
+                        frame, sp_cfg.candidate_min_score, sp_cfg.top_k,
+                    )
+                    cands = filter_in_bounds(cands, frame.shape[1], frame.shape[0])
+                    if f < start or f not in corridors:
+                        continue
+                    mean, cov = corridors[f]
+                    best = best_gated_candidate(cands, mean, cov, sp_cfg)
+                    if best is not None:
+                        accepted.append(SecondPassDetection(
+                            frame=f, uv=best[0],
+                            combined_score=best[1], used_zoom=False,
+                        ))
+                        continue
+                    K = per_frame_K.get(f)
+                    R = per_frame_R.get(f)
+                    t = per_frame_t.get(f)
+                    if K is None or R is None or t is None:
+                        continue
+                    size = apparent_ball_px(
+                        K, R, t,
+                        (float(mean[0]), float(mean[1])),
+                        ball_radius, distortion,
+                    )
+                    if size is not None and size < sp_cfg.zoom_min_ball_px:
+                        zoom_targets.append(f)
+            for f in zoom_targets:
+                mean, cov = corridors[f]
+                best = self._zoom_detect(cap, f, mean, cov, detector, sp_cfg)
+                if best is not None:
+                    accepted.append(SecondPassDetection(
+                        frame=f, uv=best[0],
+                        combined_score=best[1], used_zoom=True,
+                    ))
+        finally:
+            detector.reset()
+            cap.release()
+        accepted.sort(key=lambda d: d.frame)
+        return accepted
 
-        # 3D ground projection of every smoothed step.
-        # World positions far outside the pitch are dropped: when the
-        # IMM-smoothed UV approaches the camera horizon the ray-to-plane
-        # intersection blows up to hundreds (or thousands) of metres,
-        # producing visible teleports in the 3D viewer. An honest
-        # state="missing" is better than a wrong world position.
-        offpitch_clamp_m = max(
-            50.0, 2.0 * max(pitch_dims.length_m, pitch_dims.width_m)
-        )
-        per_frame_world: dict[int, tuple[np.ndarray, float]] = {}
-        for step in steps:
-            if step.uv is None:
-                continue
-            fi = step.frame
-            if fi not in per_frame_K:
-                continue
-            try:
-                world = ankle_ray_to_pitch(
-                    step.uv,
-                    K=per_frame_K[fi],
-                    R=per_frame_R[fi],
-                    t=per_frame_t[fi],
-                    plane_z=ball_radius,
-                    distortion=distortion,
+    def _zoom_detect(
+        self,
+        cap: "cv2.VideoCapture",
+        frame_idx: int,
+        mean: np.ndarray,
+        cov: np.ndarray,
+        detector: BallDetector,
+        sp_cfg: SecondPassCfg,
+    ) -> tuple[tuple[float, float], float] | None:
+        """Crop around the corridor and re-detect; the detector's own
+        letterbox upscales the crop, magnifying a small ball."""
+        half = sp_cfg.zoom_crop_px // 2
+        prime_offset = getattr(detector, "_frames_in", 3) - 1
+        prime = max(0, frame_idx - prime_offset)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, prime)
+        detector.reset()
+        best: tuple[tuple[float, float], float] | None = None
+        for f in range(prime, frame_idx + 1):
+            ret, frame = cap.read()
+            if not ret:
+                return None
+            h, w = frame.shape[:2]
+            x0 = int(np.clip(mean[0] - half, 0, max(0, w - sp_cfg.zoom_crop_px)))
+            y0 = int(np.clip(mean[1] - half, 0, max(0, h - sp_cfg.zoom_crop_px)))
+            crop = frame[y0:y0 + sp_cfg.zoom_crop_px, x0:x0 + sp_cfg.zoom_crop_px]
+            if crop.size == 0:
+                return None
+            cands = detector.detect_candidates(
+                crop, sp_cfg.candidate_min_score, sp_cfg.top_k,
+            )
+            if f == frame_idx:
+                best = best_gated_candidate(
+                    map_crop_candidates(cands, x0, y0), mean, cov, sp_cfg,
                 )
-            except Exception as exc:
-                logger.debug("ball ground projection failed at frame %d: %s", fi, exc)
+        detector.reset()
+        return best
+
+    def _foot_guided_loop(
+        self,
+        clip_path: Path,
+        gated: dict,
+        detector: BallDetector,
+        sp_cfg: SecondPassCfg,
+        ball_near_foot_px: float,
+        min_score: float,
+    ) -> list[tuple[int, str, str, tuple[float, float], float]]:
+        """Zoom around each gated foot (buffer-safe via ``_zoom_detect``) to
+        recover the ball where a touch is plausible. The corridor cov is sized
+        so the zoom only accepts a ball within ``ball_near_foot_px``."""
+        cov = np.eye(2) * (ball_near_foot_px / 3.0) ** 2
+        cap = cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open clip: {clip_path}")
+        try:
+            def zoom_fn(frame: int, foot_uv: tuple[float, float]):
+                return self._zoom_detect(
+                    cap, frame, np.asarray(foot_uv, dtype=float), cov,
+                    detector, sp_cfg,
+                )
+            return foot_ball_detections(
+                gated, zoom_fn,
+                ball_near_foot_px=ball_near_foot_px, min_score=min_score,
+            )
+        finally:
+            detector.reset()
+            cap.release()
+
+    def _detect_shot(
+        self,
+        shot_id: str,
+        clip_path: Path,
+        camera_path: Path,
+        ball_out_path: Path,
+        cfg: dict,
+        detector: BallDetector,
+    ) -> "_DetectArtifacts | None":
+        """Detect pass for one shot: camera load → manual anchors → detect
+        loop → second pass → coverage → observations sidecar.
+
+        Returns a :class:`_DetectArtifacts` with everything the solve pass
+        needs, or ``None`` if the clip contained no frames.
+        """
+        camera = CameraTrack.load(camera_path)
+        per_frame_K = {f.frame: np.array(f.K) for f in camera.frames}
+        per_frame_R = {f.frame: np.array(f.R) for f in camera.frames}
+        t_world_fallback = np.array(camera.t_world)
+        per_frame_t = {
+            f.frame: (np.array(f.t) if f.t is not None else t_world_fallback)
+            for f in camera.frames
+        }
+        distortion = camera.distortion
+        n_frames = max(per_frame_K) + 1 if per_frame_K else 0
+
+        manual_by_frame = _load_ball_anchors(self.output_dir, shot_id)
+        if manual_by_frame:
+            logger.info(
+                "ball stage: loaded %d manual anchors for shot %s",
+                len(manual_by_frame), shot_id or "(legacy)",
+            )
+
+        # --- 1. Detect ------------------------------------------------
+        steps, raw_confidences, sources = self._detect_loop(
+            clip_path, cfg, detector, manual_by_frame,
+        )
+        if not steps:
+            logger.warning("ball stage: clip %s contained no frames", clip_path)
+            return None
+        n_frames = max(n_frames, steps[-1].frame + 1)
+
+        # --- 1b. Second pass over evidence gaps -------------------------
+        sp_cfg = _second_pass_cfg(cfg)
+        n_clip = steps[-1].frame + 1
+        outliers = {s.frame for s in steps if s.is_outlier}
+        # Pass-1 raw observations ONLY (feedback-loop guard): the corridor
+        # that admits a second-pass detection is never built from
+        # second-pass output.
+        pass1_uv: dict[int, tuple[float, float] | None] = {
+            s.frame: (
+                s.uv if (s.frame in sources and not s.is_outlier) else None
+            )
+            for s in steps
+        }
+        n_second_pass = 0
+        n_zoom = 0
+        ball_radius = float(cfg.get("ball_radius_m", 0.11))
+        if sp_cfg.enabled:
+            # Phase A: revisit weak (low-confidence) frames too, not only
+            # gaps — the buffer-safe zoom often sharpens a barely-detected
+            # ball. Falls back to gaps-only when the flag is off.
+            if sp_cfg.redetect_low_conf:
+                revisit_runs = find_revisit_runs(
+                    sources, outliers, raw_confidences, n_clip,
+                    sp_cfg.redetect_max_conf,
+                )
+            else:
+                revisit_runs = find_gap_runs(sources, outliers, n_clip)
+            if revisit_runs:
+                corridors = corridor_predictions(
+                    pass1_uv, n_clip,
+                    tracker_factory=lambda: _build_tracker(
+                        cfg, max_gap_frames=10 ** 6),
+                )
+                sp_dets = self._second_pass_loop(
+                    clip_path, revisit_runs, corridors, per_frame_K, per_frame_R,
+                    per_frame_t, distortion, detector, sp_cfg, ball_radius,
+                )
+                if sp_dets:
+                    merged_uv = dict(pass1_uv)
+                    accepted = 0
+                    for d in sp_dets:
+                        # On a frame that already had a pass-1 detection, only
+                        # replace it when the zoom is strictly more confident.
+                        was_pass1 = sources.get(d.frame) in (
+                            "detector", "anchor", "bridge")
+                        prev = raw_confidences.get(d.frame)
+                        if was_pass1 and prev is not None and d.combined_score <= prev:
+                            continue
+                        merged_uv[d.frame] = d.uv
+                        raw_confidences[d.frame] = d.combined_score
+                        sources[d.frame] = "second_pass"
+                        accepted += 1
+                    n_second_pass = accepted
+                    n_zoom = sum(1 for d in sp_dets if d.used_zoom)
+                    logger.info(
+                        "ball: second pass accepted %d/%d revisited frames for %s",
+                        accepted,
+                        sum(e - s + 1 for s, e in revisit_runs),
+                        shot_id or "(legacy)",
+                    )
+                    steps = _resmooth_observations(merged_uv, n_clip, cfg)
+
+        # --- 1c. Foot-guided pass: zoom around fast-moving player feet to
+        # recover the ball where a touch is plausible. WASB's global hit at a
+        # touch is often wrong (confident, on the wrong object), but the true
+        # ball sits ~15px from a contact joint — so we look there.
+        foot_touches: tuple = ()
+        foot_cfg = cfg.get("foot_guided", {}) or {}
+        if (
+            foot_cfg.get("enabled", True)
+            and getattr(detector, "SUPPORTS_REDETECT", True)
+            and per_frame_K
+        ):
+            try:
+                pctx = PlayerContext.load(
+                    self.output_dir, shot_id,
+                    per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                    per_frame_t=per_frame_t, distortion=distortion,
+                )
+                gated = gated_feet(
+                    pctx, n_clip,
+                    min_foot_speed_px=float(foot_cfg.get("min_foot_speed_px", 8.0)),
+                )
+                if gated:
+                    fdets = self._foot_guided_loop(
+                        clip_path, gated, detector, sp_cfg,
+                        ball_near_foot_px=float(foot_cfg.get("ball_near_foot_px", 45.0)),
+                        min_score=float(foot_cfg.get("min_score", 0.25)),
+                    )
+                    # Temporal NMS: a real touch is isolated — you can't touch
+                    # the ball every frame. Collapse dense clusters of
+                    # foot-guided hits (running feet finding stray white blobs)
+                    # to the strongest per window, which keeps the genuine
+                    # isolated touches and discards the over-fire.
+                    nms_win = int(foot_cfg.get("nms_window_frames", 8))
+                    kept: list = []
+                    for det in sorted(fdets, key=lambda d: -d[4]):
+                        if all(abs(det[0] - k[0]) > nms_win for k in kept):
+                            kept.append(det)
+                    kept.sort(key=lambda d: d[0])
+                    if kept:
+                        cur_uv = {s.frame: s.uv for s in steps if s.uv is not None}
+                        for fr, _pid, _bone, buv, score in kept:
+                            cur_uv[fr] = buv
+                            raw_confidences[fr] = max(
+                                raw_confidences.get(fr, 0.0), score)
+                            sources[fr] = "foot_guided"
+                        steps = _resmooth_observations(cur_uv, n_clip, cfg)
+                        foot_touches = tuple(
+                            (fr, pid, bone) for fr, pid, bone, _, _ in kept)
+                        logger.info(
+                            "ball: foot-guided recovered %d ball-at-foot "
+                            "touches (%d raw) for %s",
+                            len(kept), len(fdets), shot_id or "(legacy)",
+                        )
+            except Exception as exc:  # noqa: BLE001 — foot-guided is enrichment
+                logger.warning("ball: foot-guided pass failed: %s", exc)
+
+        # Coverage counts ACCEPTED evidence: pass1 counts frames whose raw
+        # observation survived gating (outlier-rejected frames are not
+        # covered even though their source reads "detector").
+        n_pass1 = sum(1 for v in pass1_uv.values() if v is not None)
+        detection_coverage = {
+            "pass1": n_pass1 / n_clip,
+            "second_pass": n_second_pass / n_clip,
+            "total": (n_pass1 + n_second_pass) / n_clip,
+            # Count (not fraction): zoom-retry recoveries within second_pass.
+            "zoom_recoveries": n_zoom,
+        }
+
+        try:
+            _write_observations_sidecar(
+                ball_out_path.with_name(ball_out_path.name.replace(
+                    "ball_track", "ball_observations")),
+                camera.clip_id, camera.fps, steps, raw_confidences, sources,
+            )
+        except Exception as exc:  # noqa: BLE001 — sidecar is enrichment
+            logger.warning("ball: failed to write observations sidecar: %s", exc)
+
+        return _DetectArtifacts(
+            shot_id=shot_id,
+            ball_out_path=ball_out_path,
+            camera_clip_id=camera.clip_id,
+            camera_fps=camera.fps,
+            camera_image_size=camera.image_size,
+            distortion=distortion,
+            n_clip=n_clip,
+            n_frames=n_frames,
+            steps=steps,
+            raw_confidences=raw_confidences,
+            sources=sources,
+            detection_coverage=detection_coverage,
+            per_frame_K=per_frame_K,
+            per_frame_R=per_frame_R,
+            per_frame_t=per_frame_t,
+            manual_by_frame=manual_by_frame,
+            foot_touches=foot_touches,
+        )
+
+    def _triangulate_groups(
+        self,
+        artifacts_by_shot: dict[str, "_DetectArtifacts"],
+        cfg: dict,
+    ) -> tuple[dict[str, dict[int, tuple[np.ndarray, float]]], dict[str, dict]]:
+        """Cross-replay triangulation pass.
+
+        For each highlight group with >= 2 member shots present in
+        ``artifacts_by_shot``: refine the saved sync offset by ray-miss
+        minimisation, triangulate detection pairs into 3D fixes, and
+        write per-shot :class:`BallFixSet` sidecars.
+
+        Returns ``(fixes_by_shot, summaries_by_shot)`` where:
+        - ``fixes_by_shot[shot_id]`` is ``{frame: (xyz_array, weight)}``
+        - ``summaries_by_shot[shot_id]`` is the cross_replay summary dict
+          (surfaced in the diag sidecar).
+        """
+        sync_map_path = self.output_dir / "shots" / "sync_map.json"
+        if not sync_map_path.exists():
+            return {}, {}
+
+        cr_cfg = _cross_replay_cfg(cfg)
+        if not cr_cfg.enabled:
+            return {}, {}
+
+        try:
+            sync_map = SyncMap.load(sync_map_path)
+        except Exception as exc:
+            logger.warning("ball: failed to load sync_map.json: %s — skipping triangulation", exc)
+            return {}, {}
+
+        fixes_by_shot: dict[str, dict[int, tuple[np.ndarray, float]]] = {}
+        summaries_by_shot: dict[str, dict] = {}
+        ball_dir = self.output_dir / "ball"
+        weight = cr_cfg.fix_weight_px_per_m
+
+        for group_sync in sync_map.groups:
+            # Gather the members that are both in this group AND detected.
+            members_present = [
+                a for a in group_sync.alignments
+                if a.shot_id in artifacts_by_shot
+            ]
+            if len(members_present) < 2:
                 continue
-            if (
-                not np.all(np.isfinite(world))
-                or abs(float(world[0])) > offpitch_clamp_m
-                or abs(float(world[1])) > offpitch_clamp_m
-            ):
-                logger.debug(
-                    "ball: dropping ground projection at frame %d — world "
-                    "(%.1f, %.1f) far off-pitch (near-horizon ray-cast blow-up)",
+
+            # Side A = member with offset closest to 0 (the reference).
+            members_present.sort(key=lambda a: abs(a.frame_offset))
+            align_a = members_present[0]
+            sides_b = members_present[1:]
+            arts_a = artifacts_by_shot[align_a.shot_id]
+            obs_a, cams_a = _accepted_obs_and_cams(arts_a)
+
+            # Accumulate the reference shot's fixes/summary across ALL
+            # partners; its sidecar is written ONCE after the partner loop
+            # so a multi-partner group never clobbers the reference.
+            a_fix_records: list[BallFix] = []
+            a_best_miss: dict[int, float] = {}
+            a_partners: dict[str, dict] = {}
+            a_ray_misses: list[float] = []
+            a_parallaxes: list[float] = []
+
+            for align_b in sides_b:
+                arts_b = artifacts_by_shot[align_b.shot_id]
+                obs_b, cams_b = _accepted_obs_and_cams(arts_b)
+
+                # delta_saved = offset_B - offset_A (per sync_map convention:
+                # f_b - frame_offset_B == f_a - frame_offset_A
+                # => f_b = f_a + (offset_B - offset_A)).
+                delta_saved = float(align_b.frame_offset - align_a.frame_offset)
+
+                refined_offset, _refine_miss, n_pairs = refine_pair_offset(
+                    obs_a=obs_a, cams_a=cams_a, obs_b=obs_b, cams_b=cams_b,
+                    saved_offset=delta_saved, cfg=cr_cfg,
+                    distortion_a=arts_a.distortion, distortion_b=arts_b.distortion,
+                )
+                pair_fixes: list[PairFix] = triangulate_pair(
+                    obs_a=obs_a, cams_a=cams_a, obs_b=obs_b, cams_b=cams_b,
+                    offset_b_minus_a=refined_offset, cfg=cr_cfg,
+                    distortion_a=arts_a.distortion, distortion_b=arts_b.distortion,
+                )
+                if not pair_fixes:
+                    logger.info(
+                        "ball: cross-replay: no inlier fixes for pair %s / %s",
+                        align_a.shot_id, align_b.shot_id,
+                    )
+                    continue
+
+                # Per-partner metadata. median_ray_miss is over the accepted
+                # inlier fixes (what actually constrains the solve), not the
+                # refine-grid median used internally for offset selection.
+                inlier_miss = float(np.median([fx.ray_miss_m for fx in pair_fixes]))
+                inlier_parallax = float(
+                    np.median([fx.parallax_deg for fx in pair_fixes])
+                )
+                partner_meta = {
+                    "saved_offset": delta_saved,
+                    "refined_offset": refined_offset,
+                    "offset_disagreement_frames": abs(refined_offset - delta_saved),
+                    "n_pairs": n_pairs,
+                    "n_inlier_fixes": len(pair_fixes),
+                    "median_ray_miss_m": inlier_miss,
+                    "median_parallax_deg": inlier_parallax,
+                }
+                a_partners[align_b.shot_id] = partner_meta
+
+                # Reference-shot solver fixes: keep the lowest-ray-miss fix
+                # per frame across partners; sidecar keeps every record.
+                a_solver = fixes_by_shot.setdefault(align_a.shot_id, {})
+                for fx in pair_fixes:
+                    prev = a_best_miss.get(fx.frame_a)
+                    if prev is None or fx.ray_miss_m < prev:
+                        a_best_miss[fx.frame_a] = fx.ray_miss_m
+                        a_solver[fx.frame_a] = (np.array(fx.xyz), weight)
+                    a_fix_records.append(BallFix(
+                        frame=fx.frame_a, xyz=fx.xyz,
+                        ray_miss_m=fx.ray_miss_m, parallax_deg=fx.parallax_deg,
+                        partner_shot=align_b.shot_id, partner_frame=fx.frame_b,
+                    ))
+                    a_ray_misses.append(fx.ray_miss_m)
+                    a_parallaxes.append(fx.parallax_deg)
+
+                # Partner shot has a single partner (the reference): write its
+                # fixes + summary + sidecar now.
+                b_solver = fixes_by_shot.setdefault(align_b.shot_id, {})
+                for fx in pair_fixes:
+                    b_solver[fx.frame_b] = (np.array(fx.xyz), weight)
+                b_summary = {
+                    "partner_shots": [align_a.shot_id],
+                    **partner_meta,
+                    "partners": {align_a.shot_id: partner_meta},
+                }
+                summaries_by_shot[align_b.shot_id] = b_summary
+                ball_dir.mkdir(parents=True, exist_ok=True)
+                BallFixSet(
+                    clip_id=arts_b.camera_clip_id,
+                    group_id=group_sync.group_id,
+                    cross_replay=b_summary,
+                    fixes=tuple(
+                        BallFix(
+                            frame=fx.frame_b, xyz=fx.xyz,
+                            ray_miss_m=fx.ray_miss_m, parallax_deg=fx.parallax_deg,
+                            partner_shot=align_a.shot_id, partner_frame=fx.frame_a,
+                        )
+                        for fx in pair_fixes
+                    ),
+                ).save(ball_dir / f"{align_b.shot_id}_ball_fixes.json")
+                logger.info(
+                    "ball: cross-replay %s / %s: %d inlier fixes, "
+                    "refined offset %.2f (saved %.2f), median miss %.3f m",
+                    align_a.shot_id, align_b.shot_id,
+                    len(pair_fixes), refined_offset, delta_saved, inlier_miss,
+                )
+
+            if not a_partners:
+                continue  # no partner produced fixes for the reference
+
+            # Aggregate the reference shot's summary. Offsets are inherently
+            # per-partner, so top-level scalars report the dominant pairing
+            # (most inlier fixes) and the WORST disagreement (the review cue);
+            # full per-partner detail lives in `partners`.
+            dominant = max(
+                a_partners.values(), key=lambda p: p["n_inlier_fixes"],
+            )
+            a_summary = {
+                "partner_shots": sorted(a_partners.keys()),
+                "saved_offset": dominant["saved_offset"],
+                "refined_offset": dominant["refined_offset"],
+                "offset_disagreement_frames": max(
+                    p["offset_disagreement_frames"] for p in a_partners.values()
+                ),
+                "n_pairs": sum(p["n_pairs"] for p in a_partners.values()),
+                "n_inlier_fixes": sum(
+                    p["n_inlier_fixes"] for p in a_partners.values()
+                ),
+                "median_ray_miss_m": float(np.median(a_ray_misses)),
+                "median_parallax_deg": float(np.median(a_parallaxes)),
+                "partners": a_partners,
+            }
+            summaries_by_shot[align_a.shot_id] = a_summary
+            ball_dir.mkdir(parents=True, exist_ok=True)
+            BallFixSet(
+                clip_id=arts_a.camera_clip_id,
+                group_id=group_sync.group_id,
+                cross_replay=a_summary,
+                fixes=tuple(a_fix_records),
+            ).save(ball_dir / f"{align_a.shot_id}_ball_fixes.json")
+
+        return fixes_by_shot, summaries_by_shot
+
+    def _solve_shot(
+        self,
+        artifacts: "_DetectArtifacts",
+        cfg: dict,
+        fixes: "dict[int, tuple[np.ndarray, float]] | None",
+        cr_summary: "dict | None" = None,
+    ) -> None:
+        """Solve pass for one shot: player context → events → anchors →
+        nodes → solve_piecewise (with optional world fixes) → outputs → diag.
+
+        ``fixes`` is ``{frame: (xyz_array, weight)}`` from the triangulation
+        pass; ``None`` or empty means the pre-1.5 single-shot path.
+        ``cr_summary`` is this run's cross_replay summary for the shot (None
+        when no triangulation produced fixes); it is written to the diag
+        directly so the diag always reflects the current run.
+        """
+        shot_id = artifacts.shot_id
+        ball_out_path = artifacts.ball_out_path
+        per_frame_K = artifacts.per_frame_K
+        per_frame_R = artifacts.per_frame_R
+        per_frame_t = artifacts.per_frame_t
+        distortion = artifacts.distortion
+        steps = artifacts.steps
+        raw_confidences = artifacts.raw_confidences
+        sources = artifacts.sources
+        manual_by_frame = artifacts.manual_by_frame
+        n_frames = artifacts.n_frames
+
+        ball_radius = float(cfg.get("ball_radius_m", 0.11))
+        pitch_cfg = self.config.get("pitch", {})
+        goal_geometry = GoalGeometry.from_pitch_config(pitch_cfg)
+        auto_cfg_dict = cfg.get("auto_anchors", {})
+        event_cfg = _auto_event_cfg(
+            auto_cfg_dict, cfg.get("segment", {}), cfg.get("pose_touch", {}))
+        anchor_cfg = _auto_anchor_cfg(auto_cfg_dict, ball_radius)
+        solver_cfg = _solver_cfg(cfg, ball_radius)
+
+        # --- 2. Player context -----------------------------------------
+        player_ctx = PlayerContext.load(
+            self.output_dir, shot_id,
+            per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+            per_frame_t=per_frame_t, distortion=distortion,
+        )
+        if not player_ctx.player_ids:
+            logger.warning(
+                "ball stage: no player tracks found for shot %s — automatic "
+                "touch/goal detection degraded to ball-only evidence",
+                shot_id or "(legacy)",
+            )
+
+        # --- 3+4. Auto events -> auto anchors ---------------------------
+        events = detect_events(
+            steps=steps,
+            confidences=raw_confidences,
+            player_ctx=player_ctx,
+            per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+            per_frame_t=per_frame_t, distortion=distortion,
+            goal_geometry=goal_geometry,
+            cfg=event_cfg,
+            image_size=artifacts.camera_image_size,
+        )
+        # Foot-guided recoveries are touches by construction (a ball found at
+        # a fast-moving contact joint). Merge as touch events, winning over a
+        # same-frame event from the (less reliable) global ball track.
+        if artifacts.foot_touches:
+            ft_frames = {fr for fr, _, _ in artifacts.foot_touches}
+            events = tuple(e for e in events if e.frame not in ft_frames) + tuple(
+                BallEvent(frame=fr, kind="touch", score=0.7,
+                          player_id=pid, bone=bone)
+                for fr, pid, bone in artifacts.foot_touches
+            )
+        # Body-kinematics touch proposer: recover contacts the ball-pixel
+        # break path missed (occlusion/blur at contact). Additive recall;
+        # operator/manual anchors still win downstream via merge_anchors.
+        kin_cfg = _kinematic_touch_cfg(cfg.get("kinematic_touch", {}))
+        if kin_cfg.enabled and player_ctx.player_ids:
+            ball_uvs = {
+                s.frame: np.asarray(s.uv, dtype=float)
+                for s in steps if s.uv is not None
+            }
+            detected_frames = frozenset(
+                f for f, c in raw_confidences.items() if c > 0.0
+            )
+            confirm_frames = frozenset(
+                e.frame for e in events
+                if e.kind in ("touch", "bounce", "goal_impact", "velocity_break")
+            )
+            try:
+                kin_touches = propose_touches(
+                    player_ctx=player_ctx, ball_uvs=ball_uvs,
+                    per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                    per_frame_t=per_frame_t, distortion=distortion,
+                    confirm_frames=confirm_frames,
+                    detected_frames=detected_frames, cfg=kin_cfg,
+                )
+                events = merge_touch_events(events, kin_touches, kin_cfg.nms_window)
+            except Exception as exc:  # noqa: BLE001 — never kill the stage
+                logger.warning(
+                    "ball stage: kinematic touch proposer failed (%s) — "
+                    "continuing with ball-break touches only", exc,
+                )
+        auto_by_frame: dict[int, BallAnchor] = {}
+        if anchor_cfg.enabled:
+            try:
+                auto_anchors = generate_auto_anchors(
+                    events=events, steps=steps, confidences=raw_confidences,
+                    player_ctx=player_ctx,
+                    per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                    per_frame_t=per_frame_t, distortion=distortion,
+                    fps=artifacts.camera_fps, pitch_cfg=pitch_cfg, cfg=anchor_cfg,
+                    sources=sources,
+                )
+                auto_by_frame = {a.frame: a for a in auto_anchors}
+                BallAnchorSet(
+                    clip_id=artifacts.camera_clip_id,
+                    image_size=artifacts.camera_image_size,
+                    anchors=auto_anchors,
+                ).save(auto_anchor_path(ball_out_path.parent, shot_id))
+            except Exception as exc:  # noqa: BLE001 — auto anchors must never kill the stage
+                logger.warning(
+                    "ball stage: auto-anchor generation failed (%s) — "
+                    "continuing with manual anchors only", exc,
+                )
+        anchor_by_frame = merge_anchors(
+            manual_by_frame, auto_by_frame, anchor_cfg.suppress_radius_frames,
+        )
+        ground_touch_frames = _classify_ground_touches(anchor_by_frame)
+
+        # --- 5. Resolve nodes and solve ---------------------------------
+        pitch_length = float(pitch_cfg.get("length_m", 105.0))
+        pitch_width = float(pitch_cfg.get("width_m", 68.0))
+        # Near-horizon ray-casts blow up to hundreds of metres; a node
+        # built from one would teleport the whole adjacent segment.
+        node_clamp_m = max(50.0, 2.0 * max(pitch_length, pitch_width))
+
+        def _node_world_ok(world: np.ndarray) -> bool:
+            return bool(
+                np.all(np.isfinite(world))
+                and abs(float(world[0])) <= node_clamp_m
+                and abs(float(world[1])) <= node_clamp_m
+            )
+
+        nodes: list[TrajectoryNode] = []
+        contact_gaps: list[dict] = []
+        for fi in sorted(anchor_by_frame):
+            anc = anchor_by_frame[fi]
+            if anc.state not in HARD_KNOT_STATES:
+                continue
+            world = _resolve_anchor_world(
+                anc=anc, fi=fi,
+                ground_touch_frames=ground_touch_frames,
+                player_ctx=player_ctx,
+                per_frame_K=per_frame_K,
+                per_frame_R=per_frame_R,
+                per_frame_t=per_frame_t,
+                distortion=distortion,
+                ball_radius=ball_radius,
+                goal_geometry=goal_geometry,
+            )
+            if world is None:
+                continue
+            if not _node_world_ok(world):
+                logger.warning(
+                    "ball stage: anchor at frame %d resolved far off-pitch "
+                    "(%.0f, %.0f) — dropping it from the solve",
                     fi, float(world[0]), float(world[1]),
                 )
                 continue
-            base_conf = raw_confidences.get(fi, 0.5)
-            # Gap-filled frames have no direct detection — discount.
-            conf = base_conf * (0.3 if step.is_gap_fill else 1.0)
-            per_frame_world[fi] = (world, conf)
-
-        # Pin world positions for HARD_KNOT_STATES anchors to the exact
-        # pixel + state-height ray-cast. This runs three times: here
-        # (before any trajectory fitting), again after IMM + promotion
-        # (so the ground-level interp endpoints come from anchor truth
-        # not parabola eval), and finally at the end (so Phase 2 fits
-        # never get the last word over the user's anchor).
-        _apply_hard_knot_anchor_overrides(
-            per_frame_world=per_frame_world,
-            anchor_by_frame=anchor_by_frame,
-            ground_touch_frames=ground_touch_frames,
-            bone_lookup=bone_lookup,
-            per_frame_K=per_frame_K,
-            per_frame_R=per_frame_R,
-            per_frame_t=per_frame_t,
-            distortion=distortion,
-            ball_radius=ball_radius,
-            goal_geometry=goal_geometry,
-        )
-
-        # Flight segmentation by IMM mode posterior.
-        min_flight = int(tracker_cfg.get("min_flight_frames", 6))
-        max_flight = int(tracker_cfg.get("max_flight_frames", 90))
-        flight_runs = self._flight_runs(steps, min_flight, max_flight)
-
-        # Layer 5 — event-splitting: kick/catch/bounce anchors split flight runs.
-        # Semantics: a cut at the run start (cut == a_run) keeps the event
-        # frame as the start of the remaining segment (e.g. kick starts a new
-        # arc here); a cut strictly inside the run excludes the event frame
-        # from both sub-runs (e.g. bounce frame is ground contact, not in air).
-        if anchor_by_frame:
-            event_frames = sorted(
-                fi for fi, a_ev in anchor_by_frame.items()
-                if a_ev.state in EVENT_STATES
-            )
-            if event_frames:
-                split_runs: list[tuple[int, int]] = []
-                for (a_run, b_run) in flight_runs:
-                    cuts = [fi for fi in event_frames if a_run <= fi <= b_run]
-                    if not cuts:
-                        split_runs.append((a_run, b_run))
-                        continue
-                    prev = a_run
-                    for cut in cuts:
-                        if cut - 1 >= prev:
-                            split_runs.append((prev, cut - 1))
-                        # When the cut is at the very start of the run there is
-                        # no pre-segment; keep the event frame as the new start
-                        # so that kick anchors remain in their flight segment.
-                        prev = cut if cut == a_run else cut + 1
-                    if prev <= b_run:
-                        split_runs.append((prev, b_run))
-                flight_runs = split_runs
-
-        flight_segments: list[FlightSegment] = []
-        flight_membership: dict[int, int] = {}
-        spin_enabled = bool(spin_cfg.get("enabled", True))
-        spin_min_seconds = float(spin_cfg.get("min_flight_seconds", 0.5))
-        spin_min_improve = float(spin_cfg.get("min_residual_improvement", 0.2))
-        spin_min_improve_hinted = float(
-            spin_cfg.get("min_residual_improvement_with_hint", 0.05)
-        )
-        spin_max_omega = float(spin_cfg.get("max_omega_rad_s", 200.0))
-        drag = float(spin_cfg.get("drag_k_over_m", 0.005))
-        g = -9.81
-        g_vec = np.array([0.0, 0.0, g])
-
-        for sid, (a, b) in enumerate(flight_runs):
-            obs_pairs = [
-                (fi, steps[fi].uv)
-                for fi in range(a, b + 1)
-                if steps[fi].uv is not None and fi in per_frame_K
-            ]
-            if len(obs_pairs) < min_flight:
-                continue
-            obs = [(o[0], (float(o[1][0]), float(o[1][1]))) for o in obs_pairs]
-            Ks_seg = [per_frame_K[o[0]] for o in obs]
-            Rs_seg = [per_frame_R[o[0]] for o in obs]
-            ts_seg = [per_frame_t[o[0]] for o in obs]
-
-            ball_uvs_seg = {fi: uv for fi, uv in obs}
-            anchor_world: np.ndarray | None = None
-            if kick_cfg.enabled:
-                # Pick the nearest foot per frame in the segment seed region.
-                seed_feet: dict[int, tuple[float, float]] = {}
-                for fi in range(a, min(a + kick_cfg.lookahead_frames + 1, b + 1)):
-                    feet = feet_pixel_by_frame.get(fi, [])
-                    if not feet or fi not in ball_uvs_seg:
-                        continue
-                    bu, bv = ball_uvs_seg[fi]
-                    nearest = min(feet, key=lambda f: (f[0] - bu) ** 2 + (f[1] - bv) ** 2)
-                    seed_feet[fi] = nearest
-                if a in per_frame_K:
-                    anchor_world = find_kick_anchor(
-                        segment_start_frame=a,
-                        ball_uvs=ball_uvs_seg,
-                        foot_uvs_by_frame=seed_feet,
-                        K=per_frame_K[a],
-                        R=per_frame_R[a],
-                        t=per_frame_t[a],
-                        cfg=kick_cfg,
-                        distortion=distortion,
-                    )
-
-            # Layer 5 — hard knots from anchored frames within this
-            # segment. Uses the same resolver as the end-of-run override
-            # so the parabola fit sees exactly the world position the
-            # final track will emit at anchored frames.
-            knot_frames_arg: dict[int, np.ndarray] = {}
-            for fi in range(a, b + 1):
-                anc = anchor_by_frame.get(fi)
-                if anc is None or anc.state not in HARD_KNOT_STATES:
-                    continue
-                world_at_anchor = _resolve_anchor_world(
-                    anc=anc, fi=fi,
-                    ground_touch_frames=ground_touch_frames,
-                    bone_lookup=bone_lookup,
-                    per_frame_K=per_frame_K,
-                    per_frame_R=per_frame_R,
-                    per_frame_t=per_frame_t,
-                    distortion=distortion,
-                    ball_radius=ball_radius,
-                    goal_geometry=goal_geometry,
-                )
-                if world_at_anchor is None:
-                    continue
-                knot_frames_arg[fi - a] = world_at_anchor
-
-            # If the seed frame is a hard knot AND Layer 3 didn't set
-            # anchor_world, promote frame 0 to p0_fixed.
-            if 0 in knot_frames_arg and anchor_world is None:
-                anchor_world = knot_frames_arg.pop(0)
-
-            try:
-                p0, v0, parab_resid = fit_parabola_to_image_observations(
-                    obs, Ks=Ks_seg, Rs=Rs_seg, t_world=ts_seg,
-                    fps=camera.fps, distortion=distortion,
-                    p0_fixed=anchor_world,
-                    knot_frames=knot_frames_arg or None,
-                )
-            except Exception as exc:
-                logger.debug("parabola fit failed on segment %d: %s", sid, exc)
-                continue
-            if parab_resid > max_residual:
-                continue
-            segment_duration_s = (b - a) / camera.fps
-            if not is_plausible_trajectory(
-                p0, v0, omega=None,
-                duration_s=segment_duration_s, fps=camera.fps,
-                cfg=plaus_cfg, pitch=pitch_dims,
+            is_manual = fi in manual_by_frame
+            nodes.append(TrajectoryNode(
+                frame=fi,
+                world_xyz=(float(world[0]), float(world[1]), float(world[2])),
+                state=anc.state,
+                confidence=1.0 if is_manual else 0.8,
+                spin=anc.spin,
+                is_manual=is_manual,
+                contact_bone=anc.bone if anc.state == "player_touch" else None,
+            ))
+            if (
+                anc.state == "player_touch"
+                and anc.player_id and anc.bone
+                and fi in per_frame_K
             ):
-                logger.info(
-                    "ball seg %d (%d-%d): parabola failed plausibility, dropping",
-                    sid, a, b,
-                )
-                continue
-
-            duration_s = (b - a) / camera.fps
-            # Look up an explicit spin preset on the segment's start
-            # anchor (kick/volley) — the user is telling us the strike
-            # imparted spin. omega_seed defaults to zeros otherwise.
-            omega_seed, hint_provided = _spin_seed_for_segment(
-                anchor_by_frame, a, b, v0=v0,
-            )
-            refinement = _refine_with_magnus(
-                obs=obs, Ks_seg=Ks_seg, Rs_seg=Rs_seg, ts_seg=ts_seg,
-                fps=camera.fps, drag=drag,
-                plaus_cfg=plaus_cfg, pitch_dims=pitch_dims,
-                p0=p0, v0=v0, parab_resid=parab_resid,
-                anchor_world=anchor_world, duration_s=duration_s,
-                spin_enabled=spin_enabled,
-                spin_min_seconds=spin_min_seconds,
-                spin_max_omega=spin_max_omega,
-                spin_min_improve=spin_min_improve,
-                spin_min_improve_hinted=spin_min_improve_hinted,
-                omega_seed=omega_seed,
-                hint_provided=hint_provided,
-                segment_label=f"segment {sid}",
-                knot_frames=knot_frames_arg,
-            )
-            effective_p0 = refinement.effective_p0
-            effective_v0 = refinement.effective_v0
-            effective_resid = refinement.effective_resid
-            omega_world = refinement.omega_world
-            spin_axis = refinement.spin_axis
-            spin_omega = refinement.spin_omega
-            spin_confidence = refinement.spin_confidence
-
-            # Replace per-frame world_xyz inside the flight with the fitted
-            # trajectory evaluation. Preserves original BallStage behaviour
-            # and gives clean curves through the gltf export.
-            for fi in range(a, b + 1):
-                if fi not in per_frame_K:
-                    continue
-                flight_membership[fi] = sid
-                dt = (fi - a) / camera.fps
-                if omega_world is not None:
-                    positions = _integrate_magnus_positions(
-                        effective_p0,
-                        effective_v0,
-                        omega_world,
-                        g_vec,
-                        drag,
-                        np.array([0.0, dt]),
+                bone_world = player_ctx.joint_world(fi, anc.player_id, anc.bone)
+                if bone_world is not None and anc.image_xy is not None:
+                    gap = point_to_pixel_ray_distance(
+                        bone_world, anc.image_xy,
+                        per_frame_K[fi], per_frame_R[fi], per_frame_t[fi],
+                        distortion,
                     )
-                    pos = positions[-1]
-                else:
-                    pos = effective_p0 + effective_v0 * dt + 0.5 * g_vec * dt ** 2
-                prev_conf = per_frame_world.get(fi, (None, 0.5))[1]
-                per_frame_world[fi] = (pos, prev_conf)
+                    contact_gaps.append({
+                        "frame": fi,
+                        "player_id": anc.player_id,
+                        "bone": anc.bone,
+                        "gap_m": float(gap),
+                        "manual": is_manual,
+                    })
 
-            flight_segments.append(
-                FlightSegment(
-                    id=sid,
-                    frame_range=(a, b),
-                    parabola={
-                        "p0": [float(x) for x in effective_p0],
-                        "v0": [float(x) for x in effective_v0],
-                        "g": g,
-                        "spin_axis_world": spin_axis,
-                        "spin_omega_rad_s": spin_omega,
-                        "spin_confidence": spin_confidence,
-                    },
-                    fit_residual_px=effective_resid,
-                )
-            )
-
-        promote_cfg = GroundPromotionCfg(
-            enabled=bool(cfg.get("flight_promotion", {}).get("enabled", True)),
-            min_run_frames=int(cfg.get("flight_promotion", {}).get("min_run_frames", 6)),
-            off_pitch_margin_m=float(cfg.get("flight_promotion", {}).get("off_pitch_margin_m", 5.0)),
-            max_ground_speed_m_s=float(cfg.get("flight_promotion", {}).get("max_ground_speed_m_s", 35.0)),
+        # A flight chain the clip enters or leaves mid-air has no hard
+        # knot at its open end (camera cut after a cross, clip ending on
+        # a shot). Pin the chain-edge airborne anchor at its bucket
+        # height so the span is bracketed — coarse depth, low confidence,
+        # but a determined continuous arc instead of an open guess.
+        hard_frames = sorted(n.frame for n in nodes)
+        airborne_chain = sorted(
+            (fi, anc) for fi, anc in anchor_by_frame.items()
+            if airborne_bucket_range(anc.state) is not None
+            and anc.image_xy is not None
         )
 
-        # Provisional state map matching what would be emitted below.
-        provisional_state: dict[int, str] = {}
-        for fi in range(n_frames):
-            if fi in per_frame_world:
-                provisional_state[fi] = "flight" if fi in flight_membership else "grounded"
-            else:
-                provisional_state[fi] = "missing"
+        def _synth_airborne_node(fi: int, anc: BallAnchor) -> None:
+            if fi not in per_frame_K:
+                return
+            try:
+                world = np.asarray(ankle_ray_to_pitch(
+                    anc.image_xy,
+                    K=per_frame_K[fi], R=per_frame_R[fi], t=per_frame_t[fi],
+                    plane_z=state_to_height(anc.state), distortion=distortion,
+                ), dtype=float)
+            except Exception:
+                return
+            if not _node_world_ok(world):
+                return
+            nodes.append(TrajectoryNode(
+                frame=fi,
+                world_xyz=(float(world[0]), float(world[1]), float(world[2])),
+                state="airborne",
+                confidence=0.5,
+                is_manual=fi in manual_by_frame,
+            ))
 
-        runs_to_promote = find_implausible_grounded_runs(
-            per_frame_xyz=per_frame_world,
-            per_frame_state=provisional_state,
-            fps=camera.fps,
-            cfg=promote_cfg,
-            pitch=pitch_dims,
-        )
+        leading = [x for x in airborne_chain
+                   if not hard_frames or x[0] < hard_frames[0]]
+        trailing = [x for x in airborne_chain
+                    if not hard_frames or x[0] > hard_frames[-1]]
+        if leading:
+            _synth_airborne_node(*leading[0])
+        if trailing and (not leading or trailing[-1][0] != leading[0][0]):
+            _synth_airborne_node(*trailing[-1])
+        nodes.sort(key=lambda n: n.frame)
 
-        # Frames where the user has explicitly anchored a non-flight
-        # intent: grounded, kick, catch, bounce, or a ground-touch
-        # player_touch. The promotion stage must not lift these into a
-        # parabola — doing so would override the user's ground truth.
-        non_flight_anchored: set[int] = {
-            fi for fi, a in anchor_by_frame.items()
-            if a.state in ("grounded", "kick", "catch", "bounce")
-            or (a.state == "player_touch" and fi in ground_touch_frames)
+        z_hints = {
+            fi: bucket
+            for fi, anc in anchor_by_frame.items()
+            if (bucket := airborne_bucket_range(anc.state)) is not None
         }
+        node_frames = {n.frame for n in nodes}
+        split_hints = tuple(
+            (e.frame, e.score) for e in events
+            if e.kind == "velocity_break" and e.frame not in node_frames
+        )
 
-        next_segment_id = (max(flight_membership.values()) + 1) if flight_membership else 0
-        min_flight_frames_for_refit = int(tracker_cfg.get("min_flight_frames", 6))
-        for run in runs_to_promote:
-            if any(run.start <= fi <= run.end for fi in non_flight_anchored):
-                logger.info(
-                    "ball: promotion skipped run %d-%d — overlaps user "
-                    "non-flight anchor",
-                    run.start, run.end,
-                )
-                continue
-            obs_pairs = [
-                (fi, steps[fi].uv) for fi in range(run.start, run.end + 1)
-                if 0 <= fi < len(steps) and steps[fi].uv is not None and fi in per_frame_K
-            ]
-            if len(obs_pairs) < min_flight_frames_for_refit:
-                continue
-            obs = [(o[0], (float(o[1][0]), float(o[1][1]))) for o in obs_pairs]
-            Ks_seg = [per_frame_K[o[0]] for o in obs]
-            Rs_seg = [per_frame_R[o[0]] for o in obs]
-            ts_seg = [per_frame_t[o[0]] for o in obs]
+        # The solver seam (Phase 2, Task 8). Both paths receive the EXACT same
+        # kwargs — factored into one dict so the global path and its whole-shot
+        # piecewise fallback can never drift apart (F8: the fallback must yield
+        # the identical piecewise result, not a degraded beam result).
+        solve_kwargs = dict(
+            nodes=nodes,
+            steps=steps,
+            confidences=raw_confidences,
+            per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+            per_frame_t=per_frame_t, distortion=distortion,
+            fps=artifacts.camera_fps, n_frames=n_frames,
+            pitch_length_m=float(pitch_cfg.get("length_m", 105.0)),
+            pitch_width_m=float(pitch_cfg.get("width_m", 68.0)),
+            split_hints=split_hints,
+            z_hints=z_hints,
+            manual_obs_frames={
+                fi for fi, anc in manual_by_frame.items()
+                if anc.image_xy is not None
+            },
+            cfg=solver_cfg,
+            world_fixes=fixes or None,
+        )
+
+        solver_name = str(cfg.get("solver", "events"))
+        mode_search_fallback = False
+        if solver_name == "events":
+            # Default: resolve the sparse event set (touches body-pinned,
+            # waypoints via ray∩geometry), then render a DERIVED dense track
+            # from the §10 reference interpolator. No monocular depth solve.
+            result = resolve_events(
+                anchor_by_frame=anchor_by_frame,
+                player_ctx=player_ctx,
+                per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                per_frame_t=per_frame_t, distortion=distortion,
+                ball_radius=ball_radius, goal_geometry=goal_geometry,
+                n_frames=n_frames, fps=artifacts.camera_fps,
+                clip_id=artifacts.camera_clip_id,
+                image_size=artifacts.camera_image_size,
+            )
+        elif solver_name == "global":
+            # The beam re-segments the timeline, so it wants the RICHER
+            # permissive candidate set (soft-NMS, two events per window),
+            # not the greedy-merged `events` the auto-anchor path uses —
+            # otherwise the beam can't split where greedy merging hid a
+            # breakpoint (the whole point of Phase 2).
+            event_candidates = detect_event_candidates(
+                steps=steps,
+                confidences=raw_confidences,
+                player_ctx=player_ctx,
+                per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                per_frame_t=per_frame_t, distortion=distortion,
+                goal_geometry=goal_geometry,
+                cfg=event_cfg,
+                profile="permissive",
+            )
             try:
-                p0, v0, parab_resid = fit_parabola_to_image_observations(
-                    obs, Ks=Ks_seg, Rs=Rs_seg, t_world=ts_seg,
-                    fps=camera.fps, distortion=distortion,
+                result = solve_modes(
+                    **solve_kwargs,
+                    mode_search_cfg=_mode_search_cfg(cfg),
+                    player_ctx=player_ctx,
+                    events=event_candidates,
                 )
-            except Exception as exc:
-                # Refit failure means the data isn't actually a clean
-                # flight arc — the original ground projection (noisy but
-                # bounded) is a better fallback than nothing.
-                logger.debug("promotion refit failed at run %d-%d: %s — leaving as grounded",
-                             run.start, run.end, exc)
-                continue
-            if parab_resid > max_residual:
-                logger.info(
-                    "ball: promotion refit for run %d-%d residual %.1f px > "
-                    "%.1f px cap, leaving as grounded",
-                    run.start, run.end, parab_resid, max_residual,
+            except BudgetExceeded as exc:
+                logger.warning(
+                    "ball stage: global mode-search exceeded its fit budget "
+                    "(%s) — falling back to whole-shot piecewise solve", exc,
                 )
-                continue
-            seg_duration = (run.end - run.start) / camera.fps
-            if not is_plausible_trajectory(
-                p0, v0, omega=None,
-                duration_s=seg_duration, fps=camera.fps,
-                cfg=plaus_cfg, pitch=pitch_dims,
-            ):
-                logger.info(
-                    "ball: promotion refit for run %d-%d failed plausibility; "
-                    "leaving as grounded",
-                    run.start, run.end,
+                mode_search_fallback = True
+                result = solve_piecewise(**solve_kwargs)
+            except Exception as exc:  # noqa: BLE001 — any global-solve failure falls back
+                logger.warning(
+                    "ball stage: global mode-search failed (%s) — falling "
+                    "back to whole-shot piecewise solve", exc,
                 )
-                continue
-
-            sid_new = next_segment_id
-            next_segment_id += 1
-            for fi in range(run.start, run.end + 1):
-                if fi not in per_frame_K:
-                    continue
-                dt = (fi - run.start) / camera.fps
-                pos = p0 + v0 * dt + 0.5 * g_vec * dt ** 2
-                prev_conf = per_frame_world.get(fi, (None, 0.5))[1]
-                per_frame_world[fi] = (pos, prev_conf)
-                flight_membership[fi] = sid_new
-            flight_segments.append(
-                FlightSegment(
-                    id=sid_new,
-                    frame_range=(run.start, run.end),
-                    parabola={
-                        "p0": [float(x) for x in p0],
-                        "v0": [float(x) for x in v0],
-                        "g": g,
-                        "spin_axis_world": None,
-                        "spin_omega_rad_s": None,
-                        "spin_confidence": None,
-                    },
-                    fit_residual_px=parab_resid,
-                )
+                mode_search_fallback = True
+                result = solve_piecewise(**solve_kwargs)
+        elif solver_name == "piecewise":
+            result = solve_piecewise(**solve_kwargs)
+        else:
+            raise ValueError(
+                f"Unknown ball.solver={solver_name!r}; "
+                "expected 'events', 'piecewise', or 'global'"
             )
+        world_by_frame = dict(result.world_by_frame)
+        state_by_frame = dict(result.state_by_frame)
 
-        # Pull anchored hard-knot frames back to their exact state-
-        # height ray-cast. IMM segments and promotion refits may have
-        # written parabola values over the user's anchors; the
-        # ground-level interp pass below reads pa/pb from
-        # per_frame_world, so this MUST happen before interp or the
-        # interp endpoints carry the parabola error into every
-        # in-between frame.
-        _apply_hard_knot_anchor_overrides(
-            per_frame_world=per_frame_world,
-            anchor_by_frame=anchor_by_frame,
-            ground_touch_frames=ground_touch_frames,
-            bone_lookup=bone_lookup,
-            per_frame_K=per_frame_K,
-            per_frame_R=per_frame_R,
-            per_frame_t=per_frame_t,
-            distortion=distortion,
-            ball_radius=ball_radius,
-            goal_geometry=goal_geometry,
-        )
-
-        # Layer 5: forced-flight frames from airborne_* / off_screen_flight
-        # anchors. We do NOT create FlightSegment entries here — the user
-        # marked the frame airborne but we have no parabola data to fit
-        # (single-frame runs are not real flights). Instead the BallFrame
-        # assembly below uses the `forced_flight` set directly to classify
-        # those frames as state="flight". Avoids polluting the segments
-        # table with zero-parabola placeholders.
-
-        # Layer 5: linear interpolation between consecutive ground-level
-        # anchors. grounded / kick / bounce are all physically at
-        # z = 0.11 m, so XY interpolates smoothly between them along
-        # the pitch surface. catch is not in this set (z = 1.5 m); any
-        # airborne / header / volley / chest anchor between two
-        # ground-level anchors blocks the interp (the ball was airborne
-        # in between).
-        if anchor_by_frame:
-            # ground-level pool: grounded/kick/bounce anchors PLUS any
-            # player_touch whose bone Z is below the ground threshold
-            # (small dribble / short ground-pass touches).
-            ground_level_frames = sorted(
-                fi for fi, a in anchor_by_frame.items()
-                if (
-                    (a.state in GROUND_LEVEL_STATES and a.image_xy is not None)
-                    or fi in ground_touch_frames
-                )
-            )
-            for i in range(len(ground_level_frames) - 1):
-                fa = ground_level_frames[i]
-                fb = ground_level_frames[i + 1]
-                if fb - fa <= 1:
-                    continue
-                # Skip if any anchor that is NOT ground-level lies
-                # strictly between fa and fb. Other ground-level anchors
-                # — and ground-touch player_touches — are fine.
-                if any(
-                    fa < fi < fb
-                    and anchor_by_frame[fi].state not in GROUND_LEVEL_STATES
-                    and fi not in ground_touch_frames
-                    for fi in anchor_by_frame.keys()
-                ):
-                    continue
-                wa = per_frame_world.get(fa)
-                wb = per_frame_world.get(fb)
-                if wa is None or wb is None:
-                    continue
-                pa, _ = wa
-                pb, _ = wb
-                span = fb - fa
-                # Smooth ground-level interpolation: fit a single
-                # quadratic curve from anchor A through the kept WASB
-                # observations to anchor B.
-                #
-                #   pos(t) = line(t) + D · t · (1−t)
-                #
-                # where line(t) = (1−t)·A + t·B and D is a 2-vector
-                # "bulge" magnitude fit by least squares to the
-                # WASB-vs-line residuals. The quadratic
-                # • passes through both anchors exactly (no
-                #   discontinuity at the touch),
-                # • follows the actual rolling trajectory (no
-                #   straight-line lag the user used to see), and
-                # • has no frame-to-frame jitter (the curve is
-                #   analytical, not a sample-by-sample copy of WASB).
-                #
-                # WASB observations are filtered for sanity: must be
-                # on the pitch and within a generous distance of the
-                # anchor-to-anchor line. Bogus detections (WASB
-                # locking onto a player's foot or line marking, or a
-                # ground-projection of an airborne ball) are dropped
-                # before the LSQ fit.
-                _wasb_offline_tolerance_m = max(2.0, 0.4 * float(np.linalg.norm(pb[:2] - pa[:2])))
-                ts: list[float] = []
-                residuals_xy: list[np.ndarray] = []
-                for fi in range(fa + 1, fb):
-                    existing = per_frame_world.get(fi)
-                    if existing is None:
-                        continue
-                    t_frac = (fi - fa) / span
-                    line_pos = pa[:2] * (1.0 - t_frac) + pb[:2] * t_frac
-                    pos_existing = np.asarray(existing[0][:2])
-                    on_pitch = (
-                        -plaus_cfg.pitch_margin_m
-                        <= pos_existing[0]
-                        <= pitch_dims.length_m + plaus_cfg.pitch_margin_m
-                        and -plaus_cfg.pitch_margin_m
-                        <= pos_existing[1]
-                        <= pitch_dims.width_m + plaus_cfg.pitch_margin_m
-                    )
-                    offline = float(np.linalg.norm(pos_existing - line_pos))
-                    if not on_pitch or offline > _wasb_offline_tolerance_m:
-                        continue
-                    ts.append(t_frac)
-                    residuals_xy.append(pos_existing - line_pos)
-                if ts:
-                    ts_arr = np.asarray(ts)
-                    res_arr = np.asarray(residuals_xy)
-                    weights = ts_arr * (1.0 - ts_arr)
-                    denom = float(np.sum(weights * weights))
-                    if denom > 1e-6:
-                        bulge_xy = (res_arr * weights[:, None]).sum(axis=0) / denom
-                    else:
-                        bulge_xy = np.zeros(2)
-                else:
-                    bulge_xy = np.zeros(2)
-                # Cap the bulge so the interp curve cannot overshoot
-                # past either anchor and cannot swing more than half the
-                # anchor-to-anchor distance perpendicular to the line.
-                # Without this cap the LSQ readily produces |D| ≫ |AB|
-                # when a handful of WASB observations land on the same
-                # side of the line, and the ball "rubber-bands" past
-                # the next anchor and back. The constraint |D_par| ≤
-                # |AB| is exactly the no-overshoot bound on the
-                # quadratic pos(t) = (1−t)A + tB + D·t·(1−t); the
-                # symmetric |D_perp| ≤ |AB| keeps sideways swings
-                # bounded by the same scale.
-                ab_vec = np.asarray(pb[:2] - pa[:2], dtype=float)
-                ab_len = float(np.linalg.norm(ab_vec))
-                if ab_len > 1e-6:
-                    ab_unit = ab_vec / ab_len
-                    d_par = float(np.dot(bulge_xy, ab_unit))
-                    d_perp_vec = bulge_xy - d_par * ab_unit
-                    d_par = max(-ab_len, min(ab_len, d_par))
-                    d_perp_mag = float(np.linalg.norm(d_perp_vec))
-                    if d_perp_mag > ab_len:
-                        d_perp_vec = d_perp_vec * (ab_len / d_perp_mag)
-                    bulge_xy = d_par * ab_unit + d_perp_vec
-                for fi in range(fa + 1, fb):
-                    flight_membership.pop(fi, None)
-                    t_frac = (fi - fa) / span
-                    line_pos_xy = pa[:2] * (1.0 - t_frac) + pb[:2] * t_frac
-                    bulge = bulge_xy * (t_frac * (1.0 - t_frac))
-                    pos = np.array([
-                        line_pos_xy[0] + bulge[0],
-                        line_pos_xy[1] + bulge[1],
-                        ball_radius,
-                    ])
-                    per_frame_world[fi] = (pos, 0.9)
-
-        # Layer 5 Phase 2: parabola fit through maximal non-grounded
-        # anchor spans. For each contiguous run of non-grounded anchors
-        # (no grounded anchor between them), gather all anchor pixels
-        # as observations and all anchor-state heights as soft knots,
-        # then fit a parabola. If the fit is plausible, fill the span's
-        # unanchored frames with the parabola's per-frame evaluation
-        # and add a real FlightSegment. The linear-interp pass below
-        # serves as the fallback when the parabola fit fails or the
-        # span has too few pixels.
-        parabola_handled_spans: list[tuple[int, int]] = []
-        if anchor_by_frame:
-            ordered_for_spans = sorted(anchor_by_frame.items(), key=lambda kv: kv[0])
-            _NON_GROUNDED = AIRBORNE_STATES | EVENT_STATES
-            spans: list[list[tuple[int, BallAnchor]]] = []
-            # Span boundary rules:
-            #   grounded  → close current span (state change).
-            #   kick      → close current AND start a new span (kick is
-            #               the start of a fresh flight). kick is in the
-            #               new span only.
-            #   bounce    → close current including the bounce (flight
-            #   catch       ends here; subsequent flight needs a fresh
-            #               kick). Event is in the old span only.
-            #   header    → close current including the header AND start
-            #               a new span starting with the header (head
-            #               contact ends one parabola and starts the
-            #               next). Header is in BOTH adjacent spans.
-            #   airborne_*, off_screen_flight → continues current.
-            current_span: list[tuple[int, BallAnchor]] = []
-            for fi, anc in ordered_for_spans:
-                if anc.state == "grounded":
-                    if len(current_span) >= 2:
-                        spans.append(current_span)
-                    current_span = []
-                elif anc.state == "kick":
-                    if len(current_span) >= 2:
-                        spans.append(current_span)
-                    current_span = [(fi, anc)]
-                elif anc.state == "player_touch" and fi in ground_touch_frames:
-                    # Ground-touch player_touch (dribble / short ground
-                    # pass): the ball comes down to the player's foot
-                    # but might or might not launch back up — depends
-                    # on the NEXT anchor. Behaves like `bounce`: close
-                    # the current span AND start a new span with the
-                    # touch as the bookend. If the next anchor is also
-                    # ground-level, the new span ends up with only
-                    # ground-level anchors and is dropped by the
-                    # has_flight_evidence filter below — leaving the
-                    # gap to be filled by the ground-level interp pass
-                    # above. If the next anchor is airborne, the new
-                    # span carries the touch + airborne anchors and is
-                    # parabola-fit.
-                    current_span.append((fi, anc))
-                    if len(current_span) >= 2:
-                        spans.append(current_span)
-                    current_span = [(fi, anc)]
-                elif anc.state in (
-                    "header", "volley", "chest", "bounce",
-                    "player_touch", "goal_impact",
-                ):
-                    # Contact events that are both an end and a start of
-                    # a flight: header/volley/chest/player_touch/
-                    # goal_impact are mid-flight contacts (body part or
-                    # goal frame); bounce is a ground contact that may
-                    # launch the ball back up to a subsequent airborne
-                    # event (e.g. bounce → volley apex). The event frame
-                    # is in BOTH adjacent spans so Phase 2 fits the
-                    # incoming parabola to END at the contact point and
-                    # the outgoing parabola to START from it — without
-                    # this, the surrounding trajectory is fit ignoring
-                    # the contact and visibly teleports to/from the
-                    # pinned impact frame.
-                    current_span.append((fi, anc))
-                    if len(current_span) >= 2:
-                        spans.append(current_span)
-                    current_span = [(fi, anc)]
-                elif anc.state == "catch":
-                    current_span.append((fi, anc))
-                    if len(current_span) >= 2:
-                        spans.append(current_span)
-                    current_span = []
-                elif anc.state in _NON_GROUNDED:
-                    current_span.append((fi, anc))
-                else:
-                    if len(current_span) >= 2:
-                        spans.append(current_span)
-                    current_span = []
-            if len(current_span) >= 2:
-                spans.append(current_span)
-
-            for span in spans:
-                fa_span = span[0][0]
-                fb_span = span[-1][0]
-                # Defensive filter: drop spans where every anchor is
-                # ground-level (grounded/bounce, or ground-touch
-                # player_touch). These represent ground passes /
-                # dribbles, not flights, and are handled by the
-                # ground-level interp pass above. `kick` counts as
-                # flight evidence because it marks the start of a
-                # flight, even though the ball is at z=0.11 at the
-                # kick frame.
-                has_flight_evidence = any(
-                    anc.state == "kick"
-                    or (
-                        anc.state in AIRBORNE_STATES
-                        and not (
-                            anc.state == "player_touch"
-                            and fi in ground_touch_frames
-                        )
-                    )
-                    for fi, anc in span
-                )
-                if not has_flight_evidence:
-                    continue
-                # Build obs from every anchor pixel in the span. Only
-                # HARD_KNOT_STATES contribute to knot_frames — airborne
-                # bucket heights (1/6/15 m) are too coarse to pin Z,
-                # and using them as soft constraints would pull the fit
-                # toward the wrong height when the user picks the wrong
-                # bucket. The pixel observations alone constrain XY
-                # along each camera ray; gravity + hard knots constrain
-                # Z.
-                obs_p2: list[tuple[int, tuple[float, float]]] = []
-                Ks_p2: list[np.ndarray] = []
-                Rs_p2: list[np.ndarray] = []
-                ts_p2: list[np.ndarray] = []
-                knots: dict[int, np.ndarray] = {}
-                z_ranges: dict[int, tuple[float, float]] = {}
-                p0_pin: np.ndarray | None = None
-                for fi, anc in span:
-                    if anc.image_xy is None or fi not in per_frame_K:
-                        continue
-                    obs_p2.append((fi, (float(anc.image_xy[0]), float(anc.image_xy[1]))))
-                    Ks_p2.append(per_frame_K[fi])
-                    Rs_p2.append(per_frame_R[fi])
-                    ts_p2.append(per_frame_t[fi])
-                    rel = fi - fa_span
-                    if anc.state in HARD_KNOT_STATES:
-                        # Use the same resolver as the end-of-run
-                        # override so the parabola fit sees the exact
-                        # world position the final track will emit.
-                        # Previously this site used bone_world for
-                        # ground-touch player_touch (wrong: bone XY
-                        # drifts), causing p0_pin to be 1–2 m off and
-                        # the LM to produce nonsense v0 for the shot.
-                        world_at_anchor = _resolve_anchor_world(
-                            anc=anc, fi=fi,
-                            ground_touch_frames=ground_touch_frames,
-                            bone_lookup=bone_lookup,
-                            per_frame_K=per_frame_K,
-                            per_frame_R=per_frame_R,
-                            per_frame_t=per_frame_t,
-                            distortion=distortion,
-                            ball_radius=ball_radius,
-                            goal_geometry=goal_geometry,
-                        )
-                        if world_at_anchor is None:
-                            continue
-                        knots[rel] = world_at_anchor
-                    else:
-                        # airborne_low/mid/high → one-sided Z hinge that
-                        # forces z into the bucket range but lets the
-                        # pixel obs determine the exact value inside it.
-                        bucket = airborne_bucket_range(anc.state)
-                        if bucket is not None:
-                            z_ranges[rel] = bucket
-                # Need at least 2 anchors. With p0 pinned to a hard-knot
-                # or airborne-start ray-cast, the fit only optimises v0
-                # (3 unknowns). One additional anchor (pixel obs or
-                # knot) gives 2-3 residuals — enough to determine v0
-                # exactly for a kick→bounce or kick→airborne pair.
-                if len(obs_p2) < 2:
-                    continue
-                # C3a: record how many hard 3D knots bracket this flight
-                # span (before any are consumed as the p0 pin) so the
-                # quality report can flag depth-under-determined spans.
-                span_knot_counts.append((fa_span, fb_span, len(knots)))
-                # Pin p0 to a known world position when possible:
-                #   - Hard-knot start (kick/header/etc.): use its exact
-                #     state-height ray-cast (already in knots[0]).
-                #   - Airborne start (no kick anchor was placed): use
-                #     the bucket-midpoint ray-cast. The LM otherwise has
-                #     free reign over p0 along the camera ray and drifts
-                #     several metres from where the user clicked.
-                first_anc = span[0][1]
-                # C2: when >=free_p0_min_hard_knots hard knots bracket the
-                # span AND the span is short enough to be a single ballistic
-                # arc (<=2 s), gravity + the knots fully determine the 6-DOF
-                # arc (depth included), so leave p0 FREE and keep every knot.
-                # Pinning p0 here would discard the arc-curvature depth
-                # information. A single parabola only models one ballistic
-                # flight (~<=2 s); longer "spans" are mis-segmented multi-arc
-                # sequences where a free p0 swings wildly, so keep them
-                # pinned. Below the knot threshold, keep the historical safe
-                # pinning (p0 free-drifts along the ray without >=2 knots).
-                span_duration_s = (fb_span - fa_span) / camera.fps
-                free_p0 = (
-                    len(knots) >= free_p0_min_hard_knots
-                    and 0.0 < span_duration_s <= 2.0
-                )
-                if free_p0:
-                    p0_pin = None  # keep all entries in `knots`
-                elif 0 in knots and first_anc.state in HARD_KNOT_STATES:
-                    p0_pin = knots.pop(0)
-                elif (
-                    0 not in knots
-                    and first_anc.state in AIRBORNE_STATES
-                    and first_anc.image_xy is not None
-                    and fa_span in per_frame_K
-                ):
-                    try:
-                        p0_pin = ankle_ray_to_pitch(
-                            first_anc.image_xy,
-                            K=per_frame_K[fa_span], R=per_frame_R[fa_span], t=per_frame_t[fa_span],
-                            plane_z=state_to_height(first_anc.state),
-                            distortion=distortion,
-                        )
-                        p0_pin = np.asarray(p0_pin, dtype=float)
-                        # Drop the z-range hinge at rel=0 since position
-                        # is now pinned directly.
-                        z_ranges.pop(0, None)
-                    except (ValueError, Exception):
-                        p0_pin = None
-                try:
-                    p2_p0, p2_v0, p2_resid = fit_parabola_to_image_observations(
-                        obs_p2, Ks=Ks_p2, Rs=Rs_p2, t_world=ts_p2,
-                        fps=camera.fps, distortion=distortion,
-                        p0_fixed=p0_pin, knot_frames=knots or None,
-                        z_range_frames=z_ranges or None,
-                        # When p0 is free the >=2 hard knots already pin Z at
-                        # their frames; demote the coarse airborne z-buckets
-                        # to a light hinge so they can't fight the determined
-                        # arc.
-                        z_range_weight=(20.0 if free_p0 else 200.0),
-                    )
-                except Exception as exc:
-                    logger.debug(
-                        "Phase 2 parabola fit failed for span %d-%d: %s",
-                        fa_span, fb_span, exc,
-                    )
-                    continue
-                duration_s = (fb_span - fa_span) / camera.fps
-                if duration_s <= 0:
-                    continue
-                # Phase 2 uses a LOOSER plausibility than Layer 1: the
-                # user explicitly anchored every frame in this span, so
-                # we trust their intent even when bucket choices imply a
-                # slightly off-pitch or very high arc. Layer 1's strict
-                # bounds (pitch margin, apex 50 m, speed 40 m/s + 5)
-                # would reject perfectly usable fits when the user's
-                # bucket misclassifies the ball's height by a few metres.
-                # We still reject NaN / runaway parameters as obvious
-                # nonsense.
-                if (
-                    not np.all(np.isfinite(p2_p0))
-                    or not np.all(np.isfinite(p2_v0))
-                    or float(np.linalg.norm(p2_v0)) > 100.0
-                    or float(np.max(np.abs(p2_p0))) > 1000.0
-                ):
-                    logger.info(
-                        "Phase 2 fit for span %d-%d returned non-finite or "
-                        "runaway parameters (p0=%s v0=%s) — falling back",
-                        fa_span, fb_span,
-                        np.asarray(p2_p0).round(1).tolist(),
-                        np.asarray(p2_v0).round(1).tolist(),
-                    )
-                    continue
-                if not is_plausible_trajectory(
-                    p2_p0, p2_v0, omega=None,
-                    duration_s=duration_s, fps=camera.fps,
-                    cfg=plaus_cfg, pitch=pitch_dims,
-                ):
-                    logger.info(
-                        "Phase 2 fit for span %d-%d failed Layer 1 plausibility but "
-                        "passed sanity bounds — accepting (user-anchored trajectories "
-                        "are trusted over the strict envelope)",
-                        fa_span, fb_span,
-                    )
-                # Success: drop any pre-existing flight segments inside
-                # this span (the parabola we just fit is the authoritative
-                # answer) and emit a single new segment.
-                surviving: list[FlightSegment] = []
-                for seg in flight_segments:
-                    seg_a, seg_b = seg.frame_range
-                    if seg_a >= fa_span and seg_b <= fb_span:
-                        for fi in range(seg_a, seg_b + 1):
-                            if flight_membership.get(fi) == seg.id:
-                                flight_membership.pop(fi, None)
-                        continue
-                    surviving.append(seg)
-                flight_segments[:] = surviving
-
-                sid_new = (max(flight_membership.values()) + 1) if flight_membership else 0
-                # Avoid colliding with any segment IDs still in the list.
-                existing_ids = {s.id for s in flight_segments}
-                while sid_new in existing_ids:
-                    sid_new += 1
-                g_vec = np.array([0.0, 0.0, -9.81])
-                # Attempt Magnus refinement on the Phase 2 parabola when
-                # the span's start anchor (kick / volley) carries a spin
-                # preset. Without a hint Magnus still runs but at the
-                # strict acceptance threshold — equivalent to the IMM
-                # path's behaviour, and a no-op for most spans.
-                omega_seed_p2, hint_provided_p2 = _spin_seed_for_segment(
-                    anchor_by_frame, fa_span, fb_span, v0=p2_v0,
-                )
-                refinement = _refine_with_magnus(
-                    obs=obs_p2, Ks_seg=Ks_p2, Rs_seg=Rs_p2, ts_seg=ts_p2,
-                    fps=camera.fps, drag=drag,
-                    plaus_cfg=plaus_cfg, pitch_dims=pitch_dims,
-                    p0=(p0_pin if p0_pin is not None else p2_p0),
-                    v0=p2_v0, parab_resid=p2_resid,
-                    anchor_world=p0_pin,
-                    duration_s=duration_s,
-                    spin_enabled=spin_enabled,
-                    spin_min_seconds=spin_min_seconds,
-                    spin_max_omega=spin_max_omega,
-                    spin_min_improve=spin_min_improve,
-                    spin_min_improve_hinted=spin_min_improve_hinted,
-                    omega_seed=omega_seed_p2,
-                    hint_provided=hint_provided_p2,
-                    segment_label=f"phase-2 span {fa_span}-{fb_span}",
-                    knot_frames=knots,
-                )
-                # Inside a successful Phase 2 span the parabola (or
-                # Magnus-refined trajectory) is the authoritative answer
-                # for every frame — including the anchored ones, whose
-                # pixels constrained the fit. The per-anchor ray-cast at
-                # bucket heights would otherwise land 10s of metres off
-                # the truth for coarse buckets.
-                for fi in range(fa_span, fb_span + 1):
-                    forced_flight.add(fi)
-                    flight_membership[fi] = sid_new
-                    dt_k = (fi - fa_span) / camera.fps
-                    if refinement.omega_world is not None:
-                        positions = _integrate_magnus_positions(
-                            refinement.effective_p0,
-                            refinement.effective_v0,
-                            refinement.omega_world,
-                            g_vec, drag,
-                            np.array([0.0, dt_k]),
-                        )
-                        pos = positions[-1]
-                    else:
-                        pos = (
-                            refinement.effective_p0
-                            + refinement.effective_v0 * dt_k
-                            + 0.5 * (dt_k ** 2) * g_vec
-                        )
-                    per_frame_world[fi] = (pos, 0.92)
-                flight_segments.append(FlightSegment(
-                    id=sid_new,
-                    frame_range=(fa_span, fb_span),
-                    parabola={
-                        "p0": [float(x) for x in refinement.effective_p0],
-                        "v0": [float(x) for x in refinement.effective_v0],
-                        "g": -9.81,
-                        "spin_axis_world": refinement.spin_axis,
-                        "spin_omega_rad_s": refinement.spin_omega,
-                        "spin_confidence": refinement.spin_confidence,
-                    },
-                    fit_residual_px=refinement.effective_resid,
-                ))
-                parabola_handled_spans.append((fa_span, fb_span))
-
-        # Layer 5 Phase 1: forced-flight extension for non-grounded spans
-        # that Phase 2 did not cover. We mark frames between consecutive
-        # non-grounded anchors as state="flight" but DO NOT emit a
-        # world_xyz for unanchored or airborne-anchored frames — the
-        # bucket-midpoint ray-cast was producing 50+ metre depth swings
-        # between adjacent airborne_low/mid/high anchors and showing up
-        # as a top-down zigzag. Honest gaps are better than wrong dots.
-        # Hard-knot anchored frames (kick/catch/bounce/grounded — set
-        # earlier via the exact-world override) keep their world_xyz.
-        def _in_handled_span(fi: int) -> bool:
-            for sa, sb in parabola_handled_spans:
-                if sa <= fi <= sb:
-                    return True
-            return False
-
-        if anchor_by_frame:
-            ordered = sorted(anchor_by_frame.items(), key=lambda kv: kv[0])
-            _NON_GROUNDED = AIRBORNE_STATES | EVENT_STATES
-            for (fa, anc_a), (fb, anc_b) in zip(ordered, ordered[1:]):
-                if anc_a.state == "grounded" or anc_b.state == "grounded":
-                    continue
-                if anc_a.state not in _NON_GROUNDED or anc_b.state not in _NON_GROUNDED:
-                    continue
-                # If BOTH endpoints are ground-level (e.g. bounce→kick,
-                # kick→bounce, or a ground pass between two ground-touch
-                # player_touches), the ground-level linear-interp pass
-                # already filled the world XY at z=0.11. Don't clobber
-                # it — that pair represents the ball rolling, not flying.
-                # A ground-touch player_touch is at ground level even
-                # though `player_touch` is not in GROUND_LEVEL_STATES, so
-                # it counts here exactly as the interp / Phase 2 filter
-                # treat it (via ``ground_touch_frames``).
-                if (
-                    (anc_a.state in GROUND_LEVEL_STATES or fa in ground_touch_frames)
-                    and (anc_b.state in GROUND_LEVEL_STATES or fb in ground_touch_frames)
-                ):
-                    continue
-                if fb - fa <= 1:
-                    continue
-                if _in_handled_span(fa) and _in_handled_span(fb):
-                    continue
-                # Mark every in-between frame as flight (state-only).
-                # Also clear any world_xyz the IMM/ground-projection
-                # already wrote — those are bucket-midpoint ray-casts
-                # at bogus heights for airborne frames.
-                for fi in range(fa + 1, fb):
-                    forced_flight.add(fi)
-                    flight_membership.pop(fi, None)
-                    per_frame_world.pop(fi, None)
-                # Also drop world_xyz at airborne-anchored endpoints —
-                # the bucket-midpoint ray-cast there is just as wrong as
-                # the in-between frames. Hard-knot endpoints keep their
-                # exact-height ray-cast.
-                for fi_endpoint, anc_endpoint in ((fa, anc_a), (fb, anc_b)):
-                    if anc_endpoint.state not in HARD_KNOT_STATES:
-                        per_frame_world.pop(fi_endpoint, None)
-
-        # Final hard-knot pin: Phase 2 and Phase 1 may have written
-        # parabola eval values over body-part contact anchors (header /
-        # volley / chest / catch) inside a span. Anchors are the user's
-        # ground truth, so they take the last word.
-        _apply_hard_knot_anchor_overrides(
-            per_frame_world=per_frame_world,
-            anchor_by_frame=anchor_by_frame,
-            ground_touch_frames=ground_touch_frames,
-            bone_lookup=bone_lookup,
-            per_frame_K=per_frame_K,
-            per_frame_R=per_frame_R,
-            per_frame_t=per_frame_t,
-            distortion=distortion,
-            ball_radius=ball_radius,
-            goal_geometry=goal_geometry,
-        )
-
-        # C4 — ray-faithfulness guarantee. The user's clicked pixel is hard
-        # lateral ground truth. For every AIRBORNE-soft anchored frame
-        # (airborne_low/mid/high) whose emitted world reprojects farther than
-        # the tolerance from the click, snap it onto the clicked ray, keeping
-        # the fitted along-ray depth. Hard-knot states are already pinned
-        # on-ray, so they are skipped here.
+        # C4 — ray-faithfulness for airborne-bucket anchors: the clicked
+        # pixel is hard lateral ground truth; keep the solved depth but
+        # snap onto the clicked ray when reprojection drifts.
         ray_faithful_tol_px = float(cfg.get("ray_faithful_tolerance_px", 3.0))
-        _RAY_SNAP_STATES = frozenset({
-            "airborne_low", "airborne_mid", "airborne_high",
-        })
         for fi, anc in anchor_by_frame.items():
-            if anc.state not in _RAY_SNAP_STATES or anc.image_xy is None:
+            if anc.state not in AIRBORNE_STATES or anc.image_xy is None:
                 continue
-            if fi not in per_frame_world or fi not in per_frame_K:
+            if anc.state == "off_screen_flight":
                 continue
-            world, conf = per_frame_world[fi]
+            entry = world_by_frame.get(fi)
+            if entry is None or fi not in per_frame_K:
+                continue
+            world, conf = entry
             uvp = project_world_to_image(
                 per_frame_K[fi], per_frame_R[fi], per_frame_t[fi],
                 distortion, np.asarray(world, dtype=float).reshape(1, 3),
             )[0]
             if float(np.linalg.norm(uvp - np.array(anc.image_xy))) <= ray_faithful_tol_px:
                 continue
-            snapped = _snap_world_onto_pixel_ray(
+            snapped = project_point_onto_pixel_ray(
                 np.asarray(world, dtype=float),
                 (float(anc.image_xy[0]), float(anc.image_xy[1])),
                 per_frame_K[fi], per_frame_R[fi], per_frame_t[fi], distortion,
             )
-            per_frame_world[fi] = (snapped, conf)
+            world_by_frame[fi] = (snapped, conf)
+            state_by_frame[fi] = "flight"
+
+        # off_screen_flight: the operator says the ball is airborne out
+        # of frame — honest state without a world position.
+        for fi, anc in anchor_by_frame.items():
+            if anc.state == "off_screen_flight" and fi not in world_by_frame:
+                state_by_frame[fi] = "flight"
+
+        # --- 6. Emit -----------------------------------------------------
+        segment_by_frame: dict[int, int] = {}
+        for seg in result.flight_segments:
+            for fi in range(seg.frame_range[0], seg.frame_range[1] + 1):
+                segment_by_frame[fi] = seg.id
 
         per_frame_out: list[BallFrame] = []
         for fi in range(n_frames):
-            in_flight = fi in flight_membership or fi in forced_flight
-            if fi in per_frame_world:
-                world, conf = per_frame_world[fi]
-                state = "flight" if in_flight else "grounded"
-                per_frame_out.append(
-                    BallFrame(
-                        frame=fi,
-                        world_xyz=tuple(float(x) for x in world),
-                        state=state,
-                        confidence=float(conf),
-                        flight_segment_id=flight_membership.get(fi),
-                    )
-                )
+            entry = world_by_frame.get(fi)
+            state = state_by_frame.get(fi, "missing")
+            if entry is not None:
+                world, conf = entry
+                per_frame_out.append(BallFrame(
+                    frame=fi,
+                    world_xyz=tuple(float(x) for x in world),
+                    state=state if state != "missing" else "grounded",
+                    confidence=float(conf),
+                    flight_segment_id=segment_by_frame.get(fi),
+                ))
             else:
-                if in_flight:
-                    per_frame_out.append(
-                        BallFrame(
-                            frame=fi,
-                            world_xyz=None,
-                            state="flight",
-                            confidence=0.0,
-                            flight_segment_id=flight_membership.get(fi),
-                        )
-                    )
-                else:
-                    per_frame_out.append(
-                        BallFrame(
-                            frame=fi,
-                            world_xyz=None,
-                            state="missing",
-                            confidence=0.0,
-                        )
-                    )
+                per_frame_out.append(BallFrame(
+                    frame=fi,
+                    world_xyz=None,
+                    state="flight" if state == "flight" else "missing",
+                    confidence=0.0,
+                    flight_segment_id=segment_by_frame.get(fi),
+                ))
+
+        # Integrate a per-frame unit quaternion over the dense track so the
+        # exported ball visibly rotates/curls. ω comes from physics (flight
+        # Magnus spin / rolling-consistent ground spin), never a measured
+        # ball-spin observation; see ball_orientation.integrate_orientation.
+        quat_by_frame = integrate_orientation(
+            per_frame_out, result.flight_segments,
+            artifacts.camera_fps, ball_radius,
+        )
+        per_frame_out = [
+            dataclasses.replace(bf, quat_wxyz=quat_by_frame.get(bf.frame))
+            for bf in per_frame_out
+        ]
 
         track = BallTrack(
-            clip_id=camera.clip_id,
-            fps=camera.fps,
+            clip_id=artifacts.camera_clip_id,
+            fps=artifacts.camera_fps,
             frames=tuple(per_frame_out),
-            flight_segments=tuple(flight_segments),
+            flight_segments=result.flight_segments,
         )
         track.save(ball_out_path)
 
         try:
-            _emit_ball_keyframes(
-                ball_out_path=ball_out_path,
-                clip_id=camera.clip_id,
-                fps=camera.fps,
-                image_size=camera.image_size,
-                per_frame_out=per_frame_out,
-                anchor_by_frame=anchor_by_frame,
-                per_frame_K=per_frame_K,
-                per_frame_R=per_frame_R,
-                per_frame_t=per_frame_t,
-                distortion=distortion,
-                ground_touch_frames=ground_touch_frames,
-            )
+            event_keyframes = getattr(result, "keyframe_set", None)
+            if solver_name == "events" and event_keyframes is not None:
+                # Events mode: the resolver already built the authoritative
+                # sparse keyframes WITH interpolation segments — write them
+                # directly so the segments reach UE / the reference interp.
+                kf_path = ball_out_path.with_name(
+                    ball_out_path.name.replace("ball_track", "ball_keyframes")
+                )
+                event_keyframes.save(kf_path)
+            else:
+                _emit_ball_keyframes(
+                    ball_out_path=ball_out_path,
+                    clip_id=artifacts.camera_clip_id,
+                    fps=artifacts.camera_fps,
+                    image_size=artifacts.camera_image_size,
+                    per_frame_out=per_frame_out,
+                    anchor_by_frame=anchor_by_frame,
+                    per_frame_K=per_frame_K,
+                    per_frame_R=per_frame_R,
+                    per_frame_t=per_frame_t,
+                    distortion=distortion,
+                    ground_touch_frames=ground_touch_frames,
+                    flight_segments=result.flight_segments,
+                )
         except Exception as exc:  # noqa: BLE001 — sidecar is enrichment, never block the stage
             logger.warning(
                 "ball: failed to write keyframes sidecar for %s: %s",
                 ball_out_path, exc,
             )
 
-        # C3a — surface depth-under-determined flight spans. A span with
-        # < min_hard_knots_warn hard 3D knots cannot have its airborne depth
-        # determined monocularly; adding a bracketing kick/bounce/goal_impact/
-        # grounded anchor lets the physics-first fit (C2) resolve it exactly.
-        underconstrained = _underconstrained_spans(
-            span_knot_counts, min_hard_knots_warn,
-        )
-        for fa_uc, fb_uc, nk in underconstrained:
+        for span in result.diagnostics.get("underconstrained_spans", []):
             logger.warning(
-                "ball: flight span %d-%d has %d<%d hard knots — depth is "
-                "monocularly under-determined; add a kick/bounce/goal_impact/"
-                "grounded anchor to bracket it",
-                fa_uc, fb_uc, nk, min_hard_knots_warn,
+                "ball: span %d-%d could not be explained by a physical "
+                "segment within the residual gate (%.1f px) — add a manual "
+                "anchor inside it",
+                span["start"], span["end"], span.get("residual_px") or -1.0,
             )
+
+        # cross_replay summary reflects THIS run's triangulation (None for
+        # single-shot / disabled / no-partner). A stale fixes sidecar from a
+        # prior run is removed when this run produced no fixes, so the
+        # on-disk fixes never outlive the solve that consumed them.
+        fixes_path = ball_out_path.with_name(
+            ball_out_path.name.replace("ball_track", "ball_fixes")
+        )
+        if cr_summary is None and fixes_path.exists():
+            try:
+                fixes_path.unlink()
+            except OSError:
+                pass
+
         diag_path = ball_out_path.with_name(
             ball_out_path.name.replace("ball_track", "ball_diag")
         )
-        diag_path.write_text(json.dumps({
-            "underconstrained_spans": [
-                {"start": fa_uc, "end": fb_uc, "hard_knots": nk}
-                for fa_uc, fb_uc, nk in underconstrained
+        diag: dict = {
+            "solver": solver_name,
+            # In events mode the dense ``ball_track.json`` is rendered by the
+            # reference interpolator from the sparse keyframes, not solved.
+            "derived": solver_name == "events",
+            "underconstrained_spans": result.diagnostics.get(
+                "underconstrained_spans", []),
+            "segments": result.diagnostics.get("segments", []),
+            "bounces": result.diagnostics.get("bounces", []),
+            "splits": result.diagnostics.get("splits", 0),
+            "contact_gaps": contact_gaps,
+            "events": [
+                {
+                    "frame": e.frame, "kind": e.kind,
+                    "score": round(float(e.score), 3),
+                    "player_id": e.player_id, "bone": e.bone,
+                    "goal_element": e.goal_element,
+                    "end_frame": e.end_frame,
+                }
+                for e in events
             ],
-        }, indent=2))
-
-    @staticmethod
-    def _flight_runs(
-        steps: list[TrackerStep], min_flight: int, max_flight: int
-    ) -> list[tuple[int, int]]:
-        """Run-length encode frames with ``p_flight >= 0.5``.
-
-        Returns ``(start_frame, end_frame)`` pairs, both inclusive.
-        Runs shorter than ``min_flight`` or longer than ``max_flight``
-        are dropped (long runs are likely tracker confusion, not real
-        flights).
-        """
-        runs: list[tuple[int, int]] = []
-        start: int | None = None
-        for step in steps:
-            in_flight = step.p_flight >= 0.5 and step.uv is not None
-            if in_flight and start is None:
-                start = step.frame
-            elif not in_flight and start is not None:
-                end = step.frame - 1
-                if min_flight <= (end - start + 1) <= max_flight:
-                    runs.append((start, end))
-                start = None
-        if start is not None and steps:
-            end = steps[-1].frame
-            if min_flight <= (end - start + 1) <= max_flight:
-                runs.append((start, end))
-        return runs
+            "anchors": {
+                "manual": len(manual_by_frame),
+                "auto_generated": len(auto_by_frame),
+                "merged": len(anchor_by_frame),
+                "nodes": len(nodes),
+            },
+            "detection_coverage": artifacts.detection_coverage,
+            "cross_replay": cr_summary,
+        }
+        if solver_name == "global":
+            # Surface the beam search-effort metrics + the fallback flag so the
+            # quality report / operator can see whether the global solve
+            # completed or fell back to whole-shot piecewise (F8).
+            diag["mode_search_fallback"] = mode_search_fallback
+            diag["mode_search"] = result.diagnostics.get("mode_search", {})
+        diag_path.write_text(json.dumps(diag, indent=2))

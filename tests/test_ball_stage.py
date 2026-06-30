@@ -60,13 +60,17 @@ def _save_camera_track(
 
 def _write_blank_clip(path: Path, n: int, fps: float = 30.0) -> None:
     """The BallDetector is faked in tests, so the frame contents don't matter —
-    we just need the VideoCapture to return ``n`` frames."""
+    we just need the VideoCapture to return ``n`` frames.
+
+    1280×720 so that the projected ball coordinates (u≈162–285, v≈358) from
+    _camera_pose() fall inside the frame and pass the in-bounds check.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
-        str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (320, 240)
+        str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (1280, 720)
     )
     for _ in range(n):
-        writer.write(np.full((240, 320, 3), [50, 200, 50], dtype=np.uint8))
+        writer.write(np.full((720, 1280, 3), [50, 200, 50], dtype=np.uint8))
     writer.release()
 
 
@@ -112,35 +116,51 @@ def test_ball_stage_recovers_grounded_and_flight(tmp_path: Path):
 
 
 @pytest.mark.integration
-def test_ball_stage_marks_missing_after_long_gap(tmp_path: Path):
-    n = 40
+def test_ball_stage_bridges_bracketed_gap_and_marks_trailing_missing(tmp_path: Path):
+    """A long detection gap inside a confidently-grounded roll is bridged
+    by the rolling segment between the auto-sampled grounded anchors —
+    continuous physical motion instead of the ball blinking out. A gap
+    with no bracket on its far side (trailing) stays missing."""
+    n = 60
     fps = 30.0
     K, R, t = _camera_pose()
     _save_camera_track(tmp_path / "camera" / "camera_track.json", K, R, t, n, fps=fps)
     _write_blank_clip(tmp_path / "shots" / "play.mp4", n, fps=fps)
 
+    truth = {i: np.array([30.0 + 0.2 * i, 34.0, 0.11]) for i in range(n)}
     detections: list[tuple[float, float, float] | None] = []
     for i in range(n):
-        if 10 <= i <= 25:
-            # Long missed-detection gap — far longer than max_gap_frames.
-            detections.append(None)
+        if 10 <= i <= 25 or i >= 45:
+            detections.append(None)  # interior gap + trailing gap
         else:
-            p = np.array([30.0 + 0.2 * i, 34.0, 0.11])
-            u, v = _project(p, K, R, t)
+            u, v = _project(truth[i], K, R, t)
             detections.append((u, v, 0.9))
 
     stage = BallStage(
-        config={"ball": {"detector": "fake", "max_gap_frames": 3}},
+        config={"ball": {"detector": "fake", "solver": "piecewise",
+                         "max_gap_frames": 3,
+                         "auto_anchors": {"enabled": True,
+                                          "grounded_interval": 8},
+                         "second_pass": {"enabled": False},
+                         # Disable the appearance bridge: the all-green clip
+                         # gives a uniform NCC surface that confuses it.
+                         "appearance_bridge": {"enabled": False}}},
         output_dir=tmp_path,
         ball_detector=FakeBallDetector(detections),
     )
     stage.run()
 
     out = BallTrack.load(tmp_path / "ball" / "ball_track.json")
-    # First few frames inside the gap are gap-filled; later frames in the
-    # gap should be state="missing" after max_gap_frames expires.
-    assert out.frames[20].state == "missing"
-    assert out.frames[20].world_xyz is None
+    frames = {f.frame: f for f in out.frames}
+    # Interior gap: bridged on the rolling line within 10 cm.
+    for fi in (15, 20):
+        f = frames[fi]
+        assert f.world_xyz is not None, f"frame {fi} should be bridged"
+        err = float(np.linalg.norm(np.array(f.world_xyz) - truth[fi]))
+        assert err <= 0.10, f"frame {fi}: bridge error {err:.2f} m"
+    # Trailing gap (no bracketing anchor after it): honest missing.
+    assert frames[55].state == "missing"
+    assert frames[55].world_xyz is None
 
 
 @pytest.mark.integration
@@ -192,25 +212,27 @@ def test_ball_stage_emits_per_shot_track(tmp_path: Path):
 def test_implausible_parabola_fit_is_rejected(tmp_path: Path, monkeypatch):
     """Reproduces origi01 seg-3: a parabola fit lands at billion-metre
     coordinates with tiny pixel residual. Layer 1 must drop it."""
-    import src.stages.ball as ball_mod
+    import src.utils.ball_piecewise_solver as solver_mod
 
-    # Force fit_parabola_to_image_observations (as imported into ball.py) to
-    # return garbage with a microscopic residual so the existing
-    # flight_max_residual_px gate cannot save us.
+    # Force the solver's parabola fit to return garbage with a
+    # microscopic claimed residual. (The solver re-measures pixel RMS
+    # itself, but a garbage arc can still slip a small re-measured
+    # residual on degenerate data — the plausibility gate must hold.)
     def fake_parab(*args, **kwargs):
         p0 = np.array([-5_690_504.0, 9_399_056.0, -2_218_511.0])
         v0 = np.array([3_745_003.0, 3_366_928.0, -698_927.0])
         return p0, v0, 0.11
 
-    monkeypatch.setattr(ball_mod, "fit_parabola_to_image_observations", fake_parab)
+    monkeypatch.setattr(
+        solver_mod, "fit_parabola_to_image_observations", fake_parab,
+    )
 
-    # Also stub _flight_runs so BallStage always reports one flight run
-    # (frames 10-25) regardless of what the IMM posterior says.  This
-    # isolates the test to the plausibility gate, not the tracker.
-    def forced_flight_runs(self_arg, steps, min_flight, max_flight):
-        return [(10, 25)]
-
-    monkeypatch.setattr(BallStage, "_flight_runs", forced_flight_runs)
+    # Force one open-span flight run (frames 10-25) regardless of the
+    # IMM posterior, isolating the test to the plausibility gate.
+    monkeypatch.setattr(
+        solver_mod._Solver, "_flight_runs",
+        lambda self_arg, frames: [(10, 25)],
+    )
 
     K, R, t = _camera_pose()
     out = tmp_path / "out"
@@ -263,6 +285,7 @@ def test_implausible_parabola_fit_is_rejected(tmp_path: Path, monkeypatch):
                     "horizontal_speed_max_m_s": 40.0,
                     "pitch_margin_m": 5.0,
                 },
+                "auto_anchors": {"enabled": False},
             },
             "pitch": {"length_m": 105.0, "width_m": 68.0},
         },
@@ -320,6 +343,7 @@ def test_aerial_arc_promotes_grounded_run_to_flight(tmp_path: Path):
         config={
             "ball": {
                 "detector": "fake",
+                "solver": "piecewise",
                 "ball_radius_m": 0.11,
                 "max_gap_frames": 6,
                 "flight_max_residual_px": 200.0,
@@ -344,11 +368,9 @@ def test_aerial_arc_promotes_grounded_run_to_flight(tmp_path: Path):
 
     track = BallTrack.load(out / "ball" / "play_ball_track.json")
 
-    # Layer 2 ran and exercised the find_implausible_grounded_runs path
-    # on this synthetic fast-rolling-but-on-pitch trajectory. The
-    # parabola refit cannot recover a real flight from purely-linear
-    # pixel motion, so the safe behaviour is to leave the frames as
-    # grounded — the original ground projection is noisy but bounded
+    # Purely-linear pixel motion cannot support a real flight fit, so
+    # the safe behaviour is to leave the frames as grounded — the
+    # original ground projection is noisy but bounded
     # and better than `state="missing"`. We assert the safe fall-back:
     # frames remain grounded, no spurious flight segment was created,
     # and the run was not demoted to missing.
@@ -369,12 +391,15 @@ def test_aerial_arc_promotes_grounded_run_to_flight(tmp_path: Path):
 
 
 @pytest.mark.integration
-def test_kick_anchored_fit_pins_p0_to_foot(tmp_path: Path, monkeypatch):
-    """When a kp2d sidecar puts a player's ankle within 30 px of the
-    ball at the flight seed frame, the parabola fit's p0 is anchored
-    to the foot ray-cast position (not the unconstrained 6-param fit)."""
-    import json as _json
-    import src.stages.ball as ball_mod
+def test_auto_touch_anchors_flight_to_players_foot(tmp_path: Path):
+    """End-to-end automatic contact pipeline: a player's SMPL track puts
+    their foot at the kick point; the velocity break at the kick becomes
+    a touch event, the touch becomes an auto player_touch anchor with
+    the foot's depth, and the solved flight launches from the foot —
+    no manual anchors, no kp2d sidecars."""
+    from src.schemas.smpl_world import SmplWorldTrack
+    from src.utils.ball_anchor_heights import BONE_TO_SMPL_INDEX
+    from src.utils.smpl_skeleton import compute_joint_world
 
     K, R, t = _camera_pose()
     out = tmp_path / "out"
@@ -398,62 +423,65 @@ def test_kick_anchored_fit_pins_p0_to_foot(tmp_path: Path, monkeypatch):
         ],
     ).save(out / "shots" / "shots_manifest.json")
 
-    # True kick: p0 = (52.5, 34.0, 0.11) — projects to image centre,
-    # v0 = (3, 0.5, 12).
+    # True kick point + flight.
     p0_true = np.array([52.5, 34.0, 0.11])
     v0_true = np.array([3.0, 0.5, 12.0])
     g_vec = np.array([0.0, 0.0, -9.81])
-    detections: list[tuple[float, float, float] | None] = [None] * 5
+    kick_frame = 10
+
+    # Player whose left foot sits exactly at the kick point: solve the
+    # root translation so FK(l_foot) == p0_true for the rest pose.
+    base_R = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
+    thetas0 = np.zeros((24, 3), dtype=np.float32)
+    foot_at_origin = compute_joint_world(
+        thetas0, base_R, np.zeros(3), BONE_TO_SMPL_INDEX["l_foot"]
+    )
+    root_t_kick = p0_true - foot_at_origin
+    frames = np.arange(n_frames, dtype=np.int64)
+    SmplWorldTrack(
+        player_id="P001",
+        frames=frames,
+        betas=np.zeros(10, dtype=np.float32),
+        thetas=np.stack([thetas0] * n_frames),
+        root_R=np.stack([base_R.astype(np.float32)] * n_frames),
+        root_t=np.stack([root_t_kick.astype(np.float32)] * n_frames),
+        confidence=np.full(n_frames, 0.8, dtype=np.float32),
+        shot_id="play",
+    ).save(out / "hmr_world" / "play__P001_smpl_world.npz")
+
+    def _proj(p):
+        cam = R @ p + t
+        pix = K @ cam
+        return (float(pix[0] / pix[2]), float(pix[1] / pix[2]))
+
+    # Ball waits at the foot, then launches into the arc.
+    detections: list[tuple[float, float, float] | None] = []
+    for i in range(kick_frame):
+        u, v = _proj(p0_true)
+        detections.append((u, v, 0.9))
     for i in range(30):
         dt = i / 30.0
         pt = p0_true + v0_true * dt + 0.5 * g_vec * dt ** 2
-        uv = _project(pt, K, R, t)
-        detections.append((uv[0], uv[1], 0.85))
-    detections += [None] * (n_frames - len(detections))
-
-    # Synthesise a kp2d sidecar with the kicker's right ankle at p0_true.
-    hmr_dir = out / "hmr_world"
-    hmr_dir.mkdir(parents=True, exist_ok=True)
-    foot_uv_kick = _project(p0_true, K, R, t)
-    kp_zero = [0.0, 0.0, 0.0]
-    kp_payload = {
-        "player_id": "P001",
-        "shot_id": "play",
-        "frames": [{
-            "frame": 5,
-            "keypoints": [kp_zero] * 15 + [list(foot_uv_kick) + [0.9], list(foot_uv_kick) + [0.9]],
-        }],
-    }
-    (hmr_dir / "play__P001_kp2d.json").write_text(_json.dumps(kp_payload))
-
-    # Force _flight_runs to return one flight run covering the 30 detection
-    # frames so the test isolates the kick-anchor logic, not the IMM.
-    monkeypatch.setattr(
-        BallStage, "_flight_runs",
-        lambda self_arg, steps, min_flight, max_flight: [(5, 34)],
-    )
+        u, v = _proj(pt)
+        detections.append((u, v, 0.85))
+    while len(detections) < n_frames:
+        detections.append(None)
 
     stage = BallStage(
         config={
-            "ball": {
-                "detector": "fake",
-                "ball_radius_m": 0.11,
-                "max_gap_frames": 6,
-                "flight_max_residual_px": 5.0,
-                "tracker": {
-                    "process_noise_grounded_px": 4.0,
-                    "process_noise_flight_px": 12.0,
-                    "measurement_noise_px": 2.0,
-                    "gating_sigma": 4.0,
-                    "min_flight_frames": 6,
-                    "max_flight_frames": 90,
-                    "initial_p_flight": 0.5,
-                },
-                "spin": {"enabled": False, "min_flight_seconds": 0.5, "min_residual_improvement": 0.2, "max_omega_rad_s": 200.0, "drag_k_over_m": 0.005},
-                "plausibility": {"z_max_m": 50.0, "horizontal_speed_max_m_s": 40.0, "pitch_margin_m": 5.0},
-                "flight_promotion": {"enabled": False, "min_run_frames": 6, "off_pitch_margin_m": 5.0, "max_ground_speed_m_s": 35.0},
-                "kick_anchor": {"enabled": True, "max_pixel_distance_px": 30.0, "lookahead_frames": 4, "min_pixel_acceleration_px_per_frame": 0.0, "foot_anchor_z_m": 0.11},
-            },
+            # grounded_min_conf > 1 disables grounded keyframe sampling:
+            # this scene's lob is genuinely roll-ambiguous from pixels
+            # at this camera geometry, and the test isolates the contact
+            # pipeline (pose -> touch event -> anchor -> launch arc).
+            "ball": {"detector": "fake",
+                     # Validates the piecewise contact -> launch-arc fit
+                     # (a parabola through the post-touch detections without
+                     # a far knot); events mode needs a bracketing keyframe.
+                     "solver": "piecewise",
+                     "auto_anchors": {"grounded_min_conf": 2.0},
+                     # Disable the appearance bridge: the all-green clip
+                     # gives a uniform NCC surface that confuses it.
+                     "appearance_bridge": {"enabled": False}},
             "pitch": {"length_m": 105.0, "width_m": 68.0},
         },
         output_dir=out,
@@ -461,14 +489,31 @@ def test_kick_anchored_fit_pins_p0_to_foot(tmp_path: Path, monkeypatch):
     )
     stage.run()
 
+    # An auto player_touch anchor exists at (or next to) the kick.
+    from src.schemas.ball_anchor import BallAnchorSet
+    auto = BallAnchorSet.load(out / "ball" / "play_ball_anchors_auto.json")
+    touches = [a for a in auto.anchors if a.state == "player_touch"]
+    assert touches, f"expected an auto touch anchor; got {auto.anchors}"
+    assert abs(touches[0].frame - kick_frame) <= 1
+    assert touches[0].player_id == "P001"
+
+    # The solved flight launches from the player's foot.
     track = BallTrack.load(out / "ball" / "play_ball_track.json")
-    assert len(track.flight_segments) >= 1
-    seg = track.flight_segments[0]
-    p0_fit = np.array(seg.parabola["p0"])
-    # With anchored fit we expect p0 to land within 0.5 m of the truth.
-    assert np.linalg.norm(p0_fit - p0_true) < 0.5, (
-        f"expected kick-anchored p0 ≈ {p0_true.tolist()}, got {p0_fit.tolist()}"
+    seg = next(
+        (s for s in track.flight_segments
+         if s.frame_range[0] <= kick_frame + 1
+         and s.frame_range[1] > kick_frame + 5),
+        None,
     )
+    assert seg is not None, (
+        f"expected a flight launching at the touch; got "
+        f"{[s.frame_range for s in track.flight_segments]}"
+    )
+    p0_fit = np.array(seg.parabola["p0"])
+    assert np.linalg.norm(p0_fit - p0_true) < 0.5, (
+        f"expected p0 ≈ {p0_true.tolist()}, got {p0_fit.tolist()}"
+    )
+
 
 
 @pytest.mark.integration

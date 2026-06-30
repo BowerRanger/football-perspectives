@@ -170,6 +170,40 @@ def compute_joint_world_pose(
     return pos, R_world
 
 
+def compute_all_joint_worlds(
+    thetas: np.ndarray,
+    root_R: np.ndarray,
+    root_t: np.ndarray,
+    rest_joints: np.ndarray | None = None,
+) -> np.ndarray:
+    """World positions of all 24 SMPL joints for one frame, shape (24, 3).
+
+    Same conventions as :func:`compute_joint_world_pose` (``thetas[0]``
+    ignored; ``root_R`` carries the world orientation). One chain walk
+    instead of one per queried joint — use this when a caller needs
+    several joints of the same frame (e.g. ball contact detection).
+    """
+    rest = (
+        np.asarray(rest_joints, dtype=np.float64)
+        if rest_joints is not None else SMPL_REST_JOINTS_YUP
+    )
+    thetas = np.asarray(thetas, dtype=np.float64).reshape(24, 3)
+    local_rot = np.empty((24, 3, 3))
+    for j in range(24):
+        local_rot[j] = axis_angle_to_matrix(thetas[j])
+    global_rot = np.empty((24, 3, 3))
+    global_pos = np.empty((24, 3))
+    global_rot[0] = np.eye(3)
+    global_pos[0] = rest[0]
+    for j in range(1, 24):
+        p = SMPL_PARENTS[j]
+        global_rot[j] = global_rot[p] @ local_rot[j]
+        global_pos[j] = global_pos[p] + global_rot[p] @ (rest[j] - rest[p])
+    root_R = np.asarray(root_R, dtype=np.float64)
+    root_t = np.asarray(root_t, dtype=np.float64)
+    return global_pos @ root_R.T + root_t
+
+
 def compute_joint_world(
     thetas: np.ndarray,
     root_R: np.ndarray,

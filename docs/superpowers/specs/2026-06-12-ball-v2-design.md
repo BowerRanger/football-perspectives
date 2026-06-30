@@ -1,0 +1,614 @@
+# Ball v2 design: evidence booster, global mode-sequence solve, spin
+
+Status: Phase 1 shipped; Phases 1.5/2/3 in progress.
+Scope agreed 2026-06-12: Ideas 1, 3, 4 from
+[2026-06-12-ball-v2-ideas.md](2026-06-12-ball-v2-ideas.md), in that order.
+Scope extended 2026-06-12 (post-Phase-1): Idea 2 (cross-replay
+triangulation) un-parked as **Phase 1.5**, sequenced before Phase 2 so its
+3D fixes are available to the global solver. Idea 5 (UE realism layer) and
+Idea 6 (learned lifting prior) remain deferred.
+
+## Goals
+
+- Raise 2D ball evidence density so detector-limited clips (origi02: 44 %
+  coverage) become solvable, with zero new user input.
+- Replace greedy event-classification + split-and-retry with a global
+  mode-sequence search so multi-impact sequences (goalmouth scrambles,
+  deflections) segment correctly.
+- Make spin a first-class fitted state with physical bounds and bounce
+  coupling, and export ball rotation (today: position only).
+
+## Non-goals
+
+- No multi-shot/replay fusion (parked with Idea 2).
+- No WASB retraining/fine-tuning (optional later; inference-time only here).
+- No learned action spotter (touch typing is geometric in this iteration).
+- No UE-side net/keeper simulation work (Idea 5); we only guarantee the
+  exported data carries what that layer will need.
+- Manual anchors remain authoritative everywhere — nothing in this design
+  may override an operator anchor.
+
+---
+
+## Phase 1 — Ball Evidence Booster
+
+### Problem
+
+WASB at production threshold yields sparse confident detections (origi01:
+168/506 frames ≥ 0.3 conf; origi02: 148/334 with any uv). Gaps starve the
+event detector, the auto-anchors, and the solver alike.
+
+### Design
+
+Two-pass detection inside `src/stages/ball.py`'s detect loop, plus a
+forward–backward track smoother to predict where to look.
+
+**1. Candidate API on the detector** (`src/utils/wasb_ball_detector.py`)
+- New method `detect_candidates(frame_bgr, min_score, top_k) ->
+  list[BallCandidate]` where `BallCandidate = (uv, score, blob_area_px)`.
+  Implementation: same HRNet forward pass, lower heatmap threshold, return
+  top-k connected-component centroids with scores instead of the single
+  best-above-threshold blob. The existing `detect()` becomes a thin wrapper
+  (top-1 at production threshold), so pass 1 behavior is unchanged.
+- The YOLO fallback gets the same interface (top-k boxes by confidence).
+
+**2. Forward–backward IMM smoothing** (`src/utils/ball_tracker.py`)
+- Run the existing IMM forward as today, then a second IMM pass over the
+  reversed observation sequence; fuse per-frame state estimates (covariance-
+  weighted average of forward and backward means; standard two-filter
+  smoother). Output per frame: smoothed uv prediction + covariance, used
+  only for second-pass gating — the persisted track semantics stay causal-
+  compatible (same fields, better values).
+
+**3. Second pass over evidence gaps** (new `src/utils/ball_second_pass.py`)
+- For every frame where pass 1 produced no accepted detection (missing or
+  rejected as outlier): build a gating ellipse from the smoothed prediction
+  covariance (inflated by `corridor_sigma`), call `detect_candidates` on
+  that frame, keep candidates inside the ellipse, and re-score:
+  `combined = candidate.score * exp(-0.5 * mahalanobis² / corridor_sigma²)`
+  — the hard gate (mahalanobis ≤ corridor_sigma) does the rejection work;
+  the exponent is sigma-normalised so the distance penalty stays mild and
+  `accept_min` is tuned against the candidate's score, not its position.
+- Accept the best candidate if `combined >= accept_min`. Accepted frames are
+  appended to observations with `source: "second_pass"` and
+  `confidence = combined` (always < pass-1 confidences by construction of
+  `accept_min`).
+- **Feedback-loop guard**: the smoother that defines corridors is built from
+  pass-1 observations only — second-pass detections never widen or steer
+  the corridor that admitted them, and the second pass runs exactly once
+  (no iteration).
+- **Zoom retry**: if no candidate clears `accept_min` and the predicted
+  apparent ball size is below `zoom_min_ball_px`, crop `zoom_crop_px`
+  around the prediction, upscale to the detector input size, re-run
+  `detect_candidates`, and map centroids back through the crop transform.
+  Same acceptance rule.
+
+**4. Downstream weighting**
+- The IMM/event/anchor pipeline re-runs over the merged observation set.
+  `second_pass` observations participate in event detection and solving but
+  are excluded from auto-anchor *generation* (gates in
+  `ball_auto_anchor.py` already key on confidence; add an explicit
+  source check) — they densify evidence, they don't mint constraints.
+
+### Config (`config/default.yaml`, `ball.second_pass.*`)
+
+```yaml
+second_pass:
+  enabled: true
+  candidate_min_score: 0.05   # heatmap floor for detect_candidates
+  top_k: 5
+  corridor_sigma: 3.0         # gating ellipse inflation
+  accept_min: 0.25            # combined-score acceptance gate
+  zoom_min_ball_px: 8.0
+  zoom_crop_px: 320
+```
+
+### Diagnostics
+
+`_ball_diag.json` gains `detection_coverage: {pass1, second_pass, total}` (fractions
+of frames) and per-source observation counts; `quality_report.json` surfaces
+coverage per shot so detector-limited clips are visible at a glance.
+
+### Acceptance criteria
+
+- origi02 total coverage ≥ 0.75 (from 0.44) with anchor-accuracy harness
+  (`tests/test_ball_anchor_accuracy.py`) still green.
+- kroupi01 / origi01: no segment-residual regressions, no new jumps > 2 m.
+- Synthetic unit tests: corridor gating rejects a decoy blob outside the
+  ellipse; feedback guard holds (second-pass output identical when run
+  twice); zoom path maps coordinates back exactly.
+
+---
+
+## Phase 1.5 — Cross-replay triangulation
+
+### Problem
+
+Monocular depth on flights is ambiguous: cross-checking against the origi02
+replay showed ~2 m typical depth disagreement and an 8 m worst case in the
+Phase-1 solution. Broadcast replays of the same event are a free second
+view: prepare_shots already groups them and saves per-group sync offsets
+(`shots/sync_map.json`, v1 files migrate to one group). The prototype
+(`prototypes/replay_triangulation.py`) validated the physics: origi01/
+origi02 cameras sit 37.5 m apart (11–44° parallax), 11/21 detection pairs
+triangulate with < 1 m ray-miss (best 2–15 cm), and ball ray-miss
+minimisation found the saved sync offset to be ~2 frames off.
+
+### Design
+
+The ball stage restructures from one per-shot loop into three passes:
+
+1. **Detect all shots** — the existing pass-1 + second-pass detection per
+   shot, persisting observation sidecars (unchanged behaviour, now run for
+   every shot before any solve).
+2. **Triangulate per sync group** — for each group with ≥ 2 members that
+   have camera tracks and observation sidecars:
+   - **Local offset refinement**: scan the saved offset ± `offset_search_
+     radius_frames` in `offset_search_step` increments, minimising the
+     median ray-miss of conf-gated detection pairs (reference detections
+     linearly interpolated at fractional frames, gaps ≤ 3 frames). Needs
+     ≥ `min_pairs_for_refine` pairs, else the saved offset is used as-is.
+     The refined offset is **local to triangulation** — `sync_map.json` is
+     never written (operator offsets win); a disagreement > 1 frame is
+     flagged in the diag and quality report as a sync-review cue.
+   - **Pair triangulation**: for every synced frame pair where both views
+     have a detection with conf ≥ `min_conf`: midpoint of the rays' common
+     perpendicular. Gates: parallax ≥ `min_parallax_deg`, ray-miss ≤
+     `max_ray_miss_m`, both ray depths positive.
+   - **Fix assignment**: each surviving point becomes a fix for BOTH
+     shots, assigned to each shot's nearest integer frame, persisted to
+     `ball/<shot>_ball_fixes.json` (xyz, ray_miss_m, parallax_deg, partner
+     shot + frame, refined-offset metadata).
+3. **Solve all shots** — the existing event/anchor/solve flow, now passing
+   the shot's fixes into the piecewise solver.
+
+**Solver consumption (soft constraints).** The LM flight fitters
+(`fit_parabola_to_image_observations`, `fit_magnus_trajectory`) accept
+optional `world_fixes` — per-frame 3D points appended to the residual
+vector as `fix_weight_px_per_m * (pos(t_f) − xyz)`. Flight fits
+(node-bracketed and open-span) include any fixes inside their frame range.
+Manual anchors remain hard knots; fixes are soft and can never override an
+anchor. Rolling/grounded spans do not consume fixes in this phase.
+
+Single-shot outputs (kroupi) and shots without a synced partner take the
+exact pre-1.5 path: no fixes sidecar, solver unchanged — the feature is a
+structural no-op without a group.
+
+### Config (`ball.cross_replay.*`)
+
+```yaml
+cross_replay:
+  enabled: true
+  min_conf: 0.3                  # per-view detection gate
+  max_ray_miss_m: 1.0            # inlier gate on the common perpendicular
+  min_parallax_deg: 8.0          # conditioning gate
+  offset_search_radius_frames: 4
+  offset_search_step: 0.25       # sub-frame, via interpolated reference uv
+  min_pairs_for_refine: 8
+  fix_weight_px_per_m: 30.0      # soft-constraint weight in LM fits
+```
+
+### Diagnostics
+
+Per shot: `cross_replay: {partner_shots, saved_offset, refined_offset,
+offset_disagreement_frames, n_pairs, n_inlier_fixes, median_ray_miss_m,
+median_parallax_deg}` in the diag sidecar; fix counts consumed per flight
+segment in `segments[]`; quality report surfaces fix counts and the
+sync-disagreement flag.
+
+### Acceptance criteria
+
+- origi01/origi02: ≥ 8 inlier fixes total across the pair; refined offset
+  lands at −144 ± 0.5 (vs saved −142) and the disagreement is flagged.
+- Flight segments consuming ≥ 1 fix: pixel residual within 1.5× of the
+  unconstrained fit, and the fitted trajectory passes within
+  `max_ray_miss_m` of its fixes (3D agreement).
+- **Cross-view consistency** (measurement, not a hard gate): median 3D
+  distance between the origi01 and origi02 solved tracks at synced frames
+  — record before/after; the expectation is a clear improvement on flight
+  frames.
+- kroupi01 (no group): byte-identical solve path, no regressions; anchor
+  harness green; synthetic two-camera unit tests for refinement,
+  triangulation gates and fix-constrained fits.
+
+---
+
+## Phase 2 — Global mode-sequence solve
+
+### Problem
+
+Events are classified greedily and anchors are minted before the solver
+runs; the solver then fits between fixed nodes and can only split-and-retry
+locally. Real failure: origi01 fit one ballistic span 454–488 across
+detected side-net impacts (451, 460), a bounce (465) and velocity breaks
+(470, 475). The evidence existed; the architecture couldn't use it jointly.
+
+### Design
+
+A per-shot beam search over **timeline partitions**: which mode the ball is
+in between candidate breakpoints, scored by how well bounded physics
+primitives explain the pixel evidence. Greedy classification becomes
+hypothesis scoring. New module `src/utils/ball_mode_search.py`; existing
+primitives in `ball_physics.py` / `bundle_adjust.py` are the segment fitters.
+
+**Modes** (per segment): `rolling`, `flight`, `possessed`, `stationary`,
+`out_of_view`. Mode transitions occur at **breakpoint candidates**.
+
+**Breakpoint candidates** come from the existing event detector
+(`ball_auto_events.py`) run in a permissive profile: every velocity break,
+touch, bounce, goal-impact candidate with its score — decisions deferred to
+the search. Manual anchors are forced breakpoints.
+
+**Hypothesis** = ordered list of (breakpoint frame, transition kind) +
+per-segment mode. Scored as the sum of:
+- **Segment fit residuals**: each segment fitted by its primitive —
+  `rolling`: existing endpoint-exact roll fit; `flight`: parabola (Magnus
+  refinement stays a post-pass, Phase 3 upgrades it); `possessed`: ball
+  follows the possessing player's foot position from `refined_poses` FK
+  with a soft pixel tether (weak/occluded pixel evidence expected) — the
+  possessing player is searched over the 2 players nearest the ball's last
+  confident pixel before the segment, each as its own hypothesis branch;
+  `stationary`: constant position; `out_of_view`: no pixel cost, fixed
+  per-frame penalty so it's never free. Flight fits consume Phase-1.5
+  triangulated fixes automatically (same fitters, same `world_fixes`
+  path), so hypotheses that contradict a cross-replay fix score worse.
+- **Transition priors**: flight→rolling/flight requires bounce (restitution
+  inside the envelope, else penalty), touch transitions require a player
+  joint within `contact_max_gap_m`, goal impacts require ray–goal-geometry
+  proximity; each prior reuses the existing gate math as a *cost*, not a
+  filter.
+- **Event agreement**: a transition coinciding with a high-score detected
+  event earns a bonus; a transition with no event evidence pays
+  `unexplained_break_penalty`; a high-score event with no transition pays
+  `ignored_event_penalty`.
+- **Complexity prior**: per-segment constant (BIC-style) so the search
+  prefers fewer segments when residuals tie.
+
+**Search**: left-to-right beam over breakpoint candidates (sorted by frame),
+beam width `beam_width` (default 24). State = (last breakpoint, mode,
+accumulated cost). Segment fits are memoized by (start, end, mode) — the
+dominant cost — and bounded by `max_segment_fit_calls` as a safety valve.
+Deterministic by construction (no randomness; ties broken by frame then
+mode order).
+
+**Hard constraints**: manual anchors must lie on the trajectory exactly as
+today (`_resolve_anchor_world` unchanged); hypotheses violating an anchor
+are pruned, not penalized. Auto-anchor *generation* for the dashboard
+remains, but the solver consumes the winning hypothesis's transitions
+directly; persisted `_ball_anchors_auto.json` is now derived from the
+winning hypothesis (same schema — dashboard unchanged).
+
+**Output compatibility**: winning hypothesis renders to the same
+`BallTrack` (dense frames), `flight_segments`, keyframes and diag schemas.
+`segments[].kind` gains values `possessed`/`stationary`/`out_of_view`
+(additive). Diag gains `mode_search: {hypotheses_explored, beam_width,
+winning_cost, runner_up_cost}` for tuning.
+
+**Rollout**: `ball.solver: piecewise | global` config switch; `piecewise`
+remains the default until validation passes, then flips. The piecewise code
+path is kept for one release as the fallback.
+
+### Config (`ball.mode_search.*`)
+
+```yaml
+mode_search:
+  beam_width: 24
+  segment_cost_constant: 6.0      # BIC-style per-segment penalty
+  unexplained_break_penalty: 10.0
+  ignored_event_penalty: 8.0
+  out_of_view_frame_penalty: 1.5
+  possessed_tether_px: 40.0
+  max_segment_fit_calls: 20000
+```
+
+### Acceptance criteria
+
+- origi01 454–488: winning hypothesis contains ≥ 3 segments with a net
+  impact and a bounce transition (matches hand-read ground truth), no
+  underconstrained flag, residual ≤ 8 px per accepted segment.
+- origi01 201–282: the 40-velocity-break span resolves to ≤ 4 segments with
+  residuals ≤ 8 px (currently 2 segments at 62–76 px).
+- kroupi01: identical or better residuals than piecewise on every segment.
+- All clips: anchor harness green; `--from-stage ball` runtime ≤ 3× current.
+- Unit tests: synthetic multi-bounce + possession scenarios where the
+  correct partition is known; determinism test (two runs, identical output);
+  manual-anchor pruning test.
+
+---
+
+## Phase 3 — Spin as a coupled state + rotation export
+
+### Problem
+
+Spin today is preset-seeded Magnus refinement per isolated segment with a
+200 rad/s cap (~32 rev/s — beyond any real kick), no coupling across
+bounces, and no exported rotation: the ball never visibly spins in the
+viewer or UE.
+
+### Design
+
+**1. Bounded per-segment spin** (`bundle_adjust.py`, solver call sites)
+- `omega_mag_bound` becomes always-on at `spin.max_omega_rad_s: 95`
+  (~15 rev/s, top of real free-kick range). Acceptance gates
+  (`min_residual_improvement`, endpoint continuity) unchanged.
+
+**2. Bounce coupling** (`ball_physics.py` + solver)
+- New spin-aware bounce model:
+  `v_out = bounce(v_in, ω_in; e, μ)` — normal restitution `e` plus
+  tangential update from sliding/rolling friction `μ` and spin (standard
+  rigid-sphere-on-plane impulse model); returns `(v_out, ω_out)`.
+- At every flight→flight bounce node in the winning hypothesis, the two
+  adjacent flight segments are refit **jointly**: parameters
+  `(p0, v0, ω0, e, μ)` with `e ∈ [restitution_min, restitution_max]`,
+  `μ ∈ [0, mu_max]`; residual = pixel reprojection over both segments.
+  This is the identifiability mechanism the gray-box literature validates:
+  curvature alone is weak, curvature + bounce kinematics is strong.
+- Joint fit accepted on the same improvement gate; on rejection both
+  segments keep their independent fits (today's behavior).
+
+**3. Geometric touch typing → spin seed** (extends `ball_spin_presets.py`)
+- At touch transitions, derive a seed from geometry already in hand:
+  contact bone (foot/head/chest from FK), approach/exit velocity directions.
+  Mapping: foot contact with large horizontal direction change → side-spin
+  about z (sign from cross product of in/out velocities); lofted foot
+  contact (exit elevation > 25°) → backspin seed; header → ω seed 0.
+  Seeds feed the existing `omega_seed` path with the hinted improvement
+  gate. Manual preset on an anchor still overrides any derived seed.
+
+**4. Ball orientation integration + export**
+- New `src/utils/ball_orientation.py`: integrate quaternion q(t) over the
+  dense track — flight: q̇ from fitted ω (constant per segment);
+  rolling/possessed/stationary: rolling-consistent ω = (v/r) about the
+  horizontal axis perpendicular to travel (zero when stationary);
+  transitions: ω changes discontinuously at nodes, orientation stays
+  continuous. Output: per-frame unit quaternion appended to `BallFrame`
+  (`quat_wxyz`, optional field — schema-additive).
+- Export: glTF gains a rotation sampler on the ball node
+  (`gltf_builder.py`); FBX export keys rotation in the Blender script;
+  `_ball_keyframes.json` carries per-flight `omega_rad_s` (vector) so UE
+  can later drive physically-correct curl. Existing UE `ball_motion.py`
+  preset path keeps working (additive data only).
+
+### Config changes (`ball.spin.*`, `ball.physics.*`)
+
+```yaml
+spin:
+  max_omega_rad_s: 95          # was 200
+  bounce_coupling: true
+  mu_max: 0.7                  # tangential friction bound in bounce model
+```
+
+### Acceptance criteria
+
+- Synthetic round-trips: generate drag+Magnus trajectories with known ω
+  (5–12 rev/s) + spin-coupled bounces; joint fit recovers |ω| within 20 %
+  and axis within 25° — and, run on spin-free synthetics, reports |ω| < 1
+  rev/s (no spin hallucination).
+- Real clips: every accepted spin fit satisfies bounds + improvement gates;
+  no segment-residual regressions vs Phase 2 output.
+- Viewer/UE: ball node carries rotation animation; rolling ball's contact
+  point has near-zero slip velocity (computable check in the export test).
+
+---
+
+## Testing strategy
+
+TDD throughout (write failing test → implement → refactor), consistent with
+the existing `tests/test_ball_*.py` style: pure numpy/scipy, light-venv
+runnable, detectors and video mocked behind the candidate API. Each phase
+lands with: unit tests for new math (smoother fusion, bounce-spin impulse,
+quaternion integration), scenario tests on synthetic trajectories with known
+ground truth, the anchor-accuracy harness, and a real-clip validation run
+(kroupi01, origi01, origi02 — same metrics tables as the auto-physics
+validation) appended to this doc before each phase is called done.
+
+## Risks
+
+- **Phase 1 false positives**: corridor + combined-score gate + the
+  feedback-loop guard; second-pass detections can't mint anchors. Residual
+  risk visible in coverage-vs-residual diagnostics.
+- **Phase 2 search cost**: memoized segment fits + beam cap +
+  `max_segment_fit_calls`; worst case degrades to piecewise-quality answer,
+  never hangs. Config flag keeps the old solver one switch away.
+- **Phase 2 scoring weights need tuning**: weights are config, diag exposes
+  winner/runner-up costs, and the acceptance clips are the tuning set.
+- **Phase 3 spin hallucination**: bounds, improvement gates, and the
+  spin-free synthetic test guard it.
+
+## Phase ordering note
+
+Phase 3's bounce coupling assumes Phase 2's segmentation (joint refits need
+correct bounce nodes), so phases land 1 → 2 → 3. Phase 3's export work
+(orientation integration, glTF/FBX rotation) has no Phase 2 dependency and
+can be pulled forward if a visible win is wanted early.
+
+---
+
+## Phase 1 validation results (2026-06-12)
+
+Implementation: commits `9a97725..bd6d410` on `ball-auto-physics` (10 plan
+tasks + 2 validation-driven fixes). Full ball/anchor/tracker suite: 322
+passed. Anchor-accuracy harness green.
+
+Coverage uses the strict accepted-evidence metric introduced in Phase 1
+(fraction of frames whose raw observation survived gating; outlier-rejected
+and IMM-bridged frames do not count). The old "any uv" figure for origi02
+(0.44) re-baselines to **pass1 = 0.32** under this metric.
+
+| clip | metric | pre-Phase-1 | post-Phase-1 (defaults) |
+|---|---|---|---|
+| kroupi01 | coverage total | 0.37 (pass1 only) | **0.47** (+0.10 second pass) |
+| | underconstrained spans / mean residual | 2 / 73.1 px | **1 / 58.1 px** |
+| | max jump / jumps > 2 m | 1.46 m / 0 | 1.46 m / 0 |
+| origi01 | coverage total | 0.34 | **0.40** (+0.06) |
+| | spans / mean residual | 9 / 21.2 px | 10 / 21.0 px |
+| | max jump / jumps > 2 m | 2.95 m / 13 | 2.95 m / 13 |
+| origi02 | coverage total | 0.32 | **0.58** (+0.26) |
+| | spans / mean residual | 2 / 234 px | 1 / 540 px (flagged span, see below) |
+| | max jump / jumps > 2 m | 7.07 m / 26 | **0.57 m / 0** |
+
+**Acceptance verdict**
+
+- *No regressions on kroupi01/origi01*: **met** — every metric equal or
+  better.
+- *origi02 coverage ≥ 0.75*: **not met as written** (0.58). The bar was set
+  against the old lax metric; under the strict metric the second pass
+  recovers +81 % relative coverage, and inspection shows much of the
+  remaining 42 % is ball-out-of-frame or genuinely occluded in this
+  behind-goal replay. Tuned `accept_min: 0.15` reaches **0.68** on origi02
+  (residual 540→384 px, still 0 jumps) but regresses origi01 fit quality
+  (max residual 101→814 px), so **0.25 ships as the default**; 0.15 is a
+  legitimate per-clip override for detector-limited footage.
+- origi02's surviving 540 px span (203–262) is the known multi-impact
+  mis-segmentation case — denser evidence now exposes contradictory
+  observation clusters that one ballistic segment cannot explain. It is
+  correctly flagged underconstrained; this is Phase 2's
+  (mode-sequence search) target, not a detection problem.
+
+**Validation-driven fixes shipped with Phase 1**
+
+1. `fix(ball) 828d837` — detections outside the image (WASB letterbox-
+   padding blobs mapped through the inverse affine, e.g. v = −136) are
+   rejected in both passes.
+2. `fix(ball) a181dd5` — the open-span grounded fallback no longer ground-
+   projects IMM gap-fill frames or raycasts landing outside pitch + margin.
+   This pre-existing hole produced origi02's 26 jumps > 2 m (max 7.07 m)
+   before Phase 1 and a 72 m teleport when denser evidence re-anchored the
+   IMM mid-glide; with the guard, origi02 has **zero** jumps > 2 m — better
+   than pre-rework.
+
+---
+
+## Phase 1.5 validation results (2026-06-14)
+
+Implementation: commits `77ba146..238d610` on `ball-auto-physics` (Tasks 1–6
++ the two Magnus/aggregation review fixes). Full ball/anchor/tracker/quality
+suite: 344 passed, 2 skipped (unrelated Blender). Real clips: origi01+origi02
+(one sync group) and kroupi01 (single shot), CPU WASB.
+
+### Triangulation quality (origi01 ↔ origi02)
+
+| metric | value | acceptance |
+|---|---|---|
+| inlier fixes (both shots) | **31** | ≥ 8 ✓ |
+| median ray-miss | **0.199 m** | ≤ 1.0 m ✓ |
+| median parallax | **26.9°** | ≥ 8° ✓ |
+| refined offset (saved −142) | **−145.75** | flagged, disagreement 3.75 fr ✓ |
+
+The sub-frame offset refinement and gated triangulation work as designed.
+The refined offset is −145.75 (the prototype found −144 on a sparser, pre-
+second-pass detection set); ray-miss at −145.75 is 0.2 m, so the offset is
+well-determined for ray consistency, and the 3.75-frame disagreement with
+the operator's saved −142 is correctly surfaced as a review cue. The fixes
+form a coherent, physically-sensible sub-trajectory (origi02 frames 273–302:
+a low ball arc bouncing to the pitch and kicking back up).
+
+### The honest finding: fixes are inert on this clip's dense output
+
+origi02's 31 fix frames (198, 202, 273–302, 309) are **all classified
+"missing"** by the piecewise solver, and its only flight segment is
+[203, 262] — **no fix overlaps any solved flight span**. Because Phase 1.5
+feeds fixes only into flight fits *within committed spans*, the fixes never
+enter a fit: origi02's dense track is byte-identical before vs after
+(0 frames moved). The cross-view consistency tool therefore shows no change
+(flight median 25.9 m both before and after) — that 25.9 m is origi02's
+unhelped monocular arc in [203, 262], a span with no fixes.
+
+Where the fixes *can* be compared (against origi01's manual-anchored solve at
+the 31 synced frames): median 2.6 m, but bimodal — **sub-metre where the ball
+is grounded/slow** (frames 287–293, agreement 0.1–0.8 m) and **10–14 m where
+it is fast/high** (frames 198, 202, 300–302). The high-speed errors are
+consistent with a small residual sync error (metres per frame at speed) plus
+the imperfection of the anchored solve we compare against. This argues for
+**speed-aware fix weighting** in Phase 2.
+
+### Verdict
+
+- Triangulation + all plumbing (schema, fitter `world_fixes`, solver
+  threading, three-pass stage, diag, quality report): **correct, tested,
+  geometrically sound**.
+- Dense-output improvement on origi02: **not delivered** — the flight-fit-
+  only consumption is too narrow; the fixes land in regions the piecewise
+  solver leaves unsolved, and it never *creates* trajectory where the ball
+  is currently missing.
+- **The payoff is gated on Phase 2.** The global mode-sequence solver treats
+  fix-bearing frames as first-class flight evidence (creating segments
+  there), so the 273–302 ball arc — which the piecewise solver discards —
+  becomes a solved flight segment constrained by its 0.2 m-ray-miss fixes.
+  Phase 2 acceptance explicitly targets this span.
+- kroupi01 (no group): **clean no-op** — no fixes sidecar, `cross_replay:
+  null`, coverage 0.474 identical to Phase 1; no regressions.
+
+### Carried into Phase 2
+
+1. Fixes must be able to **create** solved geometry, not just refine existing
+   flight fits (a fix run is direct stereo evidence of a flight segment).
+2. **Speed-aware fix weighting**: down-weight fixes where the ball moves far
+   between frames (sub-frame sync sensitivity), up-weight slow/grounded fixes.
+
+---
+
+## Phase 3 validation results (2026-06-14)
+
+Implementation: commits `690251e..816ac71` on `ball-auto-physics` (Tasks
+1–5). Full ball/spin/orientation/gltf/quality suite: **524 passed, 2
+skipped** (the 2 skips are the pre-existing unrelated Blender player-FBX
+test). All changes additive — the default piecewise solve output is
+unchanged except the new optional `quat_wxyz` per frame.
+
+### What shipped (the visible win)
+
+- **Bounded spin** (T1): the Magnus cap dropped 200→95 rad/s (~15 rev/s,
+  the top of the real free-kick range). Hard optimizer bound + post-fit
+  guard.
+- **Per-frame ball orientation** (T2): new `ball_orientation.py` integrates
+  a continuous unit quaternion over the dense track — flight from fitted ω,
+  grounded from rolling-consistent ω = v/r (contact-point slip ≈ 0,
+  asserted), stationary constant — written to the schema-additive
+  `BallFrame.quat_wxyz`.
+- **Rotation export** (T3): the glTF ball node gains a rotation animation
+  channel (wxyz→xyz,w conversion, explicitly tested on known values); the
+  FBX exporter keys `rotation_quaternion`; `_ball_keyframes.json` carries
+  per-flight `omega_rad_s` for UE-side curl. The UE preset path is
+  untouched (additive `.get`-read keys).
+- **Geometric touch-typing spin seeds** (T4): foot-contact curl/backspin
+  and header-zero seeds derived from in/out velocity geometry, feeding the
+  Magnus fit's hinted-improvement gate; a manual preset still wins.
+
+### Real-clip check (origi01/origi02, default piecewise)
+
+| metric | origi01 | origi02 |
+|---|---|---|
+| frames with unit quaternion | 489/506 (norm err 2e-16) | 82/334 |
+| ball visibly rotates | **yes** | **yes** |
+| max fitted \|ω\| (cap 95) | 0.0 (none fitted) | 0.0 (none fitted) |
+| spin within cap | ✓ | ✓ |
+
+The ball now carries a continuous, unit-norm orientation and **visibly
+rotates** in the viewer/UE — the headline Phase-3 goal. The visible
+rotation on these clips comes from the rolling-consistent ω (the ball is
+mostly grounded / in short flights); **no Magnus flight-spin was fitted**
+because origi/kroupi contain no long curving free kicks where the spin
+signal is identifiable. The Magnus recovery machinery is validated by the
+synthetic round-trips (T1/T4 unit tests: known ω recovered within tolerance;
+spin-free synthetics report |ω| < 1 rev/s — no hallucination).
+
+### Bounce coupling (T5): shipped OFF, model available
+
+The spin-aware `bounce(v_in, ω_in, e, μ)` rigid-sphere impulse model is
+implemented and unit-tested (7 cases: normal restitution, top/back-spin
+tangential coupling). The **joint bounce-coupled refit is monocular-
+degenerate** — even with the true seed and zero noise, the weak Magnus
+deflection (~0.3 m over a 0.6 s arc) is freely absorbed by the unconstrained
+monocular depth, so |ω| walks far from truth. This is the same fundamental
+single-view limit seen in Phase 1.5's spin prototype. Therefore
+`ball.spin.bounce_coupling` ships **default false**, with the degeneracy
+pinned by a regression test (`test_monocular_degeneracy_is_real`). The
+`bounce()` model itself is valid and ready for UE-side physically-correct
+bounce rendering.
+
+**Natural future synergy:** bounce-coupled spin becomes identifiable once
+arc depth is pinned by an external constraint — exactly what Phase 1.5's
+cross-replay triangulated fixes provide. The degeneracy test will flag when
+that combination makes the joint fit converge, at which point
+`bounce_coupling` can be enabled on replay-covered events.

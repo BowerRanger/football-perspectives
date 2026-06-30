@@ -256,3 +256,46 @@ def test_player_touch_without_touch_type_or_spin_is_valid(tmp_path: Path):
     loaded = BallAnchorSet.load(p)
     assert loaded.anchors[0].touch_type is None
     assert loaded.anchors[0].spin is None
+
+
+def test_anchor_confidence_and_end_frame_roundtrip(tmp_path: Path):
+    """Auto events carry a confidence score and (for span events) an
+    end_frame; both must survive a save/load round-trip."""
+    aset = BallAnchorSet(
+        clip_id="clip", image_size=(1920, 1080),
+        anchors=(
+            BallAnchor(
+                frame=5, image_xy=(10.0, 20.0), state="player_touch",
+                player_id="P001", bone="r_foot", confidence=0.42,
+            ),
+        ),
+    )
+    p = tmp_path / "a.json"
+    aset.save(p)
+    back = BallAnchorSet.load(p)
+    assert back.anchors[0].confidence == 0.42
+    assert back.anchors[0].end_frame is None
+
+
+def test_anchor_confidence_defaults_to_one_for_legacy(tmp_path: Path):
+    """A legacy anchors file with no confidence field loads as 1.0 so
+    existing on-disk anchors keep working."""
+    p = tmp_path / "legacy.json"
+    p.write_text(json.dumps({
+        "clip_id": "c", "image_size": [100, 100],
+        "anchors": [{"frame": 0, "image_xy": [1, 2], "state": "grounded"}],
+    }))
+    back = BallAnchorSet.load(p)
+    assert back.anchors[0].confidence == 1.0
+    assert back.anchors[0].end_frame is None
+
+
+def test_anchor_confidence_clamped_to_unit_range(tmp_path: Path):
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({
+        "clip_id": "c", "image_size": [100, 100],
+        "anchors": [{"frame": 0, "image_xy": [1, 2], "state": "grounded",
+                     "confidence": 1.7}],
+    }))
+    back = BallAnchorSet.load(p)
+    assert back.anchors[0].confidence == 1.0

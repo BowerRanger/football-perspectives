@@ -100,9 +100,9 @@ def test_quality_report_aggregates_three_stages(tmp_path: Path) -> None:
     assert report["hmr_world"]["low_confidence_players"] == []
 
     # Ball section
-    assert report["ball"]["grounded_frames"] == 11
     assert report["ball"]["flight_segments"] == 0
     assert report["ball"]["missing_frames"] == 0
+    assert report["ball"]["shots"][0]["grounded_frames"] == 11
 
 
 @pytest.mark.unit
@@ -150,7 +150,7 @@ def test_quality_report_ball_spin_coverage(tmp_path: Path) -> None:
     report = json.loads((tmp_path / "quality_report.json").read_text())
     assert report["ball"]["flight_segments"] == 2
     # 5 of 10 flight frames are inside the spin-bearing segment.
-    assert report["ball"]["spin_coverage_pct"] == pytest.approx(50.0)
+    assert report["ball"]["shots"][0]["spin_coverage_pct"] == pytest.approx(50.0)
 
 
 @pytest.mark.unit
@@ -394,3 +394,82 @@ def test_quality_report_no_prepare_section_without_groups(
     write_quality_report(tmp_path)
     report = json.loads((tmp_path / "quality_report.json").read_text())
     assert "prepare_shots" not in report
+
+@pytest.mark.unit
+def test_quality_report_ball_per_shot_with_diag(tmp_path: Path) -> None:
+    """Per-shot ball entries pull anchoring/solver diagnostics from the
+    ball_diag sidecar: anchor counts, event tallies, flagged bounces,
+    underconstrained spans, contact gaps."""
+    from src.schemas.shots import Shot, ShotsManifest
+
+    (tmp_path / "shots").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "ball").mkdir(parents=True, exist_ok=True)
+    ShotsManifest(
+        source_file="match.mp4",
+        fps=30.0,
+        total_frames=20,
+        shots=[Shot(id="s1", clip_file="shots/s1.mp4", start_frame=0,
+                    end_frame=19, start_time=0.0, end_time=19 / 30.0)],
+    ).save(tmp_path / "shots" / "shots_manifest.json")
+
+    BallTrack(
+        clip_id="s1",
+        fps=30.0,
+        frames=tuple(
+            BallFrame(frame=i, world_xyz=(0.0, 0.0, 0.11),
+                      state="grounded", confidence=0.9)
+            for i in range(20)
+        ),
+        flight_segments=(),
+    ).save(tmp_path / "ball" / "s1_ball_track.json")
+    (tmp_path / "ball" / "s1_ball_diag.json").write_text(json.dumps({
+        "underconstrained_spans": [{"start": 3, "end": 9, "residual_px": 7.2}],
+        "segments": [],
+        "bounces": [
+            {"frame": 9, "restitution": 1.4, "flagged": True},
+            {"frame": 15, "restitution": 0.7, "flagged": False},
+        ],
+        "splits": 1,
+        "contact_gaps": [
+            {"frame": 4, "player_id": "P001", "bone": "l_foot",
+             "gap_m": 0.31, "manual": False},
+        ],
+        "events": [
+            {"frame": 4, "kind": "touch", "score": 0.8,
+             "player_id": "P001", "bone": "l_foot",
+             "goal_element": None, "end_frame": None},
+            {"frame": 9, "kind": "bounce", "score": 0.6, "player_id": None,
+             "bone": None, "goal_element": None, "end_frame": None},
+        ],
+        "anchors": {"manual": 1, "auto_generated": 4, "merged": 5, "nodes": 5},
+        "detection_coverage": {"pass1": 0.8, "second_pass": 0.1, "total": 0.9},
+        "cross_replay": {"partner_shots": ["origi02"], "refined_offset": -144.0,
+                         "n_inlier_fixes": 11, "offset_disagreement_frames": 2.0},
+        "mode_search": {"hypotheses_explored": 42, "beam_width": 8,
+                        "winning_cost": 12.5, "runner_up_cost": 18.0,
+                        "fit_calls": 30, "budget_hit": False},
+        "out_of_view_spans": [{"start": 11, "end": 17}],
+    }))
+
+    write_quality_report(tmp_path)
+    report = json.loads((tmp_path / "quality_report.json").read_text())
+
+    ball = report["ball"]
+    assert ball["underconstrained_span_count"] == 1
+    assert ball["flagged_bounce_count"] == 1
+    shot = ball["shots"][0]
+    assert shot["shot_id"] == "s1"
+    assert shot["anchors"]["auto_generated"] == 4
+    assert shot["events"] == {"touch": 1, "bounce": 1}
+    assert shot["flagged_bounces"][0]["frame"] == 9
+    assert shot["max_contact_gap_m"] == pytest.approx(0.31)
+    assert shot["splits"] == 1
+    assert shot["detection_coverage"] == {
+        "pass1": 0.8, "second_pass": 0.1, "total": 0.9,
+    }
+    assert shot["cross_replay"]["n_inlier_fixes"] == 11
+    # Phase-2 mode-search + out-of-view diagnostics surface (passthrough).
+    assert shot["mode_search"]["hypotheses_explored"] == 42
+    assert shot["mode_search"]["winning_cost"] == 12.5
+    assert shot["mode_search"]["budget_hit"] is False
+    assert shot["out_of_view_spans"] == [{"start": 11, "end": 17}]

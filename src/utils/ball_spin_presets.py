@@ -18,6 +18,8 @@ correctly down (top-spin → dipping) or up (back-spin → floating).
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 
@@ -27,6 +29,17 @@ import numpy as np
 # chipped shots (≈ 40–60 rad/s).
 _CURL_MAGNITUDE_RAD_S = 15.0
 _SPIN_MAGNITUDE_RAD_S = 50.0
+
+# Geometric thresholds for derive_spin_seed.
+# Minimum horizontal direction change (degrees) to classify as a curling
+# foot contact.
+_MIN_CURL_ANGLE_DEG = 20.0
+# Minimum exit elevation angle (degrees) to classify a foot kick as lofted
+# (producing a backspin seed rather than a side-spin seed).
+_MIN_LOFT_ELEVATION_DEG = 25.0
+
+# Bones that map to foot contacts.
+_FOOT_BONES: frozenset[str] = frozenset({"l_foot", "r_foot"})
 
 
 VALID_SPIN_PRESETS: frozenset[str] = frozenset({
@@ -122,3 +135,104 @@ def omega_seed_from_preset(
         return axis * _SPIN_MAGNITUDE_RAD_S
     # Unreachable — preset guarded above.
     return np.zeros(3, dtype=float)
+
+
+def derive_spin_seed(
+    contact_bone: str,
+    v_in: np.ndarray,
+    v_out: np.ndarray,
+) -> np.ndarray | None:
+    """Derive a geometric spin seed from the ball's approach and exit vectors.
+
+    This function infers a likely angular-velocity seed from the geometry of
+    a player contact event, using the contact bone, ball approach velocity
+    (``v_in``), and ball exit velocity (``v_out``).  The seed is passed to
+    ``fit_magnus_trajectory`` as the LM starting point when no manual spin
+    preset is on the anchor.
+
+    Args:
+        contact_bone: the SMPL bone at the contact site, e.g. ``"l_foot"``,
+            ``"r_foot"``, ``"head"``, ``"chest"``.  See
+            ``ball_anchor_heights.BONE_TO_SMPL_INDEX`` for the full vocabulary.
+        v_in: ball approach velocity (world frame, m/s), 3-vector.
+        v_out: ball exit velocity (world frame, m/s), 3-vector.
+
+    Returns:
+        * An angular-velocity seed (rad/s, world frame) when a clear spin
+          pattern is detected.
+        * A **zero vector** (not ``None``) for headers — we assert
+          approximately zero spin rather than leaving the fit unconstrained.
+        * ``None`` when no pattern is recognised, so the caller falls back to
+          the unconstrained (strict-gate) Magnus fit.
+
+    Rules (in priority order):
+
+    1. **Head** → ``np.zeros(3)``  (controlled spin is rare; seed zero).
+    2. **Foot + large horizontal direction change** (angle between horizontal
+       projections of ``v_in`` and ``v_out`` exceeds
+       :data:`_MIN_CURL_ANGLE_DEG`) → side-spin about world-z; sign given by
+       ``cross(v_in_xy, v_out_xy).z``.  Magnitude = :data:`_CURL_MAGNITUDE_RAD_S`.
+    3. **Foot + lofted exit** (exit elevation angle >
+       :data:`_MIN_LOFT_ELEVATION_DEG`) → backspin about the horizontal axis
+       perpendicular to the exit direction (``up × v_out_hat``), with the sign
+       that gives backspin (top of ball moving backward relative to travel,
+       producing an upward Magnus force).  Magnitude =
+       :data:`_SPIN_MAGNITUDE_RAD_S`.
+    4. **Otherwise** → ``None``.
+    """
+    v_in = np.asarray(v_in, dtype=float)
+    v_out = np.asarray(v_out, dtype=float)
+
+    # Rule 1: head — zero spin assertion.
+    if contact_bone == "head":
+        return np.zeros(3, dtype=float)
+
+    # Rules 2 & 3 apply to foot bones only.
+    if contact_bone not in _FOOT_BONES:
+        return None
+
+    # --- Rule 2: side-spin from horizontal direction change ---------------
+    v_in_xy = np.array([v_in[0], v_in[1], 0.0], dtype=float)
+    v_out_xy = np.array([v_out[0], v_out[1], 0.0], dtype=float)
+    norm_in = float(np.linalg.norm(v_in_xy))
+    norm_out = float(np.linalg.norm(v_out_xy))
+
+    if norm_in > 1e-6 and norm_out > 1e-6:
+        cos_angle = float(np.dot(v_in_xy, v_out_xy) / (norm_in * norm_out))
+        # Clamp for numerical safety.
+        cos_angle = max(-1.0, min(1.0, cos_angle))
+        angle_deg = math.degrees(math.acos(cos_angle))
+        if angle_deg >= _MIN_CURL_ANGLE_DEG:
+            cross_z = float(np.cross(v_in_xy, v_out_xy)[2])
+            sign = 1.0 if cross_z >= 0.0 else -1.0
+            return np.array([0.0, 0.0, sign * _CURL_MAGNITUDE_RAD_S], dtype=float)
+
+    # --- Rule 3: backspin from lofted exit --------------------------------
+    out_speed = float(np.linalg.norm(v_out))
+    if out_speed > 1e-6:
+        out_h = float(np.linalg.norm([v_out[0], v_out[1]]))
+        # Elevation angle of exit vector.
+        elevation_deg = math.degrees(math.atan2(float(v_out[2]), out_h))
+        if elevation_deg > _MIN_LOFT_ELEVATION_DEG:
+            # Horizontal direction of travel.
+            v_out_h = np.array([v_out[0], v_out[1], 0.0], dtype=float)
+            h_norm = float(np.linalg.norm(v_out_h))
+            if h_norm < 1e-6:
+                return None
+            v_out_h /= h_norm
+            # Backspin axis: perpendicular to travel in the horizontal plane.
+            # ``up × v_out_hat`` gives the axis to the left of travel; for
+            # backspin we want the top of the ball moving backward relative to
+            # travel direction, which produces an upward Magnus force.
+            # F = k (ω × v); to get F_z > 0 with v roughly horizontal we need
+            # (ω × v).z > 0.  Using ω = up × v_hat = (-v_y, v_x, 0) and
+            # v = (v_x, v_y, 0):
+            #   (ω × v).z = ω_x v_y - ω_y v_x = -v_y v_y - v_x v_x = -(v_x²+v_y²)
+            # That is negative — so we flip the sign to get backspin (upward force).
+            # ω = -(up × v_out_hat) = (v_y, -v_x, 0)
+            axis = np.array([v_out_h[1], -v_out_h[0], 0.0], dtype=float)
+            axis /= float(np.linalg.norm(axis))
+            return axis * _SPIN_MAGNITUDE_RAD_S
+
+    # Rule 4: no pattern detected.
+    return None

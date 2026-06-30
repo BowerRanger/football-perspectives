@@ -39,6 +39,7 @@ _bef = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_bef)
 iter_player_fbx_entries = _bef.iter_player_fbx_entries
 _load_shot_ids = _bef._load_shot_ids
+prepare_ball_keys = _bef.prepare_ball_keys
 
 
 def _write_refined(
@@ -215,3 +216,73 @@ def test_load_shot_ids_returns_ids_from_manifest(tmp_path: Path) -> None:
 def test_load_shot_ids_returns_empty_set_without_manifest(tmp_path: Path) -> None:
     """_load_shot_ids returns an empty set when no shots_manifest.json exists."""
     assert _load_shot_ids(tmp_path) == set()
+
+
+# --- Ball FBX rotation key preparation (pure, no Blender) ---------------
+#
+# The Blender ball branch reads ball_track.json directly in-Blender, so its
+# key-baking can't run under pytest.  ``prepare_ball_keys`` is the pure
+# helper that turns the JSON frame dicts into (frame, location, rotation)
+# tuples; we unit-test it here so the FBX rotation contract is covered
+# without Blender.
+
+
+def _ball_json_frames() -> list[dict]:
+    c = float(np.cos(np.pi / 4))
+    s = float(np.sin(np.pi / 4))
+    return [
+        {"frame": 0, "world_xyz": [10.0, 5.0, 0.11],
+         "quat_wxyz": [1.0, 0.0, 0.0, 0.0]},
+        {"frame": 1, "world_xyz": [11.0, 5.0, 1.0],
+         "quat_wxyz": [c, 0.0, 0.0, s]},
+        # No quat on this frame: holds the previous rotation.
+        {"frame": 2, "world_xyz": [12.0, 5.0, 0.11]},
+        # No world_xyz: dropped (not exported).
+        {"frame": 3, "world_xyz": None, "quat_wxyz": [1.0, 0.0, 0.0, 0.0]},
+    ]
+
+
+@pytest.mark.unit
+def test_prepare_ball_keys_emits_location_and_rotation() -> None:
+    """Each exported frame carries both a location and a wxyz rotation."""
+    keys = prepare_ball_keys(_ball_json_frames())
+    # Frame 3 has null world_xyz and is dropped.
+    assert [k["frame"] for k in keys] == [0, 1, 2]
+    for k in keys:
+        assert "location" in k and len(k["location"]) == 3
+        assert "rotation_quaternion" in k and len(k["rotation_quaternion"]) == 4
+
+
+@pytest.mark.unit
+def test_prepare_ball_keys_rotation_is_wxyz_scalar_first() -> None:
+    """Blender's rotation_quaternion is wxyz; the helper passes it through
+    unchanged (no reordering, unlike the glTF xyz,w path)."""
+    c = float(np.cos(np.pi / 4))
+    s = float(np.sin(np.pi / 4))
+    keys = prepare_ball_keys(_ball_json_frames())
+    np.testing.assert_allclose(keys[0]["rotation_quaternion"], [1.0, 0.0, 0.0, 0.0])
+    np.testing.assert_allclose(keys[1]["rotation_quaternion"], [c, 0.0, 0.0, s])
+    np.testing.assert_allclose(keys[0]["location"], [10.0, 5.0, 0.11])
+
+
+@pytest.mark.unit
+def test_prepare_ball_keys_holds_previous_quat_for_missing() -> None:
+    """A frame without a quat holds the previous rotation; leading
+    missing-quat frames hold identity."""
+    c = float(np.cos(np.pi / 4))
+    s = float(np.sin(np.pi / 4))
+    keys = prepare_ball_keys(_ball_json_frames())
+    # Frame 2 had no quat -> holds frame 1's rotation.
+    np.testing.assert_allclose(keys[2]["rotation_quaternion"], [c, 0.0, 0.0, s])
+
+
+@pytest.mark.unit
+def test_prepare_ball_keys_leading_missing_quat_is_identity() -> None:
+    frames = [
+        {"frame": 0, "world_xyz": [0.0, 0.0, 0.11]},  # no quat
+        {"frame": 1, "world_xyz": [1.0, 0.0, 0.11],
+         "quat_wxyz": [0.0, 1.0, 0.0, 0.0]},
+    ]
+    keys = prepare_ball_keys(frames)
+    np.testing.assert_allclose(keys[0]["rotation_quaternion"], [1.0, 0.0, 0.0, 0.0])
+    np.testing.assert_allclose(keys[1]["rotation_quaternion"], [0.0, 1.0, 0.0, 0.0])

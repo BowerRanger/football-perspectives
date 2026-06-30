@@ -11,6 +11,7 @@ from src.utils.bundle_adjust import (
     fit_magnus_trajectory,
     fit_parabola_to_image_observations,
 )
+from src.utils.ball_piecewise_solver import SolverCfg
 
 
 def _broadcast_camera() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -165,3 +166,137 @@ def test_fit_magnus_collapses_to_parabola_when_no_spin():
     assert np.linalg.norm(omega_hat) < 5.0
     # And the Magnus residual should be at least as good as parabola.
     assert magnus_resid <= parab_resid + 0.1
+
+
+# Physical ceiling for free-kick spin: ~15 rev/s = 94.2 rad/s.  Task 1
+# lowers the configured cap from 200 to 95 to match this real-world limit.
+_PHYSICAL_SPIN_CEILING_RAD_S = 95.0
+
+
+@pytest.mark.unit
+def test_spin_cap_clamps_unphysically_high_omega():
+    """An arc generated with an unphysically-high true ω (150 rad/s) must
+    be clamped to ≤ 95 rad/s by the SolverCfg.spin_max_omega_rad_s default.
+
+    The cap threads as ``omega_mag_bound`` to ``fit_magnus_trajectory`` via
+    the piecewise solver's Magnus-refinement call sites.  We exercise the
+    same gate here by reading SolverCfg's class-level default and passing it
+    directly to the fitter.
+
+    This test FAILS at the old cap (200 rad/s) because the LM is free to
+    recover ω ≈ 150 rad/s which satisfies the 200-bound but violates the
+    physical ceiling.  After lowering the default to 95, the optimizer is
+    bounded to ≤ 95 rad/s and the test PASSES.
+    """
+    K, R, t = _broadcast_camera()
+    g = -9.81
+    drag = 0.005
+    fps = 30.0
+    duration = 1.0
+    n = int(round(fps * duration)) + 1
+
+    p0_true = np.array([30.0, 40.0, 0.5])
+    v0_true = np.array([12.0, -8.0, 9.0])
+    # Unphysically high sidespin — well above the real free-kick ceiling of
+    # ~15 rev/s (≈ 94 rad/s).
+    omega_true = np.array([0.0, 0.0, 150.0])
+
+    times, pos = _integrate_magnus_truth(p0_true, v0_true, omega_true, g, drag, duration)
+    sampled = _sample_at_frames(times, pos, fps, n)
+    uv = _project(sampled, K, R, t)
+    obs = [(i, uv[i]) for i in range(n)]
+    Ks = [K] * n
+    Rs = [R] * n
+
+    # Read the cap from SolverCfg so the test is coupled to the config value.
+    cap = SolverCfg.spin_max_omega_rad_s  # class-level default
+
+    p0_seed, v0_seed, _ = fit_parabola_to_image_observations(
+        obs, Ks=Ks, Rs=Rs, t_world=t, fps=fps,
+    )
+    omega_axis = omega_true / np.linalg.norm(omega_true)
+    _, _, omega_hat, _ = fit_magnus_trajectory(
+        obs,
+        Ks=Ks,
+        Rs=Rs,
+        t_world=t,
+        fps=fps,
+        drag_k_over_m=drag,
+        p0_seed=p0_seed,
+        v0_seed=v0_seed,
+        # Hinted path: axis fixed, magnitude bounded by the configured cap.
+        omega_seed=omega_axis * min(cap, 63.0),
+        omega_axis_fixed=omega_axis,
+        omega_mag_bound=cap,
+    )
+
+    omega_hat_mag = float(np.linalg.norm(omega_hat))
+    # After Task 1 the cap is 95; any fit above this is unphysical.
+    assert omega_hat_mag <= _PHYSICAL_SPIN_CEILING_RAD_S + 1e-6, (
+        f"recovered |ω| {omega_hat_mag:.1f} rad/s exceeds physical ceiling "
+        f"{_PHYSICAL_SPIN_CEILING_RAD_S:.1f} rad/s — SolverCfg.spin_max_omega_rad_s "
+        f"is {cap:.1f} (should be ≤ {_PHYSICAL_SPIN_CEILING_RAD_S:.1f})"
+    )
+
+
+@pytest.mark.unit
+def test_spin_cap_does_not_clamp_normal_freekick_omega():
+    """A normal free-kick ω (~63 rad/s ≈ 10 rev/s) must be recovered close to
+    truth without the cap clamping it (it sits comfortably below 95 rad/s).
+
+    This test validates that lowering the cap from 200 to 95 does NOT degrade
+    recovery of in-range spins.  The fitter must remain free below the cap.
+    """
+    K, R, t = _broadcast_camera()
+    g = -9.81
+    drag = 0.005
+    fps = 30.0
+    duration = 1.0
+    n = int(round(fps * duration)) + 1
+
+    p0_true = np.array([30.0, 40.0, 0.5])
+    v0_true = np.array([12.0, -8.0, 9.0])
+    # ~10 rev/s sidespin — firmly within real free-kick range and below 95.
+    omega_true = np.array([0.0, 0.0, 63.0])
+    omega_hat_mag_true = float(np.linalg.norm(omega_true))
+
+    times, pos = _integrate_magnus_truth(p0_true, v0_true, omega_true, g, drag, duration)
+    sampled = _sample_at_frames(times, pos, fps, n)
+    uv = _project(sampled, K, R, t)
+    obs = [(i, uv[i]) for i in range(n)]
+    Ks = [K] * n
+    Rs = [R] * n
+
+    cap = SolverCfg.spin_max_omega_rad_s  # must be ≥ 95 after Task 1
+
+    p0_seed, v0_seed, _ = fit_parabola_to_image_observations(
+        obs, Ks=Ks, Rs=Rs, t_world=t, fps=fps,
+    )
+    omega_axis = omega_true / np.linalg.norm(omega_true)
+    _, _, omega_hat, residual = fit_magnus_trajectory(
+        obs,
+        Ks=Ks,
+        Rs=Rs,
+        t_world=t,
+        fps=fps,
+        drag_k_over_m=drag,
+        p0_seed=p0_seed,
+        v0_seed=v0_seed,
+        omega_seed=omega_axis * omega_hat_mag_true,
+        omega_axis_fixed=omega_axis,
+        omega_mag_bound=cap,
+    )
+
+    omega_hat_mag = float(np.linalg.norm(omega_hat))
+    # 63 rad/s is well below 95; the cap must not have clamped it.
+    assert omega_hat_mag < _PHYSICAL_SPIN_CEILING_RAD_S - 5.0, (
+        f"|ω| hat {omega_hat_mag:.1f} rad/s unexpectedly close to or above "
+        f"physical ceiling {_PHYSICAL_SPIN_CEILING_RAD_S:.1f} rad/s"
+    )
+    # Recovered within 20 % of truth — cap is not biting.
+    rel_err = abs(omega_hat_mag - omega_hat_mag_true) / omega_hat_mag_true
+    assert rel_err < 0.20, (
+        f"relative magnitude error {rel_err:.1%} exceeds 20 % for a "
+        f"normal free-kick ω ({omega_hat_mag_true:.0f} rad/s)"
+    )
+    assert residual < 1.0, f"residual {residual:.2f} px"

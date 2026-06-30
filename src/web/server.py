@@ -1891,6 +1891,11 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         # "shot" or "volley"; categorical spin preset consumed by the
         # Magnus seed in the ball stage.
         spin: str | None = None
+        # Detector score for an auto event (1.0 for manual/confirmed); used
+        # by the editor to render suggestions distinctly.
+        confidence: float = 1.0
+        # Inclusive end frame for a span event (e.g. carry); None otherwise.
+        end_frame: int | None = None
 
     class BallAnchorPayload(BaseModel):
         clip_id: str
@@ -1942,6 +1947,65 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"Failed to load ball anchors: {exc}")
         return data
 
+    @app.get("/ball-anchors/{shot_id}/auto")
+    def get_auto_ball_anchors_for_shot(shot_id: str):
+        """Auto-generated anchors (read-only sidecar written by the ball
+        stage). Empty set when the stage hasn't run with auto-anchoring."""
+        path = output_dir / "ball" / f"{shot_id}_ball_anchors_auto.json"
+        if not path.exists():
+            return {"clip_id": shot_id, "image_size": [0, 0], "anchors": []}
+        try:
+            data = json.loads(path.read_text())
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to load auto ball anchors: {exc}",
+            )
+        return data
+
+    @app.get("/joints-near")
+    def joints_near(shot: str, frame: int, u: float, v: float, r: float = 40.0):
+        """Contact joints whose projected pixel is within ``r`` px of
+        ``(u, v)`` at ``frame`` for ``shot`` — the editor's click-to-suggest
+        for player-touch authoring. Best-effort: returns an empty list when
+        the camera track or player poses are unavailable."""
+        import numpy as np
+        from src.schemas.camera_track import CameraTrack
+        from src.utils.ball_player_context import PlayerContext
+
+        try:
+            cam_path = output_dir / "camera" / f"{shot}_camera_track.json"
+            if not cam_path.exists():
+                cam_path = output_dir / "camera" / "camera_track.json"
+            if not cam_path.exists():
+                return {"joints": []}
+            camera = CameraTrack.load(cam_path)
+            per_frame_K = {f.frame: np.array(f.K) for f in camera.frames}
+            per_frame_R = {f.frame: np.array(f.R) for f in camera.frames}
+            t_world = np.array(camera.t_world)
+            per_frame_t = {
+                f.frame: (np.array(f.t) if f.t is not None else t_world)
+                for f in camera.frames
+            }
+            ctx = PlayerContext.load(
+                output_dir, shot,
+                per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                per_frame_t=per_frame_t, distortion=camera.distortion,
+            )
+            hits = ctx.joints_near_pixel(int(frame), (float(u), float(v)), float(r))
+            return {"joints": [
+                {
+                    "player_id": s.player_id,
+                    "bone": s.bone,
+                    "uv": list(s.uv) if s.uv is not None else None,
+                    "confidence": s.confidence,
+                }
+                for s in hits
+            ]}
+        except Exception as exc:  # noqa: BLE001 — suggestion helper, never 500s
+            logger.debug("joints-near failed for shot %s: %s", shot, exc)
+            return {"joints": []}
+
     @app.post("/ball-anchors/{shot_id}")
     def post_ball_anchors_for_shot(shot_id: str, payload: BallAnchorPayload):
         tmp = output_dir / "ball" / f".{shot_id}_ball_anchors.tmp.json"
@@ -1957,6 +2021,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     goal_element=a.goal_element,
                     touch_type=a.touch_type,
                     spin=a.spin,
+                    confidence=float(a.confidence),
+                    end_frame=a.end_frame,
                 ))
             aset = BallAnchorSet(
                 clip_id=str(payload.clip_id),
@@ -1975,7 +2041,22 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=f"Invalid ball anchors: {exc}")
         final = output_dir / "ball" / f"{shot_id}_ball_anchors.json"
         tmp.replace(final)
-        return {"saved": True, "path": str(final), "count": len(aset.anchors)}
+        # Fine-tuning flywheel: the operator's clicked ball pixels are gold
+        # labels targeted at the detector's failure frames. Accumulate them to
+        # a growing WASB-format corpus as a byproduct of saving — best-effort,
+        # never block the save.
+        labels_recorded = 0
+        try:
+            from src.utils.ball_label_corpus import record_labels
+            entry = record_labels(
+                output_dir / "ball_finetune", shot_id,
+                f"shots/{shot_id}.mp4", aset.anchors,
+            )
+            labels_recorded = entry["n_labels"] if entry else 0
+        except Exception as exc:  # noqa: BLE001 — accumulation must never break a save
+            logger.debug("ball label corpus accumulation failed: %s", exc)
+        return {"saved": True, "path": str(final),
+                "count": len(aset.anchors), "labels_recorded": labels_recorded}
 
     @app.post("/ball-anchors/{shot_id}/preview")
     def preview_ball_anchors(shot_id: str, payload: BallAnchorPayload):
@@ -1999,9 +2080,11 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
 
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)
-            # Mirror the production camera + shots + (optionally) hmr_world
-            # data into the temp output dir; BallStage writes only to ball/.
-            for sub in ("camera", "shots", "hmr_world"):
+            # Mirror the production camera + shots + pose data into the
+            # temp output dir; BallStage writes only to ball/. The
+            # refined_poses copy keeps preview contact resolution on the
+            # cleaned tracks (PlayerContext prefers them over hmr_world).
+            for sub in ("camera", "shots", "hmr_world", "refined_poses"):
                 src = output_dir / sub
                 if src.exists():
                     shutil.copytree(src, tdp / sub, dirs_exist_ok=True)
@@ -2017,6 +2100,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                         goal_element=a.goal_element,
                         touch_type=a.touch_type,
                         spin=a.spin,
+                        confidence=float(a.confidence),
+                        end_frame=a.end_frame,
                     ) for a in payload.anchors
                 )
                 aset = BallAnchorSet(

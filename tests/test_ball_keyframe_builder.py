@@ -1,6 +1,7 @@
 import numpy as np
 
 from src.schemas.ball_anchor import BallAnchor
+from src.schemas.ball_track import FlightSegment
 from src.utils.ball_keyframe_builder import build_ball_keyframe_set
 
 
@@ -132,6 +133,93 @@ def test_off_screen_flight_has_no_ray_no_world():
     assert kf.ray is None
     assert kf.image_xy is None
     assert kf.depth_source == "ground"
+
+
+def _flight_with_spin() -> FlightSegment:
+    return FlightSegment(
+        id=0,
+        frame_range=(5, 20),
+        parabola={
+            "p0": [0.0, 0.0, 0.5], "v0": [10.0, 0.0, 5.0], "g": -9.81,
+            "spin_axis_world": [0.0, 0.0, 1.0],
+            "spin_omega_rad_s": 42.0,
+            "spin_confidence": 0.7,
+        },
+        fit_residual_px=1.0,
+    )
+
+
+def test_flight_keyframe_carries_omega_from_segment_spin():
+    K, R, t = _ident_cam()
+    # An airborne keyframe whose frame sits inside a spinning flight.
+    anchors = {
+        10: BallAnchor(frame=10, image_xy=(960.0, 540.0), state="airborne_high")
+    }
+    world = {10: (5.0, 0.0, 3.0)}
+    kfset = build_ball_keyframe_set(
+        clip_id="c", fps=25.0, image_size=(1920, 1080),
+        anchor_by_frame=anchors, world_by_frame=world,
+        per_frame_K={10: K}, per_frame_R={10: R}, per_frame_t={10: t},
+        distortion=(0.0, 0.0),
+        flight_segments=(_flight_with_spin(),),
+    )
+    kf = kfset.keyframes[0]
+    # omega = spin_omega_rad_s * unit(spin_axis_world) = 42 * (0,0,1).
+    assert kf.omega_rad_s is not None
+    np.testing.assert_allclose(kf.omega_rad_s, (0.0, 0.0, 42.0), atol=1e-6)
+
+
+def test_keyframe_outside_flight_has_no_omega():
+    K, R, t = _ident_cam()
+    anchors = {
+        3: BallAnchor(frame=3, image_xy=(960.0, 540.0), state="grounded")
+    }
+    world = {3: (1.0, 0.0, 0.11)}
+    kfset = build_ball_keyframe_set(
+        clip_id="c", fps=25.0, image_size=(1920, 1080),
+        anchor_by_frame=anchors, world_by_frame=world,
+        per_frame_K={3: K}, per_frame_R={3: R}, per_frame_t={3: t},
+        distortion=(0.0, 0.0),
+        flight_segments=(_flight_with_spin(),),  # frame 3 < range start 5
+    )
+    assert kfset.keyframes[0].omega_rad_s is None
+
+
+def test_flight_without_spin_yields_no_omega():
+    K, R, t = _ident_cam()
+    anchors = {
+        10: BallAnchor(frame=10, image_xy=(960.0, 540.0), state="airborne_high")
+    }
+    world = {10: (5.0, 0.0, 3.0)}
+    seg = FlightSegment(
+        id=0, frame_range=(5, 20),
+        parabola={"p0": [0, 0, 0.5], "v0": [10, 0, 5], "g": -9.81,
+                  "spin_axis_world": None, "spin_omega_rad_s": None,
+                  "spin_confidence": None},
+        fit_residual_px=1.0,
+    )
+    kfset = build_ball_keyframe_set(
+        clip_id="c", fps=25.0, image_size=(1920, 1080),
+        anchor_by_frame=anchors, world_by_frame=world,
+        per_frame_K={10: K}, per_frame_R={10: R}, per_frame_t={10: t},
+        distortion=(0.0, 0.0),
+        flight_segments=(seg,),
+    )
+    assert kfset.keyframes[0].omega_rad_s is None
+
+
+def test_builder_without_flight_segments_is_backward_compatible():
+    # Omitting flight_segments (the legacy call) leaves omega None.
+    K, R, t = _ident_cam()
+    anchors = {5: BallAnchor(frame=5, image_xy=(960.0, 540.0), state="grounded")}
+    world = {5: (3.0, 4.0, 0.11)}
+    kfset = build_ball_keyframe_set(
+        clip_id="c", fps=25.0, image_size=(1920, 1080),
+        anchor_by_frame=anchors, world_by_frame=world,
+        per_frame_K={5: K}, per_frame_R={5: R}, per_frame_t={5: t},
+        distortion=(0.0, 0.0),
+    )
+    assert kfset.keyframes[0].omega_rad_s is None
 
 
 def test_keyframes_sorted_by_frame():

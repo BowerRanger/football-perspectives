@@ -217,3 +217,7 @@ __marimo__/
 .DS_Store
 *.pt
 test-media/
+
+# Vendored WASB-SBDT source is tracked; its model checkpoint is not (5.8 MB
+# binary, downloaded once). Path referenced by config/default.yaml ball.detector.
+third_party/wasb_sbdt/pretrained_weights/

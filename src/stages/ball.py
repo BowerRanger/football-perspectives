@@ -96,6 +96,11 @@ from src.utils.camera_projection import (
 )
 from src.schemas.ball_fixes import BallFix, BallFixSet
 from src.schemas.sync_map import SyncMap
+from src.utils.ball_context_prior import (
+    ContextPrior,
+    ContextPriorCfg,
+    load_player_boxes,
+)
 from src.utils.ball_cross_replay import (
     CrossReplayCfg,
     PairFix,
@@ -627,6 +632,30 @@ def _shot_chain_cfg(cfg_dict: dict) -> ShotChainCfg:
     )
 
 
+def _context_prior_cfg(cfg_dict: dict) -> ContextPriorCfg:
+    """Build a ContextPriorCfg from the ``ball.context_prior`` sub-tree."""
+    base = ContextPriorCfg()
+    return ContextPriorCfg(
+        enabled=bool(cfg_dict.get("enabled", base.enabled)),
+        drop_below=float(cfg_dict.get("drop_below", base.drop_below)),
+        pitch_margin_m=float(cfg_dict.get(
+            "pitch_margin_m", base.pitch_margin_m)),
+        pitch_penalty=float(cfg_dict.get(
+            "pitch_penalty", base.pitch_penalty)),
+        player_max_dist_px=float(cfg_dict.get(
+            "player_max_dist_px", base.player_max_dist_px)),
+        player_penalty=float(cfg_dict.get(
+            "player_penalty", base.player_penalty)),
+        static_window=int(cfg_dict.get("static_window", base.static_window)),
+        static_max_px=float(cfg_dict.get("static_max_px", base.static_max_px)),
+        static_min_cam_deg=float(cfg_dict.get(
+            "static_min_cam_deg", base.static_min_cam_deg)),
+        static_penalty=float(cfg_dict.get(
+            "static_penalty", base.static_penalty)),
+        min_factor=float(cfg_dict.get("min_factor", base.min_factor)),
+    )
+
+
 def _auto_anchor_cfg(auto_cfg: dict, ball_radius: float) -> AutoAnchorCfg:
     base = AutoAnchorCfg()
     return AutoAnchorCfg(
@@ -825,6 +854,8 @@ class BallStage(BaseStage):
         cfg: dict,
         detector: BallDetector,
         anchor_by_frame: dict[int, BallAnchor],
+        prior: "ContextPrior | None" = None,
+        prior_drop_below: float = 0.0,
     ) -> tuple[list[TrackerStep], dict[int, float], dict[int, str]]:
         """Per-frame detection + appearance bridging + IMM smoothing."""
         tracker = _build_tracker(cfg)
@@ -872,6 +903,13 @@ class BallStage(BaseStage):
                         h_img, w_img = frame.shape[:2]
                         if not (0.0 <= det[0] < w_img and 0.0 <= det[1] < h_img):
                             det = None
+                    if det is not None and prior is not None:
+                        adj = float(det[2]) * prior.factor(
+                            frame_idx, (float(det[0]), float(det[1])))
+                        if adj < prior_drop_below:
+                            det = None  # penalized below the drop threshold
+                        else:
+                            det = (det[0], det[1], adj)
                     if det is None:
                         consecutive_misses += 1
                         bridge_result = bridge.try_bridge(
@@ -929,6 +967,7 @@ class BallStage(BaseStage):
         detector: BallDetector,
         sp_cfg: SecondPassCfg,
         ball_radius: float,
+        prior: "ContextPrior | None" = None,
     ) -> list[SecondPassDetection]:
         """Revisit evidence gaps with corridor-gated candidate detection.
 
@@ -957,6 +996,11 @@ class BallStage(BaseStage):
                     cands = filter_in_bounds(cands, frame.shape[1], frame.shape[0])
                     if f < start or f not in corridors:
                         continue
+                    if prior is not None:
+                        cands = [
+                            (u, v, s * prior.factor(f, (u, v)))
+                            for (u, v, s) in cands
+                        ]
                     mean, cov = corridors[f]
                     best = best_gated_candidate(cands, mean, cov, sp_cfg)
                     if best is not None:
@@ -1091,9 +1135,35 @@ class BallStage(BaseStage):
                 len(manual_by_frame), shot_id or "(legacy)",
             )
 
+        # --- 0. Context prior (scoreboard/crowd false-positive guard) --
+        prior_cfg = _context_prior_cfg(cfg.get("context_prior", {}))
+        prior: ContextPrior | None = None
+        if prior_cfg.enabled:
+            try:
+                tracks_path = (
+                    self.output_dir / "tracks" / f"{shot_id}_tracks.json"
+                    if shot_id else self.output_dir / "tracks" / "tracks.json"
+                )
+                pitch_cfg = self.config.get("pitch", {})
+                prior = ContextPrior(
+                    prior_cfg,
+                    per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                    per_frame_t=per_frame_t, distortion=distortion,
+                    pitch_length_m=float(pitch_cfg.get("length_m", 105.0)),
+                    pitch_width_m=float(pitch_cfg.get("width_m", 68.0)),
+                    player_boxes_by_frame=load_player_boxes(tracks_path),
+                    ball_radius_m=float(cfg.get("ball_radius_m", 0.11)),
+                )
+            except Exception as exc:  # noqa: BLE001 — prior is enrichment
+                logger.warning(
+                    "ball: context prior unavailable (%s) — detections "
+                    "unmodified", exc)
+                prior = None
+
         # --- 1. Detect ------------------------------------------------
         steps, raw_confidences, sources = self._detect_loop(
             clip_path, cfg, detector, manual_by_frame,
+            prior=prior, prior_drop_below=prior_cfg.drop_below,
         )
         if not steps:
             logger.warning("ball stage: clip %s contained no frames", clip_path)
@@ -1136,6 +1206,7 @@ class BallStage(BaseStage):
                 sp_dets = self._second_pass_loop(
                     clip_path, revisit_runs, corridors, per_frame_K, per_frame_R,
                     per_frame_t, distortion, detector, sp_cfg, ball_radius,
+                    prior=prior,
                 )
                 if sp_dets:
                     merged_uv = dict(pass1_uv)

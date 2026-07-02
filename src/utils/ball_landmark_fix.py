@@ -96,21 +96,21 @@ def suggest_pitch_fixes(
         if lm.world_xyz[2] > _MAX_GROUND_LANDMARK_Z:
             continue
         d = float(np.hypot(lm.world_xyz[0] - gx, lm.world_xyz[1] - gy))
-        if 0.0 < d <= max_distance_m:
+        if d <= max_distance_m:
             items.append({
                 "name": lm.name, "kind": "landmark", "distance_m": d,
                 "world_xy": [lm.world_xyz[0], lm.world_xyz[1]],
             })
     for name, ((ax, ay, az), (bx, by, bz)) in LINE_CATALOGUE.items():
-        # Only consider ground-level lines (both endpoints at z <= 0.2).
-        # Exclude pitch-boundary lines (goal lines, touchlines).
-        if az > _MAX_GROUND_LANDMARK_Z or bz > _MAX_GROUND_LANDMARK_Z:
-            continue
-        if "goal_line" in name or "touchline" in name:
+        # Elevated lines (crossbars: both endpoints up at 2.44 m) are never
+        # grounded-ball fixes — a 2-D projection would suggest them at a
+        # bogus near-zero distance. Vertical post lines (one endpoint at
+        # ground) remain eligible.
+        if az > _MAX_GROUND_LANDMARK_Z and bz > _MAX_GROUND_LANDMARK_Z:
             continue
         sx, sy = project_onto_segment_2d((gx, gy), (ax, ay), (bx, by))
         d = float(np.hypot(sx - gx, sy - gy))
-        if 0.0 < d <= max_distance_m:
+        if d <= max_distance_m:
             items.append({
                 "name": f"{LINE_PREFIX}{name}", "kind": "line",
                 "distance_m": d, "world_xy": [sx, sy],

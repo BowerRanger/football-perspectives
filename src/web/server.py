@@ -1898,11 +1898,15 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         confidence: float = 1.0
         # Inclusive end frame for a span event (e.g. carry); None otherwise.
         end_frame: int | None = None
+        # Pitch-feature coincidence for a grounded anchor (LANDMARK_CATALOGUE
+        # name, or "line:<name>"); valid only when state == "grounded".
+        landmark: str | None = None
 
     class BallAnchorPayload(BaseModel):
         clip_id: str
         image_size: list[int]
         anchors: list[BallAnchorEntry]
+        shot_chains: list[list[int]] = []
 
     def _first_shot_id() -> str | None:
         """Return the manifest's first shot_id, or None when no manifest."""
@@ -2037,6 +2041,97 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             logger.debug("joints-near failed for shot %s: %s", shot, exc)
             return {"joints": []}
 
+    def _load_shot_camera(shot: str):
+        """Camera matrices for a shot (best-effort, joints-near pattern)."""
+        import numpy as np
+        from src.schemas.camera_track import CameraTrack
+
+        cam_path = output_dir / "camera" / f"{shot}_camera_track.json"
+        if not cam_path.exists():
+            cam_path = output_dir / "camera" / "camera_track.json"
+        if not cam_path.exists():
+            return None
+        camera = CameraTrack.load(cam_path)
+        per_frame_K = {f.frame: np.array(f.K) for f in camera.frames}
+        per_frame_R = {f.frame: np.array(f.R) for f in camera.frames}
+        t_world = np.array(camera.t_world)
+        per_frame_t = {
+            f.frame: (np.array(f.t) if f.t is not None else t_world)
+            for f in camera.frames
+        }
+        return camera, per_frame_K, per_frame_R, per_frame_t
+
+    @app.get("/goal-element-suggest")
+    def goal_element_suggest(shot: str, frame: int, u: float, v: float):
+        """Ranked goal elements for a clicked pixel (ray residual to the
+        3-D goal geometry) — the editor's auto-suggest for goal_impact
+        authoring. Best-effort: empty candidates when camera/config are
+        unavailable."""
+        from src.utils.goal_geometry import (
+            GoalGeometry,
+            goal_element_candidates,
+        )
+
+        try:
+            loaded = _load_shot_camera(shot)
+            if loaded is None:
+                return {"candidates": []}
+            camera, per_frame_K, per_frame_R, per_frame_t = loaded
+            fi = int(frame)
+            config = load_config(app.state.config_path)
+            geometry = GoalGeometry.from_pitch_config(
+                (config or {}).get("pitch", {}))
+            cands = goal_element_candidates(
+                (float(u), float(v)),
+                K=per_frame_K[fi], R=per_frame_R[fi], t=per_frame_t[fi],
+                distortion=camera.distortion, geometry=geometry,
+            )
+            # goal_element_candidates already sorts by (residual_m, ray_s),
+            # but raw float residuals near zero (e.g. 1e-15 vs exact 0.0)
+            # can break ties in the wrong direction due to floating-point
+            # noise. Re-sort with the residual rounded to micrometre
+            # precision so true ties fall through to the documented
+            # ray-s (closer-to-camera) tiebreak.
+            cands = sorted(cands, key=lambda h: (round(h[1], 6), h[2]))
+            return {"candidates": [
+                {"element": el, "residual_m": float(res),
+                 "world_xyz": [float(w[0]), float(w[1]), float(w[2])]}
+                for el, res, _s, w in cands
+            ]}
+        except Exception as exc:  # noqa: BLE001 — suggestion helper, never 500s
+            logger.debug("goal-element-suggest failed for %s: %s", shot, exc)
+            return {"candidates": []}
+
+    @app.get("/pitch-fix-suggest")
+    def pitch_fix_suggest(shot: str, frame: int, u: float, v: float):
+        """Pitch features near the clicked pixel's ground point — the
+        editor's suggest for landmark-coincidence fixes. Best-effort."""
+        from src.utils.ball_landmark_fix import suggest_pitch_fixes
+        from src.utils.foot_anchor import ankle_ray_to_pitch
+
+        try:
+            loaded = _load_shot_camera(shot)
+            if loaded is None:
+                return {"ground_xy": None, "suggestions": []}
+            camera, per_frame_K, per_frame_R, per_frame_t = loaded
+            fi = int(frame)
+            config = load_config(app.state.config_path)
+            ball_radius = float(
+                ((config or {}).get("ball", {})).get("ball_radius_m", 0.11))
+            ground = ankle_ray_to_pitch(
+                (float(u), float(v)),
+                K=per_frame_K[fi], R=per_frame_R[fi], t=per_frame_t[fi],
+                plane_z=ball_radius, distortion=camera.distortion,
+            )
+            gxy = (float(ground[0]), float(ground[1]))
+            return {
+                "ground_xy": [gxy[0], gxy[1]],
+                "suggestions": suggest_pitch_fixes(gxy),
+            }
+        except Exception as exc:  # noqa: BLE001 — suggestion helper, never 500s
+            logger.debug("pitch-fix-suggest failed for %s: %s", shot, exc)
+            return {"ground_xy": None, "suggestions": []}
+
     @app.post("/ball-anchors/{shot_id}")
     def post_ball_anchors_for_shot(shot_id: str, payload: BallAnchorPayload):
         tmp = output_dir / "ball" / f".{shot_id}_ball_anchors.tmp.json"
@@ -2054,11 +2149,13 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     spin=a.spin,
                     confidence=float(a.confidence),
                     end_frame=a.end_frame,
+                    landmark=a.landmark,
                 ))
             aset = BallAnchorSet(
                 clip_id=str(payload.clip_id),
                 image_size=(int(payload.image_size[0]), int(payload.image_size[1])),
                 anchors=tuple(anchors_in),
+                shot_chains=tuple(tuple(int(f) for f in c) for c in payload.shot_chains),
             )
             # Round-trip through JSON to apply state-validation rules.
             tmp.parent.mkdir(parents=True, exist_ok=True)
@@ -2133,12 +2230,14 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                         spin=a.spin,
                         confidence=float(a.confidence),
                         end_frame=a.end_frame,
+                        landmark=a.landmark,
                     ) for a in payload.anchors
                 )
                 aset = BallAnchorSet(
                     clip_id=str(payload.clip_id),
                     image_size=(int(payload.image_size[0]), int(payload.image_size[1])),
                     anchors=anchors_in,
+                    shot_chains=tuple(tuple(int(f) for f in c) for c in payload.shot_chains),
                 )
                 # Round-trip validation.
                 tmp_validate = tdp / "ball" / f".{shot_id}_validate.json"
@@ -2170,7 +2269,15 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             track_path = ball_dir / f"{shot_id}_ball_track.json"
             if not track_path.exists():
                 raise HTTPException(status_code=500, detail="Preview produced no ball_track")
-            return json.loads(track_path.read_text())
+            track_json = json.loads(track_path.read_text())
+            diag_path = ball_dir / f"{shot_id}_ball_diag.json"
+            if diag_path.exists():
+                try:
+                    track_json["shot_chain_warnings"] = json.loads(
+                        diag_path.read_text()).get("shot_chains", [])
+                except Exception:  # noqa: BLE001 — enrichment only
+                    pass
+            return track_json
 
     @app.get("/anchors")
     def get_anchors():

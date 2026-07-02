@@ -237,6 +237,7 @@ let imageSize = [1280, 720];
 let dirty = false;
 let shotChains = [];        // number[][] — persisted with the anchor set
 let activeChain = null;     // number[] while recording, else null
+let dismissedAuto = [];     // {frame,state,player_id,bone}[] — persisted with the anchor set
 
 const video = document.getElementById("video");
 const overlay = document.getElementById("overlay");
@@ -271,62 +272,112 @@ function renderTags() {
   }
 }
 
+function dismissKey(a) {
+  return `${a.frame}|${a.state}|${a.player_id || ""}|${a.bone || ""}`;
+}
+function isDismissed(a) {
+  return dismissedAuto.some(d => dismissKey(d) === dismissKey(a));
+}
+
 function renderAnchors() {
   anchorList.innerHTML = "";
-  const sorted = [...anchors].sort((a, b) => a.frame - b.frame);
-  for (const a of sorted) {
+  const head = document.createElement("div");
+  head.style.cssText = "color:#64748b;font-size:10px;padding:2px 0;text-transform:uppercase;";
+  head.textContent = `Events (manual + auto, ${anchors.length}+${autoAnchors.length})`;
+  anchorList.appendChild(head);
+
+  const rows = [
+    ...anchors.map(a => ({ a, src: "manual" })),
+    ...autoAnchors.map(a => ({ a, src: "auto" })),
+  ].sort((x, y) => x.a.frame - y.a.frame || (x.src === "manual" ? -1 : 1));
+
+  for (const { a, src } of rows) {
     const t = TAGS.find(x => x.id === a.state) || { color: "#94a3b8" };
     const row = document.createElement("div");
     row.className = "anchor-row";
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "6px";
+    row.onclick = () => seekToFrame(a.frame);
+
     const detail = a.player_id
       ? ` (${a.player_id}/${a.bone || "?"}${a.touch_type ? " " + a.touch_type : ""})`
-      : a.goal_element ? ` (${a.goal_element})` : a.landmark ? ` (⚑ ${a.landmark})` : "";
-    row.innerHTML = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${t.color};flex-shrink:0;"></span> Frame ${a.frame} — ${a.state}${detail}`;
-    row.onclick = () => seekToFrame(a.frame);
-    anchorList.appendChild(row);
-  }
-  if (autoAnchors.length) {
-    const head = document.createElement("div");
-    head.style.cssText = "color:#64748b;font-size:10px;padding:8px 0 2px;border-top:1px solid #252840;margin-top:6px;text-transform:uppercase;";
-    head.textContent = `Auto anchors (${autoAnchors.length}, read-only)`;
-    anchorList.appendChild(head);
-    for (const a of [...autoAnchors].sort((x, y) => x.frame - y.frame)) {
-      const t = TAGS.find(x => x.id === a.state) || { color: "#94a3b8" };
-      const suppressed = anchors.some(m => Math.abs(m.frame - a.frame) <= 3);
-      const row = document.createElement("div");
-      row.className = "anchor-row";
-      if (suppressed) row.style.opacity = "0.45";
-      const detail = a.player_id ? ` (${a.player_id}/${a.bone || "?"})`
-        : a.goal_element ? ` (${a.goal_element})` : "";
-      const conf = (a.confidence != null)
-        ? ` · ${Math.round(a.confidence * 100)}%` : "";
-      row.style.display = "flex";
-      row.style.alignItems = "center";
-      row.style.gap = "6px";
-      row.innerHTML = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;border:1.5px dashed ${t.color};flex-shrink:0;"></span><span style="flex:1;min-width:0;">Frame ${a.frame} — ${a.state}${detail}${conf}${suppressed ? " · suppressed" : ""}</span>`;
-      row.onclick = () => seekToFrame(a.frame);
-      if (!suppressed) {
-        const add = document.createElement("button");
-        add.textContent = "＋";
-        add.title = "Promote this suggestion to an editable anchor";
-        add.style.cssText = "background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:3px;font-size:11px;padding:0 6px;cursor:pointer;";
-        add.onclick = (ev) => {
+      : a.goal_element ? ` (${a.goal_element})`
+      : a.landmark ? ` (⚑ ${a.landmark})` : "";
+    const span = a.end_frame != null ? ` →${a.end_frame}` : "";
+
+    if (src === "manual") {
+      row.innerHTML = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${t.color};flex-shrink:0;"></span><span style="flex:1;min-width:0;">Frame ${a.frame}${span} — ${a.state}${detail}</span>`;
+      if (a.state === "player_touch") {
+        const BTN_CSS = "background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:3px;font-size:10px;padding:0 5px;cursor:pointer;";
+        row.insertAdjacentHTML("beforeend", `<button title="Set end frame to the current video frame (span event, e.g. carry)" style="${BTN_CSS}" data-role="set-end">⇥</button>`);
+        const setEndEl = row.lastElementChild;
+        setEndEl.onclick = (ev) => {
           ev.stopPropagation();
-          anchors = anchors.filter(m => m.frame !== a.frame);
-          anchors.push({
-            frame: a.frame, image_xy: a.image_xy ?? null, state: a.state,
-            player_id: a.player_id || null, bone: a.bone || null,
-            goal_element: a.goal_element || null,
-            touch_type: a.touch_type || null, confidence: 1.0,
-          });
-          setDirty(true);
-          renderAnchors();
-          drawOverlay();
+          const fi = currentFrame();
+          if (fi <= a.frame) { setStatus("end frame must be after the anchor frame"); return; }
+          a.end_frame = fi;
+          setDirty(true); renderAnchors();
         };
-        row.appendChild(add);
+        if (a.end_frame != null) {
+          row.insertAdjacentHTML("beforeend", `<button title="Clear end frame (back to a point event)" style="${BTN_CSS}" data-role="clear-end">⇤</button>`);
+          const clrEl = row.lastElementChild;
+          clrEl.onclick = (ev) => {
+            ev.stopPropagation();
+            a.end_frame = null;
+            setDirty(true); renderAnchors();
+          };
+        }
       }
       anchorList.appendChild(row);
+      continue;
     }
+
+    // Auto suggestion row.
+    const dismissed = isDismissed(a);
+    const suppressed = anchors.some(m => Math.abs(m.frame - a.frame) <= 3);
+    if (dismissed || suppressed) row.style.opacity = "0.45";
+    const conf = (a.confidence != null) ? ` · ${Math.round(a.confidence * 100)}%` : "";
+    const flag = dismissed ? " · dismissed" : suppressed ? " · suppressed" : "";
+    row.innerHTML = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;border:1.5px dashed ${t.color};flex-shrink:0;"></span><span style="flex:1;min-width:0;${dismissed ? "text-decoration:line-through;" : ""}">Frame ${a.frame} — ${a.state}${detail}${conf}${flag}</span>`;
+
+    if (dismissed) {
+      row.insertAdjacentHTML("beforeend", `<button title="Undo dismissal" style="background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:3px;font-size:11px;padding:0 6px;cursor:pointer;" data-role="undo">↩</button>`);
+      const undoEl = row.lastElementChild;
+      undoEl.onclick = (ev) => {
+        ev.stopPropagation();
+        dismissedAuto = dismissedAuto.filter(d => dismissKey(d) !== dismissKey(a));
+        setDirty(true); renderAnchors();
+      };
+    } else if (!suppressed) {
+      const add = document.createElement("button");
+      add.textContent = "＋";
+      add.title = "Promote this suggestion to an editable anchor";
+      add.style.cssText = "background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:3px;font-size:11px;padding:0 6px;cursor:pointer;";
+      add.onclick = (ev) => {
+        ev.stopPropagation();
+        anchors = anchors.filter(m => m.frame !== a.frame);
+        anchors.push({
+          frame: a.frame, image_xy: a.image_xy ?? null, state: a.state,
+          player_id: a.player_id || null, bone: a.bone || null,
+          goal_element: a.goal_element || null,
+          touch_type: a.touch_type || null, confidence: 1.0,
+        });
+        setDirty(true); renderAnchors(); drawOverlay();
+      };
+      row.appendChild(add);
+      row.insertAdjacentHTML("beforeend", `<button title="Dismiss this suggestion (persisted; won't return on re-runs)" style="background:#334155;color:#f87171;border:1px solid #475569;border-radius:3px;font-size:11px;padding:0 6px;cursor:pointer;" data-role="dismiss">✕</button>`);
+      const disEl = row.lastElementChild;
+      disEl.onclick = (ev) => {
+        ev.stopPropagation();
+        dismissedAuto.push({
+          frame: a.frame, state: a.state,
+          player_id: a.player_id || null, bone: a.bone || null,
+        });
+        setDirty(true); renderAnchors();
+      };
+    }
+    anchorList.appendChild(row);
   }
 }
 
@@ -710,7 +761,7 @@ document.getElementById("chainBtn").onclick = () => {
 };
 
 document.getElementById("saveBtn").onclick = async () => {
-  const payload = { clip_id: shotId || "", image_size: imageSize, anchors, shot_chains: shotChains };
+  const payload = { clip_id: shotId || "", image_size: imageSize, anchors, shot_chains: shotChains, dismissed_auto: dismissedAuto };
   const r = await fetch(`/ball-anchors/${encodeURIComponent(shotId)}`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -725,7 +776,7 @@ document.getElementById("saveBtn").onclick = async () => {
 };
 
 document.getElementById("previewBtn").onclick = async () => {
-  const payload = { clip_id: shotId || "", image_size: imageSize, anchors, shot_chains: shotChains };
+  const payload = { clip_id: shotId || "", image_size: imageSize, anchors, shot_chains: shotChains, dismissed_auto: dismissedAuto };
   setStatus("Solving…");
   const r = await fetch(`/ball-anchors/${encodeURIComponent(shotId)}/preview`, {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -811,6 +862,10 @@ async function loadShot() {
     landmark: a.landmark ?? null,
   })) : [];
   shotChains = (ar && ar.shot_chains) ? ar.shot_chains.map(c => c.map(Number)) : [];
+  dismissedAuto = (ar && ar.dismissed_auto) ? ar.dismissed_auto.map(d => ({
+    frame: d.frame, state: d.state,
+    player_id: d.player_id ?? null, bone: d.bone ?? null,
+  })) : [];
   renderChains();
 
   const auto = await fetch(`/ball-anchors/${encodeURIComponent(shotId)}/auto`)

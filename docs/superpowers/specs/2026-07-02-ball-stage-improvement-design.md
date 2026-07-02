@@ -321,7 +321,7 @@ composition over existing events; no new detection.
 |---|---|---|
 | 1 | 4.1 proposer validation + integration test; 5.1 quality timeline | recall report published; timeline usable on gberch |
 | 2 | 6 shot chains (authoring, validation, auto-proposal); 5.3 landmark fixes | a goal-mouth shot on origi01/gberch reconstructs from 2 clicks with preview warnings working |
-| 3 | 4.2 context prior; 4.4 attribution refinement; 5.2 event-list/span UI + exhaustive-annotation workflow | gberch strict union recall ≥ 4/8 via relabelling; frame-top FPs suppressed, no coverage regression; event list usable for a full review pass |
+| 3 | 4.2 context prior; 4.4 attribution refinement; 5.2 event-list/span UI + exhaustive-annotation workflow | gberch strict union recall ≥ 4/8 via relabelling; frame-top FPs suppressed, no coverage regression; event list usable for a full review pass — superseded by §4.2/§4.4 measured outcomes: recall-via-relabelling moves to Phase 4; shipped bars were baseline-parity, met bit-identically. |
 | 4 | 4.3 fine-tune loop end-to-end; re-enable foot_guided | recall ≥ 4/8 @ precision ≥ 0.5 on gberch; coverage lift on origi02 |
 
 Phases 1–2 are GPU-light and land the user-facing systems; Phase 4 is the ML lift and is

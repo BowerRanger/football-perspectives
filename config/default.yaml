@@ -558,7 +558,7 @@ ball:
     launch_speed_warn_max_m_s: 45.0  # consecutive chain knots (mis-click catch)
   context_prior:
     enabled: true
-    drop_below: 0.35         # penalized conf below this => treated as no detection
+    drop_below: 0.35         # prior FACTOR at/below this => detection vetoed (confidences never scaled)
     pitch_margin_m: 5.0
     pitch_penalty: 0.7       # ground intersection far off-pitch (crowd/stand)
     player_max_dist_px: 180.0

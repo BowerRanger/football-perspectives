@@ -1051,7 +1051,8 @@ class BallStage(BaseStage):
         sp_cfg: SecondPassCfg,
     ) -> tuple[tuple[float, float], float] | None:
         """Crop around the corridor and re-detect; the detector's own
-        letterbox upscales the crop, magnifying a small ball."""
+        letterbox upscales the crop, magnifying a small ball.
+        Deliberately NOT prior-filtered: zoom candidates are already corridor/foot-region constrained, and the prior's far-from-player signal would invert foot-guided semantics."""
         half = sp_cfg.zoom_crop_px // 2
         prime_offset = getattr(detector, "_frames_in", 3) - 1
         prime = max(0, frame_idx - prime_offset)

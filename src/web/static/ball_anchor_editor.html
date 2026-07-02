@@ -127,6 +127,11 @@
       <button id="offScreenBtn" style="display:none;">Mark off-screen flight</button>
       <span id="frameLabel" style="color:#94a3b8;font-size:11px;min-width:90px;text-align:right;">Frame 0</span>
     </div>
+      <div id="qualityStrip" title="Ball quality — click to seek"
+           style="height:26px;background:#0a0c12;border:1px solid #252840;border-radius:4px;margin-top:6px;cursor:pointer;">
+        <canvas id="qualityCanvas" style="width:100%;height:100%;display:block;"></canvas>
+      </div>
+      <div id="annotateNext" style="margin-top:4px;font-size:11px;color:#94a3b8;"></div>
   </section>
   <section class="panel">
     <h2>Anchors</h2>
@@ -294,6 +299,93 @@ function renderAnchors() {
 function currentFrame() { return Math.round(video.currentTime * fps); }
 function seekToFrame(fi) { video.currentTime = fi / fps; }
 
+// ── Ball quality timeline (fed by GET /ball-quality/{shot}) ────────────
+let quality = null;  // payload from /ball-quality, null until loaded
+
+async function loadQuality() {
+  if (!shotId) { quality = null; renderQualityStrip(); renderAnnotateNext(); return; }
+  try {
+    const r = await fetch(`/ball-quality/${encodeURIComponent(shotId)}`);
+    quality = r.ok ? await r.json() : null;
+  } catch (e) {
+    quality = null;
+  }
+  renderQualityStrip();
+  renderAnnotateNext();
+}
+
+function renderQualityStrip() {
+  const strip = document.getElementById("qualityStrip");
+  const c = document.getElementById("qualityCanvas");
+  const ctx = c.getContext("2d");
+  const w = strip.clientWidth, h = strip.clientHeight;
+  c.width = w; c.height = h;
+  ctx.fillStyle = "#0a0c12";
+  ctx.fillRect(0, 0, w, h);
+  if (!quality || !quality.n_frames) {
+    ctx.fillStyle = "#4b5563";
+    ctx.font = "11px -apple-system, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("(no ball quality yet — run the ball stage)", w / 2, h / 2 + 4);
+    return;
+  }
+  const N = quality.n_frames;
+  const barW = Math.max(1, w / N);
+  // Per-frame detection confidence: red (0) -> green (1); gap-fill reads as 0.
+  for (const f of quality.frames) {
+    const c01 = f.gap_fill ? 0 : Math.max(0, Math.min(1, f.confidence || 0));
+    ctx.fillStyle = `rgb(${Math.round(255 * (1 - c01))},${Math.round(200 * c01 + 30)},60)`;
+    ctx.fillRect(f.frame * barW, 0, Math.ceil(barW), h);
+  }
+  // Annotate-next bands along the bottom: red = underconstrained flight,
+  // orange = detection gap.
+  for (const it of quality.annotate_next || []) {
+    ctx.fillStyle = it.reason === "underconstrained_flight"
+      ? "rgba(239,68,68,0.6)" : "rgba(251,146,60,0.5)";
+    ctx.fillRect(it.start * barW, h - 7, (it.end - it.start + 1) * barW, 7);
+  }
+  // Top stripe ticks: auto events (blue), manual anchors (purple, drawn last).
+  for (const e of quality.events || []) {
+    ctx.fillStyle = "#38bdf8";
+    ctx.fillRect(e.frame * barW, 0, Math.max(1, barW), 4);
+  }
+  for (const a of anchors) {
+    ctx.fillStyle = "#a855f7";
+    ctx.fillRect(a.frame * barW, 0, Math.max(1, barW), 4);
+  }
+  // Cursor.
+  const cx = (currentFrame() / Math.max(1, N - 1)) * w;
+  ctx.fillStyle = "rgba(255,255,255,0.9)";
+  ctx.fillRect(Math.max(0, cx - 1), 0, 2, h);
+}
+
+function renderAnnotateNext() {
+  const el = document.getElementById("annotateNext");
+  el.innerHTML = "";
+  const items = (quality && quality.annotate_next) || [];
+  if (!items.length) return;
+  const label = document.createElement("span");
+  label.textContent = "Annotate next: ";
+  el.appendChild(label);
+  for (const it of items.slice(0, 3)) {
+    const b = document.createElement("button");
+    b.textContent = `${it.reason === "underconstrained_flight" ? "flight" : "gap"} ${it.start}–${it.end}`;
+    b.title = it.reason === "underconstrained_flight"
+      ? "Flight span with < 2 hard knots — add a bracketing kick/bounce/grounded anchor inside it"
+      : "Long detection gap — confirm the ball state through it";
+    b.style.cssText = "margin-right:6px;background:#1e293b;color:#e2e8f0;border:1px solid #475569;border-radius:3px;font-size:11px;padding:1px 6px;cursor:pointer;";
+    b.onclick = () => seekToFrame(it.start);
+    el.appendChild(b);
+  }
+}
+
+document.getElementById("qualityStrip").addEventListener("click", (ev) => {
+  if (!quality || !quality.n_frames) return;
+  const rect = ev.currentTarget.getBoundingClientRect();
+  const frac = (ev.clientX - rect.left) / Math.max(1, rect.width);
+  seekToFrame(Math.round(frac * (quality.n_frames - 1)));
+});
+
 function fitOverlay() {
   if (!video.videoWidth) return;
   overlay.width = video.videoWidth;
@@ -309,6 +401,7 @@ function drawOverlay() {
   const fi = currentFrame();
   frameLabel.textContent = `Frame ${fi}`;
   seek.value = String(fi);
+  renderQualityStrip();
   for (const a of autoAnchors) {
     if (a.frame !== fi || a.image_xy == null) continue;
     const tag = TAGS.find(x => x.id === a.state) || { color: "#94a3b8" };
@@ -460,6 +553,7 @@ document.getElementById("saveBtn").onclick = async () => {
   if (r.ok) {
     setStatus(`saved ${anchors.length}`);
     dirty = false;
+    loadQuality();
   } else {
     setStatus(`save failed: ${r.status}`);
   }
@@ -564,6 +658,7 @@ async function loadShot() {
   renderTags();
   renderAnchors();
   setStatus(`${anchors.length} anchors`);
+  loadQuality();
 }
 
 loadShot();

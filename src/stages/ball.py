@@ -303,6 +303,16 @@ def _resolve_anchor_world(
         return None
     uv = (float(anc.image_xy[0]), float(anc.image_xy[1]))
 
+    if anc.state == "grounded" and anc.landmark:
+        from src.utils.ball_landmark_fix import resolve_landmark_world
+        world = resolve_landmark_world(
+            anc.image_xy, anc.landmark, K=K, R=R, t=t,
+            distortion=distortion, ball_radius=ball_radius,
+        )
+        if world is not None:
+            return world
+        # else fall through to the ordinary grounded ray-cast
+
     if anc.state == "goal_impact" and anc.goal_element is not None:
         try:
             return np.asarray(

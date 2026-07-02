@@ -112,6 +112,14 @@ def _resolve_waypoint_world(
     if anc.image_xy is None or K is None or R is None or t is None:
         return None
     uv = (float(anc.image_xy[0]), float(anc.image_xy[1]))
+    if anc.state == "grounded" and anc.landmark:
+        from src.utils.ball_landmark_fix import resolve_landmark_world
+        world = resolve_landmark_world(
+            anc.image_xy, anc.landmark, K=K, R=R, t=t,
+            distortion=distortion, ball_radius=ball_radius,
+        )
+        if world is not None:
+            return world
     if anc.state == "goal_impact" and anc.goal_element and goal_geometry is not None:
         from src.utils.goal_geometry import resolve_goal_impact_world
         try:

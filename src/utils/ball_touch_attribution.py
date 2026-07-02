@@ -8,6 +8,10 @@ event's (player, bone) as the joint with the smallest 3-D bone↔ball-ray
 gap over a small window around the event frame, keeping the original when
 the improvement is within an ambiguity margin. It relabels ONLY — never
 adds, removes, re-frames, or re-scores events. Pure and torch-free.
+
+Default-off: relabelling trusts the ball pixel, which is exactly what is
+unreliable on detector-limited clips — enable per-clip once detection
+quality at touch moments is validated.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 
 @dataclass(frozen=True)
 class TouchAttributionCfg:
-    enabled: bool = True
+    enabled: bool = False
     window: int = 2          # +/- frames considered around the event frame
     max_gap_m: float = 0.45  # candidate joints beyond this never relabel
     margin_m: float = 0.05   # new joint must beat the current one by this

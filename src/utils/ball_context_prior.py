@@ -15,10 +15,12 @@ before the solve pass:
   window while the camera visibly pans — glued to the IMAGE, not the
   world (overlays, scoreboards).
 
-The factor multiplies the detector confidence; the EXISTING acceptance
-thresholds then do any dropping. Signals are deliberately gentle: no
-single signal drops a confident detection (see default penalties).
-Pure and torch-free.
+The factor is a veto signal: the wiring drops a detection only when the
+factor itself falls to ``drop_below`` — which only compounded signals
+involving the static-under-pan signature can reach — and stored
+confidences are never scaled, so low-confidence clips are not penalized.
+Signals are deliberately gentle: no single signal drops a confident
+detection (see default penalties). Pure and torch-free.
 """
 
 from __future__ import annotations
@@ -38,13 +40,12 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ContextPriorCfg:
     enabled: bool = True
-    # Penalized confidence below this is treated as "no detection" by the
-    # wiring in ball.py (the drop happens via existing gate semantics).
+    # drop a detection when the prior FACTOR (not conf × factor) falls to/below this
     drop_below: float = 0.35
     pitch_margin_m: float = 5.0
-    pitch_penalty: float = 0.5
+    pitch_penalty: float = 0.7
     player_max_dist_px: float = 180.0
-    player_penalty: float = 0.6
+    player_penalty: float = 0.75
     static_window: int = 45
     static_max_px: float = 3.0
     static_min_cam_deg: float = 2.0

@@ -911,12 +911,10 @@ class BallStage(BaseStage):
                         if not (0.0 <= det[0] < w_img and 0.0 <= det[1] < h_img):
                             det = None
                     if det is not None and prior is not None:
-                        adj = float(det[2]) * prior.factor(
+                        factor = prior.factor(
                             frame_idx, (float(det[0]), float(det[1])))
-                        if adj < prior_drop_below:
-                            det = None  # penalized below the drop threshold
-                        else:
-                            det = (det[0], det[1], adj)
+                        if factor <= prior_drop_below:
+                            det = None  # vetoed by the context prior
                     if det is None:
                         consecutive_misses += 1
                         bridge_result = bridge.try_bridge(
@@ -975,6 +973,7 @@ class BallStage(BaseStage):
         sp_cfg: SecondPassCfg,
         ball_radius: float,
         prior: "ContextPrior | None" = None,
+        prior_drop_below: float = 0.0,
     ) -> list[SecondPassDetection]:
         """Revisit evidence gaps with corridor-gated candidate detection.
 
@@ -1005,8 +1004,8 @@ class BallStage(BaseStage):
                         continue
                     if prior is not None:
                         cands = [
-                            (u, v, s * prior.factor(f, (u, v)))
-                            for (u, v, s) in cands
+                            (u, v, s) for (u, v, s) in cands
+                            if prior.factor(f, (u, v)) > prior_drop_below
                         ]
                     mean, cov = corridors[f]
                     best = best_gated_candidate(cands, mean, cov, sp_cfg)
@@ -1213,7 +1212,7 @@ class BallStage(BaseStage):
                 sp_dets = self._second_pass_loop(
                     clip_path, revisit_runs, corridors, per_frame_K, per_frame_R,
                     per_frame_t, distortion, detector, sp_cfg, ball_radius,
-                    prior=prior,
+                    prior=prior, prior_drop_below=prior_cfg.drop_below,
                 )
                 if sp_dets:
                     merged_uv = dict(pass1_uv)

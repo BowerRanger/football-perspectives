@@ -112,7 +112,7 @@ def test_refinement_runs_and_relabel_reaches_diag(tmp_path, monkeypatch):
                         lambda **kwargs: synthetic)
     monkeypatch.setattr("src.stages.ball.refine_touch_attribution",
                         fake_refine)
-    BallStage(config=_cfg(), output_dir=out,
+    BallStage(config=_cfg(touch_attribution={"enabled": True}), output_dir=out,
               ball_detector=FakeBallDetector(detections)).run()
     assert "n" in calls, "refine_touch_attribution was never invoked"
     diag = json.loads((out / "ball" / "play_ball_diag.json").read_text())
@@ -143,7 +143,7 @@ def test_refinement_crash_degrades_with_warning(tmp_path, monkeypatch, caplog):
 
     monkeypatch.setattr("src.stages.ball.refine_touch_attribution", broken)
     with caplog.at_level("WARNING"):
-        BallStage(config=_cfg(), output_dir=out,
+        BallStage(config=_cfg(touch_attribution={"enabled": True}), output_dir=out,
                   ball_detector=FakeBallDetector(detections)).run()
     assert (out / "ball" / "play_ball_track.json").exists()
     assert any("touch attribution refinement failed" in r.message

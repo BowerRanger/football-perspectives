@@ -560,16 +560,16 @@ ball:
     enabled: true
     drop_below: 0.35         # penalized conf below this => treated as no detection
     pitch_margin_m: 5.0
-    pitch_penalty: 0.5       # ground intersection far off-pitch (crowd/stand)
+    pitch_penalty: 0.7       # ground intersection far off-pitch (crowd/stand)
     player_max_dist_px: 180.0
-    player_penalty: 0.6      # no tracked person box anywhere near the pixel
+    player_penalty: 0.75     # no tracked person box anywhere near the pixel
     static_window: 45
     static_max_px: 3.0
     static_min_cam_deg: 2.0
     static_penalty: 0.45     # pixel-static while the camera pans (overlay)
     min_factor: 0.1          # floor on the combined factor
   touch_attribution:
-    enabled: true            # relabel touch events to the ray-closest joint
+    enabled: false           # relabel touch events to the ray-closest joint. OFF by default: on detector-limited clips the ball pixel at touch moments is unreliable and relabelling overwrites body-derived correct labels (measured on gberch 2026-07-02); enable per-clip after detector fine-tuning.
     window: 2                # +/- frames around the event frame
     max_gap_m: 0.45          # candidates beyond this never relabel
     margin_m: 0.05           # required improvement over current attribution

@@ -14,7 +14,7 @@ from src.utils.ball_touch_attribution import (
     refine_touch_attribution,
 )
 
-CFG = TouchAttributionCfg()
+CFG = TouchAttributionCfg(enabled=True)
 
 
 def _camera():
@@ -157,7 +157,7 @@ def test_config_block_keys():
     from pathlib import Path
     cfg = yaml.safe_load(
         Path("config/default.yaml").read_text())["ball"]["touch_attribution"]
-    assert cfg["enabled"] is True
+    assert cfg["enabled"] is False
     assert cfg["window"] == 2
     assert cfg["max_gap_m"] == 0.45
     assert cfg["margin_m"] == 0.05

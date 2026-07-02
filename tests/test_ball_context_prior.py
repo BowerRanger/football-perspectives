@@ -68,14 +68,15 @@ def test_on_pitch_detection_with_player_nearby_is_unpenalized():
 
 def test_single_signal_never_drops_a_confident_detection():
     # No player box within reach (boxes exist that frame) — player penalty
-    # alone must keep 0.8 * factor >= drop_below.
+    # alone must keep the factor above drop_below (a pure factor veto now,
+    # not multiplied against detector confidence).
     K, R, t = _camera_pose()
     uv = _project(np.array([40.0, 34.0, 0.11]), K, R, t)
     boxes = {0: [(uv[0] + 500, uv[1] + 500, uv[0] + 560, uv[1] + 620)]}
     prior, _ = _prior(boxes=boxes)
     f = prior.factor(0, uv)
     assert f == pytest.approx(CFG.player_penalty)
-    assert 0.8 * f >= CFG.drop_below
+    assert f > CFG.drop_below
 
 
 def test_off_pitch_ground_intersection_penalized():
@@ -100,14 +101,15 @@ def test_unresolvable_ground_ray_is_not_penalized():
 
 def test_static_in_image_under_pan_penalized_combined_with_player():
     # Same pixel for 60 frames while the camera pans 0.2 deg/frame, and no
-    # player anywhere near: static * player must drop a 0.8-conf blob.
+    # player anywhere near: static * player must veto the detection outright
+    # (factor falls to/below drop_below), regardless of detector confidence.
     uv = (640.0, 40.0)
     boxes = {i: [(100.0, 600.0, 160.0, 700.0)] for i in range(90)}
     prior, _ = _prior(yaw_per_frame=0.2, boxes=boxes)
     fs = [prior.factor(i, uv) for i in range(60)]
     f_late = fs[-1]
     assert f_late <= CFG.static_penalty * CFG.player_penalty + 1e-9
-    assert 0.8 * f_late < CFG.drop_below
+    assert f_late <= CFG.drop_below
 
 
 def test_static_not_triggered_when_camera_still():
@@ -168,6 +170,18 @@ def test_load_player_boxes_excludes_ball_and_missing_file(tmp_path: Path):
     boxes = load_player_boxes(p)
     assert boxes == {3: [(1.0, 2.0, 3.0, 4.0)]}
     assert load_player_boxes(tmp_path / "missing.json") is None
+
+
+def test_circumstantial_pair_never_drops_confident_detection():
+    # A genuine long ball is often BOTH far from players AND ray-casts
+    # off-pitch (it's airborne): the pitch+player pairing alone must never
+    # reach the veto threshold (origi02 regression guard). Only pairings
+    # involving the static-under-pan signature may cross it.
+    assert CFG.pitch_penalty * CFG.player_penalty > CFG.drop_below
+    assert CFG.static_penalty * CFG.player_penalty <= CFG.drop_below
+    assert CFG.static_penalty * CFG.pitch_penalty <= CFG.drop_below
+    for single in (CFG.pitch_penalty, CFG.player_penalty, CFG.static_penalty):
+        assert single > CFG.drop_below
 
 
 def test_config_block_keys():

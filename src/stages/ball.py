@@ -41,6 +41,7 @@ import numpy as np
 
 from src.pipeline.base import BaseStage
 from src.schemas.ball_anchor import BallAnchor, BallAnchorSet
+from src.schemas.ball_keyframes import BallKeyframeSet
 from src.schemas.ball_track import BallFrame, BallTrack
 from src.schemas.camera_track import CameraTrack
 from src.schemas.shots import ShotsManifest
@@ -111,6 +112,11 @@ from src.utils.ball_second_pass import (
     find_gap_runs,
     find_revisit_runs,
     map_crop_candidates,
+)
+from src.utils.ball_shot_chain import (
+    ShotChainCfg,
+    chain_warnings,
+    propose_shot_chains,
 )
 from src.utils.foot_anchor import ankle_ray_to_pitch
 from src.utils.goal_geometry import GoalGeometry, resolve_goal_impact_world
@@ -218,6 +224,24 @@ def _load_ball_anchors(
         logger.warning("ball stage: failed to load anchors at %s: %s", path, exc)
         return {}
     return {a.frame: a for a in aset.anchors}
+
+
+def _load_manual_shot_chains(
+    output_dir: Path, shot_id: str
+) -> tuple[tuple[int, ...], ...]:
+    """Shot chains from the manual anchor sidecar; () when absent/invalid."""
+    if shot_id:
+        path = output_dir / "ball" / f"{shot_id}_ball_anchors.json"
+    else:
+        path = output_dir / "ball" / "ball_anchors.json"
+    if not path.exists():
+        return ()
+    try:
+        return BallAnchorSet.load(path).shot_chains
+    except Exception as exc:  # noqa: BLE001 — chains are enrichment
+        logger.warning(
+            "ball stage: failed to load shot chains at %s: %s", path, exc)
+        return ()
 
 
 # Player_touch ground/air classification by surrounding anchors. The
@@ -586,6 +610,20 @@ def _kinematic_touch_cfg(cfg_dict: dict) -> KinematicTouchCfg:
         w_fk=float(d.get("w_fk", base.w_fk)),
         w_interp=float(d.get("w_interp", base.w_interp)),
         min_emit_score=float(d.get("min_emit_score", base.min_emit_score)),
+    )
+
+
+def _shot_chain_cfg(cfg_dict: dict) -> ShotChainCfg:
+    """Build a ShotChainCfg from the ``ball.shot_chain`` sub-tree."""
+    base = ShotChainCfg()
+    return ShotChainCfg(
+        enabled=bool(cfg_dict.get("enabled", base.enabled)),
+        pair_window_frames=int(cfg_dict.get(
+            "pair_window_frames", base.pair_window_frames)),
+        launch_speed_warn_min_m_s=float(cfg_dict.get(
+            "launch_speed_warn_min_m_s", base.launch_speed_warn_min_m_s)),
+        launch_speed_warn_max_m_s=float(cfg_dict.get(
+            "launch_speed_warn_max_m_s", base.launch_speed_warn_max_m_s)),
     )
 
 
@@ -1511,6 +1549,8 @@ class BallStage(BaseStage):
                     "ball stage: kinematic touch proposer failed (%s) — "
                     "continuing with ball-break touches only", exc,
                 )
+        chain_cfg = _shot_chain_cfg(cfg.get("shot_chain", {}))
+        proposed_chains = propose_shot_chains(events, chain_cfg)
         auto_by_frame: dict[int, BallAnchor] = {}
         if anchor_cfg.enabled:
             try:
@@ -1527,6 +1567,7 @@ class BallStage(BaseStage):
                     clip_id=artifacts.camera_clip_id,
                     image_size=artifacts.camera_image_size,
                     anchors=auto_anchors,
+                    shot_chains=proposed_chains,
                 ).save(auto_anchor_path(ball_out_path.parent, shot_id))
             except Exception as exc:  # noqa: BLE001 — auto anchors must never kill the stage
                 logger.warning(
@@ -1830,15 +1871,15 @@ class BallStage(BaseStage):
         )
         track.save(ball_out_path)
 
+        kf_path = ball_out_path.with_name(
+            ball_out_path.name.replace("ball_track", "ball_keyframes")
+        )
         try:
             event_keyframes = getattr(result, "keyframe_set", None)
             if solver_name == "events" and event_keyframes is not None:
                 # Events mode: the resolver already built the authoritative
                 # sparse keyframes WITH interpolation segments — write them
                 # directly so the segments reach UE / the reference interp.
-                kf_path = ball_out_path.with_name(
-                    ball_out_path.name.replace("ball_track", "ball_keyframes")
-                )
                 event_keyframes.save(kf_path)
             else:
                 _emit_ball_keyframes(
@@ -1885,6 +1926,25 @@ class BallStage(BaseStage):
         diag_path = ball_out_path.with_name(
             ball_out_path.name.replace("ball_track", "ball_diag")
         )
+        shot_chain_diag: list[dict] = []
+        try:
+            kf_set = (
+                BallKeyframeSet.load(kf_path) if kf_path.exists() else None
+            )
+            manual_chains = _load_manual_shot_chains(
+                self.output_dir, shot_id)
+            for source, chains in (
+                ("manual", manual_chains), ("auto", proposed_chains),
+            ):
+                for chain in chains:
+                    shot_chain_diag.append({
+                        "frames": [int(f) for f in chain],
+                        "source": source,
+                        "warnings": chain_warnings(
+                            chain, kf_set, artifacts.camera_fps, chain_cfg),
+                    })
+        except Exception as exc:  # noqa: BLE001 — validation never kills the stage
+            logger.warning("ball: shot-chain validation failed: %s", exc)
         diag: dict = {
             "solver": solver_name,
             # In events mode the dense ``ball_track.json`` is rendered by the
@@ -1896,6 +1956,7 @@ class BallStage(BaseStage):
             "bounces": result.diagnostics.get("bounces", []),
             "splits": result.diagnostics.get("splits", 0),
             "contact_gaps": contact_gaps,
+            "shot_chains": shot_chain_diag,
             "events": [
                 {
                     "frame": e.frame, "kind": e.kind,

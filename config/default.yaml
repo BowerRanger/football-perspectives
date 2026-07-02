@@ -556,6 +556,18 @@ ball:
     pair_window_frames: 75     # max frames between strike touch and goal impact
     launch_speed_warn_min_m_s: 8.0   # warn band for implied speed between
     launch_speed_warn_max_m_s: 45.0  # consecutive chain knots (mis-click catch)
+  context_prior:
+    enabled: true
+    drop_below: 0.35         # penalized conf below this => treated as no detection
+    pitch_margin_m: 5.0
+    pitch_penalty: 0.5       # ground intersection far off-pitch (crowd/stand)
+    player_max_dist_px: 180.0
+    player_penalty: 0.6      # no tracked person box anywhere near the pixel
+    static_window: 45
+    static_max_px: 3.0
+    static_min_cam_deg: 2.0
+    static_penalty: 0.45     # pixel-static while the camera pans (overlay)
+    min_factor: 0.1          # floor on the combined factor
   # Automatic anchoring (camera auto-anchor analogy): velocity breaks on
   # the pixel track are classified as player touches / bounces / goal
   # impacts using the players' FK contact joints and the goal geometry,

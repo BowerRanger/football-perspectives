@@ -50,3 +50,31 @@ def test_touches_from_anchor_set(tmp_path: Path):
         ],
     }))
     assert touches_from_anchor_set(p) == [(5, "P1", "r_foot")]
+
+
+def test_fp_breakdown_partitions_dismissed_and_unreviewed():
+    from src.utils.ball_touch_recall import fp_breakdown
+
+    manual = [(10, "P1", "r_foot")]
+    auto = [(10, "P1", "r_foot"),   # TP
+            (30, "P2", "l_foot"),   # FP, dismissed
+            (50, "P3", "head")]     # FP, unreviewed
+    dismissed = [(30, "P2", "l_foot")]
+    out = fp_breakdown(auto, manual, dismissed, frame_tol=2)
+    assert out == {"fp_total": 2, "fp_dismissed": 1, "fp_unreviewed": 1}
+
+
+def test_dismissed_touches_loader(tmp_path):
+    import json
+    from src.utils.ball_touch_recall import dismissed_touches_from_anchor_set
+
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps({
+        "clip_id": "x", "image_size": [1280, 720], "anchors": [],
+        "dismissed_auto": [
+            {"frame": 30, "state": "player_touch",
+             "player_id": "P2", "bone": "l_foot"},
+            {"frame": 40, "state": "bounce"},
+        ],
+    }))
+    assert dismissed_touches_from_anchor_set(p) == [(30, "P2", "l_foot")]

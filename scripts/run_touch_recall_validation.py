@@ -102,6 +102,20 @@ def main() -> int:
     proposer_only = proposer_only_touches(break_only, union)
     table = recall_table(manual, break_only, proposer_only, union)
     _print_table(table)
+
+    from src.utils.ball_touch_recall import (
+        dismissed_touches_from_anchor_set,
+        fp_breakdown,
+    )
+    dismissed = dismissed_touches_from_anchor_set(manual_path)
+    if dismissed:
+        print(f"\nFP breakdown ({len(dismissed)} dismissed touches on record):")
+        for name, auto_set in (("break_only", break_only), ("union", union)):
+            b = fp_breakdown(auto_set, manual, dismissed)
+            print(f"  {name:<12} fp={b['fp_total']}  "
+                  f"dismissed={b['fp_dismissed']}  "
+                  f"unreviewed={b['fp_unreviewed']}")
+
     report_path = ball_dir / f"{args.shot}_touch_recall.json"
     report_path.write_text(json.dumps(table, indent=2))
     print(f"written {report_path}")

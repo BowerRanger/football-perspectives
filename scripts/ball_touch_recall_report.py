@@ -13,7 +13,12 @@ from __future__ import annotations
 
 import sys
 
-from src.utils.ball_touch_recall import match_touches, touches_from_anchor_set
+from src.utils.ball_touch_recall import (
+    dismissed_touches_from_anchor_set,
+    fp_breakdown,
+    match_touches,
+    touches_from_anchor_set,
+)
 
 Touch = tuple[int, str, str]
 
@@ -62,8 +67,18 @@ if __name__ == "__main__":
             "ball.kinematic_touch.enabled=true"
         )
         raise SystemExit(2)
-    manual = touches_from_anchor_set(sys.argv[1])
+    manual_path = sys.argv[1]
+    manual = touches_from_anchor_set(manual_path)
     break_only = touches_from_anchor_set(sys.argv[2])
     union = touches_from_anchor_set(sys.argv[3])
     proposer_only = proposer_only_touches(break_only, union)
     _print_table(recall_table(manual, break_only, proposer_only, union))
+
+    dismissed = dismissed_touches_from_anchor_set(manual_path)
+    if dismissed:
+        print(f"\nFP breakdown ({len(dismissed)} dismissed touches on record):")
+        for name, auto_set in (("break_only", break_only), ("union", union)):
+            b = fp_breakdown(auto_set, manual, dismissed)
+            print(f"  {name:<12} fp={b['fp_total']}  "
+                  f"dismissed={b['fp_dismissed']}  "
+                  f"unreviewed={b['fp_unreviewed']}")

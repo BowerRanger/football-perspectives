@@ -76,4 +76,58 @@ def match_touches(
     }
 
 
-__all__ = ["match_touches", "touches_from_anchor_set", "Touch"]
+def dismissed_touches_from_anchor_set(path: str | Path) -> list[Touch]:
+    """The dismissed ``player_touch`` triples from a manual sidecar."""
+    data = json.loads(Path(path).read_text())
+    out: list[Touch] = []
+    for d in data.get("dismissed_auto", []):
+        if d.get("state") == "player_touch":
+            out.append((int(d["frame"]), str(d.get("player_id") or ""),
+                        str(d.get("bone") or "")))
+    return sorted(out, key=lambda t: t[0])
+
+
+def fp_breakdown(
+    auto: list[Touch],
+    manual: list[Touch],
+    dismissed: list[Touch],
+    *,
+    frame_tol: int = 2,
+) -> dict:
+    """Partition strict-match false positives into operator-dismissed
+    (reviewed, confirmed wrong) vs unreviewed (unknown — possibly real
+    touches the manual set never annotated)."""
+    manual_sorted = sorted(manual, key=lambda t: t[0])
+    claimed = [False] * len(manual_sorted)
+    fps: list[Touch] = []
+    for af, ap, ab in sorted(auto, key=lambda t: t[0]):
+        best_j = -1
+        best_d = frame_tol + 1
+        for j, (mf, _mp, mb) in enumerate(manual_sorted):
+            if claimed[j]:
+                continue
+            d = abs(af - mf)
+            if d > frame_tol or ab != mb:
+                continue
+            if d < best_d:
+                best_d, best_j = d, j
+        if best_j >= 0:
+            claimed[best_j] = True
+        else:
+            fps.append((af, ap, ab))
+    dismissed_set = set(dismissed)
+    n_dismissed = sum(1 for fp in fps if fp in dismissed_set)
+    return {
+        "fp_total": len(fps),
+        "fp_dismissed": n_dismissed,
+        "fp_unreviewed": len(fps) - n_dismissed,
+    }
+
+
+__all__ = [
+    "match_touches",
+    "touches_from_anchor_set",
+    "dismissed_touches_from_anchor_set",
+    "fp_breakdown",
+    "Touch",
+]

@@ -71,7 +71,7 @@ from pydantic import BaseModel
 from src.pipeline.config import load_config
 from src.pipeline.runner import run_pipeline
 from src.schemas.anchor import AnchorSet
-from src.schemas.ball_anchor import BallAnchor, BallAnchorSet
+from src.schemas.ball_anchor import BallAnchor, BallAnchorSet, DismissedAuto
 from src.schemas.ball_track import BallTrack
 from src.schemas.camera_track import CameraTrack
 from src.schemas.tracks import Track, TrackFrame, TracksResult
@@ -1902,11 +1902,18 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         # name, or "line:<name>"); valid only when state == "grounded".
         landmark: str | None = None
 
+    class DismissedAutoEntry(BaseModel):
+        frame: int
+        state: str
+        player_id: str | None = None
+        bone: str | None = None
+
     class BallAnchorPayload(BaseModel):
         clip_id: str
         image_size: list[int]
         anchors: list[BallAnchorEntry]
         shot_chains: list[list[int]] = []
+        dismissed_auto: list[DismissedAutoEntry] = []
 
     def _first_shot_id() -> str | None:
         """Return the manifest's first shot_id, or None when no manifest."""
@@ -2156,6 +2163,11 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                 image_size=(int(payload.image_size[0]), int(payload.image_size[1])),
                 anchors=tuple(anchors_in),
                 shot_chains=tuple(tuple(int(f) for f in c) for c in payload.shot_chains),
+                dismissed_auto=tuple(
+                    DismissedAuto(frame=int(d.frame), state=str(d.state),
+                                  player_id=d.player_id, bone=d.bone)
+                    for d in payload.dismissed_auto
+                ),
             )
             # Round-trip through JSON to apply state-validation rules.
             tmp.parent.mkdir(parents=True, exist_ok=True)
@@ -2238,6 +2250,11 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     image_size=(int(payload.image_size[0]), int(payload.image_size[1])),
                     anchors=anchors_in,
                     shot_chains=tuple(tuple(int(f) for f in c) for c in payload.shot_chains),
+                    dismissed_auto=tuple(
+                        DismissedAuto(frame=int(d.frame), state=str(d.state),
+                                      player_id=d.player_id, bone=d.bone)
+                        for d in payload.dismissed_auto
+                    ),
                 )
                 # Round-trip validation.
                 tmp_validate = tdp / "ball" / f".{shot_id}_validate.json"

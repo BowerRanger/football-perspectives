@@ -134,6 +134,17 @@ the second-pass `accept_min` comparison; config `ball.context_prior.*` (on by de
 weights small). Acceptance: gberch's known top-of-frame false positives drop below
 `accept_min` while origi01/origi02/kroupi `detection_coverage` does not regress.
 
+**Measured outcome (2026-07-02, Phase 3 execution):** the score-modifier design was
+revised to a **factor veto** after measurement. Multiplying penalties into absolute
+confidence regressed origi02 coverage 0.512→0.225 (a genuine long ball is simultaneously
+"far from players" and "ground-ray off-pitch", and origi02's real detections have median
+confidence 0.449, far below the arithmetic's 0.8 assumption). Shipped semantics: a
+detection is dropped only when the prior's *factor* falls to `drop_below` — reachable only
+by signal pairs involving the static-under-pan overlay signature — and confidences are
+never scaled. Result: origi01/origi02 coverage bit-identical to baseline, static-overlay
+suppression proven by stage test; gberch's real-clip FP count unchanged (its residual FPs
+are moving crowd blobs, not static overlays — Phase 4 territory).
+
 ### 4.3 Execute the detector fine-tune loop (the unlock)
 
 The scaffold exists (`ball_finetune_export.py`, corpus flywheel, README). Remaining work
@@ -164,9 +175,17 @@ in both configs — half the touch moments are found but pinned to the wrong bod
 (player, bone) by minimising the 3-D bone↔ball-ray gap over a small window around the
 event frame (the `ray_gap_series` machinery from the kinematic proposer), keeping the
 original attribution when the refinement margin is ambiguous. Config
-`ball.touch_attribution.*`, on by default. Acceptance: gberch strict union recall rises
+`ball.touch_attribution.*`. Acceptance: gberch strict union recall rises
 from 2/8 toward the 4/8 loose ceiling with no new false touches (refinement never adds or
 removes events, only relabels).
+
+**Measured outcome (2026-07-02, Phase 3 execution):** shipped **default-off**. Three
+measurement waves on gberch showed relabelling by bone↔ball-ray gap trusts exactly the
+evidence that is broken on detector-limited clips — the ball pixel at the touch moment —
+and overwrites the kinematic proposer's body-derived correct labels (union recall halved
+to 1/8 with it on, isolated from the context prior by an ablation run). The mechanism is
+unit-proven and stays available per-clip; its payoff is gated on Phase 4 detector quality,
+after which the default flips back on with re-measurement.
 
 ### 4.5 Deliberately not doing (now)
 

@@ -1,0 +1,894 @@
+{
+  "clip_id": "gberch",
+  "image_size": [
+    1920,
+    1080
+  ],
+  "anchors": [
+    {
+      "frame": 0,
+      "image_xy": [
+        1585.057268722467,
+        517.9937304075235
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 37,
+      "image_xy": [
+        1588.4405286343613,
+        517.9937304075235
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 49,
+      "image_xy": [
+        1612.123348017621,
+        524.7648902821317
+      ],
+      "state": "player_touch",
+      "player_id": "P014",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 51,
+      "image_xy": [
+        1497.092511013216,
+        492.60188087774293
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 55,
+      "image_xy": [
+        1321.1629955947137,
+        450.282131661442
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 56,
+      "image_xy": [
+        1272.1057268722468,
+        445.20376175548586
+      ],
+      "state": "player_touch",
+      "player_id": "P008",
+      "bone": "r_knee",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 60,
+      "image_xy": [
+        1349.920704845815,
+        495.98746081504703
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 65,
+      "image_xy": [
+        1415.8942731277534,
+        540.0
+      ],
+      "state": "bounce",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 70,
+      "image_xy": [
+        1466.6431718061674,
+        538.307210031348
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 76,
+      "image_xy": [
+        1517.3920704845816,
+        550.1567398119122
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 88,
+      "image_xy": [
+        1573.215859030837,
+        641.5673981191222
+      ],
+      "state": "bounce",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 95,
+      "image_xy": [
+        1576.5991189427314,
+        648.3385579937304
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 102,
+      "image_xy": [
+        1573.215859030837,
+        694.0438871473355
+      ],
+      "state": "bounce",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 108,
+      "image_xy": [
+        1576.5991189427314,
+        699.1222570532915
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 112,
+      "image_xy": [
+        1578.2907488986784,
+        715.4153605015674
+      ],
+      "state": "bounce",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 115,
+      "image_xy": [
+        1542.7665198237885,
+        712.0297805642633
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 118,
+      "image_xy": [
+        1520.7753303964757,
+        709.2789968652038
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 129,
+      "image_xy": [
+        1431.1189427312777,
+        712.0297805642633
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 141,
+      "image_xy": [
+        1388.8281938325993,
+        710.9717868338557
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 156,
+      "image_xy": [
+        1363.4537444933922,
+        710.9717868338557
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 159,
+      "image_xy": [
+        1356.6872246696037,
+        716.0501567398119
+      ],
+      "state": "player_touch",
+      "player_id": "P009",
+      "bone": "l_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 162,
+      "image_xy": [
+        1199.3656387665199,
+        727.2648902821317
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 164,
+      "image_xy": [
+        1145.2334801762115,
+        729.5924764890282
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 170,
+      "image_xy": [
+        945.6211453744494,
+        744.192789968652
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 176,
+      "image_xy": [
+        789.9911894273127,
+        760.0626959247649
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 188,
+      "image_xy": [
+        585.3039647577093,
+        766.833855799373
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 192,
+      "image_xy": [
+        521.0220264317181,
+        768.5266457680251
+      ],
+      "state": "player_touch",
+      "player_id": "P003",
+      "bone": "l_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 194,
+      "image_xy": [
+        534.5550660792952,
+        771.2774294670846
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 198,
+      "image_xy": [
+        553.1629955947137,
+        762.8134796238244
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 203,
+      "image_xy": [
+        571.7709251101322,
+        766.833855799373
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 209,
+      "image_xy": [
+        581.920704845815,
+        768.5266457680251
+      ],
+      "state": "player_touch",
+      "player_id": "P003",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 218,
+      "image_xy": [
+        619.136563876652,
+        751.5987460815047
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 226,
+      "image_xy": [
+        634.3612334801762,
+        740.807210031348
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 236,
+      "image_xy": [
+        673.2687224669604,
+        724.5141065830721
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 243,
+      "image_xy": [
+        691.8766519823789,
+        715.4153605015674
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 251,
+      "image_xy": [
+        698.6431718061674,
+        705.8934169278997
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 259,
+      "image_xy": [
+        698.6431718061674,
+        695.7366771159874
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 273,
+      "image_xy": [
+        695.2599118942732,
+        680.501567398119
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 289,
+      "image_xy": [
+        683.4185022026431,
+        668.6520376175548
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 304,
+      "image_xy": [
+        668.193832599119,
+        663.5736677115988
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 310,
+      "image_xy": [
+        673.2687224669604,
+        665.2664576802507
+      ],
+      "state": "player_touch",
+      "player_id": "P003",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 317,
+      "image_xy": [
+        708.7929515418502,
+        661.8808777429467
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 321,
+      "image_xy": [
+        734.1674008810572,
+        662.9388714733542
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 326,
+      "image_xy": [
+        925.3215859030837,
+        636.4890282131661
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 335,
+      "image_xy": [
+        1199.3656387665199,
+        600.9404388714734
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 343,
+      "image_xy": [
+        1368.5286343612336,
+        570.4702194357367
+      ],
+      "state": "player_touch",
+      "player_id": "P006",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 357,
+      "image_xy": [
+        1314.3964757709252,
+        543.3855799373041
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 368,
+      "image_xy": [
+        1260.2643171806167,
+        543.3855799373041
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 371,
+      "image_xy": [
+        1255.1894273127753,
+        551.2147335423198
+      ],
+      "state": "player_touch",
+      "player_id": "P006",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": "shot",
+      "spin": "instep_curl_right",
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 374,
+      "image_xy": [
+        1175.68281938326,
+        470.59561128526644
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 378,
+      "image_xy": [
+        1058.9603524229076,
+        385.95611285266455
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 385,
+      "image_xy": [
+        901.6387665198238,
+        311.4733542319749
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 394,
+      "image_xy": [
+        729.0925110132159,
+        297.9310344827586
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 402,
+      "image_xy": [
+        629.2863436123348,
+        310.8385579937304
+      ],
+      "state": "goal_impact",
+      "player_id": null,
+      "bone": null,
+      "goal_element": "back_net",
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 407,
+      "image_xy": [
+        678.3436123348018,
+        348.0799373040752
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 412,
+      "image_xy": [
+        734.1674008810572,
+        404.576802507837
+      ],
+      "state": "bounce",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 419,
+      "image_xy": [
+        742.625550660793,
+        396.1128526645768
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 428,
+      "image_xy": [
+        747.7004405286344,
+        420.86990595611286
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 429,
+      "image_xy": [
+        744.3171806167401,
+        424.8902821316614
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    }
+  ]
+}

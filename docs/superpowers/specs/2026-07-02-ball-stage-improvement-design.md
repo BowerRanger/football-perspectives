@@ -155,7 +155,20 @@ Acceptance: union touch recall on gberch > 0 (target ≥ 4/8) at precision ≥ 0
 `detection_coverage.total` improves on origi02 (worst clip, 0.58) without regressing
 origi01/kroupi; anchor-accuracy harness stays green.
 
-### 4.4 Deliberately not doing (now)
+### 4.4 Touch bone-attribution refinement (added 2026-07-02 from Phase-1 validation data)
+
+The gberch recall run showed the strict-recall gap is mostly *attribution*, not detection:
+with the same ±2-frame tolerance, ignoring the bone claim takes recall from 0.25 to 0.50
+in both configs — half the touch moments are found but pinned to the wrong body part
+(l_foot vs r_foot, knee vs foot). Add a post-pass that re-picks each emitted touch event's
+(player, bone) by minimising the 3-D bone↔ball-ray gap over a small window around the
+event frame (the `ray_gap_series` machinery from the kinematic proposer), keeping the
+original attribution when the refinement margin is ambiguous. Config
+`ball.touch_attribution.*`, on by default. Acceptance: gberch strict union recall rises
+from 2/8 toward the 4/8 loose ceiling with no new false touches (refinement never adds or
+removes events, only relabels).
+
+### 4.5 Deliberately not doing (now)
 
 Motion-flow candidate source stays unwired until 4.3 lands (same disambiguation problem);
 global mode-sequence solver stays opt-in; spin bounce-coupling stays off until cross-replay
@@ -182,6 +195,16 @@ Land the deferred touch-events UI: chronological auto ∪ manual event list with
 confirm (promote) / dismiss per row, and drag handles on the timeline for `end_frame`
 span events (carry). Dismissals persist (a `dismissed_auto` list in the manual
 `BallAnchorSet` sidecar) so re-runs don't resurrect rejected suggestions.
+
+This panel is also the **exhaustive touch-annotation workflow** (added 2026-07-02 from
+Phase-1 validation data): the gberch "precision" numbers are a lower bound because the
+59-anchor GT is a trajectory-constraint set, not an exhaustive touch inventory — the
+biggest FP cluster (P003, frames 193–271) is a dribble where several auto touches are
+plausibly real but unannotated. Walking the event list once, confirming real touches and
+dismissing false ones, yields a trustworthy precision denominator (confirmed = GT,
+dismissed = true FP) and every confirmation feeds the fine-tune corpus flywheel. The
+recall report gains an FP breakdown (dismissed vs unreviewed) so tuning is done against
+reviewed data only.
 
 ### 5.3 Landmark-coincidence ball fixes (the new "manual landmark annotations")
 
@@ -279,7 +302,7 @@ composition over existing events; no new detection.
 |---|---|---|
 | 1 | 4.1 proposer validation + integration test; 5.1 quality timeline | recall report published; timeline usable on gberch |
 | 2 | 6 shot chains (authoring, validation, auto-proposal); 5.3 landmark fixes | a goal-mouth shot on origi01/gberch reconstructs from 2 clicks with preview warnings working |
-| 3 | 4.2 context prior; 5.2 event-list/span UI | gberch frame-top FPs suppressed, no coverage regression |
+| 3 | 4.2 context prior; 4.4 attribution refinement; 5.2 event-list/span UI + exhaustive-annotation workflow | gberch strict union recall ≥ 4/8 via relabelling; frame-top FPs suppressed, no coverage regression; event list usable for a full review pass |
 | 4 | 4.3 fine-tune loop end-to-end; re-enable foot_guided | recall ≥ 4/8 @ precision ≥ 0.5 on gberch; coverage lift on origi02 |
 
 Phases 1–2 are GPU-light and land the user-facing systems; Phase 4 is the ML lift and is

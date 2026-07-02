@@ -77,6 +77,8 @@ from src.schemas.camera_track import CameraTrack
 from src.schemas.tracks import Track, TrackFrame, TracksResult
 from src.utils.pitch_landmarks import LANDMARK_CATALOGUE
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Stage completion (broadcast-mono)
 # ---------------------------------------------------------------------------

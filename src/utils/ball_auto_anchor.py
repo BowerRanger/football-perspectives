@@ -22,13 +22,14 @@ manual one dropped — the operator has looked at that moment.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
 import numpy as np
 
-from src.schemas.ball_anchor import BallAnchor
+from src.schemas.ball_anchor import BallAnchor, DismissedAuto
 from src.utils.ball_auto_events import BallEvent
 from src.utils.camera_projection import point_to_pixel_ray_distance
 from src.utils.foot_anchor import ankle_ray_to_pitch
@@ -392,11 +393,19 @@ def merge_anchors(
     manual: Mapping[int, BallAnchor],
     auto: Mapping[int, BallAnchor],
     suppress_radius_frames: int,
+    dismissed: Collection[DismissedAuto] = (),
 ) -> dict[int, BallAnchor]:
-    """Manual anchors win; auto anchors near a manual frame are dropped."""
+    """Manual anchors win; auto anchors near a manual frame are dropped;
+    auto anchors exactly matching an operator dismissal are dropped."""
+    dismissed_keys = {
+        (d.frame, d.state, d.player_id, d.bone) for d in dismissed
+    }
     merged: dict[int, BallAnchor] = dict(manual)
     for f, anchor in auto.items():
         if any(abs(f - mf) <= suppress_radius_frames for mf in manual):
+            continue
+        if (anchor.frame, anchor.state, anchor.player_id,
+                anchor.bone) in dismissed_keys:
             continue
         merged[f] = anchor
     return merged

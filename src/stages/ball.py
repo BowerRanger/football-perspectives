@@ -217,40 +217,31 @@ def _build_detector(cfg: dict) -> BallDetector:
     raise ValueError(f"Unknown ball.detector backend: {backend!r}")
 
 
+def _load_manual_anchor_set(
+    output_dir: Path, shot_id: str
+) -> BallAnchorSet | None:
+    """The operator's manual anchor sidecar for a shot; None when absent
+    or invalid. Single load point for anchors, shot chains and dismissals."""
+    if shot_id:
+        path = output_dir / "ball" / f"{shot_id}_ball_anchors.json"
+    else:
+        path = output_dir / "ball" / "ball_anchors.json"
+    if not path.exists():
+        return None
+    try:
+        return BallAnchorSet.load(path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ball stage: failed to load anchors at %s: %s",
+                       path, exc)
+        return None
+
+
 def _load_ball_anchors(
     output_dir: Path, shot_id: str
 ) -> dict[int, BallAnchor]:
     """Load per-frame manual ball anchors keyed by frame index."""
-    if shot_id:
-        path = output_dir / "ball" / f"{shot_id}_ball_anchors.json"
-    else:
-        path = output_dir / "ball" / "ball_anchors.json"
-    if not path.exists():
-        return {}
-    try:
-        aset = BallAnchorSet.load(path)
-    except Exception as exc:
-        logger.warning("ball stage: failed to load anchors at %s: %s", path, exc)
-        return {}
-    return {a.frame: a for a in aset.anchors}
-
-
-def _load_manual_shot_chains(
-    output_dir: Path, shot_id: str
-) -> tuple[tuple[int, ...], ...]:
-    """Shot chains from the manual anchor sidecar; () when absent/invalid."""
-    if shot_id:
-        path = output_dir / "ball" / f"{shot_id}_ball_anchors.json"
-    else:
-        path = output_dir / "ball" / "ball_anchors.json"
-    if not path.exists():
-        return ()
-    try:
-        return BallAnchorSet.load(path).shot_chains
-    except Exception as exc:  # noqa: BLE001 — chains are enrichment
-        logger.warning(
-            "ball stage: failed to load shot chains at %s: %s", path, exc)
-        return ()
+    aset = _load_manual_anchor_set(output_dir, shot_id)
+    return {a.frame: a for a in aset.anchors} if aset else {}
 
 
 # Player_touch ground/air classification by surrounding anchors. The
@@ -1691,8 +1682,10 @@ class BallStage(BaseStage):
                     "ball stage: auto-anchor generation failed (%s) — "
                     "continuing with manual anchors only", exc,
                 )
+        manual_set = _load_manual_anchor_set(self.output_dir, shot_id)
         anchor_by_frame = merge_anchors(
             manual_by_frame, auto_by_frame, anchor_cfg.suppress_radius_frames,
+            dismissed=(manual_set.dismissed_auto if manual_set else ()),
         )
         ground_touch_frames = _classify_ground_touches(anchor_by_frame)
 
@@ -2048,8 +2041,7 @@ class BallStage(BaseStage):
             kf_set = (
                 BallKeyframeSet.load(kf_path) if kf_path.exists() else None
             )
-            manual_chains = _load_manual_shot_chains(
-                self.output_dir, shot_id)
+            manual_chains = manual_set.shot_chains if manual_set else ()
             for source, chains in (
                 ("manual", manual_chains), ("auto", proposed_chains),
             ):

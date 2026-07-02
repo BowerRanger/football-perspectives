@@ -92,6 +92,18 @@ class BallAnchor:
 
 
 @dataclass(frozen=True)
+class DismissedAuto:
+    """One operator-dismissed auto suggestion. Identity is the full
+    (frame, state, player_id, bone) tuple: auto sets regenerate every run,
+    so a dismissal only suppresses an auto anchor that still matches
+    exactly; otherwise it is inert."""
+    frame: int
+    state: str
+    player_id: str | None = None
+    bone: str | None = None
+
+
+@dataclass(frozen=True)
 class BallAnchorSet:
     clip_id: str
     image_size: tuple[int, int]
@@ -101,6 +113,10 @@ class BallAnchorSet:
     # Grouping only — members are ordinary anchors; the ball stage validates
     # each chain and reports warnings in the diag sidecar.
     shot_chains: tuple[tuple[int, ...], ...] = ()
+    # Operator-dismissed auto suggestions (exhaustive-annotation workflow):
+    # matching auto anchors are excluded from the merge; the recall report
+    # counts them as reviewed false positives.
+    dismissed_auto: tuple[DismissedAuto, ...] = ()
 
     @classmethod
     def load(cls, path: Path) -> "BallAnchorSet":
@@ -237,11 +253,20 @@ class BallAnchorSet:
                     f"shot_chain frames must be strictly ascending; got {frames}"
                 )
             shot_chains.append(frames)
+        dismissed: list[DismissedAuto] = []
+        for d in data.get("dismissed_auto", []):
+            dismissed.append(DismissedAuto(
+                frame=int(d["frame"]),
+                state=str(d["state"]),
+                player_id=(str(d["player_id"]) if d.get("player_id") else None),
+                bone=(str(d["bone"]) if d.get("bone") else None),
+            ))
         return cls(
             clip_id=str(data["clip_id"]),
             image_size=(int(data["image_size"][0]), int(data["image_size"][1])),
             anchors=tuple(anchors),
             shot_chains=tuple(shot_chains),
+            dismissed_auto=tuple(dismissed),
         )
 
     def save(self, path: Path) -> None:

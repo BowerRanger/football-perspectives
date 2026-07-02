@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import pytest
 
-from src.schemas.ball_anchor import BallAnchor, BallAnchorSet
+from src.schemas.ball_anchor import BallAnchor, BallAnchorSet, DismissedAuto
 from src.schemas.camera_track import CameraFrame, CameraTrack
 from src.schemas.shots import Shot, ShotsManifest
 from src.stages.ball import BallStage
@@ -156,3 +156,63 @@ def test_manual_chain_validated_into_diag(tmp_path: Path):
     assert manual[0]["frames"] == [20, 40]
     kinds = {w["kind"] for w in manual[0]["warnings"]}
     assert "launch_speed" in kinds
+
+
+@pytest.mark.integration
+def test_dismissed_auto_suppresses_auto_anchor(tmp_path: Path, monkeypatch):
+    out, detections = _build_scene(tmp_path)
+
+    # The touch event needs a player track: the contact-gap gate rejects
+    # a "touch" candidate when the named joint has no world position
+    # (see ball_auto_anchor._event_candidates). Place P001's r_foot at
+    # the ball's own world position at frame 15 (30 + 0.2*15, 34.0, 0.11)
+    # so the gap is ~0 m, well inside contact_max_gap_m (0.6 m default).
+    from src.schemas.smpl_world import SmplWorldTrack
+    from src.utils.smpl_skeleton import SMPL_JOINT_NAMES, SMPL_REST_JOINTS_YUP
+    r_foot_idx = SMPL_JOINT_NAMES.index("r_foot")
+    target_world = np.array([33.0, 34.0, 0.11])
+    root_t_one = target_world - SMPL_REST_JOINTS_YUP[r_foot_idx]
+    smpl_dir = out / "hmr_world"
+    smpl_dir.mkdir(parents=True, exist_ok=True)
+    SmplWorldTrack(
+        player_id="P001",
+        frames=np.arange(N_FRAMES, dtype=np.int64),
+        betas=np.zeros(10, dtype=np.float32),
+        thetas=np.zeros((N_FRAMES, 24, 3), dtype=np.float32),
+        root_R=np.tile(np.eye(3, dtype=np.float32), (N_FRAMES, 1, 1)),
+        root_t=np.tile(root_t_one.astype(np.float32), (N_FRAMES, 1)),
+        confidence=np.ones(N_FRAMES, dtype=np.float32),
+        shot_id="play",
+    ).save(smpl_dir / "play__P001_smpl_world.npz")
+
+    synthetic = (
+        BallEvent(frame=15, kind="touch", score=0.8,
+                  player_id="P001", bone="r_foot"),
+    )
+    monkeypatch.setattr(
+        "src.stages.ball.detect_events", lambda **kwargs: synthetic)
+
+    # First run: the touch becomes an auto anchor.
+    BallStage(config=_cfg(), output_dir=out,
+              ball_detector=FakeBallDetector(detections)).run()
+    auto = json.loads(
+        (out / "ball" / "play_ball_anchors_auto.json").read_text())
+    touch_autos = [a for a in auto["anchors"]
+                   if a["state"] == "player_touch"]
+    assert touch_autos, "precondition: auto touch anchor exists"
+    ta = touch_autos[0]
+
+    # Operator dismisses it in the manual sidecar; second run must not
+    # merge it (diag anchor count drops).
+    BallAnchorSet(
+        clip_id="play", image_size=(1280, 720), anchors=(),
+        dismissed_auto=(DismissedAuto(
+            frame=int(ta["frame"]), state="player_touch",
+            player_id=ta.get("player_id"), bone=ta.get("bone")),),
+    ).save(out / "ball" / "play_ball_anchors.json")
+    BallStage(config=_cfg(), output_dir=out,
+              ball_detector=FakeBallDetector(detections)).run()
+    diag = json.loads((out / "ball" / "play_ball_diag.json").read_text())
+    assert diag["anchors"]["merged"] < diag["anchors"]["auto_generated"], (
+        "dismissed auto anchor must be excluded from the merge"
+    )

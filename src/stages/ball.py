@@ -123,6 +123,10 @@ from src.utils.ball_shot_chain import (
     chain_warnings,
     propose_shot_chains,
 )
+from src.utils.ball_touch_attribution import (
+    TouchAttributionCfg,
+    refine_touch_attribution,
+)
 from src.utils.foot_anchor import ankle_ray_to_pitch
 from src.utils.goal_geometry import GoalGeometry, resolve_goal_impact_world
 
@@ -629,6 +633,18 @@ def _shot_chain_cfg(cfg_dict: dict) -> ShotChainCfg:
             "launch_speed_warn_min_m_s", base.launch_speed_warn_min_m_s)),
         launch_speed_warn_max_m_s=float(cfg_dict.get(
             "launch_speed_warn_max_m_s", base.launch_speed_warn_max_m_s)),
+    )
+
+
+def _touch_attribution_cfg(cfg_dict: dict) -> TouchAttributionCfg:
+    """Build a TouchAttributionCfg from ``ball.touch_attribution``."""
+    base = TouchAttributionCfg()
+    return TouchAttributionCfg(
+        enabled=bool(cfg_dict.get("enabled", base.enabled)),
+        window=int(cfg_dict.get("window", base.window)),
+        max_gap_m=float(cfg_dict.get("max_gap_m", base.max_gap_m)),
+        margin_m=float(cfg_dict.get("margin_m", base.margin_m)),
+        min_fk_conf=float(cfg_dict.get("min_fk_conf", base.min_fk_conf)),
     )
 
 
@@ -1620,6 +1636,31 @@ class BallStage(BaseStage):
                     "ball stage: kinematic touch proposer failed (%s) — "
                     "continuing with ball-break touches only", exc,
                 )
+
+        # Bone-attribution refinement: half the strict-recall gap on real
+        # clips is wrong-bone labels at the (noisy) break moment — re-pick
+        # each touch's (player, bone) by minimal bone<->ball-ray gap over a
+        # small window. Relabels only; runs before chain proposal so chains
+        # pair against final labels.
+        attr_cfg = _touch_attribution_cfg(cfg.get("touch_attribution", {}))
+        if attr_cfg.enabled and player_ctx.player_ids:
+            try:
+                attr_ball_uvs = {
+                    s.frame: np.asarray(s.uv, dtype=float)
+                    for s in steps if s.uv is not None
+                }
+                events = refine_touch_attribution(
+                    events, player_ctx=player_ctx, ball_uvs=attr_ball_uvs,
+                    per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                    per_frame_t=per_frame_t, distortion=distortion,
+                    cfg=attr_cfg,
+                )
+            except Exception as exc:  # noqa: BLE001 — never kill the stage
+                logger.warning(
+                    "ball stage: touch attribution refinement failed (%s) — "
+                    "keeping original attributions", exc,
+                )
+
         chain_cfg = _shot_chain_cfg(cfg.get("shot_chain", {}))
         # Only propose auto chains when auto anchors are enabled — otherwise
         # no auto sidecar is written and these chains would be ghost diag

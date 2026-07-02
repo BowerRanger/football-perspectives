@@ -71,6 +71,11 @@ class BallAnchor:
     ``end_frame`` is the inclusive end of a *span* event (e.g. a
     ``carry``/possession dribble); ``None`` for point events. When set it
     must be greater than ``frame``.
+
+    ``landmark`` is a pitch-feature coincidence for a grounded anchor: a LANDMARK_CATALOGUE
+    name (point) or "line:<LINE_CATALOGUE name>". The ball stage snaps the
+    anchor's world x,y to the feature (exact hard knot); the clicked pixel
+    remains authoring provenance. None for ordinary anchors.
     """
     frame: int
     # None only when state == "off_screen_flight".
@@ -83,6 +88,7 @@ class BallAnchor:
     spin: str | None = None
     confidence: float = 1.0
     end_frame: int | None = None
+    landmark: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +96,11 @@ class BallAnchorSet:
     clip_id: str
     image_size: tuple[int, int]
     anchors: tuple[BallAnchor, ...]
+    # Operator-authored shot chains: each entry is >= 2 strictly-ascending
+    # member anchor frames (strike -> [deflections...] -> terminal impact).
+    # Grouping only — members are ordinary anchors; the ball stage validates
+    # each chain and reports warnings in the diag sidecar.
+    shot_chains: tuple[tuple[int, ...], ...] = ()
 
     @classmethod
     def load(cls, path: Path) -> "BallAnchorSet":
@@ -176,6 +187,22 @@ class BallAnchorSet:
                         f"unknown spin preset {spin!r}; "
                         f"valid: {sorted(VALID_SPIN_PRESETS)}"
                     )
+            landmark = a.get("landmark")
+            if landmark:
+                if state != "grounded":
+                    raise ValueError(
+                        f"landmark is only valid on state 'grounded'; "
+                        f"got state {state!r}"
+                    )
+                from src.utils.pitch_landmarks import LANDMARK_CATALOGUE
+                from src.utils.pitch_lines_catalogue import LINE_CATALOGUE
+                if landmark.startswith("line:"):
+                    if landmark[5:] not in LINE_CATALOGUE:
+                        raise ValueError(
+                            f"unknown landmark line {landmark!r}"
+                        )
+                elif landmark not in LANDMARK_CATALOGUE:
+                    raise ValueError(f"unknown landmark {landmark!r}")
             confidence = float(a.get("confidence", 1.0))
             confidence = min(1.0, max(0.0, confidence))
             raw_end = a.get("end_frame")
@@ -196,11 +223,25 @@ class BallAnchorSet:
                 spin=str(spin) if spin else None,
                 confidence=confidence,
                 end_frame=end_frame,
+                landmark=str(landmark) if landmark else None,
             ))
+        shot_chains: list[tuple[int, ...]] = []
+        for chain in data.get("shot_chains", []):
+            frames = tuple(int(f) for f in chain)
+            if len(frames) < 2:
+                raise ValueError(
+                    f"shot_chain needs >= 2 member frames; got {frames}"
+                )
+            if any(b <= a_ for a_, b in zip(frames, frames[1:])):
+                raise ValueError(
+                    f"shot_chain frames must be strictly ascending; got {frames}"
+                )
+            shot_chains.append(frames)
         return cls(
             clip_id=str(data["clip_id"]),
             image_size=(int(data["image_size"][0]), int(data["image_size"][1])),
             anchors=tuple(anchors),
+            shot_chains=tuple(shot_chains),
         )
 
     def save(self, path: Path) -> None:

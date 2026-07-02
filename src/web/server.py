@@ -1963,6 +1963,35 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             )
         return data
 
+    @app.get("/ball-quality/{shot_id}")
+    def get_ball_quality_for_shot(shot_id: str):
+        """Aggregated ball-stage quality for the editor's timeline strip
+        (per-frame detection confidence, events, underconstrained spans,
+        ranked annotate-next cues). Read-only over sidecars the ball stage
+        already writes; missing or corrupt sidecars degrade to an empty
+        payload rather than erroring."""
+        from src.utils.ball_quality import build_quality_payload
+
+        def _load_sidecar(name: str):
+            path = output_dir / "ball" / f"{shot_id}_{name}.json"
+            if not path.exists():
+                # Legacy single-shot runs write unprefixed names
+                # (ball_track.json et al.).
+                path = output_dir / "ball" / f"{name}.json"
+            if not path.exists():
+                return None
+            try:
+                return json.loads(path.read_text())
+            except Exception as exc:  # noqa: BLE001 — quality is enrichment
+                logging.getLogger(__name__).debug("ball-quality: unreadable %s: %s", path, exc)
+                return None
+
+        return build_quality_payload(
+            _load_sidecar("ball_observations"),
+            _load_sidecar("ball_diag"),
+            _load_sidecar("ball_keyframes"),
+        )
+
     @app.get("/joints-near")
     def joints_near(shot: str, frame: int, u: float, v: float, r: float = 40.0):
         """Contact joints whose projected pixel is within ``r`` px of

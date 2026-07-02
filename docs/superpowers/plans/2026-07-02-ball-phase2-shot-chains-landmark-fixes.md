@@ -333,11 +333,13 @@ def test_project_onto_segment_clamps_to_endpoints():
 
 
 def test_suggest_ranks_nearest_first_and_prefixes_lines():
-    name = "left_goal_left_post_base"
+    # Near the penalty spot: the spot is the unambiguous nearest feature
+    # (box edges / arc are all > 2 m away from this point).
+    name = "left_penalty_spot"
     lm = LANDMARK_CATALOGUE[name]
     near = (lm.world_xyz[0] + 0.2, lm.world_xyz[1] + 0.1)
     out = suggest_pitch_fixes(near, max_distance_m=2.0, limit=5)
-    assert out, "expected at least the nearby post base"
+    assert out, "expected at least the nearby penalty spot"
     assert out[0]["name"] == name
     assert out[0]["kind"] == "landmark"
     assert out[0]["distance_m"] == pytest.approx(np.hypot(0.2, 0.1), abs=1e-6)
@@ -347,14 +349,34 @@ def test_suggest_ranks_nearest_first_and_prefixes_lines():
     assert [i["distance_m"] for i in out] == sorted(i["distance_m"] for i in out)
 
 
-def test_suggest_ignores_elevated_landmarks():
-    # Crossbar endpoints live at z=2.44 — never a grounded-ball fix.
-    out = suggest_pitch_fixes((0.0, 30.34), max_distance_m=1.0, limit=10)
-    assert all("crossbar" not in i["name"] for i in out if i["kind"] == "landmark")
+def test_suggest_exact_coincidence_is_best_not_excluded():
+    # A ball sitting exactly ON a feature is the canonical pitch fix —
+    # zero distance must rank FIRST, never be filtered out.
+    lm = LANDMARK_CATALOGUE["left_penalty_spot"]
+    out = suggest_pitch_fixes((lm.world_xyz[0], lm.world_xyz[1]))
+    assert out and out[0]["name"] == "left_penalty_spot"
+    assert out[0]["distance_m"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_suggest_includes_boundary_lines():
+    # Crossing the touchline/goal line is an explicit spec use case —
+    # boundary lines must be suggestible.
+    out = suggest_pitch_fixes((30.0, 0.1), max_distance_m=1.0, limit=10)
+    assert any(
+        i["kind"] == "line" and "touchline" in i["name"] for i in out
+    ), f"expected a touchline suggestion, got {out}"
+
+
+def test_suggest_ignores_elevated_features():
+    # Crossbar endpoints/lines live at z=2.44 — never a grounded-ball fix
+    # (a 2-D projection would suggest them at bogus zero-ish distance).
+    out = suggest_pitch_fixes((0.0, 34.0), max_distance_m=4.0, limit=20)
+    assert all("crossbar" not in i["name"] for i in out)
 
 
 def test_suggest_empty_when_nothing_in_range():
-    assert suggest_pitch_fixes((52.5, 20.0), max_distance_m=0.05, limit=5) == []
+    # (30, 25) is >10 m from every catalogue feature.
+    assert suggest_pitch_fixes((30.0, 25.0), max_distance_m=0.05, limit=5) == []
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -470,7 +492,13 @@ def suggest_pitch_fixes(
                 "name": lm.name, "kind": "landmark", "distance_m": d,
                 "world_xy": [lm.world_xyz[0], lm.world_xyz[1]],
             })
-    for name, ((ax, ay, _), (bx, by, _)) in LINE_CATALOGUE.items():
+    for name, ((ax, ay, az), (bx, by, bz)) in LINE_CATALOGUE.items():
+        # Elevated lines (crossbars: both endpoints up at 2.44 m) are never
+        # grounded-ball fixes — a 2-D projection would suggest them at a
+        # bogus near-zero distance. Vertical post lines (one endpoint at
+        # ground) remain eligible.
+        if az > _MAX_GROUND_LANDMARK_Z and bz > _MAX_GROUND_LANDMARK_Z:
+            continue
         sx, sy = project_onto_segment_2d((gx, gy), (ax, ay), (bx, by))
         d = float(np.hypot(sx - gx, sy - gy))
         if d <= max_distance_m:

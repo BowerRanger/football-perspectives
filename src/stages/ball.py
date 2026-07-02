@@ -1550,7 +1550,12 @@ class BallStage(BaseStage):
                     "continuing with ball-break touches only", exc,
                 )
         chain_cfg = _shot_chain_cfg(cfg.get("shot_chain", {}))
-        proposed_chains = propose_shot_chains(events, chain_cfg)
+        # Only propose auto chains when auto anchors are enabled — otherwise
+        # no auto sidecar is written and these chains would be ghost diag
+        # entries reporting source="auto" for anchors that exist nowhere.
+        proposed_chains = (
+            propose_shot_chains(events, chain_cfg) if anchor_cfg.enabled else ()
+        )
         auto_by_frame: dict[int, BallAnchor] = {}
         if anchor_cfg.enabled:
             try:

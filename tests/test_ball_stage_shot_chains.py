@@ -103,6 +103,34 @@ def test_auto_proposal_reaches_auto_sidecar(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_no_ghost_auto_chains_when_auto_anchors_disabled(
+        tmp_path: Path, monkeypatch):
+    out, detections = _build_scene(tmp_path)
+
+    synthetic = (
+        BallEvent(frame=15, kind="touch", score=0.8,
+                  player_id="P001", bone="r_foot"),
+        BallEvent(frame=40, kind="goal_impact", score=0.9,
+                  goal_element="back_net"),
+    )
+    monkeypatch.setattr(
+        "src.stages.ball.detect_events", lambda **kwargs: synthetic)
+    cfg = _cfg()
+    cfg["ball"]["auto_anchors"] = {"enabled": False}
+    BallStage(config=cfg, output_dir=out,
+              ball_detector=FakeBallDetector(detections)).run()
+
+    # No auto sidecar should be written when auto anchors are disabled...
+    assert not (out / "ball" / "play_ball_anchors_auto.json").exists()
+
+    # ...and the diag must not report source="auto" chains that exist in no
+    # sidecar (ghost entries — see fix for post-review issue #2).
+    diag = json.loads((out / "ball" / "play_ball_diag.json").read_text())
+    auto_chains = [c for c in diag["shot_chains"] if c["source"] == "auto"]
+    assert auto_chains == []
+
+
+@pytest.mark.integration
 def test_manual_chain_validated_into_diag(tmp_path: Path):
     out, detections = _build_scene(tmp_path)
     # Manual anchors 20 frames apart, ~4 m apart on the roll -> ~6 m/s,

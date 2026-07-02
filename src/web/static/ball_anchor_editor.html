@@ -514,6 +514,7 @@ overlay.addEventListener("click", async (e) => {
   }
 
   if (selectedTag === "goal_impact") {
+    const wasAuto = document.getElementById("goalElement").value === "auto";
     let element = document.getElementById("goalElement").value;
     if (element === "auto") {
       try {
@@ -523,7 +524,6 @@ overlay.addEventListener("click", async (e) => {
         ).then(r => r.json());
         if (res.candidates && res.candidates.length) {
           element = res.candidates[0].element;
-          document.getElementById("goalElement").value = element;
         }
       } catch (_err) { /* suggestion is best-effort */ }
     }
@@ -538,6 +538,12 @@ overlay.addEventListener("click", async (e) => {
     setDirty(true);
     renderAnchors();
     drawOverlay();
+    // Reset to auto so the next impact click (e.g. a deflection chain like
+    // crossbar-then-net) re-suggests instead of silently reusing this element.
+    if (wasAuto) {
+      document.getElementById("goalElement").value = "auto";
+      setStatus(`goal impact anchored: ${element} (auto-suggest reset)`);
+    }
     return;
   }
 

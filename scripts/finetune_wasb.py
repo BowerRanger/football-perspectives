@@ -85,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     holdout_clips = list(manifest.get("holdout", []))
 
     device = _pick_device(args.device)
-    print(f"device={device}")
+    print(f"device={device}", flush=True)
 
     full_train_ds = FinetuneDataset(corpus_root, train_clips)
     full_train_ds = _limit(full_train_ds, args.limit_samples)
@@ -116,7 +116,16 @@ def main(argv: list[str] | None = None) -> int:
 
     history: list[dict] = []
     best_metric = -1.0
+    best_epoch: int | None = None
     best_metric_name = "holdout_hit_rate" if holdout_ds is not None else "val_hit_rate"
+
+    def _write_history() -> None:
+        (run_dir / "history.json").write_text(json.dumps({
+            "best_metric_name": best_metric_name,
+            "best_metric": best_metric,
+            "best_epoch": best_epoch,
+            "epochs": history,
+        }, indent=2))
 
     for epoch in range(args.epochs):
         t0 = time.time()
@@ -156,26 +165,36 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"epoch={epoch} train_loss={train_loss:.6f} "
             f"val_hit_rate={val_hit_rate} holdout_hit_rate={holdout_hit_rate} "
-            f"wall_time_s={wall_time:.2f}"
+            f"wall_time_s={wall_time:.2f}",
+            flush=True,
+        )
+
+        # Save the last epoch's weights every epoch, so a killed run (or a
+        # small noisy holdout that happens to pick an early epoch as
+        # "best") never loses the strongest late-training weights.
+        torch.save(
+            {"model_state_dict": model.state_dict()},
+            run_dir / "last.pth.tar",
         )
 
         if metric is not None and metric > best_metric:
             best_metric = metric
+            best_epoch = epoch
             torch.save(
                 {"model_state_dict": model.state_dict()},
                 run_dir / "best.pth.tar",
             )
+
+        # Write history after EVERY epoch so a killed run keeps its
+        # progress instead of losing it all at exit.
+        _write_history()
 
     if not (run_dir / "best.pth.tar").exists():
         # No val/holdout signal available at all — still persist a
         # checkpoint so the CLI's contract (best.pth.tar exists) holds.
         torch.save({"model_state_dict": model.state_dict()}, run_dir / "best.pth.tar")
 
-    (run_dir / "history.json").write_text(json.dumps({
-        "best_metric_name": best_metric_name,
-        "best_metric": best_metric,
-        "epochs": history,
-    }, indent=2))
+    _write_history()
 
     return 0
 

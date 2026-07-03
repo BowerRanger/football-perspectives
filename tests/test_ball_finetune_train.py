@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import sys
 from pathlib import Path
 
 import cv2
@@ -17,6 +19,9 @@ from src.utils.ball_finetune_train import (
 )
 from src.utils.ball_weak_labels import labels_to_cvat_xml
 from src.utils.wasb_ball_detector import _get_affine_transform
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import finetune_wasb  # noqa: E402
 
 
 def _mini_corpus(tmp_path: Path, labels: dict[int, tuple[float, float]],
@@ -118,6 +123,84 @@ def test_wbce_loss_decreases_toward_target():
     bad[0, :, 4, 4] = -6.0
     assert wbce_loss(good, target) < wbce_loss(bad, target)
     assert wbce_loss(good, target).item() >= 0.0
+
+
+def _mini_finetune_corpus(tmp_path: Path) -> Path:
+    """A tiny corpus with a ``manifest.json``: one ``train`` clip and one
+    ``holdout`` clip (mirrors ``_mini_corpus`` but builds two distinctly
+    named clips, since the CLI splits clips by manifest membership)."""
+    corpus = tmp_path / "corpus"
+    labels = {2: (30.0, 20.0), 3: (31.0, 20.0), 4: (32.0, 20.0)}
+
+    for clip_id in ("train_clip", "holdout_clip"):
+        fdir = corpus / "frames" / clip_id
+        fdir.mkdir(parents=True)
+        for i in range(8):
+            img = np.full((48, 64, 3), 30, dtype=np.uint8)
+            if i in labels:
+                u, v = labels[i]
+                cv2.circle(img, (int(u), int(v)), 2, (255, 255, 255), -1)
+            cv2.imwrite(str(fdir / f"{i:05d}.png"), img)
+        (corpus / "annos").mkdir(parents=True, exist_ok=True)
+        (corpus / "annos" / f"{clip_id}.xml").write_text(
+            labels_to_cvat_xml(clip_id, labels))
+
+    (corpus / "manifest.json").write_text(json.dumps({
+        "train": ["train_clip"],
+        "holdout": ["holdout_clip"],
+    }))
+    return corpus
+
+
+class _TinyStandInModel(torch.nn.Module):
+    """WASB-shaped (9ch in, 3ch out) stand-in — avoids needing the real
+    HRNet checkpoint / vendored weights just to exercise the CLI's save
+    and history-writing behaviour."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(9, 3, kernel_size=3, padding=1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+def test_cli_saves_last_and_best_and_records_best_epoch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """A 2-epoch run must leave both best.pth.tar and last.pth.tar on
+    disk, and history.json must record which epoch was best — this is
+    the harness-gap fix: a small noisy holdout picking an early epoch as
+    "best" must not lose the later epoch's weights, and a killed run
+    must still have progress on disk (exercised here via the per-epoch
+    write, not an actual kill)."""
+    corpus = _mini_finetune_corpus(tmp_path)
+    run_dir = tmp_path / "run"
+
+    stand_in = _TinyStandInModel()
+    monkeypatch.setattr(
+        finetune_wasb, "load_wasb_model",
+        lambda init, device: (stand_in, "cpu"),
+    )
+
+    rc = finetune_wasb.main([
+        "--corpus-root", str(corpus),
+        "--run-dir", str(run_dir),
+        "--epochs", "2",
+        "--batch", "1",
+        "--val-frac", "0",
+        "--device", "cpu",
+    ])
+    assert rc == 0
+
+    assert (run_dir / "best.pth.tar").exists()
+    assert (run_dir / "last.pth.tar").exists()
+
+    history = json.loads((run_dir / "history.json").read_text())
+    assert "best_epoch" in history
+    assert len(history["epochs"]) == 2
+    if history["best_metric"] > -1.0:
+        assert history["best_epoch"] in (0, 1)
 
 
 def test_one_training_step_runs_on_cpu(tmp_path: Path):

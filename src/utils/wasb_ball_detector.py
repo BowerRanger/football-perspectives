@@ -31,12 +31,16 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
 
 from src.utils.ball_detector import BallDetector
 from src.utils.ball_heatmap import heatmap_candidates
+
+if TYPE_CHECKING:  # pragma: no cover — typing only
+    import torch
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +162,79 @@ def _pick_device(requested: str | None) -> str:
     return want
 
 
+def _build_hrnet(model_cfg: dict) -> torch.nn.Module:
+    """Construct the vendored HRNet from an OmegaConf-wrapped cfg dict."""
+    import sys
+    from omegaconf import OmegaConf
+
+    # Make upstream HRNet importable without dragging in the rest of
+    # the WASB src tree (`models/__init__.py` imports several model
+    # files that aren't needed for inference).
+    wasb_src = str(_WASB_SRC)
+    added = False
+    if wasb_src not in sys.path:
+        sys.path.insert(0, wasb_src)
+        added = True
+    try:
+        from models.hrnet import HRNet  # type: ignore
+    finally:
+        if added:
+            # Leave it in place: subsequent imports of upstream
+            # submodules (if anyone needs them) should keep working.
+            # The path entry is harmless.
+            pass
+
+    cfg = OmegaConf.create(model_cfg)
+    return HRNet(cfg)
+
+
+def _load_checkpoint_state_dict(ckpt_path: Path) -> dict:
+    """Load a WASB checkpoint, handling both dict forms + ``module.`` stripping."""
+    import torch
+
+    state = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+    if "model_state_dict" in state:
+        state_dict = state["model_state_dict"]
+    else:
+        state_dict = state
+    # Checkpoints from upstream were saved through DataParallel and
+    # carry a "module." prefix on every key.
+    return {
+        (k[len("module."):] if k.startswith("module.") else k): v
+        for k, v in state_dict.items()
+    }
+
+
+def load_wasb_model(
+    checkpoint_path: str | Path, device: str = "auto",
+) -> tuple[torch.nn.Module, str]:
+    """Build the WASB HRNet and load a checkpoint onto the resolved device.
+
+    Accepts both ``{"model_state_dict": ...}`` and bare state dicts, strips
+    DataParallel ``module.`` prefixes, returns ``(model, device_str)``.
+    Shared by the inference detector and the fine-tune harness so the two
+    can never drift.
+    """
+    ckpt_path = Path(checkpoint_path).expanduser().resolve()
+    if not ckpt_path.exists():
+        raise FileNotFoundError(
+            f"WASB checkpoint not found at {ckpt_path}. Run "
+            "third_party/wasb_sbdt/src/setup_scripts/setup_weights.sh "
+            "or download from MODEL_ZOO.md."
+        )
+
+    device_str = _pick_device(device)
+    model = _build_hrnet(_WASB_MODEL_CFG)
+    stripped = _load_checkpoint_state_dict(ckpt_path)
+    missing, unexpected = model.load_state_dict(stripped, strict=False)
+    if missing:
+        logger.warning("WASB load_state_dict: %d missing keys", len(missing))
+    if unexpected:
+        logger.warning("WASB load_state_dict: %d unexpected keys", len(unexpected))
+    model.to(device_str).eval()
+    return model, device_str
+
+
 class WASBBallDetector(BallDetector):
     """Single-frame interface around the vendored WASB HRNet model."""
 
@@ -170,9 +247,9 @@ class WASBBallDetector(BallDetector):
         input_size: tuple[int, int] = (512, 288),
         device: str | None = None,
     ) -> None:
-        import sys
         import torch
-        from omegaconf import OmegaConf
+
+        self._inp_w, self._inp_h = int(input_size[0]), int(input_size[1])
 
         ckpt_path = Path(checkpoint).expanduser().resolve()
         if not ckpt_path.exists():
@@ -182,25 +259,6 @@ class WASBBallDetector(BallDetector):
                 "or download from MODEL_ZOO.md."
             )
 
-        # Make upstream HRNet importable without dragging in the rest of
-        # the WASB src tree (`models/__init__.py` imports several model
-        # files that aren't needed for inference).
-        wasb_src = str(_WASB_SRC)
-        added = False
-        if wasb_src not in sys.path:
-            sys.path.insert(0, wasb_src)
-            added = True
-        try:
-            from models.hrnet import HRNet  # type: ignore
-        finally:
-            if added:
-                # Leave it in place: subsequent imports of upstream
-                # submodules (if anyone needs them) should keep working.
-                # The path entry is harmless.
-                pass
-
-        cfg = OmegaConf.create(_WASB_MODEL_CFG)
-        self._inp_w, self._inp_h = int(input_size[0]), int(input_size[1])
         if (self._inp_w, self._inp_h) != (_WASB_MODEL_CFG["inp_width"], _WASB_MODEL_CFG["inp_height"]):
             # The checkpoint was trained at 512x288; running at a
             # different resolution silently degrades accuracy. Allow
@@ -210,30 +268,25 @@ class WASBBallDetector(BallDetector):
                 "size (512, 288); detection accuracy will degrade.",
                 input_size,
             )
-            cfg.inp_width = self._inp_w
-            cfg.inp_height = self._inp_h
-            cfg.out_width = self._inp_w
-            cfg.out_height = self._inp_h
+            model_cfg = dict(_WASB_MODEL_CFG)
+            model_cfg["inp_width"] = self._inp_w
+            model_cfg["inp_height"] = self._inp_h
+            model_cfg["out_width"] = self._inp_w
+            model_cfg["out_height"] = self._inp_h
 
-        self._device = _pick_device(device)
-        model = HRNet(cfg)
-        state = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
-        if "model_state_dict" in state:
-            state_dict = state["model_state_dict"]
+            device_str = _pick_device(device)
+            model = _build_hrnet(model_cfg)
+            stripped = _load_checkpoint_state_dict(ckpt_path)
+            missing, unexpected = model.load_state_dict(stripped, strict=False)
+            if missing:
+                logger.warning("WASB load_state_dict: %d missing keys", len(missing))
+            if unexpected:
+                logger.warning("WASB load_state_dict: %d unexpected keys", len(unexpected))
+            model.to(device_str).eval()
         else:
-            state_dict = state
-        # Checkpoints from upstream were saved through DataParallel and
-        # carry a "module." prefix on every key.
-        stripped = {
-            (k[len("module."):] if k.startswith("module.") else k): v
-            for k, v in state_dict.items()
-        }
-        missing, unexpected = model.load_state_dict(stripped, strict=False)
-        if missing:
-            logger.warning("WASB load_state_dict: %d missing keys", len(missing))
-        if unexpected:
-            logger.warning("WASB load_state_dict: %d unexpected keys", len(unexpected))
-        model.to(self._device).eval()
+            model, device_str = load_wasb_model(ckpt_path, device or "auto")
+
+        self._device = device_str
         self._model = model
         self._torch = torch
         self._confidence = float(confidence)

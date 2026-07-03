@@ -36,6 +36,48 @@ def _mini_corpus(tmp_path: Path, labels: dict[int, tuple[float, float]],
     return corpus
 
 
+def _mini_corpus_partial_frames(
+    tmp_path: Path, labels: dict[int, tuple[float, float]],
+    n_frames: int, size=(64, 48),
+) -> Path:
+    """Like ``_mini_corpus`` but only extracts frames ``0..n_frames-1``,
+    even though ``labels`` may reference frames beyond that (mirrors the
+    real-corpus decoder off-by-one: labels can reference frames the
+    extractor never produced)."""
+    corpus = tmp_path / "corpus"
+    fdir = corpus / "frames" / "clipA"
+    fdir.mkdir(parents=True)
+    for i in range(n_frames):
+        img = np.full((size[1], size[0], 3), 30, dtype=np.uint8)
+        if i in labels:
+            u, v = labels[i]
+            cv2.circle(img, (int(u), int(v)), 2, (255, 255, 255), -1)
+        cv2.imwrite(str(fdir / f"{i:05d}.png"), img)
+    (corpus / "annos").mkdir(parents=True)
+    (corpus / "annos" / "clipA.xml").write_text(
+        labels_to_cvat_xml("clipA", labels))
+    return corpus
+
+
+def test_dataset_drops_samples_referencing_missing_frames(tmp_path: Path):
+    # Labels at 2..6 (consecutive) but only frames 0..4 are on disk, i.e.
+    # the run [4,5,6] references frames 5 and 6 which were never extracted
+    # (decoder-off-by-one) while [2,3,4] and [3,4,5]... only [2,3,4] is
+    # fully on disk since frame 5 is missing.
+    labels = {
+        2: (10.0, 10.0), 3: (11.0, 10.0), 4: (12.0, 10.0),
+        5: (13.0, 10.0), 6: (14.0, 10.0),
+    }
+    corpus = _mini_corpus_partial_frames(tmp_path, labels, n_frames=5)
+    ds = FinetuneDataset(corpus, ["clipA"], input_size=(128, 72))
+    # build_runs(labels) -> [[2,3,4],[3,4,5],[4,5,6]]; only [2,3,4] has all
+    # three frames (0..4) present on disk.
+    assert len(ds) == 1
+    # Must not raise despite the missing-frame runs having been dropped.
+    x, y = ds[0]
+    assert x.shape[0] == 9 and y.shape[0] == 3
+
+
 def test_parse_labels_roundtrip(tmp_path: Path):
     labels = {3: (10.0, 20.0), 4: (11.0, 21.0)}
     corpus = _mini_corpus(tmp_path, labels)

@@ -19,6 +19,7 @@ vendored source; import pure pieces only).
 from __future__ import annotations
 
 import importlib.util
+import logging
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from pathlib import Path
@@ -34,6 +35,8 @@ from src.utils.wasb_ball_detector import (
     _get_affine_transform,
     _WASB_SRC,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _load_vendored_heatmap_module():
@@ -151,8 +154,22 @@ class FinetuneDataset(Dataset):
         for clip in clips:
             xml_path = self._corpus_root / "annos" / f"{clip}.xml"
             labels = parse_labels_xml(xml_path)
+            dropped = 0
             for run in build_runs(labels, frames_in=self._frames_in):
-                self._samples.append((clip, run))
+                frame_paths = [
+                    self._corpus_root / "frames" / clip / f"{fid:05d}.png"
+                    for fid in run
+                ]
+                if all(p.exists() for p in frame_paths):
+                    self._samples.append((clip, run))
+                else:
+                    dropped += 1
+            if dropped:
+                logger.warning(
+                    "finetune dataset: dropped %d sample(s) for %s referencing "
+                    "frames missing on disk",
+                    dropped, clip,
+                )
         self._labels_by_clip: dict[str, dict[int, tuple[float, float]]] = {}
 
     def __len__(self) -> int:

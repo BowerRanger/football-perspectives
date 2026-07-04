@@ -629,7 +629,13 @@ ball:
     max_arc_seconds: 2.5
     open_span_min_apex_m: 0.5
   wasb:
-    checkpoint: third_party/wasb_sbdt/pretrained_weights/wasb_soccer_best.pth.tar
+    # Fine-tuned v1 (2026-07-04, ball_finetune_runs/run2/last.pth.tar: 30
+    # epochs on the gberch/origi01/s013 gold+weak corpus, kroupi01 held
+    # out). Coverage vs stock: origi01 0.36->0.92, origi02 0.51->0.62,
+    # kroupi01 (holdout) 0.38->0.53, s013 0.27->0.99. Regenerate with
+    # scripts/build_finetune_corpus.py + scripts/finetune_wasb.py.
+    checkpoint: third_party/wasb_sbdt/pretrained_weights/wasb_soccer_finetuned_v1.pth.tar
+    # checkpoint: third_party/wasb_sbdt/pretrained_weights/wasb_soccer_best.pth.tar  # stock fallback
     confidence: 0.3
     input_size: [512, 288]
   tracker:

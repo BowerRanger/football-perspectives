@@ -171,18 +171,10 @@ def _build_hrnet(model_cfg: dict) -> torch.nn.Module:
     # the WASB src tree (`models/__init__.py` imports several model
     # files that aren't needed for inference).
     wasb_src = str(_WASB_SRC)
-    added = False
     if wasb_src not in sys.path:
         sys.path.insert(0, wasb_src)
-        added = True
-    try:
-        from models.hrnet import HRNet  # type: ignore
-    finally:
-        if added:
-            # Leave it in place: subsequent imports of upstream
-            # submodules (if anyone needs them) should keep working.
-            # The path entry is harmless.
-            pass
+
+    from models.hrnet import HRNet  # type: ignore
 
     cfg = OmegaConf.create(model_cfg)
     return HRNet(cfg)
@@ -220,7 +212,10 @@ def load_wasb_model(
         raise FileNotFoundError(
             f"WASB checkpoint not found at {ckpt_path}. Run "
             "third_party/wasb_sbdt/src/setup_scripts/setup_weights.sh "
-            "or download from MODEL_ZOO.md."
+            "or download from MODEL_ZOO.md. If this is a fine-tuned checkpoint, "
+            "regenerate it via scripts/build_finetune_corpus.py + "
+            "scripts/finetune_wasb.py, or switch ball.wasb.checkpoint to the "
+            "stock fallback in config/default.yaml."
         )
 
     device_str = _pick_device(device)
@@ -256,7 +251,10 @@ class WASBBallDetector(BallDetector):
             raise FileNotFoundError(
                 f"WASB checkpoint not found at {ckpt_path}. Run "
                 "third_party/wasb_sbdt/src/setup_scripts/setup_weights.sh "
-                "or download from MODEL_ZOO.md."
+                "or download from MODEL_ZOO.md. If this is a fine-tuned checkpoint, "
+                "regenerate it via scripts/build_finetune_corpus.py + "
+                "scripts/finetune_wasb.py, or switch ball.wasb.checkpoint to the "
+                "stock fallback in config/default.yaml."
             )
 
         if (self._inp_w, self._inp_h) != (_WASB_MODEL_CFG["inp_width"], _WASB_MODEL_CFG["inp_height"]):

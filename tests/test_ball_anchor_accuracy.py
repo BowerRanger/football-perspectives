@@ -38,6 +38,9 @@ CONTACT_GROUND = {
 
 
 class _NoopDetector(BallDetector):
+    # A no-op detector cannot re-detect crops (no heatmap to zoom on).
+    SUPPORTS_REDETECT = False
+
     def detect(self, frame):  # noqa: ANN001
         return None
 

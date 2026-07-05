@@ -34,8 +34,8 @@ annotation XML per clip (gold = operator anchors, weak = solved-track labels wit
 recording the train/holdout split:
 ```bash
 python scripts/build_finetune_corpus.py \
-    --pairs output:gberch output-origi:origi01 \
-            output-kroupi:kroupi01 output-japan:s013 \
+    --pairs output:gberch output:origi01 \
+            output:kroupi01 output:s013 \
     --corpus-root output/ball_finetune_corpus \
     --holdout kroupi01
 ```
@@ -86,7 +86,7 @@ Two harnesses, both usable without re-running the corpus build:
   ```
   ```bash
   python scripts/run_touch_recall_validation.py \
-      --output output-gberch --shot gberch \
+      --output output --shot gberch \
       --config /tmp/finetune_v1_checkpoint.yaml
   # --report-only re-prints the table from existing snapshots without a GPU run
   ```

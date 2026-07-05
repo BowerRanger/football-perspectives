@@ -5,7 +5,6 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 
 import numpy as np
-import pytest
 
 from src.schemas.ball_track import BallFrame, BallTrack
 from src.utils.ball_weak_labels import (

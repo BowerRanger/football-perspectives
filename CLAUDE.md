@@ -69,7 +69,7 @@ The 2D pose stage was collapsed into `hmr_world` (decision D15): GVHMR runs ViTP
 
 - **Player detection + tracking**: YOLOv8x + ByteTrack (via `supervision`)
 - **HMR + 2D pose**: GVHMR (SIGGRAPH Asia 2024) — vendored under `third_party/gvhmr`. Bundles ViTPose-Huge for COCO-17 keypoints (used internally for HMR and reused for foot anchoring + dashboard overlay).
-- **Ball detection**: WASB-SBDT HRNet (vendored at `third_party/wasb_sbdt`); YOLOv8 (`yolov8n.pt`) as fallback
+- **Ball detection**: WASB-SBDT HRNet (vendored at `third_party/wasb_sbdt`), fine-tuned checkpoint v1 as the default (`ball.wasb.checkpoint`, commit 5cb1237); stock `wasb_soccer_best.pth.tar` remains a config fallback. YOLOv8 (`yolov8n.pt`) as ultimate fallback
 
 ## Configuration
 
@@ -81,7 +81,7 @@ The 2D pose stage was collapsed into `hmr_world` (decision D15): GVHMR runs ViTP
 - `ball.second_pass.*` — corridor-gated second detection pass over evidence gaps (on by default; re-decodes gap spans, so the ball stage costs roughly one extra detector pass on gap-heavy clips). Accepted frames carry `source="second_pass"` in the observations sidecar and never mint auto-anchors; per-shot coverage lands in `detection_coverage` in the diag sidecar and quality report.
 - `ball.shot_chain.*` — strike→impact chain auto-proposal window + launch-speed warn band (chains validated into the diag sidecar; landmark-coincidence "pitch fix" anchors snap grounded balls to exact pitch-feature coordinates)
 - `ball.context_prior.*` — detection veto from compounded context signals (off-pitch ground ray, no player box nearby, pixel-static under camera pan). A detection is dropped only when the prior FACTOR falls to `drop_below` — only signal pairs involving the static-under-pan overlay signature can reach it; confidences are never scaled, so low-confidence clips are not penalized (origi01/origi02 coverage bit-identical to baseline).
-- `ball.touch_attribution.*` — post-pass that relabels each touch event's (player, bone) to the ray-closest joint over a small window around the event frame; strictly count-preserving (never adds or removes events, only relabels — same length/order as input). OFF by default: on detector-limited clips the ball pixel at touch moments is unreliable and relabelling overwrites body-derived correct labels (measured on gberch 2026-07-02); enable per-clip after detector fine-tuning.
+- `ball.touch_attribution.*` — post-pass that relabels each touch event's (player, bone) to the ray-closest joint over a small window around the event frame; strictly count-preserving (never adds or removes events, only relabels — same length/order as input). ON by default since the detector v1 fine-tune (2026-07-04): gberch union touch recall rose 0.500→0.625 with it on top of `foot_guided`. Was OFF from 2026-07-02 through the fine-tune, when the stock detector's ball pixel at touch moments was unreliable and relabelling overwrote body-derived correct labels.
 
 The ankle-confidence cutoff for foot anchoring (formerly `pose_2d.min_confidence: 0.3`) is now a constant `_ANKLE_CONF_MIN = 0.3` inside `src/stages/hmr_world.py`.
 

@@ -9,9 +9,11 @@ gap over a small window around the event frame, keeping the original when
 the improvement is within an ambiguity margin. It relabels ONLY — never
 adds, removes, re-frames, or re-scores events. Pure and torch-free.
 
-Default-off: relabelling trusts the ball pixel, which is exactly what is
-unreliable on detector-limited clips — enable per-clip once detection
-quality at touch moments is validated.
+Default-ON since detector fine-tune v1 (2026-07-04): relabelling now helps
+(gberch union recall 0.500 -> 0.625). History: this was default-off from
+2026-07-02 through the fine-tune, because relabelling trusts the ball
+pixel, which is exactly what was unreliable on the stock (pre-fine-tune)
+detector at touch moments.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 
 @dataclass(frozen=True)
 class TouchAttributionCfg:
-    enabled: bool = False
+    enabled: bool = True
     window: int = 2          # +/- frames considered around the event frame
     max_gap_m: float = 0.45  # candidate joints beyond this never relabel
     margin_m: float = 0.05   # new joint must beat the current one by this

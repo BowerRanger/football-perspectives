@@ -76,8 +76,12 @@ def anchor_gt_world(anchor: BallAnchor, K, R, t, distortion, *,
         return (X, "ground_exact") if X is not None else (None, "ray_only")
     if anchor.state == "player_touch" and joint_world is not None:
         _, along = point_ray_distance(np.asarray(joint_world, float), C, d)
-        if along > 0:
-            return C + along * d, "joint_depth"
+        if along > ball_radius:
+            # Ball centre sits one radius in front of the contacting limb
+            # along the sight-line (the resolver's physical convention).
+            # joint_depth GT therefore carries ~±ball_radius model
+            # uncertainty; ground_exact rows are the strict gate.
+            return C + (along - ball_radius) * d, "joint_depth"
     return None, "ray_only"
 
 

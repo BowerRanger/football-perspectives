@@ -92,9 +92,12 @@ def test_anchor_gt_world_joint_depth_projects_joint_onto_ray():
                                joint_world=tuple(joint))
     assert kind == "joint_depth"
     C, d = pixel_ray(uv, K, R, t)
-    perp, _ = point_ray_distance(np.asarray(gt), C, d)
+    perp, along_gt = point_ray_distance(np.asarray(gt), C, d)
     assert perp < 1e-9  # GT lies on the clicked ray
     assert np.linalg.norm(gt - true_ball) < 0.45  # depth ≈ joint depth
+    # GT sits one ball radius nearer the camera than the joint's depth.
+    _, along_joint = point_ray_distance(joint, C, d)
+    assert abs((along_joint - along_gt) - 0.11) < 0.02
 
 
 def test_anchor_gt_world_airborne_is_ray_only_and_no_pixel_is_none():

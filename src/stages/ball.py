@@ -208,6 +208,7 @@ def _build_detector(cfg: dict) -> BallDetector:
             checkpoint=wasb_cfg.get("checkpoint"),
             confidence=float(wasb_cfg.get("confidence", 0.3)),
             input_size=tuple(wasb_cfg.get("input_size", (512, 288))),
+            device=wasb_cfg.get("device"),
         )
     if backend == "yolo":
         return YOLOBallDetector(

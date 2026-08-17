@@ -161,3 +161,65 @@ def test_config_block_keys():
     assert cfg["window"] == 2
     assert cfg["max_gap_m"] == 0.45
     assert cfg["margin_m"] == 0.05
+
+
+def test_depth_consistency_breaks_ray_gap_tie(  # W5d: depth-blind gate fix
+):
+    """The kicker's foot can sit nearer the camera-ball RAY than the true
+    toucher's knee while being metres off in DEPTH along it. With an
+    expected ball world supplied, the depth-consistent joint wins."""
+    K, R, t = _camera()
+    true_ball = np.array([52.5, 30.0, 0.6])       # ball at the knee
+    uv = _project(true_ball, K, R, t)
+    C = -R.T @ t
+    ray = true_ball - C
+    ray /= np.linalg.norm(ray)
+    # Kicker's foot: exactly ON the ray, 5m closer to the camera (gap ≈ 0).
+    kicker_foot = tuple(true_ball - 5.0 * ray)
+    knee = tuple(true_ball + np.array([0.12, 0.05, 0.0]))
+    ctx = _Ctx([
+        _Joint("P014", "r_foot", kicker_foot, None, 0.9),
+        _Joint("P008", "r_knee", knee, None, 0.9),
+    ])
+    events = (BallEvent(frame=10, kind="touch", score=0.8,
+                        player_id="P014", bone="r_foot"),)
+    common = dict(
+        player_ctx=ctx, ball_uvs={10: np.asarray(uv)},
+        per_frame_K={10: K}, per_frame_R={10: R}, per_frame_t={10: t},
+        distortion=(0.0, 0.0),
+    )
+    # Without depth info the near-ray kicker foot keeps the label.
+    out_blind = refine_touch_attribution(events, cfg=CFG, **common)
+    assert (out_blind[0].player_id, out_blind[0].bone) == ("P014", "r_foot")
+    # With the expected ball world, the depth-consistent knee wins.
+    out_depth = refine_touch_attribution(
+        events, cfg=CFG,
+        expected_world_by_frame={10: tuple(true_ball)}, **common)
+    assert (out_depth[0].player_id, out_depth[0].bone) == ("P008", "r_knee")
+    assert out_depth[0].frame == 10 and len(out_depth) == 1
+
+
+def test_expected_worlds_interpolate_between_ground_anchors():
+    from src.schemas.ball_anchor import BallAnchor
+    from src.utils.ball_touch_attribution import expected_ball_worlds
+
+    K, R, t = _camera()
+    a = np.array([40.0, 30.0, 0.11])
+    b = np.array([46.0, 33.0, 0.11])
+    anchors = {
+        10: BallAnchor(frame=10, image_xy=_project(a, K, R, t),
+                       state="grounded"),
+        20: BallAnchor(frame=20, image_xy=_project(b, K, R, t),
+                       state="grounded"),
+        15: BallAnchor(frame=15, image_xy=None, state="off_screen_flight"),
+    }
+    worlds = expected_ball_worlds(
+        anchors, per_frame_K={f: K for f in range(30)},
+        per_frame_R={f: R for f in range(30)},
+        per_frame_t={f: t for f in range(30)},
+        distortion=(0.0, 0.0), ball_radius=0.11)
+    assert np.allclose(worlds[10], a, atol=1e-6)
+    assert np.allclose(worlds[20], b, atol=1e-6)
+    mid = np.asarray(worlds[15])
+    assert np.allclose(mid, (a + b) / 2, atol=0.05)
+    assert 25 not in worlds        # no extrapolation past the last anchor

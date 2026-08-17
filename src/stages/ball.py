@@ -1649,11 +1649,21 @@ class BallStage(BaseStage):
                     s.frame: np.asarray(s.uv, dtype=float)
                     for s in steps if s.uv is not None
                 }
+                from src.utils.ball_touch_attribution import (
+                    expected_ball_worlds,
+                )
+                expected_worlds = expected_ball_worlds(
+                    manual_by_frame,
+                    per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                    per_frame_t=per_frame_t, distortion=distortion,
+                    ball_radius=ball_radius,
+                )
                 events = refine_touch_attribution(
                     events, player_ctx=player_ctx, ball_uvs=attr_ball_uvs,
                     per_frame_K=per_frame_K, per_frame_R=per_frame_R,
                     per_frame_t=per_frame_t, distortion=distortion,
                     cfg=attr_cfg,
+                    expected_world_by_frame=expected_worlds,
                 )
             except Exception as exc:  # noqa: BLE001 — never kill the stage
                 logger.warning(

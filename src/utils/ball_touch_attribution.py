@@ -37,6 +37,12 @@ class TouchAttributionCfg:
     max_gap_m: float = 0.45  # candidate joints beyond this never relabel
     margin_m: float = 0.05   # new joint must beat the current one by this
     min_fk_conf: float = 0.3
+    # The ray gap is DEPTH-BLIND: a joint near the camera↔ball line passes
+    # even when it sits metres from the ball along the ray (the kicker's
+    # foot stealing the true toucher's label — sub-20cm campaign W5d).
+    # When an expected ball world is available, each candidate's score adds
+    # depth_weight × |along-ray depth mismatch|.
+    depth_weight: float = 0.5
 
 
 def _best_gaps_in_window(
@@ -49,24 +55,41 @@ def _best_gaps_in_window(
     per_frame_t: dict[int, np.ndarray],
     distortion: tuple[float, float],
     cfg: TouchAttributionCfg,
+    expected_world_by_frame: dict | None = None,
 ) -> dict[tuple[str, str], float]:
-    """Per-(player, bone) minimal ray gap over the window around ``frame``."""
+    """Per-(player, bone) minimal score over the window around ``frame``.
+
+    Score = ray gap + ``depth_weight`` × along-ray depth mismatch against
+    the expected ball world (when one exists at that frame).
+    """
+    from src.utils.camera_projection import pixel_ray
+
     best: dict[tuple[str, str], float] = {}
     for f in range(frame - cfg.window, frame + cfg.window + 1):
         ball_uv = ball_uvs.get(f)
         K, R, t = per_frame_K.get(f), per_frame_R.get(f), per_frame_t.get(f)
         if ball_uv is None or K is None or R is None or t is None:
             continue
+        expected = (expected_world_by_frame or {}).get(f)
+        C = d_hat = exp_depth = None
+        if expected is not None:
+            C, d_hat = pixel_ray(
+                (float(ball_uv[0]), float(ball_uv[1])), K, R, t, distortion)
+            exp_depth = float(np.dot(
+                np.asarray(expected, dtype=float) - C, d_hat))
         for s in player_ctx.joints_at(f):
             if s.confidence < cfg.min_fk_conf or s.world_xyz is None:
                 continue
-            gap = float(point_to_pixel_ray_distance(
-                np.asarray(s.world_xyz, dtype=float), ball_uv,
-                K, R, t, distortion,
+            joint = np.asarray(s.world_xyz, dtype=float)
+            score = float(point_to_pixel_ray_distance(
+                joint, ball_uv, K, R, t, distortion,
             ))
+            if exp_depth is not None:
+                joint_depth = float(np.dot(joint - C, d_hat))
+                score += cfg.depth_weight * abs(joint_depth - exp_depth)
             key = (s.player_id, s.bone)
-            if gap < best.get(key, float("inf")):
-                best[key] = gap
+            if score < best.get(key, float("inf")):
+                best[key] = score
     return best
 
 
@@ -80,9 +103,12 @@ def refine_touch_attribution(
     per_frame_t: dict[int, np.ndarray],
     distortion: tuple[float, float],
     cfg: TouchAttributionCfg,
+    expected_world_by_frame: dict | None = None,
 ) -> "tuple[BallEvent, ...]":
-    """Relabel touch events to the ray-closest joint; everything else
-    passes through untouched (same order, same length)."""
+    """Relabel touch events to the best-scoring joint; everything else
+    passes through untouched (same order, same length). With
+    ``expected_world_by_frame`` the score is depth-aware (W5d), so a
+    joint lying on the ray but metres from the ball never wins."""
     if not cfg.enabled:
         return tuple(events)
     out: "list[BallEvent]" = []
@@ -94,6 +120,7 @@ def refine_touch_attribution(
             e.frame, player_ctx=player_ctx, ball_uvs=ball_uvs,
             per_frame_K=per_frame_K, per_frame_R=per_frame_R,
             per_frame_t=per_frame_t, distortion=distortion, cfg=cfg,
+            expected_world_by_frame=expected_world_by_frame,
         )
         if not gaps:
             out.append(e)
@@ -112,3 +139,52 @@ def refine_touch_attribution(
         else:
             out.append(e)
     return tuple(out)
+
+
+def expected_ball_worlds(
+    anchor_by_frame: dict,
+    *,
+    per_frame_K: dict[int, np.ndarray],
+    per_frame_R: dict[int, np.ndarray],
+    per_frame_t: dict[int, np.ndarray],
+    distortion: tuple[float, float],
+    ball_radius: float,
+    max_gap_frames: int = 60,
+) -> dict[int, tuple[float, float, float]]:
+    """Sparse expected ball worlds from ground-level anchors, linearly
+    interpolated between consecutive anchors (no extrapolation).
+
+    Coarse by design — it exists to give the attribution score a depth
+    reference so a joint metres off along the ray cannot win.
+    """
+    from src.utils.ball_anchor_heights import GROUND_LEVEL_STATES
+    from src.utils.camera_projection import pixel_ray
+
+    ground_states = frozenset(GROUND_LEVEL_STATES) | {"bounce"}
+    pts: list[tuple[int, np.ndarray]] = []
+    for f in sorted(anchor_by_frame):
+        a = anchor_by_frame[f]
+        if a.state not in ground_states or a.image_xy is None:
+            continue
+        K, R, t = per_frame_K.get(f), per_frame_R.get(f), per_frame_t.get(f)
+        if K is None or R is None or t is None:
+            continue
+        C, d = pixel_ray(a.image_xy, K, R, t, distortion)
+        dz = float(d[2])
+        if abs(dz) < 1e-9:
+            continue
+        s = (ball_radius - float(C[2])) / dz
+        if s <= 0:
+            continue
+        pts.append((f, C + s * d))
+    worlds: dict[int, tuple[float, float, float]] = {}
+    for (fa, pa), (fb, pb) in zip(pts, pts[1:]):
+        if fb - fa > max_gap_frames:
+            worlds[fa] = tuple(float(x) for x in pa)
+            continue
+        for f in range(fa, fb + 1):
+            s = (f - fa) / (fb - fa) if fb > fa else 0.0
+            worlds[f] = tuple(float(x) for x in (pa + (pb - pa) * s))
+    if pts:
+        worlds[pts[-1][0]] = tuple(float(x) for x in pts[-1][1])
+    return worlds

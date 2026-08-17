@@ -127,3 +127,26 @@ def test_carry_span_follows_player_path():
     assert err_follow < 1e-9        # carry worlds are used verbatim
     assert np.allclose(followed.frames[0].world_xyz, p0)
     assert np.allclose(followed.frames[n - 1].world_xyz, p1)
+
+
+def test_roll_evidence_far_from_endpoint_chord_is_ignored():
+    """A false-detection cluster (detector locked on a static object) must
+    not drag the roll off the endpoint chord (gberch f164-176 regression)."""
+    from src.utils.ball_interpolate import interpolate_events
+
+    n = 13
+    a = np.array([32.1, 12.2, 0.11])
+    b = np.array([26.3, 7.25, 0.11])
+    truth = {f: tuple(a + (b - a) * (f / (n - 1))) for f in range(n)}
+    # Junk evidence ~4.5m off the chord at mid-span.
+    junk = {f: (35.1, 15.5, 0.11) for f in range(3, 10, 2)}
+    ks = BallKeyframeSet(
+        clip_id="c", fps=_FPS, image_size=(1920, 1080),
+        keyframes=(_kf(0, a), _kf(n - 1, b)),
+        segments=(BallSegment(start_frame=0, end_frame=n - 1, kind="roll",
+                              hints={}),),
+    )
+    track = interpolate_events(ks, n_frames=n, evidence_worlds=junk)
+    errs = [np.linalg.norm(np.asarray(track.frames[f].world_xyz)
+                           - np.asarray(truth[f])) for f in range(n)]
+    assert max(errs) < 0.05      # junk ignored → straight chord retained

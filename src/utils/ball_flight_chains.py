@@ -33,12 +33,30 @@ from src.utils.ball_anchor_heights import (
     airborne_bucket_range,
 )
 from src.utils.bundle_adjust import fit_parabola_to_image_observations
+from src.utils.camera_projection import project_world_to_image
 
 logger = logging.getLogger(__name__)
 
 # Sanity caps on an accepted arc (anything beyond is a mis-fit, not football).
 _MAX_LAUNCH_SPEED_M_S = 60.0
 _MAX_ARC_Z_M = 40.0
+# An extra (detection) observation joins the stage-2 refit only when the
+# anchors-only arc already reprojects within this of it — junk detections
+# (players, static lock-ons) never poison the fit.
+_EXTRA_OBS_GATE_PX = 30.0
+
+
+def _arc_residual_px(p0, v0, obs, Ks, Rs, ts, distortion, fps, f0) -> float:
+    """Median reprojection error of the arc against ``obs`` pixels."""
+    errs = []
+    g = np.array([0.0, 0.0, -9.81])
+    for (f, uv), K, R, t in zip(obs, Ks, Rs, ts):
+        tt = (f - f0) / fps
+        w = p0 + v0 * tt + 0.5 * g * tt * tt
+        proj = project_world_to_image(K, R, t, distortion,
+                                      np.asarray(w).reshape(1, 3))[0]
+        errs.append(float(np.linalg.norm(proj - np.asarray(uv, dtype=float))))
+    return float(np.median(errs)) if errs else float("inf")
 
 
 def _chains(anchor_by_frame, world_for_anchor):
@@ -100,34 +118,37 @@ def refit_airborne_chains(
             })
             continue
         chain_frames = [start, *air_frames, end]
-        obs = []
+        anchor_obs = []
         for f in chain_frames:
             anc = anchor_by_frame[f]
             if (anc.image_xy is not None and f in per_frame_K
                     and f in per_frame_R and f in per_frame_t):
-                obs.append((f, (float(anc.image_xy[0]),
-                                float(anc.image_xy[1]))))
-        n_extra = 0
-        anchored = {f for f, _ in obs}
+                anchor_obs.append((f, (float(anc.image_xy[0]),
+                                       float(anc.image_xy[1]))))
+        extras = []
+        anchored = {f for f, _ in anchor_obs}
         for f in sorted(extra_observations):
             if (start < f < end and f not in anchored
                     and f in per_frame_K and f in per_frame_R
                     and f in per_frame_t):
                 uv = extra_observations[f]
-                obs.append((f, (float(uv[0]), float(uv[1]))))
-                n_extra += 1
-        obs.sort(key=lambda o: o[0])
-        if len(obs) < 3 or obs[0][0] != start or obs[-1][0] != end:
+                extras.append((f, (float(uv[0]), float(uv[1]))))
+        if (len(anchor_obs) < 2 or anchor_obs[0][0] != start
+                or anchor_obs[-1][0] != end
+                or len(anchor_obs) + len(extras) < 3):
             diags.append({
                 "kind": "underconstrained_chain",
                 "air_frames": list(air_frames),
                 "note": "insufficient pixel observations for a chain fit",
             })
             continue
-        f0 = obs[0][0]
-        Ks = [np.asarray(per_frame_K[f]) for f, _ in obs]
-        Rs = [np.asarray(per_frame_R[f]) for f, _ in obs]
-        ts = [np.asarray(per_frame_t[f]) for f, _ in obs]
+
+        def _cams_for(o):
+            return ([np.asarray(per_frame_K[f]) for f, _ in o],
+                    [np.asarray(per_frame_R[f]) for f, _ in o],
+                    [np.asarray(per_frame_t[f]) for f, _ in o])
+
+        f0 = start
         knots = {
             0: np.asarray(world_for_anchor[start], dtype=float),
             end - f0: np.asarray(world_for_anchor[end], dtype=float),
@@ -138,12 +159,45 @@ def refit_airborne_chains(
             if (bucket := airborne_bucket_range(
                 anchor_by_frame[f].state)) is not None
         }
-        try:
-            p0, v0, residual = fit_parabola_to_image_observations(
-                obs, Ks=Ks, Rs=Rs, t_world=ts, fps=fps,
+
+        def _fit(o):
+            Ks, Rs, ts = _cams_for(o)
+            return fit_parabola_to_image_observations(
+                o, Ks=Ks, Rs=Rs, t_world=ts, fps=fps,
                 distortion=distortion, p0_fixed=None,
-                knot_frames=knots, z_range_frames=z_ranges,
+                knot_frames={k - (o[0][0] - f0): w for k, w in knots.items()},
+                z_range_frames={k - (o[0][0] - f0): b
+                                for k, b in z_ranges.items()},
             )
+
+        # Two-stage robust fit: anchors first (operator clicks are trusted),
+        # then only extras the anchors-only arc already agrees with — and
+        # the refit must not degrade the anchor residual (W5b).
+        n_extra_used = 0
+        try:
+            p0, v0, residual = _fit(anchor_obs)
+            aK, aR, aT = _cams_for(anchor_obs)
+            anchor_res = _arc_residual_px(
+                p0, v0, anchor_obs, aK, aR, aT, distortion, fps, f0)
+            inliers = []
+            for f, uv in extras:
+                K = np.asarray(per_frame_K[f])
+                R = np.asarray(per_frame_R[f])
+                t = np.asarray(per_frame_t[f])
+                if _arc_residual_px(p0, v0, [(f, uv)], [K], [R], [t],
+                                    distortion, fps, f0) <= _EXTRA_OBS_GATE_PX:
+                    inliers.append((f, uv))
+            if inliers:
+                merged = sorted([*anchor_obs, *inliers], key=lambda o: o[0])
+                p0_2, v0_2, residual_2 = _fit(merged)
+                anchor_res_2 = _arc_residual_px(
+                    p0_2, v0_2, anchor_obs, aK, aR, aT, distortion, fps, f0)
+                if anchor_res_2 <= anchor_res + 1.0:
+                    p0, v0 = p0_2, v0_2
+                    anchor_res = anchor_res_2
+                    n_extra_used = len(inliers)
+            # Acceptance grades the arc against the trusted anchor clicks.
+            residual = float(anchor_res)
         except Exception as exc:  # noqa: BLE001 — fit failure keeps buckets
             diags.append({
                 "kind": "chain_fit", "accepted": False,
@@ -164,7 +218,7 @@ def refit_airborne_chains(
         diags.append({
             "kind": "chain_fit", "accepted": bool(ok),
             "span": [start, end], "n_air": len(air_frames),
-            "n_extra_obs": n_extra,
+            "n_extra_obs": len(extras), "n_extra_used": n_extra_used,
             "residual_px": float(residual),
         })
         if not ok:

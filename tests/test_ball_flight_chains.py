@@ -105,11 +105,13 @@ def test_unbracketed_airborne_run_is_flagged_not_touched():
     assert any(d.get("kind") == "underconstrained_chain" for d in diags)
 
 
-def test_inconsistent_pixels_fall_back_to_buckets():
+def test_single_corrupt_click_does_not_collapse_the_chain():
+    """Median-robust acceptance: one bad interior click must not force the
+    whole chain back to bucket heights — the arc follows the good anchors
+    (the corrupt anchor's keyframe is later ray-snapped, operator wins)."""
     from src.utils.ball_flight_chains import refit_airborne_chains
 
     anchors, worlds, truth, cams, R, t = _chain_fixture()
-    # Corrupt one interior click far off the arc: fit residual explodes.
     bad = anchors[12]
     anchors[12] = BallAnchor(frame=12, state="airborne_low",
                              image_xy=(bad.image_xy[0] + 400.0,
@@ -122,8 +124,10 @@ def test_inconsistent_pixels_fall_back_to_buckets():
         per_frame_K=per_K, per_frame_R=per_R, per_frame_t=per_t,
         distortion=_DIST, fps=_FPS,
     )
-    assert updates == {}
-    assert any(d.get("kind") == "chain_fit" and not d.get("accepted")
+    assert set(updates) == {6, 12, 18}
+    for f in (6, 18):        # good anchors recover truth
+        assert np.linalg.norm(np.asarray(updates[f]) - truth[f]) < 0.05
+    assert any(d.get("kind") == "chain_fit" and d.get("accepted")
                for d in diags)
 
 
@@ -180,3 +184,34 @@ def test_chain_refit_uses_extra_detection_observations():
     assert err < 0.05
     fit = next(d for d in diags if d.get("kind") == "chain_fit")
     assert fit["accepted"] and fit.get("n_extra_obs", 0) == 2
+
+
+def test_poisoned_extra_observations_do_not_break_the_fit():
+    """W5b: junk in-span detections must neither poison the arc nor force
+    a bucket fallback — the anchors-only fit is the floor."""
+    from src.utils.ball_flight_chains import refit_airborne_chains
+
+    anchors, worlds, truth, cams, R, t = _chain_fixture()
+    extra = {}
+    for f in (7, 13, 19):        # true arc pixels — good extras
+        extra[f] = _uv(_arc(np.array([0.0, 8.0, _R_]),
+                            np.array([4.0, 3.0, 9.81 * 0.4]), f, 0), R, t)
+    for f, off in ((9, 260.0), (15, -310.0), (21, 280.0)):   # junk extras
+        w = _arc(np.array([0.0, 8.0, _R_]),
+                 np.array([4.0, 3.0, 9.81 * 0.4]), f, 0)
+        u, v = _uv(w, R, t)
+        extra[f] = (u + off, v + off / 2)
+    per_K = {f: c[0] for f, c in cams.items()}
+    per_R = {f: c[1] for f, c in cams.items()}
+    per_t = {f: c[2] for f, c in cams.items()}
+    updates, diags = refit_airborne_chains(
+        anchor_by_frame=anchors, world_for_anchor=worlds,
+        per_frame_K=per_K, per_frame_R=per_R, per_frame_t=per_t,
+        distortion=_DIST, fps=_FPS, extra_observations=extra,
+    )
+    assert set(updates) == {6, 12, 18}
+    for f, w_true in truth.items():
+        assert np.linalg.norm(np.asarray(updates[f]) - w_true) < 0.05
+    fit = next(d for d in diags if d.get("kind") == "chain_fit")
+    assert fit["accepted"]
+    assert fit.get("n_extra_used", 99) <= 3   # junk extras excluded

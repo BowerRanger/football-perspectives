@@ -106,20 +106,42 @@ def _eval_linear(
         world[f] = p0 + (p1 - p0) * s
 
 
+# A roll-evidence knot farther than this from the endpoints' chord is a
+# false-detection cluster (detector locked on a static object), not a curved
+# roll — genuine ground-pass curvature between nearby keyframes stays well
+# under this.
+_ROLL_KNOT_MAX_CHORD_DEV_M = 1.5
+
+
 def _evidence_knots(
     seg: BallSegment,
     evidence_worlds: dict[int, np.ndarray],
     stride: int,
     window: int,
+    p0: np.ndarray | None = None,
+    p1: np.ndarray | None = None,
 ) -> list[tuple[int, np.ndarray]]:
-    """Strided, median-filtered evidence knots strictly inside a span.
+    """Strided, jitter-filtered evidence knots strictly inside a span.
 
-    One knot per ``stride`` frames; each knot is the per-axis median of the
-    evidence within ``±window`` frames, so single-frame detection jitter
-    does not bend the rendered path.
+    One knot per ``stride`` frames; each knot is the symmetric-window mean
+    of nearby evidence, and knots deviating more than
+    ``_ROLL_KNOT_MAX_CHORD_DEV_M`` from the endpoint chord are rejected as
+    false-detection clusters.
     """
-    inside = sorted(f for f in evidence_worlds
-                    if seg.start_frame < f < seg.end_frame)
+    span = seg.end_frame - seg.start_frame
+
+    def _chord_dev(f: int, w: np.ndarray) -> float:
+        if p0 is None or p1 is None or span == 0:
+            return 0.0
+        s = (f - seg.start_frame) / span
+        return float(np.linalg.norm(w - (p0 + (p1 - p0) * s)))
+
+    inside = sorted(
+        f for f in evidence_worlds
+        if seg.start_frame < f < seg.end_frame
+        and _chord_dev(f, np.asarray(evidence_worlds[f], dtype=float))
+        <= _ROLL_KNOT_MAX_CHORD_DEV_M
+    )
     knots: list[tuple[int, np.ndarray]] = []
     last = None
     for f in inside:
@@ -237,7 +259,7 @@ def interpolate_events(
             else:
                 knots = (
                     _evidence_knots(seg, evidence_worlds, evidence_stride,
-                                    evidence_window)
+                                    evidence_window, p0=p0, p1=p1)
                     if evidence_worlds and seg.kind == "roll" else []
                 )
                 if knots:

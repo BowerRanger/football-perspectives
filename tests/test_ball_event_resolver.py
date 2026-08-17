@@ -99,3 +99,89 @@ def test_dense_world_spans_between_two_touches():
     # interior frame filled by the roll interpolation between the touches
     assert 5 in res.world_by_frame
     assert len(res.world_by_frame) == 11
+
+
+# ---------------------------------------------------------------------------
+# W2a — ground clamp (sub-20cm campaign): a resolved touch can never sit
+# below the pitch. Uses a z-up camera above the ground plane.
+
+_K2 = np.array([[1500.0, 0.0, 960.0], [0.0, 1500.0, 540.0], [0.0, 0.0, 1.0]])
+
+
+def _cam_zup():
+    fwd = np.array([0.0, 20.0, -10.0])
+    fwd /= np.linalg.norm(fwd)
+    up = np.array([0.0, 0.0, 1.0])
+    right = np.cross(fwd, up)
+    right /= np.linalg.norm(right)
+    down = np.cross(fwd, right)
+    R = np.stack([right, down, fwd])
+    C = np.array([0.0, -20.0, 10.0])
+    return R, -R @ C
+
+
+def _uv_zup(world, R, t):
+    uv = project_world_to_image(_K2, R, t, _DIST, np.asarray([world]))[0]
+    return (float(uv[0]), float(uv[1]))
+
+
+def _resolve_zup(anchor_by_frame, ctx, R, t, n_frames=1):
+    return resolve_events(
+        anchor_by_frame=anchor_by_frame,
+        player_ctx=ctx,
+        per_frame_K={f: _K2 for f in range(n_frames)},
+        per_frame_R={f: R for f in range(n_frames)},
+        per_frame_t={f: t for f in range(n_frames)},
+        distortion=_DIST,
+        ball_radius=_RADIUS,
+        goal_geometry=None,
+        n_frames=n_frames,
+        fps=25.0,
+        clip_id="c",
+        image_size=(1920, 1080),
+    )
+
+
+def test_touch_below_ground_with_pixel_clamps_onto_ray_at_ball_radius():
+    R, t = _cam_zup()
+    true_ball = np.array([2.0, 6.0, _RADIUS])   # ball on the ground
+    joint = (2.0, 6.05, -0.08)                  # FK foot below the pitch
+    ctx = _FakeCtx({(0, "P1", "r_foot"): joint})
+    anc = BallAnchor(frame=0, image_xy=_uv_zup(true_ball, R, t),
+                     state="player_touch", player_id="P1", bone="r_foot")
+    res = _resolve_zup({0: anc}, ctx, R, t)
+    world, _ = res.world_by_frame[0]
+    assert world[2] >= _RADIUS - 1e-6
+    # Stays on the clicked ray: reprojection matches the clicked pixel.
+    uvp = project_world_to_image(_K2, R, t, _DIST,
+                                 np.asarray([world]))[0]
+    assert np.linalg.norm(uvp - np.asarray(anc.image_xy)) < 0.5
+    # And lands at the true ground point (ray ∩ z=r).
+    assert np.linalg.norm(np.asarray(world) - true_ball) < 0.05
+    assert res.diagnostics.get("touch_ground_clamped", 0) == 1
+
+
+def test_touch_below_ground_without_pixel_lifts_vertically():
+    R, t = _cam_zup()
+    joint = (3.0, 8.0, -0.05)
+    ctx = _FakeCtx({(0, "P1", "l_foot"): joint})
+    anc = BallAnchor(frame=0, image_xy=None, state="player_touch",
+                     player_id="P1", bone="l_foot")
+    res = _resolve_zup({0: anc}, ctx, R, t)
+    world, _ = res.world_by_frame[0]
+    assert abs(world[0] - 3.0) < 1e-6 and abs(world[1] - 8.0) < 1e-6
+    assert abs(world[2] - _RADIUS) < 1e-6
+    assert res.diagnostics.get("touch_ground_clamped", 0) == 1
+
+
+def test_touch_above_ground_is_not_clamped():
+    R, t = _cam_zup()
+    true_ball = np.array([1.0, 5.0, 0.6])
+    joint = (1.0, 5.1, 0.6)
+    ctx = _FakeCtx({(0, "P1", "r_foot"): joint})
+    anc = BallAnchor(frame=0, image_xy=_uv_zup(true_ball, R, t),
+                     state="player_touch", player_id="P1", bone="r_foot")
+    res = _resolve_zup({0: anc}, ctx, R, t)
+    world, _ = res.world_by_frame[0]
+    assert world[2] > _RADIUS
+    assert res.diagnostics.get("touch_ground_clamped", 0) == 0

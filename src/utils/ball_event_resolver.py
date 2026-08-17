@@ -77,13 +77,20 @@ def _resolve_touch_world(
     t: np.ndarray | None,
     distortion: tuple[float, float],
     ball_radius: float,
-) -> np.ndarray | None:
-    """Body-pinned touch resolution (spec §7)."""
+) -> tuple[np.ndarray | None, bool]:
+    """Body-pinned touch resolution (spec §7).
+
+    Returns ``(world | None, ground_clamped)``. The ball centre can never
+    sit below z = ball_radius: FK foot joints dip under the pitch and would
+    otherwise carry that error straight into the touch keyframe (sub-20cm
+    campaign W2a). With a pixel the clamp stays on the clicked ray
+    (ray ∩ z = ball_radius); without one it lifts vertically.
+    """
     if not (anc.player_id and anc.bone):
-        return None
+        return None, False
     bone_world = player_ctx.joint_world(fi, anc.player_id, anc.bone)
     if bone_world is None:
-        return None
+        return None, False
     base = np.asarray(bone_world, dtype=float)
     have_cam = K is not None and R is not None and t is not None
     # With a confident ball pixel: refine laterally onto its ray, then push
@@ -95,7 +102,20 @@ def _resolve_touch_world(
         uv = (float(anc.image_xy[0]), float(anc.image_xy[1]))
         base = project_point_onto_pixel_ray(base, uv, K, R, t, distortion)
         base = _offset_toward_camera(base, R, t, ball_radius)
-    return base
+    if base[2] >= ball_radius:
+        return base, False
+    clamped: np.ndarray | None = None
+    if anc.image_xy is not None and have_cam:
+        try:
+            clamped = np.asarray(ankle_ray_to_pitch(
+                (float(anc.image_xy[0]), float(anc.image_xy[1])),
+                K=K, R=R, t=t, plane_z=ball_radius, distortion=distortion,
+            ), dtype=float)
+        except Exception:  # noqa: BLE001 — grazing ray: fall through
+            clamped = None
+    if clamped is None:
+        clamped = np.array([base[0], base[1], ball_radius])
+    return clamped, True
 
 
 def _resolve_waypoint_world(
@@ -159,6 +179,7 @@ def resolve_events(
 ) -> EventResolveResult:
     """Resolve events → keyframes + segments → derived dense track."""
     world_for_anchor: dict[int, tuple[float, float, float] | None] = {}
+    n_ground_clamped = 0
     for fi in sorted(anchor_by_frame):
         anc = anchor_by_frame[fi]
         K = per_frame_K.get(fi)
@@ -167,9 +188,10 @@ def resolve_events(
         if anc.state == "off_screen_flight":
             world = None
         elif anc.state == "player_touch":
-            world = _resolve_touch_world(
+            world, was_clamped = _resolve_touch_world(
                 anc, fi, player_ctx, K, R, t, distortion, ball_radius,
             )
+            n_ground_clamped += int(was_clamped)
             if world is None:
                 world = _resolve_waypoint_world(
                     anc, fi, K, R, t, distortion, ball_radius, goal_geometry,
@@ -222,6 +244,7 @@ def resolve_events(
         ],
         "bounces": [],
         "splits": 0,
+        "touch_ground_clamped": n_ground_clamped,
     }
     return EventResolveResult(
         world_by_frame=world_by_frame,

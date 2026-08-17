@@ -956,11 +956,23 @@ class BallStage(BaseStage):
                 # The IMM smooths and lags the pixel track (visibly so
                 # right after a kick); fits must see the raw measurement.
                 # Keep the tracker's uv only where it bridges a miss.
-                if uv is not None and not step.is_outlier:
+                # Operator anchors are exempt from the outlier gate: a
+                # fast post-kick ball exceeds the IMM gate, and rejecting
+                # the click freezes the track at the stale prediction —
+                # exactly where static false detections then get accepted
+                # (sub-20cm campaign: gberch f49–65 cluster). The click is
+                # ground truth; the tracker must follow it, not gate it.
+                is_anchor_frame = sources.get(frame_idx) == "anchor"
+                if is_anchor_frame and uv is not None and step.is_outlier:
+                    tracker.reseed(uv)
+                if uv is not None and (is_anchor_frame
+                                       or not step.is_outlier):
                     step = TrackerStep(
                         frame=step.frame, uv=uv, p_flight=step.p_flight,
-                        is_outlier=step.is_outlier,
-                        is_gap_fill=step.is_gap_fill,
+                        is_outlier=False if is_anchor_frame
+                        else step.is_outlier,
+                        is_gap_fill=False if is_anchor_frame
+                        else step.is_gap_fill,
                         pos_cov=step.pos_cov,
                     )
                 steps.append(step)

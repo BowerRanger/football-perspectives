@@ -89,6 +89,16 @@ class BallTracker:
         self._x = [x0.copy(), x0.copy()]
         self._P = [P0.copy(), P0.copy()]
 
+    def reseed(self, uv: tuple[float, float]) -> None:
+        """Force the filter onto ``uv`` (operator ground truth).
+
+        Used when an anchor click exceeds the innovation gate — e.g. the
+        ball right after a kick moves faster than the model expects. The
+        click wins; velocity re-estimates from subsequent frames.
+        """
+        self._init_state(uv)
+        self._consecutive_gap = 0
+
     def update(self, frame: int, uv: tuple[float, float] | None) -> TrackerStep:
         # Cold start — wait for the first detection to seed the filter.
         if self._x[0] is None:

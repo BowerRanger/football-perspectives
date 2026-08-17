@@ -122,3 +122,22 @@ def test_wild_outlier_does_not_break_state():
     # be back near the true trajectory (within 5 px).
     err = np.linalg.norm(np.array(outputs[17].uv) - truth[17])
     assert err < 5.0, f"state pulled too far by outlier: {err:.1f} px"
+
+
+def test_reseed_forces_filter_onto_operator_click():
+    """Sub-20cm campaign: a post-kick anchor click exceeding the innovation
+    gate must not be rejected — reseed jumps the filter to the click so the
+    track never freezes at the stale prediction."""
+    from src.utils.ball_tracker import BallTracker
+
+    tr = BallTracker(max_gap_frames=6)
+    for f in range(8):
+        step = tr.update(f, (100.0 + f, 200.0))
+        assert not step.is_outlier
+    # A 300px jump (fast kick) — the gate flags it.
+    step = tr.update(8, (420.0, 200.0))
+    assert step.is_outlier
+    tr.reseed((420.0, 200.0))
+    nxt = tr.update(9, (425.0, 200.0))
+    assert not nxt.is_outlier
+    assert abs(nxt.uv[0] - 425.0) < 30.0   # filter follows the new position

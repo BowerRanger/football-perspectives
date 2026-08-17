@@ -205,6 +205,17 @@ def resolve_events(
             else (float(world[0]), float(world[1]), float(world[2]))
         )
 
+    # W3 — airborne chains: replace bucket-height placeholders with a
+    # gravity-arc fit through the bracketing hard knots (pixels as rays).
+    from src.utils.ball_flight_chains import refit_airborne_chains
+    chain_updates, chain_diags = refit_airborne_chains(
+        anchor_by_frame=anchor_by_frame,
+        world_for_anchor=world_for_anchor,
+        per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+        per_frame_t=per_frame_t, distortion=distortion, fps=fps,
+    )
+    world_for_anchor.update(chain_updates)
+
     # Force player_bone depth_source for every touch (body-pinned, even on
     # ground touches) by passing an empty ground_touch_frames set.
     keyframe_set = build_ball_keyframe_set(
@@ -237,7 +248,10 @@ def resolve_events(
     state_by_frame = {f.frame: f.state for f in track.frames}
 
     diagnostics = {
-        "underconstrained_spans": [],
+        "underconstrained_spans": [
+            d["air_frames"] for d in chain_diags
+            if d.get("kind") == "underconstrained_chain"
+        ],
         "segments": [
             {"start": s.start_frame, "end": s.end_frame, "kind": s.kind}
             for s in segments
@@ -245,6 +259,8 @@ def resolve_events(
         "bounces": [],
         "splits": 0,
         "touch_ground_clamped": n_ground_clamped,
+        "flight_chains": chain_diags,
+        "airborne_refit_frames": sorted(chain_updates),
     }
     return EventResolveResult(
         world_by_frame=world_by_frame,

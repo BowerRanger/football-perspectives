@@ -268,6 +268,7 @@ def run_and_evaluate(src_output: Path, shot_id: str, *, detector: str,
     dense_rows: list = []
     violations: list = []
     per_fold = []
+    recall: dict = {}
 
     for fold in folds:
         if fold is None:
@@ -306,6 +307,22 @@ def run_and_evaluate(src_output: Path, shot_id: str, *, detector: str,
                     overlay / "ball" / f"{shot_id}_ball_keyframes.json")
                 violations.extend(BE.naturalness_violations(
                     track.frames, ev, float(track.fps)))
+            if first:
+                # A5 support: auto-touch recall against the FULL manual set
+                # (relaxed = frame-window only; strict = bone must agree).
+                try:
+                    from src.utils.ball_touch_recall import (
+                        match_touches, touches_from_anchor_set)
+                    man = touches_from_anchor_set(anchors_file)
+                    aut = touches_from_anchor_set(
+                        overlay / "ball" / f"{shot_id}_ball_anchors_auto.json")
+                    recall = {
+                        "strict": match_touches(man, aut, require_bone=True),
+                        "relaxed": match_touches(man, aut,
+                                                 require_bone=False),
+                    }
+                except Exception as exc:  # noqa: BLE001 — report-only
+                    recall = {"error": str(exc)}
             per_fold.append({
                 "fold": fold,
                 "n_kept": len(kept_set.anchors) if kept_set else
@@ -336,6 +353,7 @@ def run_and_evaluate(src_output: Path, shot_id: str, *, detector: str,
         "holdout": holdout,
         "n_folds": n_folds if holdout else 0,
         "summary": summary,
+        "touch_recall": recall,
         "per_fold": per_fold,
         "worst_held_out": [dataclasses.asdict(r) for r in worst],
         "violations": [dataclasses.asdict(v) for v in violations],

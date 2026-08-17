@@ -44,13 +44,14 @@ _MAX_ARC_Z_M = 40.0
 # anchors-only arc already reprojects within this of it — junk detections
 # (players, static lock-ons) never poison the fit.
 _EXTRA_OBS_GATE_PX = 30.0
-# Soft-constraint weight for AUTO knot worlds (px of residual per metre of
-# deviation, scaled by the anchor's confidence). Calibration: an auto
-# body-pin carries ~1 m attribution uncertainty, so 1 m of deviation should
-# cost only a few px against the trusted clicks — strong enough to anchor
-# the otherwise-free along-ray depth, weak enough for the rays to override
-# a mis-attributed pin.
-_AUTO_KNOT_WEIGHT_PX_PER_M = 5.0
+# Soft-constraint weights for AUTO knot worlds (px per metre of deviation,
+# scaled by anchor confidence). Measured on the corrupt-pin fixture: with
+# ≥1 manual knot, gravity + the rays fully determine the arc and any pin
+# strength only imports attribution error (0.5 → 0.11 m, 2.0 → 0.63 m),
+# so auto pins are a near-free tiebreak there. With NO manual knot the
+# pins are the only along-ray depth anchor and must carry real weight.
+_AUTO_KNOT_WEIGHT_TIEBREAK = 0.5
+_AUTO_KNOT_WEIGHT_SOLE_DEPTH = 5.0
 
 
 def _arc_residual_px(p0, v0, obs, Ks, Rs, ts, distortion, fps, f0) -> float:
@@ -164,14 +165,18 @@ def refit_airborne_chains(
         f0 = start
         knots: dict[int, np.ndarray] = {}
         soft_fixes: list[tuple[int, np.ndarray, float]] = []
+        n_manual_knots = sum(
+            1 for kf in (start, end)
+            if manual_frames is None or kf in manual_frames)
+        auto_weight = (_AUTO_KNOT_WEIGHT_TIEBREAK if n_manual_knots
+                       else _AUTO_KNOT_WEIGHT_SOLE_DEPTH)
         for kf in (start, end):
             w = np.asarray(world_for_anchor[kf], dtype=float)
             if manual_frames is None or kf in manual_frames:
                 knots[kf - f0] = w
             else:
                 conf = float(getattr(anchor_by_frame[kf], "confidence", 1.0))
-                soft_fixes.append(
-                    (kf - f0, w, _AUTO_KNOT_WEIGHT_PX_PER_M * conf))
+                soft_fixes.append((kf - f0, w, auto_weight * conf))
         z_ranges = {
             f - f0: bucket
             for f in air_frames

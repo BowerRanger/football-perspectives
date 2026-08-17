@@ -1,0 +1,205 @@
+{
+ "clip": "gberch",
+ "output_dir": "output",
+ "detector": "noop",
+ "holdout": true,
+ "n_folds": 2,
+ "summary": {
+  "anchors_held_out": {
+   "n": 55,
+   "p50": 0.4703114657763162,
+   "p95": 2.9758228111504876,
+   "max": 8.403453072360566,
+   "n_over": 41,
+   "n_missing": 3,
+   "n_3d": 41
+  },
+  "anchors_kept": {
+   "n": 27,
+   "p50": 7.105427357601002e-15,
+   "p95": 1.4814277736915568e-14,
+   "max": 1.5987211554602254e-14,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 20
+  },
+  "fixes": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0
+  },
+  "dense": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0
+  },
+  "naturalness": {
+   "n_violations": 0,
+   "by_kind": {}
+  },
+  "threshold_m": 0.2,
+  "held_out_by_state": {
+   "airborne_low": {
+    "n": 12,
+    "p50": 0.3647083508826768,
+    "p95": 2.5121597454946794,
+    "max": 2.8788102784984724,
+    "n_over": 8,
+    "n_missing": 1
+   },
+   "bounce": {
+    "n": 4,
+    "p50": 1.3662229922336768,
+    "p95": 1.6642745390799996,
+    "max": 1.7067926662290598,
+    "n_over": 4,
+    "n_missing": 1
+   },
+   "goal_impact": {
+    "n": 1,
+    "p50": 1.8383811111300943,
+    "p95": 1.8383811111300943,
+    "max": 1.8383811111300943,
+    "n_over": 1,
+    "n_missing": 0
+   },
+   "grounded": {
+    "n": 30,
+    "p50": 0.39277816560002576,
+    "p95": 1.334088758792387,
+    "max": 8.403453072360566,
+    "n_over": 20,
+    "n_missing": 1
+   },
+   "player_touch": {
+    "n": 8,
+    "p50": 1.1533502177410244,
+    "p95": 4.030910670457901,
+    "max": 4.578405333036939,
+    "n_over": 8,
+    "n_missing": 0
+   }
+  }
+ },
+ "per_fold": [
+  {
+   "fold": 0,
+   "n_kept": 28,
+   "n_held_out": 31
+  },
+  {
+   "fold": 1,
+   "n_kept": 31,
+   "n_held_out": 28
+  }
+ ],
+ "worst_held_out": [
+  {
+   "frame": 170,
+   "state": "grounded",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 4.995595649288411,
+   "err_3d_m": 8.403453072360566,
+   "reproj_px": 311.9193382634017,
+   "depth_m": 55.08311760152829
+  },
+  {
+   "frame": 49,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 4.577310029797655,
+   "err_3d_m": 4.578405333036939,
+   "reproj_px": 229.64407734970274,
+   "depth_m": 72.43439626582523
+  },
+  {
+   "frame": 343,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 3.005272172201323,
+   "err_3d_m": 3.014134868525404,
+   "reproj_px": 196.26817965802124,
+   "depth_m": 62.26987908088399
+  },
+  {
+   "frame": 56,
+   "state": "player_touch",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 2.9594033579898094,
+   "err_3d_m": null,
+   "reproj_px": 154.33630108845838,
+   "depth_m": 69.1288414467248
+  },
+  {
+   "frame": 51,
+   "state": "airborne_low",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 2.8788102784984724,
+   "err_3d_m": null,
+   "reproj_px": 142.75171621693738,
+   "depth_m": 72.76105398771924
+  },
+  {
+   "frame": 55,
+   "state": "airborne_low",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 2.212172945764304,
+   "err_3d_m": null,
+   "reproj_px": 114.91345785475926,
+   "depth_m": 69.224786633681
+  },
+  {
+   "frame": 402,
+   "state": "goal_impact",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 1.8383811111300943,
+   "err_3d_m": null,
+   "reproj_px": 101.38747294523067,
+   "depth_m": 86.87723744405099
+  },
+  {
+   "frame": 65,
+   "state": "bounce",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 0.8421479193769413,
+   "err_3d_m": 1.7067926662290598,
+   "reproj_px": 44.81144218986196,
+   "depth_m": 68.28332035773632
+  },
+  {
+   "frame": 357,
+   "state": "grounded",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 1.4495321421214862,
+   "err_3d_m": 1.452994500520349,
+   "reproj_px": 93.96333650949748,
+   "depth_m": 64.23261419113139
+  },
+  {
+   "frame": 394,
+   "state": "airborne_low",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 1.4443074244584706,
+   "err_3d_m": null,
+   "reproj_px": 76.79310132083171,
+   "depth_m": 86.59722642216332
+  }
+ ],
+ "violations": []
+}

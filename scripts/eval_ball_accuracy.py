@@ -235,6 +235,15 @@ def run_and_evaluate(src_output: Path, shot_id: str, *, detector: str,
 
     summary = BE.summarize(anchor_rows, fix_rows, dense_rows, violations,
                            threshold_m=threshold_m)
+    held_by_state: dict[str, dict] = {}
+    for state in sorted({r.state for r in anchor_rows if r.held_out}):
+        rows = [r for r in anchor_rows if r.held_out and r.state == state]
+        errs = [r.err_3d_m if r.err_3d_m is not None else r.lateral_m
+                for r in rows]
+        held_by_state[state] = BE._stats(
+            [e for e in errs if e is not None], threshold_m,
+            n_missing=sum(1 for e in errs if e is None))
+    summary["held_out_by_state"] = held_by_state
     worst = sorted(
         (r for r in anchor_rows if r.held_out
          and (r.err_3d_m or r.lateral_m) is not None),

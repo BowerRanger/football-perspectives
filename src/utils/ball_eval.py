@@ -265,6 +265,27 @@ def naturalness_violations(frames, event_frames, fps, *,
     return tuple(out)
 
 
+def split_anchors(anchors, *, fold, n_folds=2):
+    """Deterministic stratified hold-out split → ``(kept, held_out)``.
+
+    Within each state class (sorted by frame), member ``i`` is held out iff
+    ``i % n_folds == fold``, so running every fold holds each anchor out
+    exactly once while both halves keep every state class populated
+    (single-member classes are held out only in their own fold).
+    """
+    by_state: dict[str, list[BallAnchor]] = {}
+    for a in sorted(anchors, key=lambda a: a.frame):
+        by_state.setdefault(a.state, []).append(a)
+    kept: list[BallAnchor] = []
+    held: list[BallAnchor] = []
+    for state in sorted(by_state):
+        for i, a in enumerate(by_state[state]):
+            (held if i % n_folds == fold else kept).append(a)
+    kept.sort(key=lambda a: a.frame)
+    held.sort(key=lambda a: a.frame)
+    return tuple(kept), tuple(held)
+
+
 __all__ = [
     "pixel_ray",
     "point_ray_distance",
@@ -276,4 +297,8 @@ __all__ = [
     "eval_rows_at_anchors",
     "eval_rows_at_fixes",
     "dense_lateral_rows",
+    "NaturalnessCfg",
+    "Violation",
+    "naturalness_violations",
+    "split_anchors",
 ]

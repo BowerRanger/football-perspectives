@@ -259,3 +259,30 @@ def test_naturalness_flags_roll_speedup_without_event():
     # Same profile WITH an event at the speed change: no violation.
     v2 = naturalness_violations(_mk_frames(pts), event_frames={6}, fps=fps)
     assert not [x for x in v2 if x.kind == "roll_speedup"]
+
+
+def test_split_anchors_stratified_and_exhaustive():
+    from src.utils.ball_eval import split_anchors
+
+    anchors = [BallAnchor(frame=f,
+                          state=("grounded" if f % 2 else "airborne_low"),
+                          image_xy=(10.0, 10.0)) for f in range(10)]
+    seen = set()
+    for fold in (0, 1):
+        kept, held = split_anchors(anchors, fold=fold, n_folds=2)
+        assert len(kept) + len(held) == 10
+        assert not ({a.frame for a in kept} & {a.frame for a in held})
+        assert {a.state for a in kept} == {"grounded", "airborne_low"}
+        seen |= {a.frame for a in held}
+    assert seen == set(range(10))
+
+
+def test_split_anchors_deterministic():
+    from src.utils.ball_eval import split_anchors
+
+    anchors = [BallAnchor(frame=f, state="grounded", image_xy=(1.0, 1.0))
+               for f in (5, 1, 9, 3)]
+    a = split_anchors(anchors, fold=0)
+    b = split_anchors(anchors, fold=0)
+    assert [x.frame for x in a[0]] == [x.frame for x in b[0]]
+    assert [x.frame for x in a[1]] == [x.frame for x in b[1]]

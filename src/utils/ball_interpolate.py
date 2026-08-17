@@ -168,6 +168,7 @@ def interpolate_events(
     evidence_worlds: dict[int, tuple[float, float, float]] | None = None,
     evidence_stride: int = 4,
     evidence_window: int = 2,
+    carry_worlds: dict[int, tuple[float, float, float]] | None = None,
 ) -> BallTrack:
     """Materialise ``keyframe_set`` into a dense ``BallTrack``.
 
@@ -180,6 +181,11 @@ def interpolate_events(
     such evidence render as an endpoint-pinned polyline through strided
     median knots instead of a straight line, so curved or decelerating
     ground passes follow what the detector actually saw.
+
+    ``carry_worlds`` (W4b) maps interior frames of ``carry`` spans to
+    precomputed ball positions that follow the owning player's foot path
+    (endpoint-blended by the resolver); used verbatim, so a dribbler's
+    curved run no longer renders as a straight chord.
     """
     fps = float(keyframe_set.fps)
     total = _n_frames(keyframe_set, n_frames)
@@ -220,15 +226,24 @@ def interpolate_events(
             # threaded into the interpolator (a Phase-3 follow-up). Linear
             # between two nearby same-player touches (gap ≤15 fr, ≤3 m by
             # detect_carry_spans) is a reasonable approximation until then.
-            knots = (
-                _evidence_knots(seg, evidence_worlds, evidence_stride,
-                                evidence_window)
-                if evidence_worlds and seg.kind == "roll" else []
-            )
-            if knots:
-                _eval_polyline(seg, p0, p1, knots, world)
+            if seg.kind == "carry" and carry_worlds and all(
+                f in carry_worlds
+                for f in range(seg.start_frame + 1, seg.end_frame)
+            ):
+                for f in range(seg.start_frame + 1, seg.end_frame):
+                    world[f] = np.asarray(carry_worlds[f], dtype=float)
+                world[seg.start_frame] = p0
+                world[seg.end_frame] = p1
             else:
-                _eval_linear(seg, p0, p1, world)
+                knots = (
+                    _evidence_knots(seg, evidence_worlds, evidence_stride,
+                                    evidence_window)
+                    if evidence_worlds and seg.kind == "roll" else []
+                )
+                if knots:
+                    _eval_polyline(seg, p0, p1, knots, world)
+                else:
+                    _eval_linear(seg, p0, p1, world)
         elif seg.kind == "rest" and (p0 is not None or p1 is not None):
             # Hold a constant position. Works from whichever endpoint has a
             # keyframe so clip-boundary holds (open start has only the end

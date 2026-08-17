@@ -93,3 +93,37 @@ def test_evidence_is_median_filtered_against_jitter():
     errs = [np.linalg.norm(np.asarray(track.frames[f].world_xyz)
                            - np.asarray(truth[f])) for f in range(n)]
     assert max(errs) < 0.15
+
+
+def test_carry_span_follows_player_path():
+    from src.utils.ball_interpolate import interpolate_events
+
+    # Dribbler runs a curve; ball must stay with the feet, not cut the chord.
+    n = 21
+    ang = np.linspace(0.0, np.pi / 2, n)
+    foot = {f: np.array([4.0 * np.sin(ang[f]), 4.0 - 4.0 * np.cos(ang[f]),
+                         0.11]) for f in range(n)}
+    p0 = foot[0] + np.array([0.10, 0.0, 0.0])     # ball slightly off-foot
+    p1 = foot[n - 1] + np.array([0.0, 0.10, 0.0])
+    carry_worlds = {}
+    for f in range(1, n - 1):
+        s = f / (n - 1)
+        off = (1 - s) * np.array([0.10, 0.0, 0.0]) + s * np.array([0.0, 0.10, 0.0])
+        carry_worlds[f] = tuple(foot[f] + off)
+    ks = BallKeyframeSet(
+        clip_id="c", fps=_FPS, image_size=(1920, 1080),
+        keyframes=(_kf(0, p0, "player_touch"), _kf(n - 1, p1, "player_touch")),
+        segments=(BallSegment(start_frame=0, end_frame=n - 1, kind="carry",
+                              hints={"player_id": "P1"}),),
+    )
+    plain = interpolate_events(ks, n_frames=n)
+    followed = interpolate_events(ks, n_frames=n, carry_worlds=carry_worlds)
+    truth_mid = carry_worlds[10]
+    err_plain = np.linalg.norm(np.asarray(plain.frames[10].world_xyz)
+                               - np.asarray(truth_mid))
+    err_follow = np.linalg.norm(np.asarray(followed.frames[10].world_xyz)
+                                - np.asarray(truth_mid))
+    assert err_plain > 0.5
+    assert err_follow < 1e-9        # carry worlds are used verbatim
+    assert np.allclose(followed.frames[0].world_xyz, p0)
+    assert np.allclose(followed.frames[n - 1].world_xyz, p1)

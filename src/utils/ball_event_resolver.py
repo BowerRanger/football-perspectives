@@ -293,6 +293,43 @@ def resolve_events(
     )
     keyframe_set = dataclasses.replace(keyframe_set, segments=segments)
 
+    # W4b — carry spans follow the owning player's foot path (the §10
+    # design target): ball = foot midpoint + endpoint-blended offset, so a
+    # dribbler's curved run no longer renders as a straight chord.
+    carry_worlds: dict[int, tuple[float, float, float]] = {}
+    kf_world = {kf.frame: kf.world_xyz for kf in keyframe_set.keyframes}
+
+    def _foot_mid(f: int, pid: str) -> np.ndarray | None:
+        feet = [player_ctx.joint_world(f, pid, b) for b in ("l_foot", "r_foot")]
+        feet = [np.asarray(x, dtype=float) for x in feet if x is not None]
+        if not feet:
+            return None
+        return np.mean(np.stack(feet), axis=0)
+
+    for seg in segments:
+        if seg.kind != "carry":
+            continue
+        pid = (seg.hints or {}).get("player_id")
+        pa = kf_world.get(seg.start_frame)
+        pb = kf_world.get(seg.end_frame)
+        if not pid or pa is None or pb is None:
+            continue
+        fa = _foot_mid(seg.start_frame, pid)
+        fb = _foot_mid(seg.end_frame, pid)
+        if fa is None or fb is None:
+            continue
+        off_a = np.asarray(pa, dtype=float) - fa
+        off_b = np.asarray(pb, dtype=float) - fb
+        span = seg.end_frame - seg.start_frame
+        for f in range(seg.start_frame + 1, seg.end_frame):
+            ff = _foot_mid(f, pid)
+            if ff is None:
+                continue
+            s = (f - seg.start_frame) / span
+            w = ff + (1.0 - s) * off_a + s * off_b
+            carry_worlds[f] = (float(w[0]), float(w[1]),
+                               float(max(w[2], ball_radius)))
+
     # W4 — rendering evidence: real detections' ground points steer roll
     # spans (the interpolator ignores them on flight spans, whose shape the
     # chain fits already own).
@@ -315,6 +352,7 @@ def resolve_events(
     track = interpolate_events(
         keyframe_set, n_frames=n_frames, ball_radius_m=ball_radius,
         evidence_worlds=evidence_worlds or None,
+        carry_worlds=carry_worlds or None,
     )
     world_by_frame = {
         f.frame: (f.world_xyz, f.confidence)

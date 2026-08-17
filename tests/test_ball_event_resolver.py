@@ -185,3 +185,30 @@ def test_touch_above_ground_is_not_clamped():
     world, _ = res.world_by_frame[0]
     assert world[2] > _RADIUS
     assert res.diagnostics.get("touch_ground_clamped", 0) == 0
+
+
+def test_touch_clamp_prefers_vertical_lift_when_ground_point_is_far():
+    """Shallow-ray regression (origi01 f140): sliding along the ray to
+    reach z=r can move the ball metres in depth. When ray ∩ z=r is out of
+    contact range of the joint, clamp vertically at the joint instead."""
+    # Very shallow camera: 2m high, 60m behind — grazing view of the pitch.
+    fwd = np.array([0.0, 60.0, -1.9])
+    fwd /= np.linalg.norm(fwd)
+    up = np.array([0.0, 0.0, 1.0])
+    right = np.cross(fwd, up)
+    right /= np.linalg.norm(right)
+    down = np.cross(fwd, right)
+    R = np.stack([right, down, fwd])
+    C = np.array([0.0, -60.0, 2.0])
+    t = -R @ C
+    joint = np.array([0.0, 0.0, -0.15])   # FK foot dipped below the pitch
+    uv = project_world_to_image(_K2, R, t, _DIST, joint.reshape(1, 3))[0]
+    ctx = _FakeCtx({(0, "P1", "r_foot"): tuple(joint)})
+    anc = BallAnchor(frame=0, image_xy=(float(uv[0]), float(uv[1])),
+                     state="player_touch", player_id="P1", bone="r_foot")
+    res = _resolve_zup({0: anc}, ctx, R, t)
+    world, _ = res.world_by_frame[0]
+    assert world[2] >= _RADIUS - 1e-6
+    # The clamp must stay near the joint, never slide metres along the ray.
+    assert np.linalg.norm(np.asarray(world)[:2] - joint[:2]) < 0.5
+    assert res.diagnostics.get("touch_ground_clamped", 0) == 1

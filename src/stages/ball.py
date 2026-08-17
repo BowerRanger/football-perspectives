@@ -2093,6 +2093,13 @@ class BallStage(BaseStage):
             },
             "detection_coverage": artifacts.detection_coverage,
             "cross_replay": cr_summary,
+            # Sub-20cm campaign: touch ground-clamp count (W2a) and airborne
+            # chain-fit outcomes (W3) — empty/0 outside events mode.
+            "touch_ground_clamped": result.diagnostics.get(
+                "touch_ground_clamped", 0),
+            "flight_chains": result.diagnostics.get("flight_chains", []),
+            "airborne_refit_frames": result.diagnostics.get(
+                "airborne_refit_frames", []),
         }
         if solver_name == "global":
             # Surface the beam search-effort metrics + the fallback flag so the

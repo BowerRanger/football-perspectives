@@ -39,6 +39,11 @@ class _PlayerCtx(Protocol):
     ) -> tuple[float, float, float] | None: ...
 
 
+# A ground-clamped touch may snap to the on-ray ground point only when that
+# point is genuinely within reach of the contacting joint.
+_CLAMP_CONTACT_MAX_M = 0.6
+
+
 @dataclass
 class EventResolveResult:
     """Mirrors the trajectory solver's result surface so the ball stage's
@@ -104,13 +109,21 @@ def _resolve_touch_world(
         base = _offset_toward_camera(base, R, t, ball_radius)
     if base[2] >= ball_radius:
         return base, False
+    # Clamp with the MINIMUM move. The on-ray ground point (ray ∩ z=r) is
+    # ideal — pixel-faithful AND physical — but on a shallow broadcast ray
+    # it can sit metres away in depth from the actual foot (small height
+    # errors amplify by 1/sin(elevation)). Only take it when it stays in
+    # contact range of the joint; otherwise lift vertically at the joint.
     clamped: np.ndarray | None = None
     if anc.image_xy is not None and have_cam:
         try:
-            clamped = np.asarray(ankle_ray_to_pitch(
+            ground_pt = np.asarray(ankle_ray_to_pitch(
                 (float(anc.image_xy[0]), float(anc.image_xy[1])),
                 K=K, R=R, t=t, plane_z=ball_radius, distortion=distortion,
             ), dtype=float)
+            joint = np.asarray(bone_world, dtype=float)
+            if float(np.linalg.norm(ground_pt - joint)) <= _CLAMP_CONTACT_MAX_M:
+                clamped = ground_pt
         except Exception:  # noqa: BLE001 — grazing ray: fall through
             clamped = None
     if clamped is None:
@@ -249,8 +262,14 @@ def resolve_events(
 
     diagnostics = {
         "underconstrained_spans": [
-            d["air_frames"] for d in chain_diags
-            if d.get("kind") == "underconstrained_chain"
+            {
+                "start": min(d["air_frames"]),
+                "end": max(d["air_frames"]),
+                "residual_px": None,
+                "note": d.get("note", ""),
+            }
+            for d in chain_diags
+            if d.get("kind") == "underconstrained_chain" and d["air_frames"]
         ],
         "segments": [
             {"start": s.start_frame, "end": s.end_frame, "kind": s.kind}

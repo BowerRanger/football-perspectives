@@ -91,10 +91,12 @@ class AutoAnchorCfg:
     # camera RAY (the contact gap is depth-blind) and would mint phantom
     # touches. While the IMM says flight, only aerial contacts (header/
     # chest/shoulder) may mint (sub-20cm campaign W5f, kroupi01).
-    flight_touch_max_p_flight: float = 0.6
-    # Consecutive same-player touch bursts (FK jitter under a moving ball)
-    # collapse to the strongest within this window.
-    touch_burst_nms_frames: int = 4
+    flight_touch_max_p_flight: float = 0.8
+    # Adjacent-frame same-player touch duplicates (FK jitter under a
+    # moving ball) collapse to the strongest. Kept to 1 frame: genuine
+    # consecutive micro-touches during ball control are 2+ frames apart
+    # (measured on gberch's manual touches at f43/45/49).
+    touch_burst_nms_frames: int = 1
 
 
 _AERIAL_TOUCH_BONES = frozenset({"head", "chest", "l_shoulder", "r_shoulder"})

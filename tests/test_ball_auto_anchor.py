@@ -598,4 +598,7 @@ class TestFlightGateAndBurstNMS:
                        for f, s in ((30, 0.6), (31, 0.9), (32, 0.7)))
         anchors = self._gen(events, steps, ctx)
         touches = [a for a in anchors if a.state == "player_touch"]
+        # Adjacent-frame duplicates collapse to the strongest (31); a
+        # 2-frame gap is a genuine micro-touch and must survive — but
+        # here 30/32 are both adjacent to 31, so only 31 remains.
         assert [a.frame for a in touches] == [31]

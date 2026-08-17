@@ -189,19 +189,28 @@ def _load_fixes(path: Path):
     return [(fx.frame, fx.xyz, fx.ray_miss_m) for fx in fs.fixes]
 
 
+_DENSE_EVAL_SOURCES = {"detector", "second_pass", "foot_guided"}
+
+
 def _load_observations(path: Path):
+    """Real-detector observations from the ``frames`` sidecar payload.
+
+    Anchor-sourced and gap-fill entries are excluded: grading the track
+    against evidence it was pinned to (or that was synthesized) would
+    flatter A3.
+    """
     if not path.exists():
         return []
     data = json.loads(path.read_text())
-    obs = data.get("observations", [])
     out = []
-    for e in obs:
-        uv = e.get("uv") or e.get("image_xy")
-        if uv is None or e.get("frame") is None:
+    for e in data.get("frames", []):
+        uv = e.get("uv")
+        if (uv is None or e.get("frame") is None or e.get("gap_fill")
+                or str(e.get("source")) not in _DENSE_EVAL_SOURCES):
             continue
         out.append((int(e["frame"]), (float(uv[0]), float(uv[1])),
                     float(e.get("confidence", 0.0)),
-                    str(e.get("source", "detector"))))
+                    str(e.get("source"))))
     return out
 
 

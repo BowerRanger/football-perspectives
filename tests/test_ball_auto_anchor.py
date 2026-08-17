@@ -462,3 +462,88 @@ class TestEvidenceGate:
         assert [a for a in with_bridge if a.state == "grounded"]
         sourceless = gen({})   # synthetic track: no observation provenance
         assert not [a for a in sourceless if a.state == "grounded"]
+
+
+class TestSyntheticPathDeviation:
+    """W2c: synthetic-born events may REFINE the manual-anchor path but
+    never REWRITE it — kept only when the resolved pin stays near the
+    interpolated reference between bracketing manual anchors."""
+
+    def _scene_with_manual(self):
+        worlds, pixels, steps = _rolling_scene()
+        manual = {
+            10: BallAnchor(frame=10, image_xy=pixels[10], state="grounded"),
+            50: BallAnchor(frame=50, image_xy=pixels[50], state="grounded"),
+        }
+        return worlds, pixels, steps, manual
+
+    def _gen(self, events, steps, ctx, manual, sources):
+        Ks, Rs, ts = per_frame_cams(60)
+        return generate_auto_anchors(
+            events=events, steps=steps, confidences={},
+            player_ctx=ctx,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0), fps=FPS, pitch_cfg=PITCH_CFG,
+            cfg=AutoAnchorCfg(), sources=sources, manual_anchors=manual,
+        )
+
+    def test_synthetic_touch_near_manual_path_is_kept(self):
+        worlds, pixels, steps, manual = self._scene_with_manual()
+        # Joint right on the rolling path at frame 30 — a plausible touch.
+        ctx = FakePlayerContext({
+            30: [_joint("P004", "r_foot", worlds[30], pixels[30])],
+        })
+        events = (BallEvent(frame=30, kind="touch", score=0.8,
+                            player_id="P004", bone="r_foot"),)
+        anchors = self._gen(events, steps, ctx, manual, sources={30: "bridge"})
+        assert [a for a in anchors if a.state == "player_touch"]
+
+    def test_synthetic_touch_far_from_manual_path_is_dropped(self):
+        worlds, pixels, steps, manual = self._scene_with_manual()
+        far = np.asarray(worlds[30]) + np.array([8.0, 5.0, 0.0])
+        K, R, t = broadcast_camera()
+        far_uv = project_world_to_image(K, R, t, (0.0, 0.0),
+                                        far.reshape(1, 3))[0]
+        ctx = FakePlayerContext({
+            30: [_joint("P004", "r_knee", far, far_uv)],
+        })
+        # Corner pixel drifted onto the far player's knee (bridge lock-on).
+        steps2 = list(steps)
+        events = (BallEvent(frame=30, kind="touch", score=0.9,
+                            player_id="P004", bone="r_knee"),)
+        anchors = self._gen(events, steps2, ctx, manual,
+                            sources={30: "bridge"})
+        assert not [a for a in anchors if a.state == "player_touch"]
+
+    def test_synthetic_touch_without_bracket_is_dropped(self):
+        worlds, pixels, steps = _rolling_scene()
+        ctx = FakePlayerContext({
+            30: [_joint("P004", "r_foot", worlds[30], pixels[30])],
+        })
+        events = (BallEvent(frame=30, kind="touch", score=0.8,
+                            player_id="P004", bone="r_foot"),)
+        anchors = self._gen(events, steps, ctx, manual=None,
+                            sources={30: "bridge"})
+        assert not [a for a in anchors if a.state == "player_touch"]
+
+    def test_hard_evidence_touch_skips_path_check(self):
+        # A REAL detection of the ball genuinely away from the manual path
+        # (contact gap small, path deviation large) must still mint: hard
+        # evidence outranks the reference path.
+        worlds, pixels, steps, manual = self._scene_with_manual()
+        far = np.asarray(worlds[30]) + np.array([8.0, 5.0, 0.0])
+        K, R, t = broadcast_camera()
+        far_uv = project_world_to_image(K, R, t, (0.0, 0.0),
+                                        far.reshape(1, 3))[0]
+        far_uv = (float(far_uv[0]), float(far_uv[1]))
+        moved = dict(pixels)
+        moved[30] = far_uv
+        steps_far = steps_from_pixels(moved, 60)
+        ctx = FakePlayerContext({
+            30: [_joint("P004", "r_knee", far, far_uv)],
+        })
+        events = (BallEvent(frame=30, kind="touch", score=0.9,
+                            player_id="P004", bone="r_knee"),)
+        anchors = self._gen(events, steps_far, ctx, manual,
+                            sources={30: "detector"})
+        assert [a for a in anchors if a.state == "player_touch"]

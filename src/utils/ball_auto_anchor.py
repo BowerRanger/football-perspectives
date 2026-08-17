@@ -80,6 +80,13 @@ class AutoAnchorCfg:
     grounded_evidence_sources: tuple[str, ...] = (
         "detector", "second_pass", "foot_guided", "bridge", "anchor",
     )
+    # Synthetic-born events (no hard evidence in window) may REFINE the
+    # operator's path but never REWRITE it: kept only when the resolved pin
+    # lies within this distance of the path interpolated between the
+    # bracketing manual anchors (goal_impact exempt — resolved against
+    # known goal geometry, its position is bounded by the goal frame).
+    synthetic_event_max_path_dev_m: float = 1.5
+    synthetic_event_bracket_max_frames: int = 120
 
 
 def auto_anchor_path(ball_dir: Path, shot_id: str) -> Path:
@@ -268,6 +275,63 @@ def _resolve_for_gate(
         return None
 
 
+def _manual_reference_points(
+    manual_anchors: Mapping[int, BallAnchor],
+    per_frame_K: Mapping[int, np.ndarray],
+    per_frame_R: Mapping[int, np.ndarray],
+    per_frame_t: Mapping[int, np.ndarray],
+    distortion: tuple[float, float],
+) -> list[tuple[int, np.ndarray]]:
+    """Coarse world positions of the operator's anchors (state-height
+    ray-casts) — the reference path synthetic events are checked against."""
+    from src.utils.ball_anchor_heights import state_to_height
+
+    pts: list[tuple[int, np.ndarray]] = []
+    for f in sorted(manual_anchors):
+        a = manual_anchors[f]
+        if a.image_xy is None:
+            continue
+        K, R, t = per_frame_K.get(f), per_frame_R.get(f), per_frame_t.get(f)
+        if K is None or R is None or t is None:
+            continue
+        try:
+            z = state_to_height(a.state)
+        except ValueError:
+            continue
+        try:
+            pts.append((f, np.asarray(ankle_ray_to_pitch(
+                a.image_xy, K=K, R=R, t=t, plane_z=z, distortion=distortion,
+            ), dtype=float)))
+        except Exception:  # noqa: BLE001 — grazing ray
+            continue
+    return pts
+
+
+def _path_deviation_m(
+    frame: int,
+    world: np.ndarray,
+    ref_points: list[tuple[int, np.ndarray]],
+    max_bracket_frames: int,
+) -> float | None:
+    """Distance from ``world`` to the linear reference path at ``frame``;
+    None when no adequate bracketing reference exists."""
+    prev = next_ = None
+    for f, p in ref_points:
+        if f <= frame:
+            prev = (f, p)
+        elif next_ is None:
+            next_ = (f, p)
+            break
+    if prev is None or next_ is None:
+        return None
+    (f0, p0), (f1, p1) = prev, next_
+    if f1 - f0 > max_bracket_frames or f1 == f0:
+        return None
+    s = (frame - f0) / (f1 - f0)
+    ref = p0 + (p1 - p0) * s
+    return float(np.linalg.norm(np.asarray(world, dtype=float) - ref))
+
+
 def _apply_gates(
     candidates: list[_Candidate],
     per_frame_K: Mapping[int, np.ndarray],
@@ -348,6 +412,7 @@ def generate_auto_anchors(
     pitch_cfg: Mapping[str, float],
     cfg: AutoAnchorCfg | None = None,
     sources: Mapping[int, str] | None = None,
+    manual_anchors: Mapping[int, BallAnchor] | None = None,
 ) -> tuple[BallAnchor, ...]:
     """Events + grounded sampling -> validated auto anchors, frame order."""
     cfg = cfg or AutoAnchorCfg()
@@ -370,25 +435,50 @@ def generate_auto_anchors(
     # nearby grounded candidates.
     if sources is not None:
         candidates = [c for c in candidates if _not_second_pass(c)]
-    # W2b evidence gate: an event candidate with no real detector evidence
-    # anywhere near its frame was found on a synthetic pixel track — keep it
-    # out of the anchor set (it would body-pin the track to a guess).
+    # W2b/W2c evidence gate: an event candidate with no real detector
+    # evidence near its frame was found on a synthetic pixel track. Such a
+    # candidate may REFINE the operator's path (kept when its resolved pin
+    # stays close to the manual-anchor-interpolated reference) but never
+    # REWRITE it (dropped when it would drag the track away, or when no
+    # reference brackets it). goal_impact is exempt: it resolves against
+    # known goal geometry, so its position is bounded by the goal frame.
     if sources is not None and cfg.require_event_evidence:
         hard = set(cfg.event_evidence_sources)
         w = int(cfg.event_evidence_window)
+        ref_points = _manual_reference_points(
+            manual_anchors or {}, per_frame_K, per_frame_R, per_frame_t,
+            distortion,
+        )
 
         def _has_hard_evidence(frame: int) -> bool:
             return any(sources.get(f) in hard
                        for f in range(frame - w, frame + w + 1))
 
+        def _synthetic_ok(c: _Candidate) -> bool:
+            if c.anchor.state == "goal_impact":
+                return True
+            world = _resolve_for_gate(
+                c, per_frame_K, per_frame_R, per_frame_t, distortion,
+                player_ctx, cfg,
+            )
+            if world is None:
+                return False
+            dev = _path_deviation_m(
+                c.anchor.frame, world, ref_points,
+                cfg.synthetic_event_bracket_max_frames,
+            )
+            return dev is not None and dev <= cfg.synthetic_event_max_path_dev_m
+
         before = len(candidates)
         candidates = [
-            c for c in candidates if _has_hard_evidence(c.anchor.frame)
+            c for c in candidates
+            if _has_hard_evidence(c.anchor.frame) or _synthetic_ok(c)
         ]
         if before != len(candidates):
             logger.info(
                 "ball auto-anchor: evidence gate dropped %d/%d event "
-                "candidates (no %s frame within ±%d)",
+                "candidates (no %s frame within ±%d and off the manual "
+                "reference path)",
                 before - len(candidates), before,
                 "/".join(sorted(hard)), w,
             )

@@ -286,3 +286,25 @@ def test_split_anchors_deterministic():
     b = split_anchors(anchors, fold=0)
     assert [x.frame for x in a[0]] == [x.frame for x in b[0]]
     assert [x.frame for x in a[1]] == [x.frame for x in b[1]]
+
+
+def test_summarize_shapes_and_thresholds():
+    import json
+
+    from src.utils.ball_eval import (AnchorEvalRow, DenseEvalRow, FixEvalRow,
+                                     Violation, summarize)
+
+    a = [AnchorEvalRow(1, "grounded", "ground_exact", True, 0.05, 0.25, 3.0, 40.0),
+         AnchorEvalRow(2, "airborne_low", "ray_only", True, 0.10, None, 2.0, 50.0),
+         AnchorEvalRow(3, "grounded", "ground_exact", False, 0.01, 0.01, 0.5, 45.0),
+         AnchorEvalRow(4, "grounded", "ground_exact", True, None, None, None, None)]
+    s = summarize(a, [FixEvalRow(4, 0.30, 0.2)],
+                  [DenseEvalRow(5, 0.40, 0.9, "detector")],
+                  [Violation(6, "heading_break", 30.0, 12.0)])
+    ho = s["anchors_held_out"]
+    assert ho["n"] == 2 and ho["n_over"] == 1 and abs(ho["max"] - 0.25) < 1e-9
+    assert ho["n_missing"] == 1 and ho["n_3d"] == 1
+    assert s["anchors_kept"]["n"] == 1
+    assert s["fixes"]["n_over"] == 1 and s["dense"]["n_over"] == 1
+    assert s["naturalness"]["by_kind"]["heading_break"] == 1
+    json.dumps(s)

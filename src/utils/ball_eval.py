@@ -286,6 +286,56 @@ def split_anchors(anchors, *, fold, n_folds=2):
     return tuple(kept), tuple(held)
 
 
+def _stats(errs, threshold, n_missing=0):
+    vals = np.array([e for e in errs if e is not None], dtype=float)
+    if len(vals) == 0:
+        return {"n": 0, "p50": None, "p95": None, "max": None,
+                "n_over": 0, "n_missing": int(n_missing)}
+    return {
+        "n": int(len(vals)),
+        "p50": float(np.median(vals)),
+        "p95": float(np.percentile(vals, 95)),
+        "max": float(vals.max()),
+        "n_over": int((vals > threshold).sum()),
+        "n_missing": int(n_missing),
+    }
+
+
+def summarize(anchor_rows, fix_rows, dense_rows, violations, *,
+              threshold_m=0.20):
+    """JSON-safe per-clip summary of all metric sections.
+
+    Anchor rows grade on ``err_3d_m`` where GT exists, else ``lateral_m``
+    (a lower bound on 3-D error, so ``n_over`` never overstates quality).
+    """
+
+    def anchor_err(r):
+        return r.err_3d_m if r.err_3d_m is not None else r.lateral_m
+
+    def anchor_stats(rows):
+        errs = [anchor_err(r) for r in rows]
+        st = _stats([e for e in errs if e is not None], threshold_m,
+                    n_missing=sum(1 for e in errs if e is None))
+        st["n_3d"] = sum(1 for r in rows if r.err_3d_m is not None)
+        return st
+
+    held = [r for r in anchor_rows if r.held_out]
+    kept = [r for r in anchor_rows if not r.held_out]
+    by_kind: dict[str, int] = {}
+    for v in violations:
+        by_kind[v.kind] = by_kind.get(v.kind, 0) + 1
+    return {
+        "anchors_held_out": anchor_stats(held),
+        "anchors_kept": anchor_stats(kept),
+        "fixes": _stats([r.err_3d_m for r in fix_rows], threshold_m,
+                        n_missing=sum(1 for r in fix_rows
+                                      if r.err_3d_m is None)),
+        "dense": _stats([r.lateral_m for r in dense_rows], threshold_m),
+        "naturalness": {"n_violations": len(violations), "by_kind": by_kind},
+        "threshold_m": threshold_m,
+    }
+
+
 __all__ = [
     "pixel_ray",
     "point_ray_distance",
@@ -301,4 +351,5 @@ __all__ = [
     "Violation",
     "naturalness_violations",
     "split_anchors",
+    "summarize",
 ]

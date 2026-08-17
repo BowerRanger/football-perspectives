@@ -87,7 +87,13 @@ def anchor_gt_world(anchor: BallAnchor, K, R, t, distortion, *,
 
 @dataclass(frozen=True)
 class AnchorEvalRow:
-    """Track error graded at one anchor frame."""
+    """Track error graded at one anchor frame.
+
+    ``evidence_nearby`` marks whether hard detector evidence exists near
+    the frame: a held-out anchor with none is operator-only information
+    (the bend it encodes is unknowable to any auto path), so gates apply
+    to the evidenced subset and the rest is reported separately.
+    """
 
     frame: int
     state: str
@@ -97,6 +103,7 @@ class AnchorEvalRow:
     err_3d_m: float | None
     reproj_px: float | None
     depth_m: float | None
+    evidence_nearby: bool = True
 
 
 @dataclass(frozen=True)
@@ -120,7 +127,9 @@ class DenseEvalRow:
 
 def eval_rows_at_anchors(world_by_frame, anchors, cams, *, ball_radius,
                          distortion, joint_world_fn=None,
-                         held_out_frames=frozenset()):
+                         held_out_frames=frozenset(),
+                         evidence_frames=frozenset(),
+                         evidence_window: int = 5):
     """Grade the track at every anchor frame with a pixel and a camera.
 
     ``cams`` maps frame → ``(K, R, t)``; ``world_by_frame`` maps frame →
@@ -140,10 +149,13 @@ def eval_rows_at_anchors(world_by_frame, anchors, cams, *, ball_radius,
         gt, kind = anchor_gt_world(anc, K, R, t, distortion,
                                    ball_radius=ball_radius, joint_world=joint)
         held = anc.frame in held_out_frames
+        near_ev = any(abs(anc.frame - e) <= evidence_window
+                      for e in evidence_frames)
         w = world_by_frame.get(anc.frame)
         if w is None:
             rows.append(AnchorEvalRow(anc.frame, anc.state, kind, held,
-                                      None, None, None, None))
+                                      None, None, None, None,
+                                      evidence_nearby=near_ev))
             continue
         P = np.asarray(w, dtype=float)
         C, d = pixel_ray(anc.image_xy, K, R, t, distortion)
@@ -152,7 +164,8 @@ def eval_rows_at_anchors(world_by_frame, anchors, cams, *, ball_radius,
         reproj = float(np.linalg.norm(uvp - np.asarray(anc.image_xy, float)))
         err3d = float(np.linalg.norm(P - gt)) if gt is not None else None
         rows.append(AnchorEvalRow(anc.frame, anc.state, kind, held,
-                                  lateral, err3d, reproj, depth))
+                                  lateral, err3d, reproj, depth,
+                                  evidence_nearby=near_ev))
     return tuple(rows)
 
 
@@ -330,6 +343,10 @@ def summarize(anchor_rows, fix_rows, dense_rows, violations, *,
         by_kind[v.kind] = by_kind.get(v.kind, 0) + 1
     return {
         "anchors_held_out": anchor_stats(held),
+        "held_out_evidenced": anchor_stats(
+            [r for r in held if r.evidence_nearby]),
+        "held_out_unevidenced": anchor_stats(
+            [r for r in held if not r.evidence_nearby]),
         "anchors_kept": anchor_stats(kept),
         "fixes": _stats([r.err_3d_m for r in fix_rows], threshold_m,
                         n_missing=sum(1 for r in fix_rows

@@ -287,10 +287,13 @@ def run_and_evaluate(src_output: Path, shot_id: str, *, detector: str,
                      if f.world_xyz is not None}
             jw = _joint_world_fn(overlay, shot_id, per_K, per_R, per_t,
                                  distortion)
+            fold_obs = _load_observations(
+                overlay / "ball" / f"{shot_id}_ball_observations.json")
             rows = BE.eval_rows_at_anchors(
                 world, full_set.anchors, cams, ball_radius=ball_radius,
                 distortion=distortion, joint_world_fn=jw,
-                held_out_frames=held_frames)
+                held_out_frames=held_frames,
+                evidence_frames=frozenset(o[0] for o in fold_obs))
             # Aggregate: held-out rows come from their own fold; kept rows
             # (and fixes/dense/naturalness) only from the first fold so
             # nothing is double-counted.
@@ -409,7 +412,8 @@ def main() -> None:
     print(f"\n=== {rep['clip']} ({rep['detector']}"
           f"{', holdout' if rep['holdout'] else ''}) "
           f"threshold={s['threshold_m']} ===")
-    for sec in ("anchors_held_out", "anchors_kept", "fixes", "dense"):
+    for sec in ("anchors_held_out", "held_out_evidenced",
+                "held_out_unevidenced", "anchors_kept", "fixes", "dense"):
         print("  " + fmt(sec))
     nat = s["naturalness"]
     print(f"  naturalness: {nat['n_violations']} violations {nat['by_kind']}")

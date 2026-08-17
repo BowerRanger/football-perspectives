@@ -311,3 +311,20 @@ def test_summarize_shapes_and_thresholds():
     assert s["fixes"]["n_over"] == 1 and s["dense"]["n_over"] == 1
     assert s["naturalness"]["by_kind"]["heading_break"] == 1
     json.dumps(s)
+
+
+def test_summarize_splits_held_out_by_evidence_availability():
+    from src.utils.ball_eval import AnchorEvalRow, summarize
+
+    rows = [
+        AnchorEvalRow(1, "grounded", "ground_exact", True, 0.05, 0.10, 1.0,
+                      40.0, evidence_nearby=True),
+        AnchorEvalRow(2, "grounded", "ground_exact", True, 0.05, 3.00, 9.0,
+                      40.0, evidence_nearby=False),
+    ]
+    s = summarize(rows, [], [], [])
+    assert s["anchors_held_out"]["n"] == 2
+    assert s["held_out_evidenced"]["n"] == 1
+    assert abs(s["held_out_evidenced"]["max"] - 0.10) < 1e-9
+    assert s["held_out_unevidenced"]["n"] == 1
+    assert abs(s["held_out_unevidenced"]["max"] - 3.00) < 1e-9

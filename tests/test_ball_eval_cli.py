@@ -74,3 +74,43 @@ def test_run_and_evaluate_gberch_noop_holdout():
     assert rep["summary"]["anchors_held_out"]["n"] > 0
     assert rep["clip"] == "gberch" and rep["detector"] == "noop"
     json.dumps(rep)
+
+
+@pytest.mark.unit
+def test_caching_detector_replays_without_inner_calls(tmp_path):
+    import numpy as np
+
+    from eval_ball_accuracy import CachingDetector
+
+    from src.utils.ball_detector import BallDetector
+
+    class Counting(BallDetector):
+        SUPPORTS_REDETECT = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def detect(self, frame):
+            self.calls += 1
+            return (10.0, 20.0, 0.9)
+
+    inner = Counting()
+    cache = tmp_path / "det.json"
+    det = CachingDetector(inner, cache)
+    f1 = np.zeros((64, 64, 3), dtype=np.uint8)
+    f2 = np.full((64, 64, 3), 7, dtype=np.uint8)
+    assert det.detect(f1) == (10.0, 20.0, 0.9)
+    assert det.detect(f1) == (10.0, 20.0, 0.9)   # cached
+    assert det.detect(f2) == (10.0, 20.0, 0.9)
+    assert inner.calls == 2
+    det.save()
+
+    inner2 = Counting()
+    det2 = CachingDetector(inner2, cache)
+    assert det2.detect(f1) == (10.0, 20.0, 0.9)
+    assert det2.detect(f2) == (10.0, 20.0, 0.9)
+    assert inner2.calls == 0                      # fully replayed
+    assert det2.detect_candidates(f1, 0.05, 3) == [(10.0, 20.0, 0.9)]
+    assert inner2.calls == 1                      # candidates not yet cached
+    assert det2.detect_candidates(f1, 0.05, 3) == [(10.0, 20.0, 0.9)]
+    assert inner2.calls == 1

@@ -53,6 +53,68 @@ class NoopDetector(BallDetector):
         return None
 
 
+class CachingDetector(BallDetector):
+    """Content-hash cache around a real detector.
+
+    Detector inference dominates eval runtime (a WASB hold-out run costs
+    CPU-hours); frames decode deterministically, so caching on a frame-content
+    hash lets one run pay and every later run — including the second fold of
+    the same run — replay. Crops from the second-pass/foot-guided loops hash
+    differently from full frames, so all passes cache correctly.
+    """
+
+    def __init__(self, inner: BallDetector, cache_path: Path):
+        self._inner = inner
+        self._path = Path(cache_path)
+        self._detect: dict[str, tuple | None] = {}
+        self._cands: dict[str, list] = {}
+        self._dirty = 0
+        self.SUPPORTS_REDETECT = getattr(inner, "SUPPORTS_REDETECT", True)
+        if self._path.exists():
+            data = json.loads(self._path.read_text())
+            self._detect = {k: (tuple(v) if v is not None else None)
+                            for k, v in data.get("detect", {}).items()}
+            self._cands = {k: [tuple(c) for c in v]
+                           for k, v in data.get("candidates", {}).items()}
+
+    @staticmethod
+    def _key(frame) -> str:
+        import hashlib
+        h = hashlib.md5(frame[::4, ::4].tobytes())
+        h.update(str(frame.shape).encode())
+        return h.hexdigest()
+
+    def detect(self, frame):  # noqa: ANN001
+        k = self._key(frame)
+        if k in self._detect:
+            return self._detect[k]
+        det = self._inner.detect(frame)
+        self._detect[k] = tuple(det) if det is not None else None
+        self._dirty += 1
+        if self._dirty >= 200:
+            self.save()
+        return det
+
+    def detect_candidates(self, frame, min_score, top_k=5):  # noqa: ANN001
+        k = f"{self._key(frame)}:{min_score}:{top_k}"
+        if k in self._cands:
+            return list(self._cands[k])
+        out = self._inner.detect_candidates(frame, min_score, top_k)
+        self._cands[k] = [tuple(c) for c in out]
+        self._dirty += 1
+        return out
+
+    def save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps({
+            "detect": {k: (list(v) if v is not None else None)
+                       for k, v in self._detect.items()},
+            "candidates": {k: [list(c) for c in v]
+                           for k, v in self._cands.items()},
+        }))
+        self._dirty = 0
+
+
 def build_overlay(src_output: Path, tmp_root: Path, shot_id: str,
                   kept: BallAnchorSet | None) -> Path:
     """Create the overlay dir: symlinked inputs + a real ``ball/``."""
@@ -78,12 +140,16 @@ def build_overlay(src_output: Path, tmp_root: Path, shot_id: str,
     return ov
 
 
-def _make_detector(kind: str, ball_cfg: dict) -> BallDetector:
+def _make_detector(kind: str, ball_cfg: dict,
+                   cache_path: Path | None = None) -> BallDetector:
     if kind == "noop":
         return NoopDetector()
     if kind == "wasb":
         from src.stages.ball import _build_detector
-        return _build_detector(ball_cfg)
+        det = _build_detector(ball_cfg)
+        if cache_path is not None:
+            det = CachingDetector(det, cache_path)
+        return det
     raise ValueError(f"unknown detector kind: {kind!r}")
 
 
@@ -153,24 +219,28 @@ def _event_frames(keyframes_path: Path) -> set[int]:
 
 
 def _run_fold(src_output: Path, shot_id: str, config: dict, detector: str,
-              kept: BallAnchorSet | None, tmp_root: Path):
+              kept: BallAnchorSet | None, tmp_root: Path,
+              det_cache: Path | None = None):
     """Run the ball stage once in an overlay; return produced artifact paths."""
     from src.stages.ball import BallStage
 
     overlay = build_overlay(src_output, tmp_root, shot_id, kept)
-    det = _make_detector(detector, config["ball"])
+    det = _make_detector(detector, config["ball"], cache_path=det_cache)
     clip = overlay / "shots" / f"{shot_id}.mp4"
     cam_path = overlay / "camera" / f"{shot_id}_camera_track.json"
     track_out = overlay / "ball" / f"{shot_id}_ball_track.json"
     stage = BallStage(config=config, output_dir=overlay, ball_detector=det)
     stage._run_shot(shot_id, clip, cam_path, track_out, config["ball"], det)
+    if isinstance(det, CachingDetector):
+        det.save()
     return overlay, track_out
 
 
 def run_and_evaluate(src_output: Path, shot_id: str, *, detector: str,
                      holdout: bool, n_folds: int, config: dict,
                      fixes_path: Path | None = None,
-                     threshold_m: float = 0.20) -> dict:
+                     threshold_m: float = 0.20,
+                     det_cache: Path | None = None) -> dict:
     src_output = Path(src_output)
     anchors_file = src_output / "ball" / f"{shot_id}_ball_anchors.json"
     full_set = BallAnchorSet.load(anchors_file)
@@ -200,7 +270,8 @@ def run_and_evaluate(src_output: Path, shot_id: str, *, detector: str,
         held_frames = frozenset(a.frame for a in held)
         with tempfile.TemporaryDirectory(prefix="ball_eval_") as tmp:
             overlay, track_out = _run_fold(
-                src_output, shot_id, config, detector, kept_set, Path(tmp))
+                src_output, shot_id, config, detector, kept_set, Path(tmp),
+                det_cache=det_cache)
             track = BallTrack.load(track_out)
             world = {f.frame: f.world_xyz for f in track.frames
                      if f.world_xyz is not None}
@@ -276,13 +347,27 @@ def main() -> None:
                     help="write the full report JSON here")
     ap.add_argument("--config", type=Path,
                     default=ROOT / "config" / "default.yaml")
+    ap.add_argument("--set", action="append", default=[], metavar="K=V",
+                    help="dotted config override, e.g. "
+                         "ball.kinematic_touch.enabled=false")
+    ap.add_argument("--det-cache", type=Path, default=None,
+                    help="content-hash detection cache file (pay detector "
+                         "inference once per clip; reruns replay)")
     args = ap.parse_args()
 
     config = yaml.safe_load(open(args.config))
+    for kv in args.set:
+        key, _, raw = kv.partition("=")
+        node = config
+        parts = key.split(".")
+        for p in parts[:-1]:
+            node = node.setdefault(p, {})
+        node[parts[-1]] = yaml.safe_load(raw)
     rep = run_and_evaluate(
         args.output, args.shot, detector=args.detector,
         holdout=args.holdout, n_folds=args.n_folds, config=config,
-        fixes_path=args.fixes, threshold_m=args.threshold)
+        fixes_path=args.fixes, threshold_m=args.threshold,
+        det_cache=args.det_cache)
 
     s = rep["summary"]
 

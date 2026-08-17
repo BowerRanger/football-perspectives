@@ -1,0 +1,205 @@
+{
+ "clip": "s013",
+ "output_dir": "output-japan",
+ "detector": "noop",
+ "holdout": true,
+ "n_folds": 2,
+ "summary": {
+  "anchors_held_out": {
+   "n": 13,
+   "p50": 5.84711099061237,
+   "p95": 12.684469437344733,
+   "max": 12.764977323723764,
+   "n_over": 13,
+   "n_missing": 0,
+   "n_3d": 10
+  },
+  "anchors_kept": {
+   "n": 5,
+   "p50": 1.6280579355608324e-14,
+   "p95": 0.07403118095978342,
+   "max": 0.08757375353771854,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 4
+  },
+  "fixes": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0
+  },
+  "dense": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0
+  },
+  "naturalness": {
+   "n_violations": 0,
+   "by_kind": {}
+  },
+  "threshold_m": 0.2,
+  "held_out_by_state": {
+   "airborne_low": {
+    "n": 2,
+    "p50": 2.7691798274503463,
+    "p95": 4.35411260137549,
+    "max": 4.5302162429227275,
+    "n_over": 2,
+    "n_missing": 0
+   },
+   "bounce": {
+    "n": 2,
+    "p50": 8.85995239497272,
+    "p95": 11.571509658897034,
+    "max": 11.872793799333069,
+    "n_over": 2,
+    "n_missing": 0
+   },
+   "goal_impact": {
+    "n": 1,
+    "p50": 3.9517127318700243,
+    "p95": 3.9517127318700243,
+    "max": 3.9517127318700243,
+    "n_over": 1,
+    "n_missing": 0
+   },
+   "grounded": {
+    "n": 1,
+    "p50": 12.630797513092045,
+    "p95": 12.630797513092045,
+    "max": 12.630797513092045,
+    "n_over": 1,
+    "n_missing": 0
+   },
+   "player_touch": {
+    "n": 7,
+    "p50": 7.016299461628355,
+    "p95": 11.737914533305599,
+    "max": 12.764977323723764,
+    "n_over": 7,
+    "n_missing": 0
+   }
+  }
+ },
+ "per_fold": [
+  {
+   "fold": 0,
+   "n_kept": 6,
+   "n_held_out": 8
+  },
+  {
+   "fold": 1,
+   "n_kept": 8,
+   "n_held_out": 6
+  }
+ ],
+ "worst_held_out": [
+  {
+   "frame": 8,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 8.882814433913524,
+   "err_3d_m": 12.764977323723764,
+   "reproj_px": 425.3583114321488,
+   "depth_m": 92.41279591490864
+  },
+  {
+   "frame": 0,
+   "state": "grounded",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 9.207299771619278,
+   "err_3d_m": 12.630797513092045,
+   "reproj_px": 432.06119202872617,
+   "depth_m": 92.38103090999489
+  },
+  {
+   "frame": 216,
+   "state": "bounce",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 2.5059066873500155,
+   "err_3d_m": 11.872793799333069,
+   "reproj_px": 194.43195611239597,
+   "depth_m": 77.74783352169057
+  },
+  {
+   "frame": 145,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 8.778706411373994,
+   "err_3d_m": 9.341434688996557,
+   "reproj_px": 469.86925238440756,
+   "depth_m": 82.81340958586594
+  },
+  {
+   "frame": 114,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 7.818243754189663,
+   "err_3d_m": 8.129289358594212,
+   "reproj_px": 422.886189015335,
+   "depth_m": 82.59701151704209
+  },
+  {
+   "frame": 173,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 6.242726600883099,
+   "err_3d_m": 7.016299461628355,
+   "reproj_px": 345.7785238363662,
+   "depth_m": 81.43493367992426
+  },
+  {
+   "frame": 187,
+   "state": "bounce",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 4.395289442170457,
+   "err_3d_m": 5.84711099061237,
+   "reproj_px": 260.75903964409065,
+   "depth_m": 83.31452539675254
+  },
+  {
+   "frame": 181,
+   "state": "airborne_low",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 4.5302162429227275,
+   "err_3d_m": null,
+   "reproj_px": 259.7486658532245,
+   "depth_m": 82.50301900127617
+  },
+  {
+   "frame": 196,
+   "state": "goal_impact",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 3.9517127318700243,
+   "err_3d_m": null,
+   "reproj_px": 247.60357090451782,
+   "depth_m": 84.69548676742191
+  },
+  {
+   "frame": 42,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 3.6352656117572835,
+   "err_3d_m": 3.6430869409821285,
+   "reproj_px": 172.91072013507477,
+   "depth_m": 93.09712409190628
+  }
+ ],
+ "violations": []
+}

@@ -1,0 +1,229 @@
+{
+ "clip": "origi01",
+ "output_dir": "output-origi",
+ "detector": "noop",
+ "holdout": true,
+ "n_folds": 2,
+ "summary": {
+  "anchors_held_out": {
+   "n": 57,
+   "p50": 0.8733073596675156,
+   "p95": 4.861732061874283,
+   "max": 24.231022662941843,
+   "n_over": 47,
+   "n_missing": 2,
+   "n_3d": 35
+  },
+  "anchors_kept": {
+   "n": 27,
+   "p50": 7.105427357601002e-15,
+   "p95": 1.5617706521587532e-14,
+   "max": 5.025594324012839,
+   "n_over": 1,
+   "n_missing": 0,
+   "n_3d": 17
+  },
+  "fixes": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0
+  },
+  "dense": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0
+  },
+  "naturalness": {
+   "n_violations": 0,
+   "by_kind": {}
+  },
+  "threshold_m": 0.2,
+  "held_out_by_state": {
+   "airborne_high": {
+    "n": 4,
+    "p50": 1.0829660907208813,
+    "p95": 1.7536116971568148,
+    "max": 1.860844002049587,
+    "n_over": 4,
+    "n_missing": 0
+   },
+   "airborne_low": {
+    "n": 10,
+    "p50": 0.12725735093989637,
+    "p95": 0.28596432886088513,
+    "max": 0.312939234250965,
+    "n_over": 2,
+    "n_missing": 1
+   },
+   "airborne_mid": {
+    "n": 7,
+    "p50": 0.8733073596675156,
+    "p95": 1.2267724154816833,
+    "max": 1.3216939901226414,
+    "n_over": 7,
+    "n_missing": 0
+   },
+   "bounce": {
+    "n": 2,
+    "p50": 2.5657696303056037,
+    "p95": 2.824942009961781,
+    "max": 2.8537389410346896,
+    "n_over": 2,
+    "n_missing": 0
+   },
+   "catch": {
+    "n": 0,
+    "p50": null,
+    "p95": null,
+    "max": null,
+    "n_over": 0,
+    "n_missing": 1
+   },
+   "goal_impact": {
+    "n": 1,
+    "p50": 0.7559815888628142,
+    "p95": 0.7559815888628142,
+    "max": 0.7559815888628142,
+    "n_over": 1,
+    "n_missing": 0
+   },
+   "grounded": {
+    "n": 19,
+    "p50": 0.5610682646326272,
+    "p95": 2.270433727381947,
+    "max": 3.230498587669082,
+    "n_over": 17,
+    "n_missing": 0
+   },
+   "player_touch": {
+    "n": 14,
+    "p50": 2.900576548960288,
+    "p95": 12.393088689939905,
+    "max": 24.231022662941843,
+    "n_over": 14,
+    "n_missing": 0
+   }
+  }
+ },
+ "per_fold": [
+  {
+   "fold": 0,
+   "n_kept": 28,
+   "n_held_out": 32
+  },
+  {
+   "fold": 1,
+   "n_kept": 32,
+   "n_held_out": 28
+  }
+ ],
+ "worst_held_out": [
+  {
+   "frame": 282,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 1.0441830366985703,
+   "err_3d_m": 24.231022662941843,
+   "reproj_px": 59.75955159401634,
+   "depth_m": 69.41460799000346
+  },
+  {
+   "frame": 111,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 1.1621958415704945,
+   "err_3d_m": 6.018816550631178,
+   "reproj_px": 82.69558791723308,
+   "depth_m": 63.215817874937905
+  },
+  {
+   "frame": 155,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 1.5749802927202534,
+   "err_3d_m": 4.994829327248922,
+   "reproj_px": 95.0124078084354,
+   "depth_m": 58.85093155919592
+  },
+  {
+   "frame": 40,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 1.4180884500900588,
+   "err_3d_m": 4.828457745530625,
+   "reproj_px": 74.91313662753194,
+   "depth_m": 83.10959779117763
+  },
+  {
+   "frame": 140,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 0.17676171024718004,
+   "err_3d_m": 4.396730000981578,
+   "reproj_px": 12.716770585239942,
+   "depth_m": 59.76866017466121
+  },
+  {
+   "frame": 440,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 1.803064586880317,
+   "err_3d_m": 3.4012325392562763,
+   "reproj_px": 126.94796287763168,
+   "depth_m": 84.46502912536445
+  },
+  {
+   "frame": 88,
+   "state": "grounded",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 1.8374989863089992,
+   "err_3d_m": 3.230498587669082,
+   "reproj_px": 119.6956897776913,
+   "depth_m": 69.58059450632747
+  },
+  {
+   "frame": 425,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 2.2874625228943364,
+   "err_3d_m": 3.138960148271114,
+   "reproj_px": 156.51618257554958,
+   "depth_m": 84.36799167052968
+  },
+  {
+   "frame": 330,
+   "state": "bounce",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 2.518594596822435,
+   "err_3d_m": 2.8537389410346896,
+   "reproj_px": 127.87190149887057,
+   "depth_m": 91.17262416981623
+  },
+  {
+   "frame": 7,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 0.899222090336757,
+   "err_3d_m": 2.662192949649462,
+   "reproj_px": 47.32691730834291,
+   "depth_m": 88.74013692947676
+  }
+ ],
+ "violations": []
+}

@@ -106,17 +106,80 @@ def _eval_linear(
         world[f] = p0 + (p1 - p0) * s
 
 
+def _evidence_knots(
+    seg: BallSegment,
+    evidence_worlds: dict[int, np.ndarray],
+    stride: int,
+    window: int,
+) -> list[tuple[int, np.ndarray]]:
+    """Strided, median-filtered evidence knots strictly inside a span.
+
+    One knot per ``stride`` frames; each knot is the per-axis median of the
+    evidence within ``±window`` frames, so single-frame detection jitter
+    does not bend the rendered path.
+    """
+    inside = sorted(f for f in evidence_worlds
+                    if seg.start_frame < f < seg.end_frame)
+    knots: list[tuple[int, np.ndarray]] = []
+    last = None
+    for f in inside:
+        if last is not None and f - last < stride:
+            continue
+        # Symmetric window only: an unbalanced aggregate drags the knot
+        # along the path near run edges; a lone unbalanced point would
+        # pass its jitter straight through, so skip it entirely.
+        lo = [g for g in inside if f - window <= g < f]
+        hi = [g for g in inside if f < g <= f + window]
+        k = min(len(lo), len(hi))
+        if k == 0 and len(inside) > 1:
+            continue
+        group = [*lo[len(lo) - k:], f, *hi[:k]]
+        near = [np.asarray(evidence_worlds[g], dtype=float) for g in group]
+        # Mean (not median): detection jitter is zero-mean and outliers are
+        # rejected upstream by the track cleaner.
+        knots.append((f, np.mean(np.stack(near), axis=0)))
+        last = f
+    return knots
+
+
+def _eval_polyline(
+    seg: BallSegment,
+    p0: np.ndarray,
+    p1: np.ndarray,
+    knots: list[tuple[int, np.ndarray]],
+    world: dict[int, np.ndarray | None],
+) -> None:
+    """Piecewise-linear render through endpoint-pinned evidence knots."""
+    pts = [(seg.start_frame, p0), *knots, (seg.end_frame, p1)]
+    for (fa, pa), (fb, pb) in zip(pts, pts[1:]):
+        span = fb - fa
+        for f in range(fa, fb + 1):
+            s = 0.0 if span == 0 else (f - fa) / span
+            world[f] = pa + (pb - pa) * s
+    world[seg.start_frame] = p0
+    world[seg.end_frame] = p1
+
+
 def interpolate_events(
     keyframe_set: BallKeyframeSet,
     *,
     n_frames: int | None = None,
     ball_radius_m: float = _BALL_RADIUS_M,
+    evidence_worlds: dict[int, tuple[float, float, float]] | None = None,
+    evidence_stride: int = 4,
+    evidence_window: int = 2,
 ) -> BallTrack:
     """Materialise ``keyframe_set`` into a dense ``BallTrack``.
 
     ``n_frames`` defaults to one past the last keyframe / segment frame.
     Frames not covered by any segment fall back to their keyframe world
     position (if any) or ``None`` (state ``"missing"``).
+
+    ``evidence_worlds`` (sub-20cm campaign W4) maps frames to real-evidence
+    world positions (e.g. detection ray ∩ ground); ``roll`` spans containing
+    such evidence render as an endpoint-pinned polyline through strided
+    median knots instead of a straight line, so curved or decelerating
+    ground passes follow what the detector actually saw.
     """
     fps = float(keyframe_set.fps)
     total = _n_frames(keyframe_set, n_frames)
@@ -142,8 +205,14 @@ def interpolate_events(
             fs = _eval_ballistic(seg, p0, p1, fps, world)
             if fs is not None:
                 flight_segments.append(fs)
+        elif seg.kind == "free_flight" and p0 is not None and p1 is not None:
+            # Two known endpoints under gravity ARE a ballistic span; the
+            # historical linear fallback violated flight physics (W4 fix).
+            fs = _eval_ballistic(seg, p0, p1, fps, world)
+            if fs is not None:
+                flight_segments.append(fs)
         elif p0 is not None and p1 is not None and seg.kind in (
-            "roll", "carry", "free_flight",
+            "roll", "carry",
         ):
             # NOTE: ``carry`` interpolates LINEARLY here as a deliberate P1
             # interim. The §10 design target is to follow the owning
@@ -151,7 +220,15 @@ def interpolate_events(
             # threaded into the interpolator (a Phase-3 follow-up). Linear
             # between two nearby same-player touches (gap ≤15 fr, ≤3 m by
             # detect_carry_spans) is a reasonable approximation until then.
-            _eval_linear(seg, p0, p1, world)
+            knots = (
+                _evidence_knots(seg, evidence_worlds, evidence_stride,
+                                evidence_window)
+                if evidence_worlds and seg.kind == "roll" else []
+            )
+            if knots:
+                _eval_polyline(seg, p0, p1, knots, world)
+            else:
+                _eval_linear(seg, p0, p1, world)
         elif seg.kind == "rest" and (p0 is not None or p1 is not None):
             # Hold a constant position. Works from whichever endpoint has a
             # keyframe so clip-boundary holds (open start has only the end

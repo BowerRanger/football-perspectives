@@ -77,14 +77,19 @@ def refit_airborne_chains(
     distortion: tuple[float, float],
     fps: float,
     max_residual_px: float = 5.0,
+    extra_observations: dict[int, tuple[float, float]] | None = None,
 ) -> tuple[dict[int, tuple[float, float, float]], list[dict]]:
     """Return ``({airborne_frame: refit_world}, diagnostics)``.
 
     Only interior airborne-bucket anchors of successfully fitted chains
     appear in the updates map; everything else is untouched.
+    ``extra_observations`` (W4) are real in-span detection pixels — they
+    densify the fit and keep chains determined when interior anchor clicks
+    are absent (e.g. a hold-out run or a lightly-anchored clip).
     """
     updates: dict[int, tuple[float, float, float]] = {}
     diags: list[dict] = []
+    extra_observations = extra_observations or {}
     for start, air_frames, end in _chains(anchor_by_frame, world_for_anchor):
         if start is None or end is None:
             diags.append({
@@ -102,6 +107,16 @@ def refit_airborne_chains(
                     and f in per_frame_R and f in per_frame_t):
                 obs.append((f, (float(anc.image_xy[0]),
                                 float(anc.image_xy[1]))))
+        n_extra = 0
+        anchored = {f for f, _ in obs}
+        for f in sorted(extra_observations):
+            if (start < f < end and f not in anchored
+                    and f in per_frame_K and f in per_frame_R
+                    and f in per_frame_t):
+                uv = extra_observations[f]
+                obs.append((f, (float(uv[0]), float(uv[1]))))
+                n_extra += 1
+        obs.sort(key=lambda o: o[0])
         if len(obs) < 3 or obs[0][0] != start or obs[-1][0] != end:
             diags.append({
                 "kind": "underconstrained_chain",
@@ -149,6 +164,7 @@ def refit_airborne_chains(
         diags.append({
             "kind": "chain_fit", "accepted": bool(ok),
             "span": [start, end], "n_air": len(air_frames),
+            "n_extra_obs": n_extra,
             "residual_px": float(residual),
         })
         if not ok:

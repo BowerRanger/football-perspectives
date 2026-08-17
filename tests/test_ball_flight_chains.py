@@ -151,3 +151,32 @@ def test_resolve_events_dense_track_follows_fitted_arc():
         w, _conf = res.world_by_frame[f]
         err = np.linalg.norm(np.asarray(w) - _arc(p0, v0, f, 0))
         assert err < 0.10, f"frame {f}: {err:.3f}m off the true arc"
+
+
+def test_chain_refit_uses_extra_detection_observations():
+    """Hold-out scenario: interior airborne ANCHORS absent, but real
+    detections along the arc still determine the fit."""
+    from src.utils.ball_flight_chains import refit_airborne_chains
+
+    anchors, worlds, truth, cams, R, t = _chain_fixture()
+    # Keep only ONE interior anchor (frame 12); frames 6/18 become
+    # detections instead.
+    extra = {}
+    for f in (6, 18):
+        w = truth[f]
+        extra[f] = _uv(w, R, t)
+        anchors.pop(f)
+        worlds.pop(f)
+    per_K = {f: c[0] for f, c in cams.items()}
+    per_R = {f: c[1] for f, c in cams.items()}
+    per_t = {f: c[2] for f, c in cams.items()}
+    updates, diags = refit_airborne_chains(
+        anchor_by_frame=anchors, world_for_anchor=worlds,
+        per_frame_K=per_K, per_frame_R=per_R, per_frame_t=per_t,
+        distortion=_DIST, fps=_FPS, extra_observations=extra,
+    )
+    assert set(updates) == {12}
+    err = np.linalg.norm(np.asarray(updates[12]) - truth[12])
+    assert err < 0.05
+    fit = next(d for d in diags if d.get("kind") == "chain_fit")
+    assert fit["accepted"] and fit.get("n_extra_obs", 0) == 2

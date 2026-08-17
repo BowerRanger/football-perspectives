@@ -175,6 +175,10 @@ def _resolve_waypoint_world(
         return None
 
 
+_HARD_EVIDENCE_SOURCES = frozenset({"detector", "second_pass", "foot_guided"})
+_EVIDENCE_MIN_CONF = 0.3
+
+
 def resolve_events(
     *,
     anchor_by_frame: dict[int, BallAnchor],
@@ -189,8 +193,27 @@ def resolve_events(
     fps: float,
     clip_id: str,
     image_size: tuple[int, int],
+    steps=None,
+    confidences: dict[int, float] | None = None,
+    sources: dict[int, str] | None = None,
 ) -> EventResolveResult:
-    """Resolve events → keyframes + segments → derived dense track."""
+    """Resolve events → keyframes + segments → derived dense track.
+
+    ``steps``/``confidences``/``sources`` (W4) carry the shared core's
+    observation stream; frames whose observation came from a real detector
+    pass become rendering evidence: roll spans follow their ground points
+    and airborne chain fits consume their pixels as extra ray constraints.
+    """
+    hard_obs: dict[int, tuple[float, float]] = {}
+    if steps is not None and sources:
+        conf = confidences or {}
+        for s in steps:
+            if s.uv is None:
+                continue
+            f = s.frame
+            if (sources.get(f) in _HARD_EVIDENCE_SOURCES
+                    and conf.get(f, 0.0) >= _EVIDENCE_MIN_CONF):
+                hard_obs[f] = (float(s.uv[0]), float(s.uv[1]))
     world_for_anchor: dict[int, tuple[float, float, float] | None] = {}
     n_ground_clamped = 0
     for fi in sorted(anchor_by_frame):
@@ -219,14 +242,33 @@ def resolve_events(
         )
 
     # W3 — airborne chains: replace bucket-height placeholders with a
-    # gravity-arc fit through the bracketing hard knots (pixels as rays).
+    # gravity-arc fit through the bracketing hard knots (pixels as rays;
+    # W4: real in-span detections densify the fit).
     from src.utils.ball_flight_chains import refit_airborne_chains
     chain_updates, chain_diags = refit_airborne_chains(
         anchor_by_frame=anchor_by_frame,
         world_for_anchor=world_for_anchor,
         per_frame_K=per_frame_K, per_frame_R=per_frame_R,
         per_frame_t=per_frame_t, distortion=distortion, fps=fps,
+        extra_observations=hard_obs or None,
     )
+    # Refit keyframes stay ray-faithful: snap each onto its clicked ray at
+    # the fitted depth BEFORE rendering, so interpolation and the C4 stage
+    # pass agree (no kinks between an anchor frame and its neighbours).
+    for fi, w in list(chain_updates.items()):
+        anc = anchor_by_frame.get(fi)
+        K = per_frame_K.get(fi)
+        R = per_frame_R.get(fi)
+        t = per_frame_t.get(fi)
+        if (anc is not None and anc.image_xy is not None
+                and K is not None and R is not None and t is not None):
+            snapped = project_point_onto_pixel_ray(
+                np.asarray(w, dtype=float),
+                (float(anc.image_xy[0]), float(anc.image_xy[1])),
+                K, R, t, distortion,
+            )
+            chain_updates[fi] = (float(snapped[0]), float(snapped[1]),
+                                 float(snapped[2]))
     world_for_anchor.update(chain_updates)
 
     # Force player_bone depth_source for every touch (body-pinned, even on
@@ -251,8 +293,28 @@ def resolve_events(
     )
     keyframe_set = dataclasses.replace(keyframe_set, segments=segments)
 
+    # W4 — rendering evidence: real detections' ground points steer roll
+    # spans (the interpolator ignores them on flight spans, whose shape the
+    # chain fits already own).
+    evidence_worlds: dict[int, tuple[float, float, float]] = {}
+    for fi, uv in hard_obs.items():
+        if fi in anchor_by_frame:
+            continue
+        K = per_frame_K.get(fi)
+        R = per_frame_R.get(fi)
+        t = per_frame_t.get(fi)
+        if K is None or R is None or t is None:
+            continue
+        try:
+            w = ankle_ray_to_pitch(uv, K=K, R=R, t=t, plane_z=ball_radius,
+                                   distortion=distortion)
+            evidence_worlds[fi] = (float(w[0]), float(w[1]), float(w[2]))
+        except Exception:  # noqa: BLE001 — grazing ray: no evidence point
+            continue
+
     track = interpolate_events(
         keyframe_set, n_frames=n_frames, ball_radius_m=ball_radius,
+        evidence_worlds=evidence_worlds or None,
     )
     world_by_frame = {
         f.frame: (f.world_xyz, f.confidence)

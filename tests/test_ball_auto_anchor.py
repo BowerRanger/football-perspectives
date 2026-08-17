@@ -547,3 +547,55 @@ class TestSyntheticPathDeviation:
         anchors = self._gen(events, steps_far, ctx, manual,
                             sources={30: "detector"})
         assert [a for a in anchors if a.state == "player_touch"]
+
+
+class TestFlightGateAndBurstNMS:
+    """W5f: a flying ball passes OVER players — their feet near its RAY
+    must not mint touches (headers/chest excepted); and consecutive
+    same-player touch bursts collapse to the strongest."""
+
+    def _gen(self, events, steps, ctx, sources=None):
+        Ks, Rs, ts = per_frame_cams(60)
+        return generate_auto_anchors(
+            events=events, steps=steps, confidences={},
+            player_ctx=ctx,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0), fps=FPS, pitch_cfg=PITCH_CFG,
+            cfg=AutoAnchorCfg(), sources=sources,
+        )
+
+    def test_foot_touch_not_minted_while_ball_in_flight(self):
+        worlds, pixels, steps_flat = _rolling_scene()
+        steps = steps_from_pixels(pixels, 60, p_flight={30: 0.9, 29: 0.9,
+                                                        31: 0.9})
+        ctx = FakePlayerContext({
+            30: [_joint("P004", "r_foot", worlds[30], pixels[30])],
+        })
+        events = (BallEvent(frame=30, kind="touch", score=0.9,
+                            player_id="P004", bone="r_foot"),)
+        anchors = self._gen(events, steps, ctx)
+        assert not [a for a in anchors if a.state == "player_touch"]
+
+    def test_header_minted_while_ball_in_flight(self):
+        worlds, pixels, steps_flat = _rolling_scene()
+        steps = steps_from_pixels(pixels, 60, p_flight={30: 0.9})
+        ctx = FakePlayerContext({
+            30: [_joint("P004", "head", worlds[30], pixels[30])],
+        })
+        events = (BallEvent(frame=30, kind="touch", score=0.9,
+                            player_id="P004", bone="head"),)
+        anchors = self._gen(events, steps, ctx)
+        assert [a for a in anchors if a.state == "player_touch"]
+
+    def test_same_player_touch_burst_collapses_to_strongest(self):
+        worlds, pixels, steps = _rolling_scene()
+        ctx = FakePlayerContext({
+            f: [_joint("P005", "r_foot", worlds[f], pixels[f])]
+            for f in (30, 31, 32)
+        })
+        events = tuple(BallEvent(frame=f, kind="touch", score=s,
+                                 player_id="P005", bone="r_foot")
+                       for f, s in ((30, 0.6), (31, 0.9), (32, 0.7)))
+        anchors = self._gen(events, steps, ctx)
+        touches = [a for a in anchors if a.state == "player_touch"]
+        assert [a.frame for a in touches] == [31]

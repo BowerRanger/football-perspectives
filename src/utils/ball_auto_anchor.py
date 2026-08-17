@@ -87,6 +87,17 @@ class AutoAnchorCfg:
     # known goal geometry, its position is bounded by the goal frame).
     synthetic_event_max_path_dev_m: float = 1.5
     synthetic_event_bracket_max_frames: int = 120
+    # A flying ball passes OVER players: their feet/knees sit near its
+    # camera RAY (the contact gap is depth-blind) and would mint phantom
+    # touches. While the IMM says flight, only aerial contacts (header/
+    # chest/shoulder) may mint (sub-20cm campaign W5f, kroupi01).
+    flight_touch_max_p_flight: float = 0.6
+    # Consecutive same-player touch bursts (FK jitter under a moving ball)
+    # collapse to the strongest within this window.
+    touch_burst_nms_frames: int = 4
+
+
+_AERIAL_TOUCH_BONES = frozenset({"head", "chest", "l_shoulder", "r_shoulder"})
 
 
 def auto_anchor_path(ball_dir: Path, shot_id: str) -> Path:
@@ -125,6 +136,22 @@ def _outbound_speed_px(
     return 0.0
 
 
+def _burst_nms(candidates: list[_Candidate], window: int) -> list[_Candidate]:
+    """Collapse same-player touch runs within ``window`` frames to the
+    strongest; non-touch candidates pass through untouched."""
+    touches = [c for c in candidates if c.anchor.state == "player_touch"]
+    others = [c for c in candidates if c.anchor.state != "player_touch"]
+    kept: list[_Candidate] = []
+    for c in sorted(touches, key=lambda c: -c.score):
+        if any(k.anchor.player_id == c.anchor.player_id
+               and abs(k.anchor.frame - c.anchor.frame) <= window
+               for k in kept):
+            continue
+        kept.append(c)
+    kept.sort(key=lambda c: c.anchor.frame)
+    return [*others, *kept]
+
+
 def _event_candidates(
     events: Sequence[BallEvent],
     steps_by_frame: Mapping[int, tuple[float, float]],
@@ -134,10 +161,23 @@ def _event_candidates(
     per_frame_t: Mapping[int, np.ndarray],
     distortion: tuple[float, float],
     cfg: AutoAnchorCfg,
+    p_flight_by_frame: Mapping[int, float] | None = None,
 ) -> list[_Candidate]:
     out: list[_Candidate] = []
+    pf_by_frame = p_flight_by_frame or {}
     for ev in events:
         if ev.score < cfg.min_event_score:
+            continue
+        if (ev.kind == "touch"
+                and pf_by_frame.get(ev.frame, 0.0)
+                > cfg.flight_touch_max_p_flight
+                and ev.bone not in _AERIAL_TOUCH_BONES):
+            logger.info(
+                "ball auto-anchor: touch at frame %d (%s/%s) rejected — "
+                "ball in flight (p_flight %.2f)",
+                ev.frame, ev.player_id, ev.bone,
+                pf_by_frame.get(ev.frame, 0.0),
+            )
             continue
         if ev.kind == "stationary":
             for f in {ev.frame, ev.end_frame if ev.end_frame is not None else ev.frame}:
@@ -197,7 +237,7 @@ def _event_candidates(
                 ev.score,
             ))
         # velocity_break: solver split hint only — never an anchor.
-    return out
+    return _burst_nms(out, cfg.touch_burst_nms_frames)
 
 
 def _grounded_candidates(
@@ -428,6 +468,9 @@ def generate_auto_anchors(
     candidates = _event_candidates(
         events, steps_by_frame, player_ctx,
         per_frame_K, per_frame_R, per_frame_t, distortion, cfg,
+        p_flight_by_frame={
+            s.frame: float(getattr(s, "p_flight", 0.0)) for s in steps
+        },
     )
     # Second-pass detections densify solver evidence but never mint
     # constraints (ball v2 design, Phase 1). Filter event candidates BEFORE

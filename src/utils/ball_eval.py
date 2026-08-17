@@ -185,6 +185,86 @@ def dense_lateral_rows(world_by_frame, observations, cams, *, distortion,
     return tuple(rows)
 
 
+@dataclass(frozen=True)
+class NaturalnessCfg:
+    """Thresholds for the natural-motion validator (spec A4)."""
+
+    max_heading_change_deg: float = 12.0
+    min_speed_m_s: float = 2.0
+    event_window_frames: int = 2
+    flight_g_tol: float = 0.25
+    roll_speedup_tol: float = 0.15
+    min_roll_speed_m_s: float = 1.0
+
+
+@dataclass(frozen=True)
+class Violation:
+    """One natural-motion violation on the emitted dense track."""
+
+    frame: int
+    kind: str
+    value: float
+    limit: float
+
+
+def naturalness_violations(frames, event_frames, fps, *,
+                           cfg: NaturalnessCfg = NaturalnessCfg()):
+    """Flag direction/physics breaks that no event explains.
+
+    ``frames`` is a ``BallTrack.frames``-like sequence (``.frame``,
+    ``.world_xyz``, ``.state``); ``event_frames`` are frames where a
+    touch/bounce/impact/waypoint legitimately bends the path.
+    """
+    ev = {int(e) for e in event_frames}
+
+    def near_event(f: int) -> bool:
+        return any(abs(f - e) <= cfg.event_window_frames for e in ev)
+
+    by_frame = {f.frame: f for f in frames}
+    idx = sorted(by_frame)
+    out: list[Violation] = []
+    for f in idx:
+        a, b, c = by_frame.get(f - 1), by_frame.get(f), by_frame.get(f + 1)
+        if not (a and b and c):
+            continue
+        if a.world_xyz is None or b.world_xyz is None or c.world_xyz is None:
+            continue
+        pa, pb, pc = (np.asarray(x.world_xyz, float) for x in (a, b, c))
+        v_in, v_out = (pb - pa) * fps, (pc - pb) * fps
+        sp_in = float(np.linalg.norm(v_in[:2]))
+        sp_out = float(np.linalg.norm(v_out[:2]))
+        if min(sp_in, sp_out) > cfg.min_speed_m_s and not near_event(f):
+            dh = float(np.degrees(abs(np.arctan2(v_out[1], v_out[0])
+                                      - np.arctan2(v_in[1], v_in[0]))))
+            dh = min(dh, 360.0 - dh)
+            if dh > cfg.max_heading_change_deg:
+                out.append(Violation(f, "heading_break", dh,
+                                     cfg.max_heading_change_deg))
+        if (b.state != "flight" and not near_event(f)
+                and min(sp_in, sp_out) > cfg.min_roll_speed_m_s
+                and sp_out > sp_in * (1.0 + cfg.roll_speedup_tol)):
+            out.append(Violation(f, "roll_speedup", sp_out / sp_in,
+                                 1.0 + cfg.roll_speedup_tol))
+    # Flight runs: the median vertical acceleration must look like gravity.
+    run: list[int] = []
+    for f in [*idx, None]:
+        fr = by_frame.get(f) if f is not None else None
+        if fr is not None and fr.state == "flight" and fr.world_xyz is not None:
+            run.append(f)
+            continue
+        if len(run) >= 4:
+            zs = np.array([by_frame[r].world_xyz[2] for r in run])
+            az_med = float(np.median(np.diff(zs, 2) * fps * fps))
+            lo = -9.81 * (1 + cfg.flight_g_tol)
+            hi = -9.81 * (1 - cfg.flight_g_tol)
+            interior = [r for r in run[1:-1] if not near_event(r)]
+            if interior and not (lo <= az_med <= hi):
+                out.append(Violation(run[len(run) // 2], "flight_gravity",
+                                     az_med, -9.81))
+        run = []
+    return tuple(out)
+
+
 __all__ = [
     "pixel_ray",
     "point_ray_distance",

@@ -189,3 +189,73 @@ def test_dense_lateral_rows_filters_low_confidence():
                               distortion=(0.0, 0.0), min_confidence=0.5)
     assert len(rows) == 1 and rows[0].frame == 4
     assert 0.05 < rows[0].lateral_m < 0.15
+
+
+def _mk_frames(worlds, states=None):
+    from src.schemas.ball_track import BallFrame
+
+    out = []
+    for i, w in enumerate(worlds):
+        out.append(BallFrame(frame=i, world_xyz=tuple(w),
+                             state=(states[i] if states else "grounded"),
+                             confidence=1.0))
+    return out
+
+
+def test_naturalness_flags_heading_break_away_from_events():
+    from src.utils.ball_eval import naturalness_violations
+
+    fps = 30.0
+    pts = [(0.2 * i, 0.0, 0.11) for i in range(6)]
+    pts += [(1.0, 0.2 * (i - 5), 0.11) for i in range(6, 11)]
+    v = naturalness_violations(_mk_frames(pts), event_frames=set(), fps=fps)
+    assert any(x.kind == "heading_break" and abs(x.frame - 5) <= 1 for x in v)
+
+
+def test_naturalness_allows_break_at_event():
+    from src.utils.ball_eval import naturalness_violations
+
+    fps = 30.0
+    pts = [(0.2 * i, 0.0, 0.11) for i in range(6)]
+    pts += [(1.0, 0.2 * (i - 5), 0.11) for i in range(6, 11)]
+    v = naturalness_violations(_mk_frames(pts), event_frames={5}, fps=fps)
+    assert not [x for x in v if x.kind == "heading_break"]
+
+
+def test_naturalness_flags_linear_flight_as_gravity_violation():
+    from src.utils.ball_eval import naturalness_violations
+
+    pts = [(0.3 * i, 0.0, 1.0 + 0.05 * i) for i in range(12)]
+    v = naturalness_violations(_mk_frames(pts, states=["flight"] * 12),
+                               event_frames=set(), fps=30.0)
+    assert any(x.kind == "flight_gravity" for x in v)
+
+
+def test_naturalness_accepts_true_parabola_and_steady_roll():
+    from src.utils.ball_eval import naturalness_violations
+
+    fps, g = 30.0, -9.81
+    v0 = np.array([6.0, 0.0, 5.0])
+    pts = [tuple(np.array([0, 0, 0.11]) + v0 * (i / fps)
+                 + 0.5 * np.array([0, 0, g]) * (i / fps) ** 2)
+           for i in range(15)]
+    v = naturalness_violations(_mk_frames(pts, states=["flight"] * 15),
+                               event_frames=set(), fps=fps)
+    assert not [x for x in v if x.kind == "flight_gravity"]
+    roll = [(0.2 * i, 0.05 * i, 0.11) for i in range(12)]
+    v2 = naturalness_violations(_mk_frames(roll), event_frames=set(), fps=fps)
+    assert not v2
+
+
+def test_naturalness_flags_roll_speedup_without_event():
+    from src.utils.ball_eval import naturalness_violations
+
+    # Roll at 3 m/s that jumps to 6 m/s at frame 6 with no event.
+    fps = 30.0
+    pts = [(0.1 * i, 0.0, 0.11) for i in range(7)]
+    pts += [(0.6 + 0.2 * (i - 6), 0.0, 0.11) for i in range(7, 13)]
+    v = naturalness_violations(_mk_frames(pts), event_frames=set(), fps=fps)
+    assert any(x.kind == "roll_speedup" for x in v)
+    # Same profile WITH an event at the speed change: no violation.
+    v2 = naturalness_violations(_mk_frames(pts), event_frames={6}, fps=fps)
+    assert not [x for x in v2 if x.kind == "roll_speedup"]

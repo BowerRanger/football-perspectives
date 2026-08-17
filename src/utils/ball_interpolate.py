@@ -170,16 +170,26 @@ def _eval_polyline(
     p1: np.ndarray,
     knots: list[tuple[int, np.ndarray]],
     world: dict[int, np.ndarray | None],
+    smooth_iters: int = 3,
 ) -> None:
-    """Piecewise-linear render through endpoint-pinned evidence knots."""
+    """Piecewise-linear render through endpoint-pinned evidence knots,
+    followed by a light endpoint-preserving smoothing pass so knot kinks
+    stay below the natural-motion thresholds (heading/speed continuity)."""
     pts = [(seg.start_frame, p0), *knots, (seg.end_frame, p1)]
+    vals: dict[int, np.ndarray] = {}
     for (fa, pa), (fb, pb) in zip(pts, pts[1:]):
         span = fb - fa
         for f in range(fa, fb + 1):
             s = 0.0 if span == 0 else (f - fa) / span
-            world[f] = pa + (pb - pa) * s
-    world[seg.start_frame] = p0
-    world[seg.end_frame] = p1
+            vals[f] = pa + (pb - pa) * s
+    frames = sorted(vals)
+    for _ in range(smooth_iters):
+        prev = dict(vals)
+        for f in frames[1:-1]:
+            vals[f] = 0.25 * prev[f - 1] + 0.5 * prev[f] + 0.25 * prev[f + 1]
+    vals[seg.start_frame] = p0
+    vals[seg.end_frame] = p1
+    world.update(vals)
 
 
 def interpolate_events(

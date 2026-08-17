@@ -17,11 +17,13 @@ Ground-truth model:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from src.schemas.ball_anchor import BallAnchor
 from src.utils.ball_anchor_heights import GROUND_LEVEL_STATES
-from src.utils.camera_projection import undistort_pixel
+from src.utils.camera_projection import project_world_to_image, undistort_pixel
 
 
 def pixel_ray(uv, K, R, t, distortion=(0.0, 0.0)):
@@ -79,9 +81,119 @@ def anchor_gt_world(anchor: BallAnchor, K, R, t, distortion, *,
     return None, "ray_only"
 
 
+@dataclass(frozen=True)
+class AnchorEvalRow:
+    """Track error graded at one anchor frame."""
+
+    frame: int
+    state: str
+    kind: str
+    held_out: bool
+    lateral_m: float | None
+    err_3d_m: float | None
+    reproj_px: float | None
+    depth_m: float | None
+
+
+@dataclass(frozen=True)
+class FixEvalRow:
+    """Track error at one cross-replay triangulated 3-D fix."""
+
+    frame: int
+    err_3d_m: float | None
+    ray_miss_m: float
+
+
+@dataclass(frozen=True)
+class DenseEvalRow:
+    """Perpendicular distance from the track to a detection ray."""
+
+    frame: int
+    lateral_m: float
+    confidence: float
+    source: str
+
+
+def eval_rows_at_anchors(world_by_frame, anchors, cams, *, ball_radius,
+                         distortion, joint_world_fn=None,
+                         held_out_frames=frozenset()):
+    """Grade the track at every anchor frame with a pixel and a camera.
+
+    ``cams`` maps frame → ``(K, R, t)``; ``world_by_frame`` maps frame →
+    emitted ``world_xyz``. Anchors whose frame has no camera are skipped;
+    anchors whose frame has no emitted world produce a row of ``None``
+    errors (visible as ``n_missing`` in the summary).
+    """
+    rows = []
+    for anc in anchors:
+        if anc.image_xy is None or anc.frame not in cams:
+            continue
+        K, R, t = cams[anc.frame]
+        joint = None
+        if (joint_world_fn is not None and anc.state == "player_touch"
+                and anc.player_id and anc.bone):
+            joint = joint_world_fn(anc.frame, anc.player_id, anc.bone)
+        gt, kind = anchor_gt_world(anc, K, R, t, distortion,
+                                   ball_radius=ball_radius, joint_world=joint)
+        held = anc.frame in held_out_frames
+        w = world_by_frame.get(anc.frame)
+        if w is None:
+            rows.append(AnchorEvalRow(anc.frame, anc.state, kind, held,
+                                      None, None, None, None))
+            continue
+        P = np.asarray(w, dtype=float)
+        C, d = pixel_ray(anc.image_xy, K, R, t, distortion)
+        lateral, depth = point_ray_distance(P, C, d)
+        uvp = project_world_to_image(K, R, t, distortion, P.reshape(1, 3))[0]
+        reproj = float(np.linalg.norm(uvp - np.asarray(anc.image_xy, float)))
+        err3d = float(np.linalg.norm(P - gt)) if gt is not None else None
+        rows.append(AnchorEvalRow(anc.frame, anc.state, kind, held,
+                                  lateral, err3d, reproj, depth))
+    return tuple(rows)
+
+
+def eval_rows_at_fixes(world_by_frame, fixes):
+    """Grade the track at triangulated fixes: ``(frame, xyz, ray_miss_m)``."""
+    rows = []
+    for frame, xyz, ray_miss in fixes:
+        w = world_by_frame.get(int(frame))
+        err = (float(np.linalg.norm(np.asarray(w, float)
+                                    - np.asarray(xyz, float)))
+               if w is not None else None)
+        rows.append(FixEvalRow(int(frame), err, float(ray_miss)))
+    return tuple(rows)
+
+
+def dense_lateral_rows(world_by_frame, observations, cams, *, distortion,
+                       min_confidence):
+    """Track→detection-ray distance for confident observations.
+
+    ``observations``: ``(frame, (u, v), confidence, source)`` tuples.
+    """
+    rows = []
+    for frame, uv, conf, source in observations:
+        if conf < min_confidence or frame not in cams:
+            continue
+        w = world_by_frame.get(int(frame))
+        if w is None:
+            continue
+        K, R, t = cams[frame]
+        C, d = pixel_ray(uv, K, R, t, distortion)
+        lateral, _ = point_ray_distance(np.asarray(w, float), C, d)
+        rows.append(DenseEvalRow(int(frame), lateral, float(conf),
+                                 str(source)))
+    return tuple(rows)
+
+
 __all__ = [
     "pixel_ray",
     "point_ray_distance",
     "ray_plane_z",
     "anchor_gt_world",
+    "AnchorEvalRow",
+    "FixEvalRow",
+    "DenseEvalRow",
+    "eval_rows_at_anchors",
+    "eval_rows_at_fixes",
+    "dense_lateral_rows",
 ]

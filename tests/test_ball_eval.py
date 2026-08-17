@@ -107,3 +107,85 @@ def test_anchor_gt_world_airborne_is_ray_only_and_no_pixel_is_none():
     anc2 = BallAnchor(frame=6, state="off_screen_flight", image_xy=None)
     assert anchor_gt_world(anc2, K, R, t, (0.0, 0.0),
                            ball_radius=0.11) == (None, "none")
+
+
+def test_eval_rows_at_anchors_grades_holdout_and_kinds():
+    from src.utils.ball_eval import eval_rows_at_anchors
+    from src.utils.camera_projection import project_world_to_image
+
+    K, R, t = _cam()
+    P_true = np.array([4.0, 8.0, 0.11])
+    uv = project_world_to_image(K, R, t, (0.0, 0.0), P_true.reshape(1, 3))[0]
+    anchors = [BallAnchor(frame=3, state="grounded",
+                          image_xy=(float(uv[0]), float(uv[1])))]
+    world = {3: tuple(P_true + np.array([0.05, 0.0, 0.0]))}  # 5cm off
+    rows = eval_rows_at_anchors(world, anchors, {3: (K, R, t)},
+                                ball_radius=0.11, distortion=(0.0, 0.0),
+                                held_out_frames=frozenset({3}))
+    (row,) = rows
+    assert row.held_out and row.kind == "ground_exact"
+    assert 0.03 < row.err_3d_m < 0.07
+    assert row.lateral_m <= row.err_3d_m + 1e-9
+    assert row.reproj_px > 0
+
+
+def test_eval_rows_at_anchors_missing_track_frame_gives_none_errors():
+    from src.utils.ball_eval import eval_rows_at_anchors
+
+    K, R, t = _cam()
+    anchors = [BallAnchor(frame=9, state="grounded", image_xy=(900.0, 700.0))]
+    (row,) = eval_rows_at_anchors({}, anchors, {9: (K, R, t)},
+                                  ball_radius=0.11, distortion=(0.0, 0.0))
+    assert row.err_3d_m is None and row.lateral_m is None
+
+
+def test_eval_rows_at_anchors_uses_joint_world_fn_for_touches():
+    from src.utils.ball_eval import eval_rows_at_anchors
+    from src.utils.camera_projection import project_world_to_image
+
+    K, R, t = _cam()
+    true_ball = np.array([1.0, 6.0, 0.3])
+    uv = project_world_to_image(K, R, t, (0.0, 0.0),
+                                true_ball.reshape(1, 3))[0]
+    anchors = [BallAnchor(frame=7, state="player_touch",
+                          image_xy=(float(uv[0]), float(uv[1])),
+                          player_id="P001", bone="r_foot")]
+    calls = []
+
+    def joint_fn(frame, pid, bone):
+        calls.append((frame, pid, bone))
+        return tuple(true_ball + np.array([0.0, 0.3, 0.0]))
+
+    world = {7: tuple(true_ball)}
+    (row,) = eval_rows_at_anchors(world, anchors, {7: (K, R, t)},
+                                  ball_radius=0.11, distortion=(0.0, 0.0),
+                                  joint_world_fn=joint_fn)
+    assert calls == [(7, "P001", "r_foot")]
+    assert row.kind == "joint_depth"
+    assert row.err_3d_m < 0.35  # depth error bounded by joint offset
+
+
+def test_eval_rows_at_fixes():
+    from src.utils.ball_eval import eval_rows_at_fixes
+
+    world = {10: (1.0, 2.0, 3.0)}
+    rows = eval_rows_at_fixes(world, [(10, (1.0, 2.0, 3.5), 0.2),
+                                      (99, (0.0, 0.0, 0.0), 0.1)])
+    assert abs(rows[0].err_3d_m - 0.5) < 1e-9 and rows[0].ray_miss_m == 0.2
+    assert rows[1].err_3d_m is None
+
+
+def test_dense_lateral_rows_filters_low_confidence():
+    from src.utils.ball_eval import dense_lateral_rows
+    from src.utils.camera_projection import project_world_to_image
+
+    K, R, t = _cam()
+    P = np.array([0.0, 10.0, 0.11])
+    uv = project_world_to_image(K, R, t, (0.0, 0.0), P.reshape(1, 3))[0]
+    obs = [(4, (float(uv[0]), float(uv[1])), 0.9, "detector"),
+           (5, (float(uv[0]), float(uv[1])), 0.1, "detector")]
+    world = {4: tuple(P + np.array([0.1, 0.0, 0.0])), 5: tuple(P)}
+    rows = dense_lateral_rows(world, obs, {4: (K, R, t), 5: (K, R, t)},
+                              distortion=(0.0, 0.0), min_confidence=0.5)
+    assert len(rows) == 1 and rows[0].frame == 4
+    assert 0.05 < rows[0].lateral_m < 0.15

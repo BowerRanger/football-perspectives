@@ -603,6 +603,15 @@ ball:
     # No grounded sampling for this long after a touch/bounce/impact —
     # the ball is likely airborne and the IMM posterior lags the launch.
     post_event_suppress_frames: 8
+    # Evidence gate (sub-20cm campaign W2b): touch/bounce/goal events found
+    # on a synthetic pixel track (anchor-interpolation / appearance-bridge /
+    # gap-fill only) never become auto anchors — a mis-attributed body-pin
+    # drags the track metres off a span plain interpolation gets right.
+    # An event needs >= 1 real detector observation (detector/second_pass/
+    # foot_guided) within +/- event_evidence_window frames. Grounded
+    # sampling additionally accepts bridge/anchor-sourced observations.
+    require_event_evidence: true
+    event_evidence_window: 3
     # Reachability caps: ground-level anchor pairs use the rolling cap.
     max_speed_m_s: 45.0
     max_ground_speed_m_s: 35.0

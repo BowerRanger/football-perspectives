@@ -64,6 +64,22 @@ class AutoAnchorCfg:
     # so early post-event samples are the classic bogus ground anchor.
     post_event_suppress_frames: int = 8
     ball_radius_m: float = 0.11
+    # Evidence gate (sub-20cm campaign W2b). Touch/bounce/goal events found
+    # on a synthetic pixel track (anchor-interp / bridge / gap-fill only)
+    # must not become body-pinned keyframes: they add no information over
+    # interpolation and a mis-attributed joint drags the track metres off.
+    # Requires >= 1 frame whose observation came from a real detector pass
+    # within the window. Grounded sampling additionally accepts `bridge`
+    # (on-image template evidence) but never source-less synthetic frames.
+    # Both apply only when a `sources` map is provided.
+    require_event_evidence: bool = True
+    event_evidence_window: int = 3
+    event_evidence_sources: tuple[str, ...] = (
+        "detector", "second_pass", "foot_guided",
+    )
+    grounded_evidence_sources: tuple[str, ...] = (
+        "detector", "second_pass", "foot_guided", "bridge", "anchor",
+    )
 
 
 def auto_anchor_path(ball_dir: Path, shot_id: str) -> Path:
@@ -182,6 +198,7 @@ def _grounded_candidates(
     confidences: Mapping[int, float],
     taken_frames: set[int],
     cfg: AutoAnchorCfg,
+    sources: Mapping[int, str] | None = None,
 ) -> list[_Candidate]:
     out: list[_Candidate] = []
     last_emitted: int | None = None
@@ -189,6 +206,9 @@ def _grounded_candidates(
         if step.uv is None or getattr(step, "is_gap_fill", False):
             continue
         f = step.frame
+        if (sources is not None
+                and sources.get(f) not in cfg.grounded_evidence_sources):
+            continue
         if getattr(step, "p_flight", 0.0) > cfg.grounded_max_p_flight:
             continue
         conf = float(confidences.get(f, 0.0))
@@ -350,8 +370,31 @@ def generate_auto_anchors(
     # nearby grounded candidates.
     if sources is not None:
         candidates = [c for c in candidates if _not_second_pass(c)]
+    # W2b evidence gate: an event candidate with no real detector evidence
+    # anywhere near its frame was found on a synthetic pixel track — keep it
+    # out of the anchor set (it would body-pin the track to a guess).
+    if sources is not None and cfg.require_event_evidence:
+        hard = set(cfg.event_evidence_sources)
+        w = int(cfg.event_evidence_window)
+
+        def _has_hard_evidence(frame: int) -> bool:
+            return any(sources.get(f) in hard
+                       for f in range(frame - w, frame + w + 1))
+
+        before = len(candidates)
+        candidates = [
+            c for c in candidates if _has_hard_evidence(c.anchor.frame)
+        ]
+        if before != len(candidates):
+            logger.info(
+                "ball auto-anchor: evidence gate dropped %d/%d event "
+                "candidates (no %s frame within ±%d)",
+                before - len(candidates), before,
+                "/".join(sorted(hard)), w,
+            )
     taken = {c.anchor.frame for c in candidates}
-    grounded = _grounded_candidates(steps, confidences, taken, cfg)
+    grounded = _grounded_candidates(steps, confidences, taken, cfg,
+                                    sources=sources)
     if sources is not None:
         grounded = [c for c in grounded if _not_second_pass(c)]
     candidates.extend(grounded)

@@ -383,3 +383,82 @@ class TestMergeAndSidecar:
         loaded = BallAnchorSet.load(path)
         assert loaded.anchors == anchors
         assert path.name == "shotX_ball_anchors_auto.json"
+
+
+class TestEvidenceGate:
+    """W2b (sub-20cm campaign): touch/bounce/goal candidates need HARD
+    detector evidence near the event frame; grounded sampling accepts
+    bridge but never source-less (synthetic) frames."""
+
+    def _touch_scene(self):
+        worlds, pixels, steps = _rolling_scene()
+        ctx = FakePlayerContext({
+            30: [_joint("P004", "r_foot", worlds[30], pixels[30])],
+        })
+        events = (BallEvent(frame=30, kind="touch", score=0.8,
+                            player_id="P004", bone="r_foot"),)
+        return steps, ctx, events
+
+    def _generate_src(self, events, steps, n, *, ctx, sources, cfg=None):
+        Ks, Rs, ts = per_frame_cams(n)
+        return generate_auto_anchors(
+            events=events, steps=steps, confidences={},
+            player_ctx=ctx,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0), fps=FPS, pitch_cfg=PITCH_CFG,
+            cfg=cfg or AutoAnchorCfg(), sources=sources,
+        )
+
+    def test_touch_without_hard_evidence_not_minted(self):
+        steps, ctx, events = self._touch_scene()
+        sources = {f: "anchor" for f in (28, 30, 32)}
+        sources.update({f: "bridge" for f in (29, 31)})
+        anchors = self._generate_src(events, steps, 60, ctx=ctx,
+                                     sources=sources)
+        assert not [a for a in anchors if a.state == "player_touch"]
+
+    def test_touch_with_one_detector_frame_in_window_minted(self):
+        steps, ctx, events = self._touch_scene()
+        sources = {f: "anchor" for f in (28, 30)}
+        sources[32] = "detector"
+        anchors = self._generate_src(events, steps, 60, ctx=ctx,
+                                     sources=sources)
+        assert [a for a in anchors if a.state == "player_touch"]
+
+    def test_touch_with_foot_guided_evidence_minted(self):
+        steps, ctx, events = self._touch_scene()
+        anchors = self._generate_src(events, steps, 60, ctx=ctx,
+                                     sources={30: "foot_guided"})
+        assert [a for a in anchors if a.state == "player_touch"]
+
+    def test_gate_disabled_restores_legacy(self):
+        steps, ctx, events = self._touch_scene()
+        cfg = AutoAnchorCfg(require_event_evidence=False)
+        anchors = self._generate_src(events, steps, 60, ctx=ctx,
+                                     sources={30: "anchor"}, cfg=cfg)
+        assert [a for a in anchors if a.state == "player_touch"]
+
+    def test_sources_none_keeps_legacy(self):
+        steps, ctx, events = self._touch_scene()
+        anchors = _generate(events, steps, 60, ctx=ctx)
+        assert [a for a in anchors if a.state == "player_touch"]
+
+    def test_grounded_sampling_accepts_bridge_rejects_sourceless(self):
+        worlds, pixels, steps = _rolling_scene()
+        conf = {f: 0.9 for f in range(60)}
+        bridge_sources = {f: "bridge" for f in range(60)}
+        Ks, Rs, ts = per_frame_cams(60)
+
+        def gen(sources):
+            return generate_auto_anchors(
+                events=(), steps=steps, confidences=conf,
+                player_ctx=FakePlayerContext(),
+                per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+                distortion=(0.0, 0.0), fps=FPS, pitch_cfg=PITCH_CFG,
+                cfg=AutoAnchorCfg(), sources=sources,
+            )
+
+        with_bridge = gen(bridge_sources)
+        assert [a for a in with_bridge if a.state == "grounded"]
+        sourceless = gen({})   # synthetic track: no observation provenance
+        assert not [a for a in sourceless if a.state == "grounded"]

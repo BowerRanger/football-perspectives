@@ -688,6 +688,14 @@ def _auto_anchor_cfg(auto_cfg: dict, ball_radius: float) -> AutoAnchorCfg:
         max_ground_speed_m_s=float(auto_cfg.get(
             "max_ground_speed_m_s", base.max_ground_speed_m_s)),
         ball_radius_m=ball_radius,
+        require_event_evidence=bool(auto_cfg.get(
+            "require_event_evidence", base.require_event_evidence)),
+        event_evidence_window=int(auto_cfg.get(
+            "event_evidence_window", base.event_evidence_window)),
+        event_evidence_sources=tuple(auto_cfg.get(
+            "event_evidence_sources", base.event_evidence_sources)),
+        grounded_evidence_sources=tuple(auto_cfg.get(
+            "grounded_evidence_sources", base.grounded_evidence_sources)),
     )
 
 

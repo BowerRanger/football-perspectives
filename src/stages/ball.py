@@ -1862,6 +1862,7 @@ class BallStage(BaseStage):
                 clip_id=artifacts.camera_clip_id,
                 image_size=artifacts.camera_image_size,
                 steps=steps, confidences=raw_confidences, sources=sources,
+                manual_frames=frozenset(manual_by_frame),
             )
         elif solver_name == "global":
             # The beam re-segments the timeline, so it wants the RICHER

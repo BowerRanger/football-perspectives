@@ -215,3 +215,40 @@ def test_poisoned_extra_observations_do_not_break_the_fit():
     fit = next(d for d in diags if d.get("kind") == "chain_fit")
     assert fit["accepted"]
     assert fit.get("n_extra_used", 99) <= 3   # junk extras excluded
+
+
+def test_auto_touch_knots_are_soft_manual_are_hard():
+    """W5c: an auto touch's body-pin can carry attribution error — the fit
+    may pull away from it toward the ray evidence; manual knots stay hard."""
+    from src.utils.ball_flight_chains import refit_airborne_chains
+
+    anchors, worlds, truth, cams, R, t = _chain_fixture()
+    # Corrupt the END knot world (as a wrong-player auto body-pin would):
+    # 2m off the true bounce point, but its CLICK pixel stays correct.
+    w24_true = np.asarray(worlds[24])
+    worlds[24] = tuple(w24_true + np.array([2.0, -1.5, 0.0]))
+    per_K = {f: c[0] for f, c in cams.items()}
+    per_R = {f: c[1] for f, c in cams.items()}
+    per_t = {f: c[2] for f, c in cams.items()}
+    # Hard everywhere (legacy): the corrupt knot bends the arc.
+    hard_updates, _ = refit_airborne_chains(
+        anchor_by_frame=anchors, world_for_anchor=worlds,
+        per_frame_K=per_K, per_frame_R=per_R, per_frame_t=per_t,
+        distortion=_DIST, fps=_FPS,
+        manual_frames=frozenset(anchors),
+    )
+    # End knot marked AUTO (soft): the ray observations win; interior
+    # airborne positions return to the true arc.
+    soft_updates, diags = refit_airborne_chains(
+        anchor_by_frame=anchors, world_for_anchor=worlds,
+        per_frame_K=per_K, per_frame_R=per_R, per_frame_t=per_t,
+        distortion=_DIST, fps=_FPS,
+        manual_frames=frozenset(f for f in anchors if f != 24),
+    )
+    assert set(soft_updates) == {6, 12, 18}
+    err_soft = max(np.linalg.norm(np.asarray(soft_updates[f]) - truth[f])
+                   for f in truth)
+    err_hard = max(np.linalg.norm(np.asarray(hard_updates[f]) - truth[f])
+                   for f in truth) if hard_updates else float("inf")
+    assert err_soft < 0.30
+    assert err_soft < err_hard

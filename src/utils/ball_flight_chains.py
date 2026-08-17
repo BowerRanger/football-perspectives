@@ -44,6 +44,13 @@ _MAX_ARC_Z_M = 40.0
 # anchors-only arc already reprojects within this of it — junk detections
 # (players, static lock-ons) never poison the fit.
 _EXTRA_OBS_GATE_PX = 30.0
+# Soft-constraint weight for AUTO knot worlds (px of residual per metre of
+# deviation, scaled by the anchor's confidence). Calibration: an auto
+# body-pin carries ~1 m attribution uncertainty, so 1 m of deviation should
+# cost only a few px against the trusted clicks — strong enough to anchor
+# the otherwise-free along-ray depth, weak enough for the rays to override
+# a mis-attributed pin.
+_AUTO_KNOT_WEIGHT_PX_PER_M = 5.0
 
 
 def _arc_residual_px(p0, v0, obs, Ks, Rs, ts, distortion, fps, f0) -> float:
@@ -96,6 +103,7 @@ def refit_airborne_chains(
     fps: float,
     max_residual_px: float = 5.0,
     extra_observations: dict[int, tuple[float, float]] | None = None,
+    manual_frames: frozenset[int] | None = None,
 ) -> tuple[dict[int, tuple[float, float, float]], list[dict]]:
     """Return ``({airborne_frame: refit_world}, diagnostics)``.
 
@@ -104,6 +112,11 @@ def refit_airborne_chains(
     ``extra_observations`` (W4) are real in-span detection pixels — they
     densify the fit and keep chains determined when interior anchor clicks
     are absent (e.g. a hold-out run or a lightly-anchored clip).
+    ``manual_frames`` (W5c): operator-anchored frames. Manual knot worlds
+    are near-hard; AUTO knot worlds (body-pins that may carry attribution
+    error) become confidence-weighted soft constraints, so the ray
+    evidence can pull the arc away from a mis-attributed joint. ``None``
+    treats every knot as manual (legacy behaviour).
     """
     updates: dict[int, tuple[float, float, float]] = {}
     diags: list[dict] = []
@@ -149,10 +162,16 @@ def refit_airborne_chains(
                     [np.asarray(per_frame_t[f]) for f, _ in o])
 
         f0 = start
-        knots = {
-            0: np.asarray(world_for_anchor[start], dtype=float),
-            end - f0: np.asarray(world_for_anchor[end], dtype=float),
-        }
+        knots: dict[int, np.ndarray] = {}
+        soft_fixes: list[tuple[int, np.ndarray, float]] = []
+        for kf in (start, end):
+            w = np.asarray(world_for_anchor[kf], dtype=float)
+            if manual_frames is None or kf in manual_frames:
+                knots[kf - f0] = w
+            else:
+                conf = float(getattr(anchor_by_frame[kf], "confidence", 1.0))
+                soft_fixes.append(
+                    (kf - f0, w, _AUTO_KNOT_WEIGHT_PX_PER_M * conf))
         z_ranges = {
             f - f0: bucket
             for f in air_frames
@@ -162,12 +181,14 @@ def refit_airborne_chains(
 
         def _fit(o):
             Ks, Rs, ts = _cams_for(o)
+            shift = o[0][0] - f0
             return fit_parabola_to_image_observations(
                 o, Ks=Ks, Rs=Rs, t_world=ts, fps=fps,
                 distortion=distortion, p0_fixed=None,
-                knot_frames={k - (o[0][0] - f0): w for k, w in knots.items()},
-                z_range_frames={k - (o[0][0] - f0): b
-                                for k, b in z_ranges.items()},
+                knot_frames={k - shift: w for k, w in knots.items()} or None,
+                z_range_frames={k - shift: b for k, b in z_ranges.items()},
+                world_fixes=[(k - shift, w, wt) for k, w, wt in soft_fixes]
+                or None,
             )
 
         # Two-stage robust fit: anchors first (operator clicks are trusted),

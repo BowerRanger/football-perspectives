@@ -150,3 +150,31 @@ def test_roll_evidence_far_from_endpoint_chord_is_ignored():
     errs = [np.linalg.norm(np.asarray(track.frames[f].world_xyz)
                            - np.asarray(truth[f])) for f in range(n)]
     assert max(errs) < 0.05      # junk ignored → straight chord retained
+
+
+def test_roll_polyline_is_smoothed_below_naturalness_thresholds():
+    from src.utils.ball_eval import naturalness_violations
+    from src.utils.ball_interpolate import interpolate_events
+
+    # Noisy-but-chord-consistent evidence: raw polyline kinks would trip
+    # the naturalness validator; the smoothing pass must not.
+    n = 31
+    a = np.array([0.0, 0.0, 0.11])
+    b = np.array([9.0, 0.0, 0.11])
+    truth = {f: a + (b - a) * (f / (n - 1)) for f in range(n)}
+    noisy = {}
+    vals = [0.22, -0.2, 0.24, -0.22, 0.2, -0.24, 0.22, -0.2]
+    for i, f in enumerate(range(2, n - 2, 3)):
+        w = np.asarray(truth[f], dtype=float).copy()
+        w[1] += vals[i % len(vals)]
+        noisy[f] = tuple(w)
+    ks = BallKeyframeSet(
+        clip_id="c", fps=_FPS, image_size=(1920, 1080),
+        keyframes=(_kf(0, a), _kf(n - 1, b)),
+        segments=(BallSegment(start_frame=0, end_frame=n - 1, kind="roll",
+                              hints={}),),
+    )
+    track = interpolate_events(ks, n_frames=n, evidence_worlds=noisy)
+    v = naturalness_violations(track.frames, event_frames={0, n - 1},
+                               fps=_FPS)
+    assert not v, [f"{x.kind}@{x.frame}" for x in v]

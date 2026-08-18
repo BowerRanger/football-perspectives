@@ -289,14 +289,18 @@ def resolve_events(
         flight_segments=(),
     )
     carry_spans = detect_carry_spans(keyframe_set.keyframes)
-    # NOTE: derive_segments supports p_flight-based reclassification
-    # (W5i), but wiring it in measurably hurt the weak-detection clip
-    # (kroupi01 dense 0.57→0.91 m): flipping a span to ballistic without
-    # fixing its endpoint keyframes renders a wrong arc. Re-enable only
-    # together with detection-driven flight-span arc fitting.
+    # p_flight reclassification (W5i) is only safe now that flipped spans
+    # get detection-driven arc fits with soft auto endpoints (W5l) — a
+    # flipped span without a fit previously rendered a wrong naive arc
+    # (kroupi01 dense 0.57→0.91 m when wired alone).
+    p_flight_by_frame = (
+        {s.frame: float(getattr(s, "p_flight", 0.0)) for s in steps}
+        if steps is not None else None
+    )
     segments = derive_segments(
         keyframe_set.keyframes, n_frames=n_frames, fps=fps,
         carry_spans=carry_spans,
+        p_flight_by_frame=p_flight_by_frame,
     )
     # W5l — segment-level flight refits: a ballistic span with no interior
     # anchors (deep crosses) fits its arc from in-span detections; manual

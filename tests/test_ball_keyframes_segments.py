@@ -88,7 +88,7 @@ def test_high_flight_probability_overrides_roll_classification():
                           p_flight_by_frame={f: 0.1 for f in range(31)})
     assert [s.kind for s in low] == ["roll"]
     high = derive_segments(kfs, n_frames=31, fps=30.0,
-                           p_flight_by_frame={f: 0.9 for f in range(1, 30)})
+                           p_flight_by_frame={f: 0.95 for f in range(1, 30)})
     assert [s.kind for s in high] == ["ballistic"]
     # No flight info at all: state-based classification unchanged.
     none = derive_segments(kfs, n_frames=31, fps=30.0)

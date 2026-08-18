@@ -50,7 +50,7 @@ def _dist2(a, b) -> float:
 # regardless of its endpoint states: two plain touches can bracket a
 # flighted pass (sub-20cm campaign W5i — aerial balls rendered along the
 # ground when classification trusted states alone).
-_P_FLIGHT_BALLISTIC = 0.6
+_P_FLIGHT_BALLISTIC = 0.8
 
 
 def _between_kind(
@@ -62,7 +62,7 @@ def _between_kind(
         return "free_flight"
     if _implies_flight(a) or _implies_flight(b):
         return "ballistic"
-    if p_flight_by_frame and b.frame - a.frame >= 2:
+    if p_flight_by_frame and b.frame - a.frame >= 6:
         interior = [p_flight_by_frame[f]
                     for f in range(a.frame + 1, b.frame)
                     if f in p_flight_by_frame]

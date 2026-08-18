@@ -211,14 +211,7 @@ def _load_observations(path: Path):
         out.append((int(e["frame"]), (float(uv[0]), float(uv[1])),
                     float(e.get("confidence", 0.0)),
                     str(e.get("source"))))
-    # Self-consistency cleaning (same rule the stage uses): a detection
-    # that teleports against BOTH mutually-consistent neighbours is a
-    # false positive, not ground truth — grading against it would charge
-    # the track for the detector's mistake. (Cleaning is against the
-    # observations themselves, never against the track — no circularity.)
-    from src.utils.ball_track_clean import clean_pixel_track
-    kept = clean_pixel_track({f: uv for f, uv, _c, _s in out})
-    return [o for o in out if o[0] in kept]
+    return out
 
 
 def _event_frames(keyframes_path: Path) -> set[int]:

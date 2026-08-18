@@ -602,3 +602,35 @@ class TestFlightGateAndBurstNMS:
         # 2-frame gap is a genuine micro-touch and must survive — but
         # here 30/32 are both adjacent to 31, so only 31 remains.
         assert [a.frame for a in touches] == [31]
+
+
+class TestStateAwareSuppression:
+    """W5o: an auto TOUCH near a manual grounded/airborne anchor carries
+    new event information and survives; near a manual touch it defers."""
+
+    def test_touch_survives_near_manual_grounded(self):
+        manual = {289: BallAnchor(frame=289, image_xy=(10.0, 10.0),
+                                  state="grounded")}
+        auto = {290: BallAnchor(frame=290, image_xy=(12.0, 10.0),
+                                state="player_touch", player_id="P3",
+                                bone="r_foot")}
+        merged = merge_anchors(manual, auto, 3)
+        assert 290 in merged and merged[290].state == "player_touch"
+
+    def test_touch_defers_to_nearby_manual_touch(self):
+        manual = {289: BallAnchor(frame=289, image_xy=(10.0, 10.0),
+                                  state="player_touch", player_id="P3",
+                                  bone="l_foot")}
+        auto = {290: BallAnchor(frame=290, image_xy=(12.0, 10.0),
+                                state="player_touch", player_id="P4",
+                                bone="r_foot")}
+        merged = merge_anchors(manual, auto, 3)
+        assert 290 not in merged
+
+    def test_grounded_auto_still_suppressed_near_any_manual(self):
+        manual = {289: BallAnchor(frame=289, image_xy=(10.0, 10.0),
+                                  state="grounded")}
+        auto = {290: BallAnchor(frame=290, image_xy=(12.0, 10.0),
+                                state="grounded")}
+        merged = merge_anchors(manual, auto, 3)
+        assert 290 not in merged

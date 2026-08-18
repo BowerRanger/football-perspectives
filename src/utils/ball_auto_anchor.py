@@ -573,14 +573,29 @@ def merge_anchors(
     suppress_radius_frames: int,
     dismissed: Collection[DismissedAuto] = (),
 ) -> dict[int, BallAnchor]:
-    """Manual anchors win; auto anchors near a manual frame are dropped;
-    auto anchors exactly matching an operator dismissal are dropped."""
+    """Manual anchors win; auto anchors near a manual frame are dropped
+    UNLESS they carry different event information (a touch next to a
+    grounded sample is a new fact — the operator marked where the ball
+    was, not that nothing happened; sub-20cm campaign W5o). Auto anchors
+    exactly matching an operator dismissal are dropped."""
     dismissed_keys = {
         (d.frame, d.state, d.player_id, d.bone) for d in dismissed
     }
+    touch_like = frozenset({
+        "player_touch", "kick", "header", "volley", "chest", "catch",
+    })
+
+    def _duplicates(auto_anchor: BallAnchor, mf: int) -> bool:
+        m = manual[mf]
+        if auto_anchor.state == "player_touch":
+            # A touch duplicates only a nearby manual touch-class anchor.
+            return m.state in touch_like
+        return True
+
     merged: dict[int, BallAnchor] = dict(manual)
     for f, anchor in auto.items():
-        if any(abs(f - mf) <= suppress_radius_frames for mf in manual):
+        if any(abs(f - mf) <= suppress_radius_frames
+               and _duplicates(anchor, mf) for mf in manual):
             continue
         if (anchor.frame, anchor.state, anchor.player_id,
                 anchor.bone) in dismissed_keys:

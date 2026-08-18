@@ -66,11 +66,44 @@ def _eval_ballistic(
 ) -> FlightSegment | None:
     gravity = float(seg.hints.get("gravity", _DEFAULT_GRAVITY))
     total_t = (seg.end_frame - seg.start_frame) / fps
-    v0 = _ballistic_v0(p0, p1, total_t, gravity)
     a = np.array([0.0, 0.0, gravity])
-    for f in range(seg.start_frame, seg.end_frame + 1):
-        t = (f - seg.start_frame) / fps
-        world[f] = p0 + v0 * t + 0.5 * a * t * t
+    fit_p0 = seg.hints.get("fit_p0")
+    fit_v0 = seg.hints.get("fit_v0")
+    if fit_p0 is not None and fit_v0 is not None:
+        # A detection-fitted arc (W5l) overrides the naive two-endpoint
+        # parabola: in-span rays constrained it, so soft/auto endpoints
+        # no longer dictate the flight shape. The arc may disagree with
+        # the endpoint keyframes (that is the point, for auto pins), so
+        # blend the residual in over the outer quarters of the span —
+        # endpoints stay exact without a teleport.
+        base = np.asarray(fit_p0, dtype=float)
+        vel = np.asarray(fit_v0, dtype=float)
+        span = max(seg.end_frame - seg.start_frame, 1)
+        ramp_n = max(1, span // 4)
+
+        def _arc_at(f: int) -> np.ndarray:
+            t = (f - seg.start_frame) / fps
+            return base + vel * t + 0.5 * a * t * t
+
+        err_start = p0 - _arc_at(seg.start_frame)
+        err_end = p1 - _arc_at(seg.end_frame)
+        for f in range(seg.start_frame, seg.end_frame + 1):
+            w = _arc_at(f)
+            ds = f - seg.start_frame
+            de = seg.end_frame - f
+            if ds < ramp_n:
+                w = w + err_start * (1.0 - ds / ramp_n)
+            if de < ramp_n:
+                w = w + err_end * (1.0 - de / ramp_n)
+            world[f] = w
+        v0 = vel
+    else:
+        base = p0
+        vel = _ballistic_v0(p0, p1, total_t, gravity)
+        v0 = vel
+        for f in range(seg.start_frame, seg.end_frame + 1):
+            t = (f - seg.start_frame) / fps
+            world[f] = base + vel * t + 0.5 * a * t * t
     # Endpoints exact (guard against float drift).
     world[seg.start_frame] = p0
     world[seg.end_frame] = p1

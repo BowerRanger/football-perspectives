@@ -262,4 +262,83 @@ def refit_airborne_chains(
     return updates, diags
 
 
-__all__ = ["refit_airborne_chains"]
+# Minimum in-span detections for a segment-level fit: with only the two
+# endpoints the naive parabola is already the unique arc, so a refit only
+# adds information when several rays constrain the span interior.
+_SEGMENT_FIT_MIN_OBS = 3
+_SEGMENT_FIT_MAX_RESIDUAL_PX = 8.0
+
+
+def refit_ballistic_segment(
+    *,
+    start_frame: int,
+    end_frame: int,
+    start_world,
+    end_world,
+    start_is_manual: bool,
+    end_is_manual: bool,
+    end_confidence: float = 1.0,
+    start_confidence: float = 1.0,
+    extra_observations: dict[int, tuple[float, float]],
+    per_frame_K,
+    per_frame_R,
+    per_frame_t,
+    distortion: tuple[float, float],
+    fps: float,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    """Gravity-arc fit for a ballistic SEGMENT with no interior anchors.
+
+    kroupi-class deep flights sit between two keyframes with nothing in
+    between; in-span detections are the only interior evidence. Manual
+    endpoint worlds are near-hard; AUTO endpoints (body-pins that may
+    carry attribution error) are soft, so the rays can override them.
+    Returns ``(p0, v0)`` relative to ``start_frame`` on success, else
+    ``None`` (render falls back to the naive endpoint parabola).
+    """
+    obs = [(f, (float(uv[0]), float(uv[1])))
+           for f, uv in sorted(extra_observations.items())
+           if start_frame < f < end_frame
+           and f in per_frame_K and f in per_frame_R and f in per_frame_t]
+    if len(obs) < _SEGMENT_FIT_MIN_OBS:
+        return None
+    n_manual = int(start_is_manual) + int(end_is_manual)
+    auto_weight = (_AUTO_KNOT_WEIGHT_TIEBREAK if n_manual
+                   else _AUTO_KNOT_WEIGHT_SOLE_DEPTH)
+    knots: dict[int, np.ndarray] = {}
+    fixes: list[tuple[int, np.ndarray, float]] = []
+    for f, w, is_manual, conf in (
+        (start_frame, start_world, start_is_manual, start_confidence),
+        (end_frame, end_world, end_is_manual, end_confidence),
+    ):
+        arr = np.asarray(w, dtype=float)
+        if is_manual:
+            knots[f - start_frame] = arr
+        else:
+            fixes.append((f - start_frame, arr, auto_weight * float(conf)))
+    f0 = obs[0][0]
+    shift = f0 - start_frame
+    Ks = [np.asarray(per_frame_K[f]) for f, _ in obs]
+    Rs = [np.asarray(per_frame_R[f]) for f, _ in obs]
+    ts = [np.asarray(per_frame_t[f]) for f, _ in obs]
+    try:
+        p0, v0, residual = fit_parabola_to_image_observations(
+            obs, Ks=Ks, Rs=Rs, t_world=ts, fps=fps, distortion=distortion,
+            p0_fixed=None,
+            knot_frames={k - shift: w for k, w in knots.items()} or None,
+            world_fixes=[(k - shift, w, wt) for k, w, wt in fixes] or None,
+        )
+    except Exception:  # noqa: BLE001 — fit failure keeps the naive parabola
+        return None
+    med = _arc_residual_px(p0, v0, obs, Ks, Rs, ts, distortion, fps, f0)
+    if not (np.isfinite(med) and med <= _SEGMENT_FIT_MAX_RESIDUAL_PX
+            and float(np.linalg.norm(v0)) <= _MAX_LAUNCH_SPEED_M_S):
+        return None
+    # Report p0/v0 at start_frame (rebased from the first observation).
+    g = np.array([0.0, 0.0, -9.81])
+    dt = (start_frame - f0) / fps
+    p0s = p0 + v0 * dt + 0.5 * g * dt * dt
+    v0s = v0 + g * dt
+    return (tuple(float(x) for x in p0s), tuple(float(x) for x in v0s))
+
+
+__all__ = ["refit_airborne_chains", "refit_ballistic_segment"]

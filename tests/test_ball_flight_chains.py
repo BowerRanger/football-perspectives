@@ -252,3 +252,57 @@ def test_auto_touch_knots_are_soft_manual_are_hard():
                    for f in truth) if hard_updates else float("inf")
     assert err_soft < 0.30
     assert err_soft < err_hard
+
+
+def test_ballistic_segment_refit_from_detections_fixes_soft_endpoint():
+    """W5l: a ballistic SEGMENT with no interior anchors (kroupi's deep
+    crosses) refits from in-span detections; a wrong AUTO endpoint (soft)
+    is overridden by the ray evidence."""
+    from src.utils.ball_flight_chains import refit_ballistic_segment
+
+    R, t = _cam()
+    p0 = np.array([0.0, 8.0, _R_])
+    v0 = np.array([4.0, 3.0, 9.81 * 0.4])
+    end_true = _arc(p0, v0, 24, 0)
+    obs = {f: _uv(_arc(p0, v0, f, 0), R, t) for f in range(3, 24, 3)}
+    per = {f: (_K, R, t) for f in range(0, 30)}
+    # Auto end keyframe body-pinned 2m off the true landing.
+    end_bad = tuple(end_true + np.array([2.0, -1.5, 0.0]))
+    fit = refit_ballistic_segment(
+        start_frame=0, end_frame=24,
+        start_world=tuple(p0), end_world=end_bad,
+        start_is_manual=True, end_is_manual=False,
+        end_confidence=0.8,
+        extra_observations=obs,
+        per_frame_K={f: c[0] for f, c in per.items()},
+        per_frame_R={f: c[1] for f, c in per.items()},
+        per_frame_t={f: c[2] for f, c in per.items()},
+        distortion=_DIST, fps=_FPS,
+    )
+    assert fit is not None
+    fp0, fv0 = fit
+    for f in (6, 12, 18):
+        w = np.asarray(fp0) + np.asarray(fv0) * (f / _FPS) \
+            + 0.5 * np.array([0, 0, -9.81]) * (f / _FPS) ** 2
+        err = np.linalg.norm(w - _arc(p0, v0, f, 0))
+        assert err < 0.30, f"f{f}: {err:.2f}m"
+
+
+def test_ballistic_segment_refit_needs_enough_detections():
+    from src.utils.ball_flight_chains import refit_ballistic_segment
+
+    R, t = _cam()
+    p0 = np.array([0.0, 8.0, _R_])
+    v0 = np.array([4.0, 3.0, 9.81 * 0.4])
+    per = {f: (_K, R, t) for f in range(0, 30)}
+    fit = refit_ballistic_segment(
+        start_frame=0, end_frame=24,
+        start_world=tuple(p0), end_world=tuple(_arc(p0, v0, 24, 0)),
+        start_is_manual=True, end_is_manual=True, end_confidence=1.0,
+        extra_observations={9: _uv(_arc(p0, v0, 9, 0), R, t)},  # just one
+        per_frame_K={f: c[0] for f, c in per.items()},
+        per_frame_R={f: c[1] for f, c in per.items()},
+        per_frame_t={f: c[2] for f, c in per.items()},
+        distortion=_DIST, fps=_FPS,
+    )
+    assert fit is None

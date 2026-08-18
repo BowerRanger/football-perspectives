@@ -298,6 +298,51 @@ def resolve_events(
         keyframe_set.keyframes, n_frames=n_frames, fps=fps,
         carry_spans=carry_spans,
     )
+    # W5l — segment-level flight refits: a ballistic span with no interior
+    # anchors (deep crosses) fits its arc from in-span detections; manual
+    # endpoints stay near-hard, auto body-pins soft. The fitted arc rides
+    # in the segment hints so the renderer (and UE) draw the same shape.
+    if hard_obs:
+        from src.utils.ball_flight_chains import refit_ballistic_segment
+        kf_world2 = {kf.frame: kf.world_xyz for kf in keyframe_set.keyframes}
+        new_segments = []
+        for seg in segments:
+            wa = kf_world2.get(seg.start_frame)
+            wb = kf_world2.get(seg.end_frame)
+            if (seg.kind != "ballistic" or wa is None or wb is None
+                    or seg.end_frame - seg.start_frame < 6):
+                new_segments.append(seg)
+                continue
+            conf_of = {
+                f: float(getattr(anchor_by_frame.get(f), "confidence", 1.0)
+                         or 1.0)
+                for f in (seg.start_frame, seg.end_frame)
+            }
+            is_manual = {
+                f: (manual_frames is None or f in manual_frames)
+                for f in (seg.start_frame, seg.end_frame)
+            }
+            fit = refit_ballistic_segment(
+                start_frame=seg.start_frame, end_frame=seg.end_frame,
+                start_world=wa, end_world=wb,
+                start_is_manual=is_manual[seg.start_frame],
+                end_is_manual=is_manual[seg.end_frame],
+                start_confidence=conf_of[seg.start_frame],
+                end_confidence=conf_of[seg.end_frame],
+                extra_observations=hard_obs,
+                per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                per_frame_t=per_frame_t, distortion=distortion, fps=fps,
+            )
+            if fit is not None:
+                new_segments.append(dataclasses.replace(
+                    seg, hints={**(seg.hints or {}),
+                                "fit_p0": list(fit[0]),
+                                "fit_v0": list(fit[1])},
+                ))
+            else:
+                new_segments.append(seg)
+        segments = tuple(new_segments)
+
     keyframe_set = dataclasses.replace(keyframe_set, segments=segments)
 
     # W4b — carry spans follow the owning player's foot path (the §10

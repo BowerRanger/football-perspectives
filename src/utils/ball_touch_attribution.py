@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Collection, Sequence
 
 import numpy as np
 
@@ -139,6 +139,41 @@ def refine_touch_attribution(
         else:
             out.append(e)
     return tuple(out)
+
+
+def context_expected_worlds(
+    world_by_frame: dict,
+    *,
+    touch_frames: Collection[int],
+    window: int = 2,
+    max_bridge_frames: int = 30,
+) -> dict[int, tuple[float, float, float]]:
+    """Expected ball worlds from a resolved track, with every touch's
+    ±``window`` neighbourhood re-interpolated from the clean context
+    outside it (two-pass attribution, sub-20cm campaign).
+
+    A wrong first-pass body-pin drags the track toward the wrong joint at
+    the touch itself, so the expectation there must come from where the
+    ball was coming from and going to — never from the disputed pin.
+    """
+    out = {f: tuple(float(x) for x in w)
+           for f, w in world_by_frame.items() if w is not None}
+    frames = sorted(out)
+    if not frames:
+        return out
+    for tf in touch_frames:
+        lo = next((f for f in reversed(frames)
+                   if f < tf - window and tf - f <= max_bridge_frames), None)
+        hi = next((f for f in frames
+                   if f > tf + window and f - tf <= max_bridge_frames), None)
+        if lo is None or hi is None or hi <= lo:
+            continue
+        pa = np.asarray(out[lo], dtype=float)
+        pb = np.asarray(out[hi], dtype=float)
+        for f in range(max(lo + 1, tf - window), min(hi, tf + window + 1)):
+            s = (f - lo) / (hi - lo)
+            out[f] = tuple(float(x) for x in (pa + (pb - pa) * s))
+    return out
 
 
 def expected_ball_worlds(

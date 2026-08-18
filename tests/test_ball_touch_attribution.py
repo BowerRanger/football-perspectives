@@ -223,3 +223,21 @@ def test_expected_worlds_interpolate_between_ground_anchors():
     mid = np.asarray(worlds[15])
     assert np.allclose(mid, (a + b) / 2, atol=0.05)
     assert 25 not in worlds        # no extrapolation past the last anchor
+
+
+def test_context_expected_worlds_bridge_over_touch_windows():
+    from src.utils.ball_touch_attribution import context_expected_worlds
+
+    # Track dragged to a wrong pin at f10 (spike); context bridges over it.
+    world = {f: (float(f), 0.0, 0.11) for f in range(21)}
+    world[10] = (10.0, 8.0, 0.11)     # dragged toward the wrong joint
+    world[9] = (9.0, 4.0, 0.11)
+    world[11] = (11.0, 4.0, 0.11)
+    exp = context_expected_worlds(world, touch_frames={10}, window=2)
+    # Frames inside the ±window around the touch are re-interpolated from
+    # the clean context (f7 → f13): the spike is bridged away.
+    for f in range(8, 13):
+        assert abs(exp[f][1]) < 0.3, f
+        assert abs(exp[f][0] - f) < 0.3, f
+    # Far frames keep the track's own value.
+    assert exp[3] == world[3]

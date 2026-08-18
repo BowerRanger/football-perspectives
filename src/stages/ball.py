@@ -1874,18 +1874,91 @@ class BallStage(BaseStage):
             # Default: resolve the sparse event set (touches body-pinned,
             # waypoints via ray∩geometry), then render a DERIVED dense track
             # from the §10 reference interpolator. No monocular depth solve.
-            result = resolve_events(
-                anchor_by_frame=anchor_by_frame,
-                player_ctx=player_ctx,
-                per_frame_K=per_frame_K, per_frame_R=per_frame_R,
-                per_frame_t=per_frame_t, distortion=distortion,
-                ball_radius=ball_radius, goal_geometry=goal_geometry,
-                n_frames=n_frames, fps=artifacts.camera_fps,
-                clip_id=artifacts.camera_clip_id,
-                image_size=artifacts.camera_image_size,
-                steps=steps, confidences=raw_confidences, sources=sources,
-                manual_frames=frozenset(manual_by_frame),
-            )
+            def _resolve(abf):
+                return resolve_events(
+                    anchor_by_frame=abf,
+                    player_ctx=player_ctx,
+                    per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                    per_frame_t=per_frame_t, distortion=distortion,
+                    ball_radius=ball_radius, goal_geometry=goal_geometry,
+                    n_frames=n_frames, fps=artifacts.camera_fps,
+                    clip_id=artifacts.camera_clip_id,
+                    image_size=artifacts.camera_image_size,
+                    steps=steps, confidences=raw_confidences,
+                    sources=sources,
+                    manual_frames=frozenset(manual_by_frame),
+                )
+
+            result = _resolve(anchor_by_frame)
+            # Two-pass attribution (sub-20cm campaign): the first pass's
+            # ground-anchor depth expectation is wrong over flight, so
+            # re-score touch labels against context expectations bridged
+            # from the resolved track AROUND each touch (never from the
+            # disputed pin itself); on any relabel, re-mint the auto
+            # anchors and re-resolve exactly once.
+            if (attr_cfg.enabled and player_ctx.player_ids
+                    and anchor_cfg.enabled):
+                try:
+                    from src.utils.ball_touch_attribution import (
+                        context_expected_worlds,
+                    )
+                    touch_frames = {
+                        e.frame for e in events if e.kind == "touch"}
+                    ctx_worlds = context_expected_worlds(
+                        {f: w for f, (w, _c)
+                         in result.world_by_frame.items()},
+                        touch_frames=touch_frames, window=attr_cfg.window,
+                    )
+                    events2 = refine_touch_attribution(
+                        events, player_ctx=player_ctx,
+                        ball_uvs={s.frame: np.asarray(s.uv, dtype=float)
+                                  for s in steps if s.uv is not None},
+                        per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                        per_frame_t=per_frame_t, distortion=distortion,
+                        cfg=attr_cfg,
+                        expected_world_by_frame=ctx_worlds,
+                    )
+                    if tuple(events2) != tuple(events):
+                        n_rel = sum(1 for a, b in zip(events, events2)
+                                    if (a.player_id, a.bone)
+                                    != (b.player_id, b.bone))
+                        logger.info(
+                            "ball: two-pass attribution relabelled %d "
+                            "touch(es) — re-minting and re-resolving",
+                            n_rel)
+                        events = tuple(events2)
+                        auto_anchors = generate_auto_anchors(
+                            events=events, steps=steps,
+                            confidences=raw_confidences,
+                            player_ctx=player_ctx,
+                            per_frame_K=per_frame_K,
+                            per_frame_R=per_frame_R,
+                            per_frame_t=per_frame_t,
+                            distortion=distortion,
+                            fps=artifacts.camera_fps,
+                            pitch_cfg=pitch_cfg, cfg=anchor_cfg,
+                            sources=sources,
+                            manual_anchors=manual_by_frame,
+                        )
+                        auto_by_frame = {a.frame: a for a in auto_anchors}
+                        BallAnchorSet(
+                            clip_id=artifacts.camera_clip_id,
+                            image_size=artifacts.camera_image_size,
+                            anchors=auto_anchors,
+                            shot_chains=proposed_chains,
+                        ).save(auto_anchor_path(
+                            ball_out_path.parent, shot_id))
+                        anchor_by_frame = merge_anchors(
+                            manual_by_frame, auto_by_frame,
+                            anchor_cfg.suppress_radius_frames,
+                            dismissed=(manual_set.dismissed_auto
+                                       if manual_set else ()),
+                        )
+                        result = _resolve(anchor_by_frame)
+                except Exception as exc:  # noqa: BLE001 — second pass is enrichment
+                    logger.warning(
+                        "ball: two-pass attribution failed (%s) — keeping "
+                        "first-pass result", exc)
         elif solver_name == "global":
             # The beam re-segments the timeline, so it wants the RICHER
             # permissive candidate set (soft-NMS, two events per window),

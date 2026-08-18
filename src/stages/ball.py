@@ -1889,6 +1889,30 @@ class BallStage(BaseStage):
                     manual_frames=frozenset(manual_by_frame),
                 )
 
+            def _remint_and_resolve(evs):
+                """Regenerate autos from ``evs``, re-merge, re-resolve."""
+                auto = generate_auto_anchors(
+                    events=evs, steps=steps,
+                    confidences=raw_confidences, player_ctx=player_ctx,
+                    per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                    per_frame_t=per_frame_t, distortion=distortion,
+                    fps=artifacts.camera_fps, pitch_cfg=pitch_cfg,
+                    cfg=anchor_cfg, sources=sources,
+                    manual_anchors=manual_by_frame,
+                )
+                abf = merge_anchors(
+                    manual_by_frame, {a.frame: a for a in auto},
+                    anchor_cfg.suppress_radius_frames,
+                    dismissed=(manual_set.dismissed_auto
+                               if manual_set else ()),
+                )
+                BallAnchorSet(
+                    clip_id=artifacts.camera_clip_id,
+                    image_size=artifacts.camera_image_size,
+                    anchors=auto, shot_chains=proposed_chains,
+                ).save(auto_anchor_path(ball_out_path.parent, shot_id))
+                return {a.frame: a for a in auto}, abf, _resolve(abf)
+
             result = _resolve(anchor_by_frame)
             # Two-pass attribution (sub-20cm campaign): the first pass's
             # ground-anchor depth expectation is wrong over flight, so
@@ -1927,38 +1951,51 @@ class BallStage(BaseStage):
                             "touch(es) — re-minting and re-resolving",
                             n_rel)
                         events = tuple(events2)
-                        auto_anchors = generate_auto_anchors(
-                            events=events, steps=steps,
-                            confidences=raw_confidences,
-                            player_ctx=player_ctx,
-                            per_frame_K=per_frame_K,
-                            per_frame_R=per_frame_R,
-                            per_frame_t=per_frame_t,
-                            distortion=distortion,
-                            fps=artifacts.camera_fps,
-                            pitch_cfg=pitch_cfg, cfg=anchor_cfg,
-                            sources=sources,
-                            manual_anchors=manual_by_frame,
-                        )
-                        auto_by_frame = {a.frame: a for a in auto_anchors}
-                        BallAnchorSet(
-                            clip_id=artifacts.camera_clip_id,
-                            image_size=artifacts.camera_image_size,
-                            anchors=auto_anchors,
-                            shot_chains=proposed_chains,
-                        ).save(auto_anchor_path(
-                            ball_out_path.parent, shot_id))
-                        anchor_by_frame = merge_anchors(
-                            manual_by_frame, auto_by_frame,
-                            anchor_cfg.suppress_radius_frames,
-                            dismissed=(manual_set.dismissed_auto
-                                       if manual_set else ()),
-                        )
-                        result = _resolve(anchor_by_frame)
+                        auto_by_frame, anchor_by_frame, result = (
+                            _remint_and_resolve(events))
                 except Exception as exc:  # noqa: BLE001 — second pass is enrichment
                     logger.warning(
                         "ball: two-pass attribution failed (%s) — keeping "
                         "first-pass result", exc)
+            # W5k — uncovered-bend proposals: violations of the natural-
+            # motion limits on the resolved track mark MISSING events; each
+            # becomes a second-chance touch/bounce candidate that must
+            # still clear every standard gate (evidence, contact, flight,
+            # reachability, operator suppression).
+            if anchor_cfg.enabled:
+                try:
+                    from src.utils.ball_bend_proposals import (
+                        propose_bend_events,
+                    )
+                    covered = {kf.frame
+                               for kf in result.keyframe_set.keyframes}
+                    for s in result.keyframe_set.segments:
+                        covered.add(s.start_frame)
+                        covered.add(s.end_frame)
+                    bend_events = propose_bend_events(
+                        world_by_frame={
+                            f: w for f, (w, _c)
+                            in result.world_by_frame.items()},
+                        state_by_frame=result.state_by_frame,
+                        event_frames=covered,
+                        fps=artifacts.camera_fps, player_ctx=player_ctx,
+                        contact_max_gap_m=anchor_cfg.contact_max_gap_m,
+                    )
+                    fresh = tuple(
+                        e for e in bend_events
+                        if all(abs(e.frame - x.frame) > 2 for x in events))
+                    if fresh:
+                        logger.info(
+                            "ball: %d uncovered-bend event proposal(s) at "
+                            "%s — re-minting and re-resolving",
+                            len(fresh), [e.frame for e in fresh])
+                        events = tuple(events) + fresh
+                        auto_by_frame, anchor_by_frame, result = (
+                            _remint_and_resolve(events))
+                except Exception as exc:  # noqa: BLE001 — proposals are enrichment
+                    logger.warning(
+                        "ball: bend-proposal pass failed (%s) — keeping "
+                        "current result", exc)
         elif solver_name == "global":
             # The beam re-segments the timeline, so it wants the RICHER
             # permissive candidate set (soft-NMS, two events per window),

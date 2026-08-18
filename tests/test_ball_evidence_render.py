@@ -245,3 +245,37 @@ def test_carry_span_smooths_fk_foot_jitter():
     mid_true = np.asarray(carry[12])
     assert np.linalg.norm(np.asarray(track.frames[12].world_xyz)[:2]
                           - mid_true[:2]) < 0.6
+
+
+def test_long_span_genuine_curvature_passes_the_chord_gate():
+    """A fixed 1.5 m chord gate rejects real curvature on long spans
+    (origi01's 60+-frame rolls); the budget must scale with span length
+    while still rejecting false-cluster excursions."""
+    from src.utils.ball_interpolate import interpolate_events
+
+    n = 81  # long span
+    a = np.array([0.0, 0.0, 0.11])
+    b = np.array([20.0, 0.0, 0.11])
+    # Genuine curve: sagitta 2.2 m at mid-span (beyond the old 1.5 gate).
+    truth = {}
+    for f in range(n):
+        s = f / (n - 1)
+        truth[f] = (20.0 * s, 2.2 * np.sin(np.pi * s), 0.11)
+    ks = BallKeyframeSet(
+        clip_id="c", fps=_FPS, image_size=(1920, 1080),
+        keyframes=(_kf(0, a), _kf(n - 1, b)),
+        segments=(BallSegment(start_frame=0, end_frame=n - 1, kind="roll",
+                              hints={}),),
+    )
+    ev = {f: truth[f] for f in range(2, n - 2, 2)}
+    track = interpolate_events(ks, n_frames=n, evidence_worlds=ev)
+    errs = [np.linalg.norm(np.asarray(track.frames[f].world_xyz)
+                           - np.asarray(truth[f])) for f in range(n)]
+    assert max(errs) < 0.35      # follows the true curve
+    # False cluster 6 m off still rejected on the same span length.
+    junk = dict(ev)
+    for f in range(38, 44, 2):
+        junk[f] = (truth[f][0], truth[f][1] + 6.0, 0.11)
+    track2 = interpolate_events(ks, n_frames=n, evidence_worlds=junk)
+    w40 = np.asarray(track2.frames[40].world_xyz)
+    assert abs(w40[1] - truth[40][1]) < 1.0   # junk did not drag the span

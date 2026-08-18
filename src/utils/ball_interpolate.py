@@ -141,9 +141,12 @@ def _eval_linear(
 
 # A roll-evidence knot farther than this from the endpoints' chord is a
 # false-detection cluster (detector locked on a static object), not a curved
-# roll — genuine ground-pass curvature between nearby keyframes stays well
-# under this.
-_ROLL_KNOT_MAX_CHORD_DEV_M = 1.5
+# roll. The budget scales with span length: genuine curvature grows with
+# the distance travelled (origi01's 60+-frame rolls carry 2 m of real
+# sagitta) while false clusters sit 4–8 m off regardless of span.
+_ROLL_KNOT_CHORD_DEV_BASE_M = 1.5
+_ROLL_KNOT_CHORD_DEV_PER_FRAME_M = 0.02
+_ROLL_KNOT_CHORD_DEV_CAP_M = 3.5
 
 
 def _evidence_knots(
@@ -162,6 +165,11 @@ def _evidence_knots(
     false-detection clusters.
     """
     span = seg.end_frame - seg.start_frame
+    max_dev = min(
+        _ROLL_KNOT_CHORD_DEV_CAP_M,
+        _ROLL_KNOT_CHORD_DEV_BASE_M
+        + _ROLL_KNOT_CHORD_DEV_PER_FRAME_M * span,
+    )
 
     def _chord_dev(f: int, w: np.ndarray) -> float:
         if p0 is None or p1 is None or span == 0:
@@ -173,7 +181,7 @@ def _evidence_knots(
         f for f in evidence_worlds
         if seg.start_frame < f < seg.end_frame
         and _chord_dev(f, np.asarray(evidence_worlds[f], dtype=float))
-        <= _ROLL_KNOT_MAX_CHORD_DEV_M
+        <= max_dev
     )
     knots: list[tuple[int, np.ndarray]] = []
     last = None

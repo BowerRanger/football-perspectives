@@ -65,3 +65,31 @@ def test_legacy_keyframes_load_with_empty_segments(tmp_path: Path):
     back = BallKeyframeSet.load(p)
     assert back.segments == ()
     assert back.keyframes[0].end_frame is None
+
+
+def test_high_flight_probability_overrides_roll_classification():
+    """W5i (sub-20cm): two plain-touch keyframes classify as roll by
+    state, but when the IMM says the ball FLEW between them the segment
+    must be ballistic (kroupi01: aerial crosses rendered along the
+    ground)."""
+    from src.schemas.ball_keyframes import BallKeyframe
+    from src.utils.ball_segments import derive_segments
+
+    kfs = [
+        BallKeyframe(frame=0, state="player_touch", depth_source="player_bone",
+                     world_xyz=(10.0, 30.0, 0.5), player_id="P1",
+                     bone="r_foot"),
+        BallKeyframe(frame=30, state="player_touch",
+                     depth_source="player_bone",
+                     world_xyz=(30.0, 45.0, 0.5), player_id="P2",
+                     bone="r_foot"),
+    ]
+    low = derive_segments(kfs, n_frames=31, fps=30.0,
+                          p_flight_by_frame={f: 0.1 for f in range(31)})
+    assert [s.kind for s in low] == ["roll"]
+    high = derive_segments(kfs, n_frames=31, fps=30.0,
+                           p_flight_by_frame={f: 0.9 for f in range(1, 30)})
+    assert [s.kind for s in high] == ["ballistic"]
+    # No flight info at all: state-based classification unchanged.
+    none = derive_segments(kfs, n_frames=31, fps=30.0)
+    assert [s.kind for s in none] == ["roll"]

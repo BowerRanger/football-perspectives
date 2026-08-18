@@ -289,9 +289,14 @@ def resolve_events(
         flight_segments=(),
     )
     carry_spans = detect_carry_spans(keyframe_set.keyframes)
+    p_flight_by_frame = (
+        {s.frame: float(getattr(s, "p_flight", 0.0)) for s in steps}
+        if steps is not None else None
+    )
     segments = derive_segments(
         keyframe_set.keyframes, n_frames=n_frames, fps=fps,
         carry_spans=carry_spans,
+        p_flight_by_frame=p_flight_by_frame,
     )
     keyframe_set = dataclasses.replace(keyframe_set, segments=segments)
 

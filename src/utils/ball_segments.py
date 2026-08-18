@@ -46,11 +46,28 @@ def _dist2(a, b) -> float:
     return sum((float(x) - float(y)) ** 2 for x, y in zip(a, b))
 
 
-def _between_kind(a: BallKeyframe, b: BallKeyframe) -> str:
+# Mean interior IMM flight probability above which a span is ballistic
+# regardless of its endpoint states: two plain touches can bracket a
+# flighted pass (sub-20cm campaign W5i — aerial balls rendered along the
+# ground when classification trusted states alone).
+_P_FLIGHT_BALLISTIC = 0.6
+
+
+def _between_kind(
+    a: BallKeyframe,
+    b: BallKeyframe,
+    p_flight_by_frame: dict[int, float] | None = None,
+) -> str:
     if a.state == "off_screen_flight" or b.state == "off_screen_flight":
         return "free_flight"
     if _implies_flight(a) or _implies_flight(b):
         return "ballistic"
+    if p_flight_by_frame and b.frame - a.frame >= 2:
+        interior = [p_flight_by_frame[f]
+                    for f in range(a.frame + 1, b.frame)
+                    if f in p_flight_by_frame]
+        if interior and sum(interior) / len(interior) > _P_FLIGHT_BALLISTIC:
+            return "ballistic"
     if a.world_xyz is not None and b.world_xyz is not None:
         if _dist2(a.world_xyz, b.world_xyz) <= _REST_EPS_M2:
             return "rest"
@@ -77,6 +94,7 @@ def derive_segments(
     n_frames: int,
     fps: float,
     carry_spans: Sequence[tuple[int, int]] = (),
+    p_flight_by_frame: dict[int, float] | None = None,
 ) -> tuple[BallSegment, ...]:
     """Return ordered segments covering the clip.
 
@@ -102,7 +120,8 @@ def derive_segments(
     for a, b in zip(kfs, kfs[1:]):
         if b.frame <= a.frame:
             continue
-        kind = "carry" if (a.frame, b.frame) in carry_set else _between_kind(a, b)
+        kind = ("carry" if (a.frame, b.frame) in carry_set
+                else _between_kind(a, b, p_flight_by_frame))
         segments.append(BallSegment(
             start_frame=a.frame, end_frame=b.frame, kind=kind,
             hints=_hints_for(a, kind),

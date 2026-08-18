@@ -124,7 +124,9 @@ def test_carry_span_follows_player_path():
     err_follow = np.linalg.norm(np.asarray(followed.frames[10].world_xyz)
                                 - np.asarray(truth_mid))
     assert err_plain > 0.5
-    assert err_follow < 1e-9        # carry worlds are used verbatim
+    # Carry follows the player path closely (smoothed, not verbatim —
+    # FK jitter must never reach the emitted track).
+    assert err_follow < 0.15
     assert np.allclose(followed.frames[0].world_xyz, p0)
     assert np.allclose(followed.frames[n - 1].world_xyz, p1)
 
@@ -178,3 +180,68 @@ def test_roll_polyline_is_smoothed_below_naturalness_thresholds():
     v = naturalness_violations(track.frames, event_frames={0, n - 1},
                                fps=_FPS)
     assert not v, [f"{x.kind}@{x.frame}" for x in v]
+
+
+def test_roll_span_is_naturalness_clean_by_construction():
+    """origi01 f6-11 wobble class: large-amplitude knot noise (distant
+    zoom, metres per pixel) must never render heading/speed violations —
+    the span re-smooths toward the chord until clean."""
+    from src.utils.ball_eval import naturalness_violations
+    from src.utils.ball_interpolate import interpolate_events
+
+    n = 41
+    a = np.array([0.0, 0.0, 0.11])
+    b = np.array([12.0, 0.0, 0.11])
+    truth = {f: a + (b - a) * (f / (n - 1)) for f in range(n)}
+    noisy = {}
+    vals = [0.9, -0.85, 0.95, -0.9, 0.85, -0.95]   # ±0.9 m knot noise
+    for i, f in enumerate(range(2, n - 2, 3)):
+        w = np.asarray(truth[f], dtype=float).copy()
+        w[1] += vals[i % len(vals)]
+        noisy[f] = tuple(w)
+    ks = BallKeyframeSet(
+        clip_id="c", fps=_FPS, image_size=(1920, 1080),
+        keyframes=(_kf(0, a), _kf(n - 1, b)),
+        segments=(BallSegment(start_frame=0, end_frame=n - 1, kind="roll",
+                              hints={}),),
+    )
+    track = interpolate_events(ks, n_frames=n, evidence_worlds=noisy)
+    v = naturalness_violations(track.frames, event_frames={0, n - 1},
+                               fps=_FPS)
+    assert not v, [f"{x.kind}@{x.frame}={x.value:.1f}" for x in v]
+    assert np.allclose(track.frames[0].world_xyz, a)
+    assert np.allclose(track.frames[n - 1].world_xyz, b)
+
+
+def test_carry_span_smooths_fk_foot_jitter():
+    """origi01 f6-11: carry paths followed the FK foot midpoint verbatim —
+    foot jitter at distant-zoom depth renders 15-20°/frame heading wobble.
+    Carry rendering must smooth to naturalness-clean while staying with
+    the dribbler."""
+    from src.utils.ball_eval import naturalness_violations
+    from src.utils.ball_interpolate import interpolate_events
+
+    n = 25
+    a = np.array([0.0, 0.0, 0.11])
+    b = np.array([6.0, 2.0, 0.11])
+    jit = [0.35, -0.3, 0.4, -0.35, 0.3, -0.4]
+    carry = {}
+    for f in range(1, n - 1):
+        s = f / (n - 1)
+        base = a + (b - a) * s
+        base[1] += jit[f % len(jit)]        # FK jitter, every frame
+        carry[f] = tuple(base)
+    ks = BallKeyframeSet(
+        clip_id="c", fps=_FPS, image_size=(1920, 1080),
+        keyframes=(_kf(0, a, "player_touch"), _kf(n - 1, b, "player_touch")),
+        segments=(BallSegment(start_frame=0, end_frame=n - 1, kind="carry",
+                              hints={"player_id": "P1"}),),
+    )
+    track = interpolate_events(ks, n_frames=n, carry_worlds=carry)
+    v = naturalness_violations(track.frames, event_frames={0, n - 1},
+                               fps=_FPS)
+    assert not v, [f"{x.kind}@{x.frame}={x.value:.1f}" for x in v]
+    # Still near the dribbler's path (not collapsed to the chord).
+    mid_true = np.asarray(carry[12])
+    assert np.linalg.norm(np.asarray(track.frames[12].world_xyz)[:2]
+                          - mid_true[:2]) < 0.6

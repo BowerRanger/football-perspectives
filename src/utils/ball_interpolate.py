@@ -164,17 +164,69 @@ def _evidence_knots(
     return knots
 
 
+# Natural-motion limits mirrored from the validator (ball_eval
+# NaturalnessCfg): a roll/carry may never turn or speed up faster than an
+# event-free ball can. Rendering enforces them by construction.
+_MAX_HEADING_DEG_PER_FRAME = 12.0
+_MAX_SPEED_RATIO = 1.15
+_MIN_LIMIT_SPEED_M_S = 1.0
+_MAX_SMOOTH_ROUNDS = 12
+
+
+def _span_violates_limits(vals: dict[int, np.ndarray], fps: float) -> bool:
+    frames = sorted(vals)
+    for f in frames[1:-1]:
+        if f - 1 not in vals or f + 1 not in vals:
+            continue
+        v_in = (vals[f] - vals[f - 1]) * fps
+        v_out = (vals[f + 1] - vals[f]) * fps
+        sp_in = float(np.linalg.norm(v_in[:2]))
+        sp_out = float(np.linalg.norm(v_out[:2]))
+        if min(sp_in, sp_out) > 2.0:
+            dh = float(np.degrees(abs(np.arctan2(v_out[1], v_out[0])
+                                      - np.arctan2(v_in[1], v_in[0]))))
+            dh = min(dh, 360.0 - dh)
+            if dh > _MAX_HEADING_DEG_PER_FRAME - 1.0:
+                return True
+        if (min(sp_in, sp_out) > _MIN_LIMIT_SPEED_M_S
+                and sp_out > sp_in * (_MAX_SPEED_RATIO - 0.02)):
+            return True
+    return False
+
+
+def _smooth_span(vals: dict[int, np.ndarray], p0: np.ndarray,
+                 p1: np.ndarray, fps: float, base_iters: int = 3) -> None:
+    """Endpoint-preserving smoothing, repeated until the span satisfies
+    the natural-motion limits (it converges toward the always-legal
+    endpoint chord)."""
+    frames = sorted(vals)
+
+    def _round() -> None:
+        prev = dict(vals)
+        for f in frames[1:-1]:
+            vals[f] = 0.25 * prev[f - 1] + 0.5 * prev[f] + 0.25 * prev[f + 1]
+        vals[frames[0]] = p0
+        vals[frames[-1]] = p1
+
+    for _ in range(base_iters):
+        _round()
+    rounds = 0
+    while _span_violates_limits(vals, fps) and rounds < _MAX_SMOOTH_ROUNDS:
+        _round()
+        rounds += 1
+
+
 def _eval_polyline(
     seg: BallSegment,
     p0: np.ndarray,
     p1: np.ndarray,
     knots: list[tuple[int, np.ndarray]],
     world: dict[int, np.ndarray | None],
-    smooth_iters: int = 3,
+    fps: float = 30.0,
 ) -> None:
     """Piecewise-linear render through endpoint-pinned evidence knots,
-    followed by a light endpoint-preserving smoothing pass so knot kinks
-    stay below the natural-motion thresholds (heading/speed continuity)."""
+    smoothed (adaptively) until the span satisfies the natural-motion
+    limits — knot kinks and jitter never reach the emitted track."""
     pts = [(seg.start_frame, p0), *knots, (seg.end_frame, p1)]
     vals: dict[int, np.ndarray] = {}
     for (fa, pa), (fb, pb) in zip(pts, pts[1:]):
@@ -182,13 +234,7 @@ def _eval_polyline(
         for f in range(fa, fb + 1):
             s = 0.0 if span == 0 else (f - fa) / span
             vals[f] = pa + (pb - pa) * s
-    frames = sorted(vals)
-    for _ in range(smooth_iters):
-        prev = dict(vals)
-        for f in frames[1:-1]:
-            vals[f] = 0.25 * prev[f - 1] + 0.5 * prev[f] + 0.25 * prev[f + 1]
-    vals[seg.start_frame] = p0
-    vals[seg.end_frame] = p1
+    _smooth_span(vals, p0, p1, fps)
     world.update(vals)
 
 
@@ -262,10 +308,16 @@ def interpolate_events(
                 f in carry_worlds
                 for f in range(seg.start_frame + 1, seg.end_frame)
             ):
-                for f in range(seg.start_frame + 1, seg.end_frame):
-                    world[f] = np.asarray(carry_worlds[f], dtype=float)
-                world[seg.start_frame] = p0
-                world[seg.end_frame] = p1
+                vals: dict[int, np.ndarray] = {
+                    f: np.asarray(carry_worlds[f], dtype=float)
+                    for f in range(seg.start_frame + 1, seg.end_frame)
+                }
+                vals[seg.start_frame] = p0
+                vals[seg.end_frame] = p1
+                # FK foot jitter at distant-zoom depth renders as heading
+                # wobble; smooth to naturalness-clean like roll spans.
+                _smooth_span(vals, p0, p1, fps)
+                world.update(vals)
             else:
                 knots = (
                     _evidence_knots(seg, evidence_worlds, evidence_stride,
@@ -273,7 +325,7 @@ def interpolate_events(
                     if evidence_worlds and seg.kind == "roll" else []
                 )
                 if knots:
-                    _eval_polyline(seg, p0, p1, knots, world)
+                    _eval_polyline(seg, p0, p1, knots, world, fps=fps)
                 else:
                     _eval_linear(seg, p0, p1, world)
         elif seg.kind == "rest" and (p0 is not None or p1 is not None):

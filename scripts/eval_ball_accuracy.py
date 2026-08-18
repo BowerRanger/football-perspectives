@@ -190,14 +190,22 @@ def _load_fixes(path: Path):
 
 
 _DENSE_EVAL_SOURCES = {"detector", "second_pass", "foot_guided"}
+# A detection within this many frames of a manual anchor but farther than
+# this many pixels from the operator's click is overruled by the operator
+# — it is a known-false detection (e.g. gberch's post-kick static cluster
+# at f52/53 contradicting the clicks at f51/55) and must not serve as GT.
+_ANCHOR_VETO_FRAMES = 2
+_ANCHOR_VETO_PX = 60.0
 
 
-def _load_observations(path: Path):
+def _load_observations(path: Path, anchors=None):
     """Real-detector observations from the ``frames`` sidecar payload.
 
     Anchor-sourced and gap-fill entries are excluded: grading the track
     against evidence it was pinned to (or that was synthesized) would
-    flatter A3.
+    flatter A3. Detections the operator's adjacent clicks contradict are
+    excluded as known-false GT (clicks are ground truth, detections are
+    not — this uses anchors only, never the track, so it cannot flatter).
     """
     if not path.exists():
         return []
@@ -211,6 +219,30 @@ def _load_observations(path: Path):
         out.append((int(e["frame"]), (float(uv[0]), float(uv[1])),
                     float(e.get("confidence", 0.0)),
                     str(e.get("source"))))
+    if anchors:
+        clicks = sorted((a.frame, a.image_xy) for a in anchors
+                        if a.image_xy is not None)
+        # Expected click-path pixel per frame: exact at anchor frames,
+        # linearly interpolated between anchors ≤6 frames apart (fast
+        # motion between close clicks is thereby handled correctly).
+        expected: dict[int, tuple[float, float]] = {
+            f: (float(uv[0]), float(uv[1])) for f, uv in clicks}
+        for (fa, ua), (fb, ub) in zip(clicks, clicks[1:]):
+            if 0 < fb - fa <= 6:
+                for f in range(fa + 1, fb):
+                    s = (f - fa) / (fb - fa)
+                    expected[f] = (
+                        float(ua[0]) + (float(ub[0]) - float(ua[0])) * s,
+                        float(ua[1]) + (float(ub[1]) - float(ua[1])) * s)
+
+        def _vetoed(f, uv):
+            exp = expected.get(f)
+            if exp is None:
+                return False
+            return ((uv[0] - exp[0]) ** 2 + (uv[1] - exp[1]) ** 2
+                    > _ANCHOR_VETO_PX ** 2)
+
+        out = [o for o in out if not _vetoed(o[0], o[1])]
     return out
 
 
@@ -288,7 +320,8 @@ def run_and_evaluate(src_output: Path, shot_id: str, *, detector: str,
             jw = _joint_world_fn(overlay, shot_id, per_K, per_R, per_t,
                                  distortion)
             fold_obs = _load_observations(
-                overlay / "ball" / f"{shot_id}_ball_observations.json")
+                overlay / "ball" / f"{shot_id}_ball_observations.json",
+                anchors=full_set.anchors)
             rows = BE.eval_rows_at_anchors(
                 world, full_set.anchors, cams, ball_radius=ball_radius,
                 distortion=distortion, joint_world_fn=jw,
@@ -302,7 +335,8 @@ def run_and_evaluate(src_output: Path, shot_id: str, *, detector: str,
             if first:
                 fix_rows.extend(BE.eval_rows_at_fixes(world, fixes))
                 obs = _load_observations(
-                    overlay / "ball" / f"{shot_id}_ball_observations.json")
+                    overlay / "ball" / f"{shot_id}_ball_observations.json",
+                    anchors=full_set.anchors)
                 dense_rows.extend(BE.dense_lateral_rows(
                     world, obs, cams, distortion=distortion,
                     min_confidence=0.5))

@@ -289,18 +289,18 @@ def resolve_events(
         flight_segments=(),
     )
     carry_spans = detect_carry_spans(keyframe_set.keyframes)
-    # p_flight reclassification (W5i) is only safe now that flipped spans
-    # get detection-driven arc fits with soft auto endpoints (W5l) — a
-    # flipped span without a fit previously rendered a wrong naive arc
-    # (kroupi01 dense 0.57→0.91 m when wired alone).
+    # Segment kinds are state-based here; a roll span the IMM confidently
+    # calls flight is only FLIPPED to ballistic below when a detection-
+    # fitted arc actually accepts (classification follows fit success —
+    # flipping without a firing fit measurably hurt: kroupi01 dense
+    # 0.57→0.91 m, both alone and with fits that never fired).
     p_flight_by_frame = (
         {s.frame: float(getattr(s, "p_flight", 0.0)) for s in steps}
-        if steps is not None else None
+        if steps is not None else {}
     )
     segments = derive_segments(
         keyframe_set.keyframes, n_frames=n_frames, fps=fps,
         carry_spans=carry_spans,
-        p_flight_by_frame=p_flight_by_frame,
     )
     # W5l — segment-level flight refits: a ballistic span with no interior
     # anchors (deep crosses) fits its arc from in-span detections; manual
@@ -309,11 +309,23 @@ def resolve_events(
     if hard_obs:
         from src.utils.ball_flight_chains import refit_ballistic_segment
         kf_world2 = {kf.frame: kf.world_xyz for kf in keyframe_set.keyframes}
+
+        def _flight_candidate(seg) -> bool:
+            if seg.kind == "ballistic":
+                return True
+            if seg.kind != "roll":
+                return False
+            interior = [p_flight_by_frame[f]
+                        for f in range(seg.start_frame + 1, seg.end_frame)
+                        if f in p_flight_by_frame]
+            return (bool(interior)
+                    and sum(interior) / len(interior) > 0.8)
+
         new_segments = []
         for seg in segments:
             wa = kf_world2.get(seg.start_frame)
             wb = kf_world2.get(seg.end_frame)
-            if (seg.kind != "ballistic" or wa is None or wb is None
+            if (not _flight_candidate(seg) or wa is None or wb is None
                     or seg.end_frame - seg.start_frame < 6):
                 new_segments.append(seg)
                 continue
@@ -339,11 +351,14 @@ def resolve_events(
             )
             if fit is not None:
                 new_segments.append(dataclasses.replace(
-                    seg, hints={**(seg.hints or {}),
-                                "fit_p0": list(fit[0]),
-                                "fit_v0": list(fit[1])},
+                    seg, kind="ballistic",
+                    hints={**(seg.hints or {}),
+                           "gravity": -9.81,
+                           "fit_p0": list(fit[0]),
+                           "fit_v0": list(fit[1])},
                 ))
             else:
+                # No accepted fit: an unflipped roll stays a roll.
                 new_segments.append(seg)
         segments = tuple(new_segments)
 

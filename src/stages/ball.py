@@ -2233,6 +2233,8 @@ class BallStage(BaseStage):
             "touch_ground_clamped": result.diagnostics.get(
                 "touch_ground_clamped", 0),
             "flight_chains": result.diagnostics.get("flight_chains", []),
+            "segment_fits": result.diagnostics.get("segment_fits", []),
+            "roll_evidence": result.diagnostics.get("roll_evidence", []),
             "airborne_refit_frames": result.diagnostics.get(
                 "airborne_refit_frames", []),
         }

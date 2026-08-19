@@ -1193,6 +1193,34 @@ class BallStage(BaseStage):
             clip_path, cfg, detector, manual_by_frame,
             prior=prior, prior_drop_below=prior_cfg.drop_below,
         )
+        # W5s — operator truth extends into the observation stream: a
+        # detection the bracketing clicks prove false (static lock at the
+        # ball's old position between two nearby anchors) must not feed
+        # the IMM, event search, or fits.
+        if manual_by_frame:
+            from src.utils.ball_track_clean import veto_click_contradicted
+            det_uvs = {
+                s.frame: s.uv for s in steps
+                if s.uv is not None
+                and sources.get(s.frame) == "detector"
+            }
+            clicks = {
+                f: (float(a.image_xy[0]), float(a.image_xy[1]))
+                for f, a in manual_by_frame.items()
+                if a.image_xy is not None
+            }
+            kept_uvs = veto_click_contradicted(det_uvs, clicks)
+            vetoed = set(det_uvs) - set(kept_uvs)
+            if vetoed:
+                logger.info(
+                    "ball: %d detection(s) vetoed by bracketing operator "
+                    "clicks at frames %s", len(vetoed), sorted(vetoed))
+                cur_uv = {s.frame: s.uv for s in steps
+                          if s.uv is not None and s.frame not in vetoed}
+                for f in vetoed:
+                    raw_confidences.pop(f, None)
+                    sources.pop(f, None)
+                steps = _resmooth_observations(cur_uv, len(steps), cfg)
         if not steps:
             logger.warning("ball stage: clip %s contained no frames", clip_path)
             return None

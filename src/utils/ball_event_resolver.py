@@ -357,10 +357,38 @@ def resolve_events(
                 per_frame_K=per_frame_K, per_frame_R=per_frame_R,
                 per_frame_t=per_frame_t, distortion=distortion, fps=fps,
             )
+            split = None
+            if fit is None and n_obs_in >= 6:
+                from src.utils.ball_flight_chains import refit_split_segment
+                split = refit_split_segment(
+                    start_frame=seg.start_frame, end_frame=seg.end_frame,
+                    start_world=wa, end_world=wb,
+                    start_is_manual=is_manual[seg.start_frame],
+                    end_is_manual=is_manual[seg.end_frame],
+                    start_confidence=conf_of[seg.start_frame],
+                    end_confidence=conf_of[seg.end_frame],
+                    extra_observations=hard_obs,
+                    per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+                    per_frame_t=per_frame_t, distortion=distortion,
+                    fps=fps,
+                )
             segment_fit_diags.append({
                 "span": [seg.start_frame, seg.end_frame],
                 "kind": seg.kind, "n_obs": n_obs_in,
-                "attempted": True, "accepted": fit is not None})
+                "attempted": True, "accepted": fit is not None,
+                "split": None if split is None else split[0]})
+            if split is not None:
+                s_frame, (pa, va), (pb, vb) = split
+                base_h = {k: v for k, v in (seg.hints or {}).items()}
+                new_segments.append(dataclasses.replace(
+                    seg, kind="ballistic", end_frame=s_frame,
+                    hints={**base_h, "gravity": -9.81, "split_fit": True,
+                           "fit_p0": list(pa), "fit_v0": list(va)}))
+                new_segments.append(dataclasses.replace(
+                    seg, kind="ballistic", start_frame=s_frame,
+                    hints={**base_h, "gravity": -9.81, "split_fit": True,
+                           "fit_p0": list(pb), "fit_v0": list(vb)}))
+                continue
             if fit is not None:
                 new_segments.append(dataclasses.replace(
                     seg, kind="ballistic",

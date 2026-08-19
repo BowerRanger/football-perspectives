@@ -306,3 +306,69 @@ def test_ballistic_segment_refit_needs_enough_detections():
         distortion=_DIST, fps=_FPS,
     )
     assert fit is None
+
+
+def test_split_fit_recovers_hidden_interior_bounce():
+    """kroupi class: a span hiding an interior bounce rejects a single
+    arc; the two-arc split fit recovers both halves from detections."""
+    from src.utils.ball_flight_chains import refit_split_segment
+
+    R, t = _cam()
+    p0 = np.array([0.0, 8.0, _R_])
+    v0 = np.array([4.0, 3.0, 9.81 * 0.3])   # bounces at t=0.6s → f18
+    g = np.array([0.0, 0.0, -9.81])
+
+    def arc1(f):
+        tt = f / _FPS
+        return p0 + v0 * tt + 0.5 * g * tt * tt
+
+    pb = arc1(18)
+    vb = v0 + g * (18 / _FPS)
+    vb2 = np.array([vb[0], vb[1], -vb[2] * 0.7])   # restitution bounce
+
+    def arc2(f):
+        tt = (f - 18) / _FPS
+        return pb + vb2 * tt + 0.5 * g * tt * tt
+
+    truth = {f: (arc1(f) if f <= 18 else arc2(f)) for f in range(0, 37, 3)}
+    obs = {f: _uv(w, R, t) for f, w in truth.items() if 0 < f < 36}
+    fit = refit_split_segment(
+        start_frame=0, end_frame=36,
+        start_world=tuple(arc1(0)), end_world=tuple(arc2(36)),
+        start_is_manual=True, end_is_manual=True,
+        extra_observations=obs,
+        per_frame_K={f: _K for f in range(0, 37)},
+        per_frame_R={f: R for f in range(0, 37)},
+        per_frame_t={f: t for f in range(0, 37)},
+        distortion=_DIST, fps=_FPS,
+    )
+    assert fit is not None
+    split_frame, (pa, va), (pb2, vb3) = fit
+    assert abs(split_frame - 18) <= 3
+    for f in (6, 12):
+        w = np.asarray(pa) + np.asarray(va) * (f / _FPS) + 0.5 * g * (f / _FPS) ** 2
+        assert np.linalg.norm(w - arc1(f)) < 0.25, f
+    for f in (24, 30):
+        tt = (f - split_frame) / _FPS
+        w = np.asarray(pb2) + np.asarray(vb3) * tt + 0.5 * g * tt * tt
+        assert np.linalg.norm(w - arc2(f)) < 0.35, f
+
+
+def test_split_fit_rejects_junk_span():
+    from src.utils.ball_flight_chains import refit_split_segment
+
+    R, t = _cam()
+    rngs = [(i * 37) % 300 - 150 for i in range(12)]
+    obs = {f: (900.0 + rngs[i], 400.0 + rngs[(i * 5) % 12])
+           for i, f in enumerate(range(3, 34, 3))}
+    fit = refit_split_segment(
+        start_frame=0, end_frame=36,
+        start_world=(0.0, 8.0, _R_), end_world=(6.0, 12.0, _R_),
+        start_is_manual=True, end_is_manual=True,
+        extra_observations=obs,
+        per_frame_K={f: _K for f in range(0, 37)},
+        per_frame_R={f: R for f in range(0, 37)},
+        per_frame_t={f: t for f in range(0, 37)},
+        distortion=_DIST, fps=_FPS,
+    )
+    assert fit is None

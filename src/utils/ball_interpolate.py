@@ -63,6 +63,8 @@ def _eval_ballistic(
     p1: np.ndarray,
     fps: float,
     world: dict[int, np.ndarray | None],
+    ramp_start: bool = True,
+    ramp_end: bool = True,
 ) -> FlightSegment | None:
     gravity = float(seg.hints.get("gravity", _DEFAULT_GRAVITY))
     total_t = (seg.end_frame - seg.start_frame) / fps
@@ -91,9 +93,9 @@ def _eval_ballistic(
             w = _arc_at(f)
             ds = f - seg.start_frame
             de = seg.end_frame - f
-            if ds < ramp_n:
+            if ramp_start and ds < ramp_n:
                 w = w + err_start * (1.0 - ds / ramp_n)
-            if de < ramp_n:
+            if ramp_end and de < ramp_n:
                 w = w + err_end * (1.0 - de / ramp_n)
             world[f] = w
         v0 = vel
@@ -104,11 +106,16 @@ def _eval_ballistic(
         for f in range(seg.start_frame, seg.end_frame + 1):
             t = (f - seg.start_frame) / fps
             world[f] = base + vel * t + 0.5 * a * t * t
-    # Endpoints exact (guard against float drift).
-    world[seg.start_frame] = p0
-    world[seg.end_frame] = p1
+    # Endpoints exact (guard against float drift) — only where a real
+    # keyframe exists (split-fit halves have none at the shared boundary;
+    # the fitted arc already defines those frames).
+    if ramp_start:
+        world[seg.start_frame] = p0
+    if ramp_end:
+        world[seg.end_frame] = p1
+    arc_p0 = world[seg.start_frame]
     parabola: dict = {
-        "p0": [float(x) for x in p0],
+        "p0": [float(x) for x in np.asarray(arc_p0, dtype=float)],
         "v0": [float(x) for x in v0],
         "g": gravity,
     }
@@ -384,8 +391,18 @@ def interpolate_events(
         p0 = _xyz(kf0.world_xyz) if kf0 else None
         p1 = _xyz(kf1.world_xyz) if kf1 else None
         flight = seg.kind in _FLIGHT_KINDS
-        if seg.kind == "ballistic" and p0 is not None and p1 is not None:
-            fs = _eval_ballistic(seg, p0, p1, fps, world)
+        has_fit = (seg.hints or {}).get("fit_p0") is not None
+        if seg.kind == "ballistic" and (
+                (p0 is not None and p1 is not None) or has_fit):
+            # Split-fit halves have no keyframe at the shared boundary;
+            # the fitted arc in the hints defines them completely.
+            fs = _eval_ballistic(
+                seg,
+                p0 if p0 is not None else np.zeros(3),
+                p1 if p1 is not None else np.zeros(3),
+                fps, world,
+                ramp_start=p0 is not None, ramp_end=p1 is not None,
+            )
             if fs is not None:
                 flight_segments.append(fs)
         elif seg.kind == "free_flight" and p0 is not None and p1 is not None:

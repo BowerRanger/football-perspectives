@@ -344,4 +344,121 @@ def refit_ballistic_segment(
     return (tuple(float(x) for x in p0s), tuple(float(x) for x in v0s))
 
 
-__all__ = ["refit_airborne_chains", "refit_ballistic_segment"]
+# A split's two arcs must meet within this at the shared frame (they were
+# fitted independently; a genuine bounce/touch is position-continuous).
+_SPLIT_JOIN_TOL_M = 0.6
+_SPLIT_MIN_HALF_OBS = 3
+
+
+def refit_split_segment(
+    *,
+    start_frame: int,
+    end_frame: int,
+    start_world,
+    end_world,
+    start_is_manual: bool,
+    end_is_manual: bool,
+    extra_observations: dict[int, tuple[float, float]],
+    per_frame_K,
+    per_frame_R,
+    per_frame_t,
+    distortion: tuple[float, float],
+    fps: float,
+    start_confidence: float = 1.0,
+    end_confidence: float = 1.0,
+):
+    """Two-arc fit for a span hiding one interior event (kroupi class).
+
+    Tries every viable split frame (observation frames with enough
+    observations on both sides); each half fits independently with its
+    own endpoint knot; a candidate is accepted when both halves pass the
+    residual gate AND the arcs meet within ``_SPLIT_JOIN_TOL_M`` at the
+    split (a real bounce/touch is position-continuous). Returns
+    ``(split_frame, (p0_a, v0_a), (p0_b, v0_b))`` — each arc's state at
+    its own start frame (``start_frame`` and ``split_frame``) — or None.
+    """
+    obs_frames = sorted(f for f in extra_observations
+                        if start_frame < f < end_frame)
+    if len(obs_frames) < 2 * _SPLIT_MIN_HALF_OBS:
+        return None
+    g = np.array([0.0, 0.0, -9.81])
+    best = None
+    for s in obs_frames[_SPLIT_MIN_HALF_OBS - 1:
+                        len(obs_frames) - (_SPLIT_MIN_HALF_OBS - 1)]:
+        left = {f: extra_observations[f] for f in obs_frames if f <= s}
+        right = {f: extra_observations[f] for f in obs_frames if f >= s}
+        if len(left) < _SPLIT_MIN_HALF_OBS or len(right) < _SPLIT_MIN_HALF_OBS:
+            continue
+        fa = _fit_half(
+            start_frame, s, start_world, start_is_manual,
+            start_confidence, left, per_frame_K, per_frame_R,
+            per_frame_t, distortion, fps, knot_at_start=True)
+        fb = _fit_half(
+            s, end_frame, end_world, end_is_manual,
+            end_confidence, right, per_frame_K, per_frame_R,
+            per_frame_t, distortion, fps, knot_at_start=False)
+        if fa is None or fb is None:
+            continue
+        (pa, va, res_a) = fa
+        (pb, vb, res_b) = fb
+        tt = (s - start_frame) / fps
+        a_at_s = np.asarray(pa) + np.asarray(va) * tt + 0.5 * g * tt * tt
+        join = float(np.linalg.norm(a_at_s - np.asarray(pb)))
+        if join > _SPLIT_JOIN_TOL_M:
+            continue
+        score = res_a + res_b + join
+        if best is None or score < best[0]:
+            best = (score, s,
+                    (tuple(float(x) for x in pa),
+                     tuple(float(x) for x in va)),
+                    (tuple(float(x) for x in pb),
+                     tuple(float(x) for x in vb)))
+    if best is None:
+        return None
+    return best[1], best[2], best[3]
+
+
+def _fit_half(f_start, f_end, knot_world, knot_is_manual, knot_conf,
+              obs_dict, per_frame_K, per_frame_R, per_frame_t,
+              distortion, fps, *, knot_at_start):
+    """One half of a split: single knot at the anchored end, rays free."""
+    obs = [(f, (float(uv[0]), float(uv[1])))
+           for f, uv in sorted(obs_dict.items())
+           if f in per_frame_K and f in per_frame_R and f in per_frame_t]
+    if len(obs) < _SPLIT_MIN_HALF_OBS:
+        return None
+    f0 = obs[0][0]
+    Ks = [np.asarray(per_frame_K[f]) for f, _ in obs]
+    Rs = [np.asarray(per_frame_R[f]) for f, _ in obs]
+    ts = [np.asarray(per_frame_t[f]) for f, _ in obs]
+    knot_frame = f_start if knot_at_start else f_end
+    knots = {}
+    fixes = []
+    w = np.asarray(knot_world, dtype=float)
+    if knot_is_manual:
+        knots[knot_frame - f0] = w
+    else:
+        fixes.append((knot_frame - f0, w,
+                      _AUTO_KNOT_WEIGHT_SOLE_DEPTH * float(knot_conf)))
+    try:
+        p0, v0, _ = fit_parabola_to_image_observations(
+            obs, Ks=Ks, Rs=Rs, t_world=ts, fps=fps, distortion=distortion,
+            p0_fixed=None, knot_frames=knots or None,
+            world_fixes=fixes or None,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    med = _arc_residual_px(p0, v0, obs, Ks, Rs, ts, distortion, fps, f0)
+    if not (np.isfinite(med) and med <= _SEGMENT_FIT_MAX_RESIDUAL_PX
+            and float(np.linalg.norm(v0)) <= _MAX_LAUNCH_SPEED_M_S):
+        return None
+    # Rebase the arc state to the half's own start frame.
+    g = np.array([0.0, 0.0, -9.81])
+    dt = (f_start - f0) / fps
+    p0s = p0 + v0 * dt + 0.5 * g * dt * dt
+    v0s = v0 + g * dt
+    return p0s, v0s, float(med)
+
+
+__all__ = ["refit_airborne_chains", "refit_ballistic_segment",
+           "refit_split_segment"]

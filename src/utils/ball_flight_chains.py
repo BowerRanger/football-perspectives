@@ -332,6 +332,9 @@ def refit_ballistic_segment(
     med = _arc_residual_px(p0, v0, obs, Ks, Rs, ts, distortion, fps, f0)
     if not (np.isfinite(med) and med <= _SEGMENT_FIT_MAX_RESIDUAL_PX
             and float(np.linalg.norm(v0)) <= _MAX_LAUNCH_SPEED_M_S):
+        logger.info(
+            "ball segment-fit [%d,%d]: rejected (median %.1fpx, |v0| %.1f)",
+            start_frame, end_frame, med, float(np.linalg.norm(v0)))
         return None
     # Report p0/v0 at start_frame (rebased from the first observation).
     g = np.array([0.0, 0.0, -9.81])

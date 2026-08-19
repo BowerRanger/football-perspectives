@@ -318,8 +318,13 @@ def resolve_events(
             interior = [p_flight_by_frame[f]
                         for f in range(seg.start_frame + 1, seg.end_frame)
                         if f in p_flight_by_frame]
+            # Attempt bar only — flips still REQUIRE an accepted fit, so
+            # a lower bar merely tries more fits (junk spans decline at
+            # the fit gate). origi01's distant zoom keeps the IMM flight
+            # posterior soft (~0.5-0.7) on genuinely lofted passes that
+            # were rendering along the ground.
             return (bool(interior)
-                    and sum(interior) / len(interior) > 0.8)
+                    and sum(interior) / len(interior) > 0.5)
 
         new_segments = []
         segment_fit_diags: list[dict] = []

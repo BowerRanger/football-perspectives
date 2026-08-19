@@ -1915,6 +1915,7 @@ class BallStage(BaseStage):
                     steps=steps, confidences=raw_confidences,
                     sources=sources,
                     manual_frames=frozenset(manual_by_frame),
+                    world_fixes=fixes or None,
                 )
 
             def _remint_and_resolve(evs):

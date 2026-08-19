@@ -197,6 +197,7 @@ def resolve_events(
     confidences: dict[int, float] | None = None,
     sources: dict[int, str] | None = None,
     manual_frames: frozenset[int] | None = None,
+    world_fixes: dict[int, tuple] | None = None,
 ) -> EventResolveResult:
     """Resolve events → keyframes + segments → derived dense track.
 
@@ -253,6 +254,7 @@ def resolve_events(
         per_frame_t=per_frame_t, distortion=distortion, fps=fps,
         extra_observations=hard_obs or None,
         manual_frames=manual_frames,
+        world_fixes=world_fixes,
     )
     # Refit keyframes stay ray-faithful: snap each onto its clicked ray at
     # the fitted depth BEFORE rendering, so interpolation and the C4 stage

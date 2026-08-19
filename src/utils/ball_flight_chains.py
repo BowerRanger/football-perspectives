@@ -105,8 +105,13 @@ def refit_airborne_chains(
     max_residual_px: float = 5.0,
     extra_observations: dict[int, tuple[float, float]] | None = None,
     manual_frames: frozenset[int] | None = None,
+    world_fixes: dict[int, tuple] | None = None,
 ) -> tuple[dict[int, tuple[float, float, float]], list[dict]]:
     """Return ``({airborne_frame: refit_world}, diagnostics)``.
+
+    ``world_fixes`` maps frames to ``(xyz, weight)`` absolute constraints
+    (cross-replay triangulation) — the only monocular-external depth truth
+    available; in-span entries join every fit (sub-20cm campaign W5u).
 
     Only interior airborne-bucket anchors of successfully fitted chains
     appear in the updates map; everything else is untouched.
@@ -187,13 +192,18 @@ def refit_airborne_chains(
         def _fit(o):
             Ks, Rs, ts = _cams_for(o)
             shift = o[0][0] - f0
+            wf = [(k - shift, w, wt) for k, w, wt in soft_fixes]
+            for f, entry in (world_fixes or {}).items():
+                if start < f < end:
+                    xyz, wt = entry
+                    wf.append((f - f0 - shift,
+                               np.asarray(xyz, dtype=float), float(wt)))
             return fit_parabola_to_image_observations(
                 o, Ks=Ks, Rs=Rs, t_world=ts, fps=fps,
                 distortion=distortion, p0_fixed=None,
                 knot_frames={k - shift: w for k, w in knots.items()} or None,
                 z_range_frames={k - shift: b for k, b in z_ranges.items()},
-                world_fixes=[(k - shift, w, wt) for k, w, wt in soft_fixes]
-                or None,
+                world_fixes=wf or None,
             )
 
         # Two-stage robust fit: anchors first (operator clicks are trusted),
@@ -285,6 +295,7 @@ def refit_ballistic_segment(
     per_frame_t,
     distortion: tuple[float, float],
     fps: float,
+    world_fixes: dict[int, tuple] | None = None,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
     """Gravity-arc fit for a ballistic SEGMENT with no interior anchors.
 
@@ -320,12 +331,17 @@ def refit_ballistic_segment(
     Ks = [np.asarray(per_frame_K[f]) for f, _ in obs]
     Rs = [np.asarray(per_frame_R[f]) for f, _ in obs]
     ts = [np.asarray(per_frame_t[f]) for f, _ in obs]
+    wf = [(k - shift, w, wt) for k, w, wt in fixes]
+    for f, entry in (world_fixes or {}).items():
+        if start_frame < f < end_frame:
+            xyz, wt = entry
+            wf.append((f - f0, np.asarray(xyz, dtype=float), float(wt)))
     try:
         p0, v0, residual = fit_parabola_to_image_observations(
             obs, Ks=Ks, Rs=Rs, t_world=ts, fps=fps, distortion=distortion,
             p0_fixed=None,
             knot_frames={k - shift: w for k, w in knots.items()} or None,
-            world_fixes=[(k - shift, w, wt) for k, w, wt in fixes] or None,
+            world_fixes=wf or None,
         )
     except Exception:  # noqa: BLE001 — fit failure keeps the naive parabola
         return None

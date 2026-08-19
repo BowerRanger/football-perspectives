@@ -168,6 +168,11 @@ def refine_pair_offset(
     """
 
     def _median_miss(offset: float) -> tuple[float, int]:
+        # Trimmed mean of the BEST HALF of misses: the plain median was
+        # measured to sit 1.75+ frames off the true optimum on origi01
+        # (outlier pairs from residual false detections flatten it); the
+        # best-half objective localised the optimum to ±0.25 frame with a
+        # 5.7 cm miss (sub-20cm campaign W5u).
         misses = []
         for f_a, f_b, uv_a, uv_b in _pairs_at_offset(
             obs_a, cams_a, obs_b, cams_b, offset, cfg,
@@ -182,7 +187,9 @@ def refine_pair_offset(
                 misses.append(miss)
         if not misses:
             return float("inf"), 0
-        return float(np.median(misses)), len(misses)
+        ms = sorted(misses)
+        k = max(min(4, len(ms)), len(ms) // 2)
+        return float(np.mean(ms[:k])), len(misses)
 
     base_miss, base_pairs = _median_miss(saved_offset)
     if base_pairs < cfg.min_pairs_for_refine:

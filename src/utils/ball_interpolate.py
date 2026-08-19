@@ -270,7 +270,11 @@ def _smooth_span(vals: dict[int, np.ndarray], p0: np.ndarray,
     # sequence lightly smoothed — constant-speed resampling was measured
     # to decouple evidence timing (+23 dense >20 cm frames), because real
     # rolls decelerate; the original schedule carries that physics.
-    if len(frames) >= 3 and original_steps is not None:
+    if (len(frames) >= 3 and original_steps is not None
+            and _span_violates_limits(vals, fps)):
+        # Reparameterize ONLY spans the smoothing could not make legal —
+        # measured on origi01: blanket reparameterization shifted clean
+        # spans' evidence timing (+8 dense >20 cm frames) for nothing.
         pts = [vals[f] for f in frames]
         seg_len = [float(np.linalg.norm(b - a))
                    for a, b in zip(pts, pts[1:])]

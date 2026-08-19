@@ -239,8 +239,15 @@ def _smooth_span(vals: dict[int, np.ndarray], p0: np.ndarray,
                  p1: np.ndarray, fps: float, base_iters: int = 3) -> None:
     """Endpoint-preserving smoothing, repeated until the span satisfies
     the natural-motion limits (it converges toward the always-legal
-    endpoint chord)."""
+    endpoint chord), then reparameterized to a lightly-smoothed version
+    of the ORIGINAL arc schedule so knot timing and deceleration physics
+    survive the geometric smoothing."""
     frames = sorted(vals)
+    original_steps = (
+        [float(np.linalg.norm(vals[b] - vals[a]))
+         for a, b in zip(frames, frames[1:])]
+        if len(frames) >= 3 else None
+    )
 
     def _round() -> None:
         prev = dict(vals)
@@ -258,29 +265,46 @@ def _smooth_span(vals: dict[int, np.ndarray], p0: np.ndarray,
     # Arc-length reparameterization: neighbour-averaging with pinned
     # endpoints redistributes arc length (slow near knots, catch-up
     # between), which MANUFACTURES roll_speedup violations (measured on
-    # origi01: 1 violation raw vs 8 smoothed). Re-sample the smoothed
-    # geometry at constant speed so the path keeps its shape and the
-    # speed profile keeps its physics.
-    if len(frames) >= 3:
+    # origi01: 1 violation raw vs 8 smoothed). Walk the smoothed geometry
+    # on the ORIGINAL (knot-honouring) arc schedule with the speed
+    # sequence lightly smoothed — constant-speed resampling was measured
+    # to decouple evidence timing (+23 dense >20 cm frames), because real
+    # rolls decelerate; the original schedule carries that physics.
+    if len(frames) >= 3 and original_steps is not None:
         pts = [vals[f] for f in frames]
         seg_len = [float(np.linalg.norm(b - a))
                    for a, b in zip(pts, pts[1:])]
         total = sum(seg_len)
-        if total > 1e-9:
+        # Linear-speed (constant-deceleration) schedule: least-squares
+        # quadratic through the raw cumulative arc — averages knot jitter
+        # out of the timing while keeping the span's true deceleration.
+        raw_cum = [0.0]
+        for L in original_steps:
+            raw_cum.append(raw_cum[-1] + L)
+        m = len(raw_cum)
+        xs = np.arange(m, dtype=float)
+        coef = np.polyfit(xs, np.asarray(raw_cum), 2)
+        fitted = np.polyval(coef, xs)
+        steps = [max(0.0, float(b - a))
+                 for a, b in zip(fitted, fitted[1:])]
+        ssum = sum(steps)
+        if total > 1e-9 and ssum > 1e-9:
+            schedule = [s * total / ssum for s in steps]
             cum = [0.0]
             for L in seg_len:
                 cum.append(cum[-1] + L)
-            n = len(frames)
             resampled = [pts[0]]
+            target = 0.0
             j = 0
-            for i in range(1, n - 1):
-                target = total * i / (n - 1)
+            for st in schedule:
+                target += st
                 while j < len(seg_len) - 1 and cum[j + 1] < target:
                     j += 1
                 den = max(cum[j + 1] - cum[j], 1e-12)
                 s = (target - cum[j]) / den
                 resampled.append(pts[j] + (pts[j + 1] - pts[j]) * s)
-            resampled.append(pts[-1])
+            resampled[-1] = pts[-1]
+            assert len(resampled) == len(frames)
             for f, w in zip(frames, resampled):
                 vals[f] = w
     vals[frames[0]] = p0

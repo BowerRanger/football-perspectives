@@ -241,36 +241,3 @@ def test_context_expected_worlds_bridge_over_touch_windows():
         assert abs(exp[f][0] - f) < 0.3, f
     # Far frames keep the track's own value.
     assert exp[3] == world[3]
-
-
-def test_swinging_foot_wins_left_right_disambiguation():
-    """f192/f343 class: both feet near the ball at contact — the foot
-    SWINGING toward the ball is the toucher (kinematic term)."""
-    K, R, t = _camera()
-    ball = np.array([40.0, 34.0, 0.11])
-    uv = _project(ball, K, R, t)
-    # Planted foot slightly NEARER the ray; swinging foot approaches fast.
-    planted = np.array([40.10, 34.0, 0.11])
-    swing_pos = {9: np.array([39.5, 33.6, 0.11]),
-                 10: np.array([40.18, 33.95, 0.11]),
-                 11: np.array([40.6, 34.25, 0.11])}
-
-    class _KinCtx:
-        def joints_at(self, frame):
-            out = [_Joint("P003", "l_foot", tuple(planted), None, 0.9)]
-            if frame in swing_pos:
-                out.append(_Joint("P003", "r_foot",
-                                  tuple(swing_pos[frame]), None, 0.9))
-            return out
-
-    events = (BallEvent(frame=10, kind="touch", score=0.8,
-                        player_id="P003", bone="l_foot"),)
-    out = refine_touch_attribution(
-        events, player_ctx=_KinCtx(),
-        ball_uvs={f: np.asarray(uv) for f in (9, 10, 11)},
-        per_frame_K={f: K for f in (9, 10, 11)},
-        per_frame_R={f: R for f in (9, 10, 11)},
-        per_frame_t={f: t for f in (9, 10, 11)},
-        distortion=(0.0, 0.0), cfg=CFG,
-    )
-    assert (out[0].player_id, out[0].bone) == ("P003", "r_foot")

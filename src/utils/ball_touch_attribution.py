@@ -43,6 +43,13 @@ class TouchAttributionCfg:
     # When an expected ball world is available, each candidate's score adds
     # depth_weight × |along-ray depth mismatch|.
     depth_weight: float = 0.5
+    # Same-player L/R foot swaps (gberch f192/f343 class): both feet sit
+    # near the ball at contact; the SWINGING foot is the toucher. A
+    # candidate's score is reduced by kin_weight × its approach speed
+    # toward the ball (m/s, capped) — a 10 m/s swing outranks a planted
+    # foot ~0.2 m nearer the ray.
+    kin_weight: float = 0.02
+    kin_speed_cap_m_s: float = 10.0
 
 
 def _best_gaps_in_window(
@@ -63,6 +70,16 @@ def _best_gaps_in_window(
     the expected ball world (when one exists at that frame).
     """
     from src.utils.camera_projection import pixel_ray
+
+    # Per-(player, bone) world positions across the window, for the
+    # kinematic (approach-speed) term.
+    pos_by_key: dict[tuple[str, str], dict[int, np.ndarray]] = {}
+    for f in range(frame - cfg.window - 1, frame + cfg.window + 2):
+        for s in player_ctx.joints_at(f):
+            if getattr(s, "world_xyz", None) is None:
+                continue
+            pos_by_key.setdefault((s.player_id, s.bone), {})[f] = (
+                np.asarray(s.world_xyz, dtype=float))
 
     best: dict[tuple[str, str], float] = {}
     for f in range(frame - cfg.window, frame + cfg.window + 1):
@@ -88,6 +105,16 @@ def _best_gaps_in_window(
                 joint_depth = float(np.dot(joint - C, d_hat))
                 score += cfg.depth_weight * abs(joint_depth - exp_depth)
             key = (s.player_id, s.bone)
+            hist = pos_by_key.get(key, {})
+            if f - 1 in hist and f + 1 in hist:
+                # Joint SPEED (m/s, fps-approximate — a ranking term, not
+                # a measurement): a striking foot swings at ~10 m/s while
+                # the planted foot stands still. Direction is useless at
+                # the contact frame itself (the foot reaches the ball and
+                # reverses), so speed alone disambiguates L/R.
+                speed = float(np.linalg.norm(
+                    (hist[f + 1] - hist[f - 1]) / 2.0 * 25.0))
+                score -= cfg.kin_weight * min(speed, cfg.kin_speed_cap_m_s)
             if score < best.get(key, float("inf")):
                 best[key] = score
     return best

@@ -322,11 +322,19 @@ def resolve_events(
                     and sum(interior) / len(interior) > 0.8)
 
         new_segments = []
+        segment_fit_diags: list[dict] = []
         for seg in segments:
             wa = kf_world2.get(seg.start_frame)
             wb = kf_world2.get(seg.end_frame)
+            n_obs_in = sum(1 for f in hard_obs
+                           if seg.start_frame < f < seg.end_frame)
             if (not _flight_candidate(seg) or wa is None or wb is None
                     or seg.end_frame - seg.start_frame < 6):
+                if seg.kind == "ballistic":
+                    segment_fit_diags.append({
+                        "span": [seg.start_frame, seg.end_frame],
+                        "kind": seg.kind, "n_obs": n_obs_in,
+                        "attempted": False})
                 new_segments.append(seg)
                 continue
             conf_of = {
@@ -349,6 +357,10 @@ def resolve_events(
                 per_frame_K=per_frame_K, per_frame_R=per_frame_R,
                 per_frame_t=per_frame_t, distortion=distortion, fps=fps,
             )
+            segment_fit_diags.append({
+                "span": [seg.start_frame, seg.end_frame],
+                "kind": seg.kind, "n_obs": n_obs_in,
+                "attempted": True, "accepted": fit is not None})
             if fit is not None:
                 new_segments.append(dataclasses.replace(
                     seg, kind="ballistic",
@@ -449,6 +461,14 @@ def resolve_events(
         "bounces": [],
         "splits": 0,
         "touch_ground_clamped": n_ground_clamped,
+        "segment_fits": (segment_fit_diags
+                         if hard_obs else []),
+        "roll_evidence": [
+            {"span": [sg.start_frame, sg.end_frame],
+             "n_evidence": sum(1 for f in evidence_worlds
+                               if sg.start_frame < f < sg.end_frame)}
+            for sg in segments if sg.kind == "roll"
+        ],
         "flight_chains": chain_diags,
         "airborne_refit_frames": sorted(chain_updates),
     }

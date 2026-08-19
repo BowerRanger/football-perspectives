@@ -279,3 +279,44 @@ def test_long_span_genuine_curvature_passes_the_chord_gate():
     track2 = interpolate_events(ks, n_frames=n, evidence_worlds=junk)
     w40 = np.asarray(track2.frames[40].world_xyz)
     assert abs(w40[1] - truth[40][1]) < 1.0   # junk did not drag the span
+
+
+def test_smoothed_roll_has_monotone_speed_profile():
+    """Geometric smoothing with pinned endpoints redistributes arc length
+    (slow near knots, catch-up between) and manufactured roll_speedup
+    violations (origi01 probe: 1 violation raw vs 8 smoothed). After
+    reparameterization the per-frame speed profile stays within the
+    naturalness ratio."""
+    from src.utils.ball_eval import naturalness_violations
+    from src.utils.ball_interpolate import interpolate_events
+
+    n = 31
+    a = np.array([0.0, 0.0, 0.11])
+    b = np.array([9.0, 3.0, 0.11])
+    truth = {f: a + (b - a) * (f / (n - 1)) for f in range(n)}
+    noisy = {}
+    vals = [0.3, -0.28, 0.32, -0.3, 0.28, -0.32]
+    for i, f in enumerate(range(2, n - 2, 3)):
+        w = np.asarray(truth[f], dtype=float).copy()
+        w[1] += vals[i % len(vals)]
+        noisy[f] = tuple(w)
+    ks = BallKeyframeSet(
+        clip_id="c", fps=_FPS, image_size=(1920, 1080),
+        keyframes=(_kf(0, a), _kf(n - 1, b)),
+        segments=(BallSegment(start_frame=0, end_frame=n - 1, kind="roll",
+                              hints={}),),
+    )
+    track = interpolate_events(ks, n_frames=n, evidence_worlds=noisy)
+    v = naturalness_violations(track.frames, event_frames={0, n - 1},
+                               fps=_FPS)
+    assert not [x for x in v if x.kind == "roll_speedup"], \
+        [f"{x.kind}@{x.frame}={x.value:.2f}" for x in v]
+    # Speed profile: no frame-to-frame speed ratio beyond the limit.
+    sp = []
+    for f in range(1, n):
+        w0 = np.asarray(track.frames[f - 1].world_xyz)
+        w1 = np.asarray(track.frames[f].world_xyz)
+        sp.append(float(np.linalg.norm((w1 - w0)[:2])))
+    for s0, s1 in zip(sp, sp[1:]):
+        if min(s0, s1) * _FPS > 1.0:
+            assert s1 <= s0 * 1.15 + 1e-9

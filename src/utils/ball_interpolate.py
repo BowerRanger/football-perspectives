@@ -255,6 +255,36 @@ def _smooth_span(vals: dict[int, np.ndarray], p0: np.ndarray,
     while _span_violates_limits(vals, fps) and rounds < _MAX_SMOOTH_ROUNDS:
         _round()
         rounds += 1
+    # Arc-length reparameterization: neighbour-averaging with pinned
+    # endpoints redistributes arc length (slow near knots, catch-up
+    # between), which MANUFACTURES roll_speedup violations (measured on
+    # origi01: 1 violation raw vs 8 smoothed). Re-sample the smoothed
+    # geometry at constant speed so the path keeps its shape and the
+    # speed profile keeps its physics.
+    if len(frames) >= 3:
+        pts = [vals[f] for f in frames]
+        seg_len = [float(np.linalg.norm(b - a))
+                   for a, b in zip(pts, pts[1:])]
+        total = sum(seg_len)
+        if total > 1e-9:
+            cum = [0.0]
+            for L in seg_len:
+                cum.append(cum[-1] + L)
+            n = len(frames)
+            resampled = [pts[0]]
+            j = 0
+            for i in range(1, n - 1):
+                target = total * i / (n - 1)
+                while j < len(seg_len) - 1 and cum[j + 1] < target:
+                    j += 1
+                den = max(cum[j + 1] - cum[j], 1e-12)
+                s = (target - cum[j]) / den
+                resampled.append(pts[j] + (pts[j + 1] - pts[j]) * s)
+            resampled.append(pts[-1])
+            for f, w in zip(frames, resampled):
+                vals[f] = w
+    vals[frames[0]] = p0
+    vals[frames[-1]] = p1
 
 
 def _eval_polyline(

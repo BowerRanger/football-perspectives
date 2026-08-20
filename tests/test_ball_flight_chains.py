@@ -372,3 +372,28 @@ def test_split_fit_rejects_junk_span():
         distortion=_DIST, fps=_FPS,
     )
     assert fit is None
+
+
+def test_closed_form_arc_from_fixes():
+    """W5y: >=3 absolute fixes determine the arc in closed form — no LM,
+    no seeds, no near-parallel-ray landscape."""
+    from src.utils.ball_flight_chains import fit_arc_to_fixes
+
+    p0 = np.array([28.0, 55.0, 3.0])
+    v0 = np.array([-8.0, -2.0, 1.5])
+    g = np.array([0.0, 0.0, -9.81])
+    fixes = {}
+    for f in (291, 294, 297, 300, 304, 308):
+        t = (f - 291) / _FPS
+        w = p0 + v0 * t + 0.5 * g * t * t
+        fixes[f] = (tuple(w + np.array([0.05, -0.04, 0.03])), 30.0)
+    fit = fit_arc_to_fixes(fixes, fps=_FPS)
+    assert fit is not None
+    f0, (pa, va) = fit
+    assert f0 == 291
+    for f in (293, 299, 306):
+        t = (f - 291) / _FPS
+        w = np.asarray(pa) + np.asarray(va) * t + 0.5 * g * t * t
+        true = p0 + v0 * t + 0.5 * g * t * t
+        assert np.linalg.norm(w - true) < 0.12, f
+    assert fit_arc_to_fixes({291: ((1, 2, 3), 30.0)}, fps=_FPS) is None

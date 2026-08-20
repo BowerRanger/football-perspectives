@@ -230,6 +230,39 @@ def refit_airborne_chains(
                 world_fixes=wf or None,
             )
 
+        # W5y — preferred path: ≥3 absolute in-chain fixes determine the
+        # arc in closed form; accept when it reprojects onto the anchor
+        # clicks (which are ray-hard truth).
+        span_fixes = {f: e for f, e in (world_fixes or {}).items()
+                      if start <= f <= end}
+        if len(span_fixes) >= 3:
+            cf = fit_arc_to_fixes(span_fixes, fps=fps)
+            if cf is not None:
+                ff0, (cp0, cv0) = cf
+                aK, aR, aT = _cams_for(anchor_obs)
+                med_c = _arc_residual_px(
+                    np.asarray(cp0), np.asarray(cv0), anchor_obs,
+                    aK, aR, aT, distortion, fps, ff0)
+                if np.isfinite(med_c) and med_c <= 3 * max_residual_px:
+                    g2 = np.array([0.0, 0.0, -9.81])
+                    for f in air_frames:
+                        t2 = (f - ff0) / fps
+                        w2 = (np.asarray(cp0) + np.asarray(cv0) * t2
+                              + 0.5 * g2 * t2 * t2)
+                        updates[f] = (float(w2[0]), float(w2[1]),
+                                      float(w2[2]))
+                    diags.append({
+                        "kind": "chain_fit", "accepted": True,
+                        "span": [start, end], "n_air": len(air_frames),
+                        "mode": "fix_arc", "n_fixes": len(span_fixes),
+                        "residual_px": float(med_c),
+                    })
+                    continue
+                diags.append({
+                    "kind": "chain_fit_fix_arc_rejected",
+                    "span": [start, end],
+                    "residual_px": float(med_c),
+                })
         # Two-stage robust fit: anchors first (operator clicks are trusted),
         # then only extras the anchors-only arc already agrees with — and
         # the refit must not degrade the anchor residual (W5b).
@@ -516,5 +549,41 @@ def _fit_half(f_start, f_end, knot_world, knot_is_manual, knot_conf,
     return p0s, v0s, float(med)
 
 
+def fit_arc_to_fixes(
+    fixes: dict[int, tuple],
+    *,
+    fps: float,
+    min_fixes: int = 3,
+):
+    """Closed-form gravity arc through absolute fixes (W5y).
+
+    ``fixes`` maps frame → ``(xyz, weight)``. With ≥3 fixes the 6-DOF arc
+    is a plain weighted linear least-squares problem in (p0, v0) — no LM,
+    no seeding, immune to the near-parallel-ray cost landscape that
+    stalls pixel-based fits at broadcast depths. Returns
+    ``(f0, (p0, v0))`` at the earliest fix frame, or None.
+    """
+    items = sorted(fixes.items())
+    if len(items) < min_fixes:
+        return None
+    f0 = items[0][0]
+    g = np.array([0.0, 0.0, -9.81])
+    A_rows, b_rows, w_rows = [], [], []
+    for f, entry in items:
+        xyz, wt = entry
+        t = (f - f0) / fps
+        # xyz - 0.5 g t^2 = p0 + v0 t   (per axis)
+        target = np.asarray(xyz, dtype=float) - 0.5 * g * t * t
+        A_rows.append((1.0, t))
+        b_rows.append(target)
+        w_rows.append(float(wt))
+    A = np.asarray(A_rows)              # (n, 2)
+    B = np.stack(b_rows)                # (n, 3)
+    W = np.sqrt(np.asarray(w_rows))[:, None]
+    sol, *_ = np.linalg.lstsq(A * W, B * W, rcond=None)
+    p0, v0 = sol[0], sol[1]
+    return f0, (tuple(float(x) for x in p0), tuple(float(x) for x in v0))
+
+
 __all__ = ["refit_airborne_chains", "refit_ballistic_segment",
-           "refit_split_segment"]
+           "refit_split_segment", "fit_arc_to_fixes"]

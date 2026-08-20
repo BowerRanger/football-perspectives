@@ -221,8 +221,9 @@ _MIN_LIMIT_SPEED_M_S = 1.0
 _MAX_SMOOTH_ROUNDS = 12
 
 
-def _span_violates_limits(vals: dict[int, np.ndarray], fps: float) -> bool:
+def _span_violation_count(vals: dict[int, np.ndarray], fps: float) -> int:
     frames = sorted(vals)
+    n = 0
     for f in frames[1:-1]:
         if f - 1 not in vals or f + 1 not in vals:
             continue
@@ -235,11 +236,15 @@ def _span_violates_limits(vals: dict[int, np.ndarray], fps: float) -> bool:
                                       - np.arctan2(v_in[1], v_in[0]))))
             dh = min(dh, 360.0 - dh)
             if dh > _MAX_HEADING_DEG_PER_FRAME - 1.0:
-                return True
+                n += 1
         if (min(sp_in, sp_out) > _MIN_LIMIT_SPEED_M_S
                 and sp_out > sp_in * (_MAX_SPEED_RATIO - 0.02)):
-            return True
-    return False
+            n += 1
+    return n
+
+
+def _span_violates_limits(vals: dict[int, np.ndarray], fps: float) -> bool:
+    return _span_violation_count(vals, fps) > 0
 
 
 def _smooth_span(vals: dict[int, np.ndarray], p0: np.ndarray,
@@ -282,44 +287,68 @@ def _smooth_span(vals: dict[int, np.ndarray], p0: np.ndarray,
         # Reparameterize ONLY spans the smoothing could not make legal —
         # measured on origi01: blanket reparameterization shifted clean
         # spans' evidence timing (+8 dense >20 cm frames) for nothing.
-        pts = [vals[f] for f in frames]
-        seg_len = [float(np.linalg.norm(b - a))
-                   for a, b in zip(pts, pts[1:])]
-        total = sum(seg_len)
-        # Linear-speed (constant-deceleration) schedule: least-squares
-        # quadratic through the raw cumulative arc — averages knot jitter
-        # out of the timing while keeping the span's true deceleration.
-        raw_cum = [0.0]
-        for L in original_steps:
-            raw_cum.append(raw_cum[-1] + L)
-        m = len(raw_cum)
-        xs = np.arange(m, dtype=float)
-        coef = np.polyfit(xs, np.asarray(raw_cum), 2)
-        fitted = np.polyval(coef, xs)
-        steps = [max(0.0, float(b - a))
-                 for a, b in zip(fitted, fitted[1:])]
-        ssum = sum(steps)
-        if total > 1e-9 and ssum > 1e-9:
-            schedule = [s * total / ssum for s in steps]
-            cum = [0.0]
-            for L in seg_len:
-                cum.append(cum[-1] + L)
-            resampled = [pts[0]]
-            target = 0.0
-            j = 0
-            for st in schedule:
-                target += st
-                while j < len(seg_len) - 1 and cum[j + 1] < target:
-                    j += 1
-                den = max(cum[j + 1] - cum[j], 1e-12)
-                s = (target - cum[j]) / den
-                resampled.append(pts[j] + (pts[j + 1] - pts[j]) * s)
-            resampled[-1] = pts[-1]
-            assert len(resampled) == len(frames)
-            for f, w in zip(frames, resampled):
-                vals[f] = w
+        _reparameterize_span(vals, frames, p0, p1, fps, original_steps)
     vals[frames[0]] = p0
     vals[frames[-1]] = p1
+
+
+def _reparameterize_span(vals: dict[int, np.ndarray], frames: list[int],
+                         p0: np.ndarray, p1: np.ndarray, fps: float,
+                         original_steps: list[float]) -> None:
+    """Retime the span geometry onto a linear-speed (quadratic-arc) fit of
+    the ORIGINAL knot schedule, keeping the span's true deceleration.
+
+    Self-guarded: the retimed schedule exists to REDUCE violations. A
+    quadratic fit over a near-uniform schedule can tilt into a speed ramp
+    and MANUFACTURE roll_speedup breaks (measured on gberch: a constant
+    0.55 m/frame roll became 0.24→0.78). The reparameterization is kept
+    only when it strictly lowers the span's violation count; otherwise
+    ``vals`` is left exactly as passed in.
+    """
+    pts = [vals[f] for f in frames]
+    seg_len = [float(np.linalg.norm(b - a))
+               for a, b in zip(pts, pts[1:])]
+    total = sum(seg_len)
+    # Linear-speed (constant-deceleration) schedule: least-squares
+    # quadratic through the raw cumulative arc — averages knot jitter
+    # out of the timing while keeping the span's true deceleration.
+    raw_cum = [0.0]
+    for L in original_steps:
+        raw_cum.append(raw_cum[-1] + L)
+    m = len(raw_cum)
+    xs = np.arange(m, dtype=float)
+    coef = np.polyfit(xs, np.asarray(raw_cum), 2)
+    fitted = np.polyval(coef, xs)
+    steps = [max(0.0, float(b - a))
+             for a, b in zip(fitted, fitted[1:])]
+    ssum = sum(steps)
+    if total <= 1e-9 or ssum <= 1e-9:
+        return
+    schedule = [s * total / ssum for s in steps]
+    cum = [0.0]
+    for L in seg_len:
+        cum.append(cum[-1] + L)
+    resampled = [pts[0]]
+    target = 0.0
+    j = 0
+    for st in schedule:
+        target += st
+        while j < len(seg_len) - 1 and cum[j + 1] < target:
+            j += 1
+        den = max(cum[j + 1] - cum[j], 1e-12)
+        s = (target - cum[j]) / den
+        resampled.append(pts[j] + (pts[j + 1] - pts[j]) * s)
+    resampled[-1] = pts[-1]
+    assert len(resampled) == len(frames)
+    before_n = _span_violation_count(vals, fps)
+    snapshot = dict(vals)
+    for f, w in zip(frames, resampled):
+        vals[f] = w
+    vals[frames[0]] = p0
+    vals[frames[-1]] = p1
+    if _span_violation_count(vals, fps) >= before_n:
+        vals.clear()
+        vals.update(snapshot)
 
 
 def _eval_polyline(

@@ -181,6 +181,14 @@ def refit_airborne_chains(
         f0 = start
         knots: dict[int, np.ndarray] = {}
         soft_fixes: list[tuple[int, np.ndarray, float]] = []
+        # >=2 absolute in-span fixes fully determine depth with the rays
+        # and gravity: EVERY monocular knot (bucket OR body-pin — player
+        # reconstruction depth is unreliable at distance) demotes to a
+        # soft tiebreak; the clicks stay ray-hard via the observations
+        # (sub-20cm campaign W5x).
+        n_span_fixes = sum(1 for f in (world_fixes or {})
+                           if start <= f <= end)
+        fixes_rule = n_span_fixes >= 2
         n_manual_knots = sum(
             1 for kf in (start, end)
             if manual_frames is None or kf in manual_frames)
@@ -191,7 +199,7 @@ def refit_airborne_chains(
             state = getattr(anchor_by_frame.get(kf), "state", "")
             depth_soft = state in AIRBORNE_BUCKETS   # bucket z is a guess
             if (manual_frames is None or kf in manual_frames) \
-                    and not depth_soft:
+                    and not depth_soft and not fixes_rule:
                 knots[kf - f0] = w
             else:
                 conf = float(getattr(anchor_by_frame[kf], "confidence", 1.0))
@@ -333,6 +341,12 @@ def refit_ballistic_segment(
     n_manual = int(start_is_manual) + int(end_is_manual)
     auto_weight = (_AUTO_KNOT_WEIGHT_TIEBREAK if n_manual
                    else _AUTO_KNOT_WEIGHT_SOLE_DEPTH)
+    n_span_fixes = sum(1 for f in (world_fixes or {})
+                       if start_frame <= f <= end_frame)
+    if n_span_fixes >= 2:
+        # Absolute fixes own the depth; all monocular knots soften (W5x).
+        start_depth_soft = True
+        end_depth_soft = True
     knots: dict[int, np.ndarray] = {}
     fixes: list[tuple[int, np.ndarray, float]] = []
     for f, w, is_manual, conf, depth_soft in (

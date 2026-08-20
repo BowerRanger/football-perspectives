@@ -128,3 +128,21 @@ class TestFlightContradictedVeto:
         vetoed = veto_flight_contradicted(
             self._mk(uvs), arc_px, mpp_by_frame={f: 0.02 for f in arc_px})
         assert vetoed == []
+
+    def test_island_connected_to_context_obs_kept(self):
+        from src.utils.ball_track_clean import veto_flight_contradicted
+        # Real chip: interior obs 1-2 fly coherently off the arc, feasibly
+        # connected to the span-BOUNDARY observation at frame 0 (an anchor
+        # frame, outside the vetoable interior). A junk teleport at 3
+        # breaks the chain on the right. The pair must NOT be vetoed: it
+        # is reachable from real evidence, so it may be a real deflection.
+        arc_px = {f: (400.0 + 30 * f, 500.0) for f in range(0, 5)}
+        uvs = {
+            1: (495.0, 435.0),   # ~92 px off arc; 74 px from context 0
+            2: (560.0, 400.0),   # ~141 px off arc; 74 px from frame 1
+        }
+        context = {0: (430.0, 470.0)}   # boundary obs (not vetoable)
+        vetoed = veto_flight_contradicted(
+            uvs, arc_px, mpp_by_frame={f: 0.02 for f in arc_px},
+            context_uvs=context)
+        assert vetoed == []

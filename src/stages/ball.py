@@ -517,8 +517,14 @@ def _veto_flight_obs(
             mpp[f] = depth / float(np.asarray(K)[0][0])
         if not uvs:
             continue
+        context: dict[int, tuple[float, float]] = {}
+        for f in (lo, hi):
+            r = row_by_frame.get(f)
+            if r is not None and r.get("uv") is not None:
+                context[f] = (float(r["uv"][0]), float(r["uv"][1]))
         vetoed = veto_flight_contradicted(
-            uvs, arc_px, mpp_by_frame=mpp, fps=float(track.fps))
+            uvs, arc_px, mpp_by_frame=mpp, fps=float(track.fps),
+            context_uvs=context)
         for f in vetoed:
             row_by_frame[f]["vetoed_source"] = row_by_frame[f]["source"]
             row_by_frame[f]["source"] = "flight_veto"

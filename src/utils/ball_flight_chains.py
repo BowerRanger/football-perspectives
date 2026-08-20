@@ -469,6 +469,8 @@ def _redepth_lone_bucket(
 # Minimum in-span detections for a segment-level fit: with only the two
 # endpoints the naive parabola is already the unique arc, so a refit only
 # adds information when several rays constrain the span interior.
+# (W10 measured 2 here as a no-op on the whole corpus — every candidate
+# span already had ≥3 interior obs — so the stricter floor stands.)
 _SEGMENT_FIT_MIN_OBS = 3
 _SEGMENT_FIT_MAX_RESIDUAL_PX = 8.0
 

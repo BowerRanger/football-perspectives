@@ -113,6 +113,7 @@ def veto_flight_contradicted(
     max_ball_speed_m_s: float = 40.0,
     fps: float = 25.0,
     max_island_frames: int = 2,
+    context_uvs: dict[int, UV] | None = None,
 ) -> list[int]:
     """Frames whose detection a BALLISTIC span proves non-ball (W9).
 
@@ -155,11 +156,29 @@ def veto_flight_contradicted(
             return False
         return ((uv[0] - arc[0]) ** 2 + (uv[1] - arc[1]) ** 2) > far_px ** 2
 
+    def _context_reachable(comp: list[int]) -> bool:
+        """A run feasibly connected to evidence OUTSIDE the vetoable set
+        (span-boundary anchors/detections) is reachable by a real ball —
+        never an island, whatever its arc distance."""
+        for f in (comp[0], comp[-1]):
+            for g, guv in (context_uvs or {}).items():
+                gap = abs(g - f)
+                if not 0 < gap <= static_window + 1:
+                    continue
+                mpp = max(mpp_by_frame.get(f, 0.02), 1e-6)
+                budget = (max_ball_speed_m_s / fps) * gap / mpp
+                uv = uvs[f]
+                if ((uv[0] - guv[0]) ** 2 + (uv[1] - guv[1]) ** 2) \
+                        <= budget ** 2:
+                    return True
+        return False
+
     vetoed: set[int] = set()
     for comp in components:
         if any(not _far(f) for f in comp):
             continue   # touches the arc somewhere — could be the ball
-        if len(comp) <= max_island_frames and len(comp) < len(frames):
+        if (len(comp) <= max_island_frames and len(comp) < len(frames)
+                and not _context_reachable(comp)):
             vetoed.update(comp)   # teleport island, wholly off the arc
             continue
         internal_static = all(

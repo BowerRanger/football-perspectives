@@ -163,3 +163,49 @@ class TestMovingFixFilter:
         out = filter_moving_fixes([moving, static], obs_a, obs_b,
                                   min_move_px=3.0, window=2)
         assert out == [moving]
+
+
+class TestPhysicalFixFilter:
+    """Fixes triangulated below the pitch or far outside it are impossible;
+    a pair minting many of them has untrusted geometry (wild partner camera)."""
+
+    @staticmethod
+    def _fix(xyz):
+        from src.utils.ball_cross_replay import PairFix
+        return PairFix(frame_a=0, frame_b=0, xyz=xyz, ray_miss_m=0.1,
+                       parallax_deg=10.0)
+
+    def test_underground_fix_dropped(self):
+        from src.utils.ball_cross_replay import filter_physical_fixes
+        kept, n_bad = filter_physical_fixes(
+            [self._fix((50.0, 30.0, -7.0)), self._fix((50.0, 30.0, 1.0))])
+        assert [f.xyz[2] for f in kept] == [1.0]
+        assert n_bad == 1
+
+    def test_out_of_court_fix_dropped(self):
+        from src.utils.ball_cross_replay import filter_physical_fixes
+        kept, n_bad = filter_physical_fixes(
+            [self._fix((200.0, 30.0, 1.0)), self._fix((50.0, -40.0, 1.0)),
+             self._fix((50.0, 30.0, 45.0)), self._fix((50.0, 30.0, 0.11))])
+        assert len(kept) == 1 and n_bad == 3
+
+    def test_grazing_ground_kept(self):
+        from src.utils.ball_cross_replay import filter_physical_fixes
+        kept, n_bad = filter_physical_fixes([self._fix((0.0, 0.0, -0.04))])
+        assert len(kept) == 1 and n_bad == 0
+
+    def test_pair_trust_fails_on_high_impossible_fraction(self):
+        from src.utils.ball_cross_replay import pair_geometry_trusted
+        fixes = [self._fix((50.0, 30.0, -7.0))] * 4 + \
+                [self._fix((50.0, 30.0, 1.0))] * 6
+        assert pair_geometry_trusted(fixes) is False
+
+    def test_pair_trust_holds_on_isolated_outlier(self):
+        from src.utils.ball_cross_replay import pair_geometry_trusted
+        fixes = [self._fix((50.0, 30.0, -7.0))] + \
+                [self._fix((50.0, 30.0, 1.0))] * 9
+        assert pair_geometry_trusted(fixes) is True
+
+    def test_pair_trust_empty_is_trusted(self):
+        from src.utils.ball_cross_replay import pair_geometry_trusted
+        assert pair_geometry_trusted([]) is True

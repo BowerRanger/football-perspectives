@@ -1469,13 +1469,41 @@ class BallStage(BaseStage):
                 # Static world features (flags, line marks) triangulate
                 # consistently at ANY offset — only fixes whose detections
                 # MOVE in both views are the ball (W5v).
-                from src.utils.ball_cross_replay import filter_moving_fixes
+                from src.utils.ball_cross_replay import (
+                    filter_moving_fixes,
+                    filter_physical_fixes,
+                    pair_geometry_trusted,
+                )
                 n_before = len(pair_fixes)
                 pair_fixes = filter_moving_fixes(pair_fixes, obs_a, obs_b)
                 if n_before != len(pair_fixes):
                     logger.info(
                         "ball: cross-replay: %d static-pair fix(es) "
                         "filtered for %s / %s", n_before - len(pair_fixes),
+                        align_a.shot_id, align_b.shot_id)
+                # Impossible triangulations (underground / far off court)
+                # share the pair's cameras+offset: past a small fraction the
+                # GEOMETRY is wrong and every fix from it is untrusted.
+                if not pair_geometry_trusted(pair_fixes):
+                    _, n_bad = filter_physical_fixes(pair_fixes)
+                    logger.warning(
+                        "ball: cross-replay: pair %s / %s rejected — %d/%d "
+                        "fixes physically impossible (wild partner camera "
+                        "or wrong offset)", align_a.shot_id, align_b.shot_id,
+                        n_bad, len(pair_fixes))
+                    a_partners[align_b.shot_id] = {
+                        "saved_offset": delta_saved,
+                        "refined_offset": refined_offset,
+                        "rejected": "implausible_geometry",
+                        "n_impossible": n_bad,
+                        "n_fixes": len(pair_fixes),
+                    }
+                    continue
+                pair_fixes, n_impossible = filter_physical_fixes(pair_fixes)
+                if n_impossible:
+                    logger.info(
+                        "ball: cross-replay: %d impossible fix(es) dropped "
+                        "for %s / %s", n_impossible,
                         align_a.shot_id, align_b.shot_id)
                 if not pair_fixes:
                     logger.info(
@@ -1553,23 +1581,37 @@ class BallStage(BaseStage):
             if not a_partners:
                 continue  # no partner produced fixes for the reference
 
+            productive = {
+                sid: p for sid, p in a_partners.items()
+                if not p.get("rejected")
+            }
+            if not productive:
+                # Every partner's geometry was rejected: persist the reason
+                # in the diag summary, mint no fixes for the solve.
+                summaries_by_shot[align_a.shot_id] = {
+                    "partner_shots": sorted(a_partners.keys()),
+                    "n_inlier_fixes": 0,
+                    "partners": a_partners,
+                }
+                continue
+
             # Aggregate the reference shot's summary. Offsets are inherently
             # per-partner, so top-level scalars report the dominant pairing
             # (most inlier fixes) and the WORST disagreement (the review cue);
             # full per-partner detail lives in `partners`.
             dominant = max(
-                a_partners.values(), key=lambda p: p["n_inlier_fixes"],
+                productive.values(), key=lambda p: p["n_inlier_fixes"],
             )
             a_summary = {
                 "partner_shots": sorted(a_partners.keys()),
                 "saved_offset": dominant["saved_offset"],
                 "refined_offset": dominant["refined_offset"],
                 "offset_disagreement_frames": max(
-                    p["offset_disagreement_frames"] for p in a_partners.values()
+                    p["offset_disagreement_frames"] for p in productive.values()
                 ),
-                "n_pairs": sum(p["n_pairs"] for p in a_partners.values()),
+                "n_pairs": sum(p["n_pairs"] for p in productive.values()),
                 "n_inlier_fixes": sum(
-                    p["n_inlier_fixes"] for p in a_partners.values()
+                    p["n_inlier_fixes"] for p in productive.values()
                 ),
                 "median_ray_miss_m": float(np.median(a_ray_misses)),
                 "median_parallax_deg": float(np.median(a_parallaxes)),

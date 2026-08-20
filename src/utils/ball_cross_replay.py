@@ -282,3 +282,50 @@ def filter_moving_fixes(
         if _locally_moving(obs_a, f.frame_a, min_move_px, window)
         and _locally_moving(obs_b, f.frame_b, min_move_px, window)
     ]
+
+
+# Court volume a real ball can occupy, pitch-metres with generous margin
+# (105x68 pitch; balls go out of play but not 15 m out, up but not 30 m up).
+_COURT_X = (-15.0, 120.0)
+_COURT_Y = (-15.0, 83.0)
+_COURT_Z = (-0.05, 30.0)
+
+
+def _physically_possible(xyz: tuple[float, float, float]) -> bool:
+    x, y, z = xyz
+    return (_COURT_X[0] <= x <= _COURT_X[1]
+            and _COURT_Y[0] <= y <= _COURT_Y[1]
+            and _COURT_Z[0] <= z <= _COURT_Z[1])
+
+
+def filter_physical_fixes(
+    fixes: list[PairFix],
+) -> tuple[list[PairFix], int]:
+    """Drop fixes outside the physically possible court volume.
+
+    A triangulated ball below the pitch plane or tens of metres off the
+    court cannot be a real ball position regardless of how well the rays
+    agree — it is the signature of a globally wrong partner camera or a
+    wrong sync offset. Returns ``(kept, n_dropped)``.
+    """
+    kept = [f for f in fixes if _physically_possible(f.xyz)]
+    return kept, len(fixes) - len(kept)
+
+
+def pair_geometry_trusted(
+    fixes: list[PairFix],
+    *,
+    max_impossible_frac: float = 0.2,
+) -> bool:
+    """Whether a pair's triangulation geometry can be trusted at all.
+
+    Impossible fixes are not independent outliers: they share the two
+    cameras and the offset. When more than ``max_impossible_frac`` of a
+    pair's fixes are impossible, the shared geometry is wrong and the
+    surviving fixes are just the part of the same error field that
+    happens to land inside the court — reject the whole pair.
+    """
+    if not fixes:
+        return True
+    _, n_bad = filter_physical_fixes(fixes)
+    return (n_bad / len(fixes)) <= max_impossible_frac

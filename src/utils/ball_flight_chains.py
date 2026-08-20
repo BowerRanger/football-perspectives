@@ -269,6 +269,34 @@ def refit_airborne_chains(
                         "residual_px": float(med_c),
                     })
                     continue
+                split2 = (fit_split_arcs_to_fixes(span_fixes, fps=fps)
+                          if len(span_fixes) >= 6 else None)
+                if split2 is not None:
+                    fa0, s_frame, (pa2, va2), (pb2, vb2) = split2
+                    g3 = np.array([0.0, 0.0, -9.81])
+                    lo2 = min(span_fixes) - 2
+                    hi2 = max(span_fixes) + 2
+                    for f in air_frames:
+                        if not (lo2 <= f <= hi2):
+                            continue
+                        if f <= s_frame:
+                            t3 = (f - fa0) / fps
+                            w3 = (np.asarray(pa2) + np.asarray(va2) * t3
+                                  + 0.5 * g3 * t3 * t3)
+                        else:
+                            t3 = (f - s_frame) / fps
+                            w3 = (np.asarray(pb2) + np.asarray(vb2) * t3
+                                  + 0.5 * g3 * t3 * t3)
+                        updates[f] = (float(w3[0]), float(w3[1]),
+                                      float(w3[2]))
+                    diags.append({
+                        "kind": "chain_fit", "accepted": True,
+                        "span": [start, end], "n_air": len(air_frames),
+                        "mode": "fix_split_arc", "split": int(s_frame),
+                        "n_fixes": len(span_fixes),
+                        "residual_px": float(med_c),
+                    })
+                    continue
                 diags.append({
                     "kind": "chain_fit_fix_arc_rejected",
                     "span": [start, end],
@@ -596,5 +624,72 @@ def fit_arc_to_fixes(
     return f0, (tuple(float(x) for x in p0), tuple(float(x) for x in v0))
 
 
+def fit_split_arcs_to_fixes(
+    fixes: dict[int, tuple],
+    *,
+    fps: float,
+    min_half: int = 3,
+    join_tol_m: float = 0.8,
+    max_fit_res_m: float = 0.35,
+):
+    """Two closed-form arcs through a fix run hiding one deflection.
+
+    Tries every split with ``min_half`` fixes per side; each half fits by
+    :func:`fit_arc_to_fixes`; a candidate needs per-half RMS fix residual
+    ≤ ``max_fit_res_m`` and position continuity at the split within
+    ``join_tol_m``. Returns ``(split_frame, (p0_a, v0_a), (p0_b, v0_b))``
+    with each arc's state at its own first-fix frame, or None.
+    """
+    frames = sorted(fixes)
+    if len(frames) < 2 * min_half:
+        return None
+    g = np.array([0.0, 0.0, -9.81])
+
+    def _rms(fit, sub):
+        f0, (p0, v0) = fit
+        errs = []
+        for f, (xyz, _w) in sub.items():
+            t = (f - f0) / fps
+            w = np.asarray(p0) + np.asarray(v0) * t + 0.5 * g * t * t
+            errs.append(float(np.linalg.norm(w - np.asarray(xyz))))
+        return float(np.sqrt(np.mean(np.square(errs)))) if errs else np.inf
+
+    best = None
+    for i in range(min_half - 1, len(frames) - min_half):
+        s_frame = frames[i]
+        left = {f: fixes[f] for f in frames if f <= s_frame}
+        right = {f: fixes[f] for f in frames if f > s_frame}
+        fa = fit_arc_to_fixes(left, fps=fps, min_fixes=min_half)
+        fb = fit_arc_to_fixes(right, fps=fps, min_fixes=min_half)
+        if fa is None or fb is None:
+            continue
+        ra, rb = _rms(fa, left), _rms(fb, right)
+        if ra > max_fit_res_m or rb > max_fit_res_m:
+            continue
+        fa0, (pa, va) = fa
+        fb0, (pb, vb) = fb
+        ta = (s_frame - fa0) / fps
+        a_end = np.asarray(pa) + np.asarray(va) * ta + 0.5 * g * ta * ta
+        tb = (s_frame - fb0) / fps
+        b_at = np.asarray(pb) + np.asarray(vb) * tb + 0.5 * g * tb * tb
+        join = float(np.linalg.norm(a_end - b_at))
+        if join > join_tol_m:
+            continue
+        score = ra + rb + join
+        if best is None or score < best[0]:
+            best = (score, s_frame, (pa, va), (pb, vb), fb0)
+    if best is None:
+        return None
+    _, s_frame, (pa, va), (pb, vb), fb0 = best
+    # Rebase arc B to the split frame for a uniform contract.
+    tb = (s_frame - fb0) / fps
+    pb2 = np.asarray(pb) + np.asarray(vb) * tb + 0.5 * g * tb * tb
+    vb2 = np.asarray(vb) + g * tb
+    return (frames[0], s_frame,
+            (tuple(float(x) for x in pa), tuple(float(x) for x in va)),
+            (tuple(float(x) for x in pb2), tuple(float(x) for x in vb2)))
+
+
 __all__ = ["refit_airborne_chains", "refit_ballistic_segment",
-           "refit_split_segment", "fit_arc_to_fixes"]
+           "refit_split_segment", "fit_arc_to_fixes",
+           "fit_split_arcs_to_fixes"]

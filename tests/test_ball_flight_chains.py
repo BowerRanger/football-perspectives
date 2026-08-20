@@ -397,3 +397,31 @@ def test_closed_form_arc_from_fixes():
         true = p0 + v0 * t + 0.5 * g * t * t
         assert np.linalg.norm(w - true) < 0.12, f
     assert fit_arc_to_fixes({291: ((1, 2, 3), 30.0)}, fps=_FPS) is None
+
+
+def test_closed_form_split_arc_from_fixes():
+    """W5z: a long fix run holding TWO sub-arcs (deflection mid-flight)
+    splits in closed form; join continuity gates the split point."""
+    from src.utils.ball_flight_chains import fit_split_arcs_to_fixes
+
+    g = np.array([0.0, 0.0, -9.81])
+    pa = np.array([10.0, 40.0, 1.0]); va = np.array([6.0, 4.0, 6.0])
+    def arc1(f): t = f / _FPS; return pa + va * t + 0.5 * g * t * t
+    pb = arc1(30); vb = np.array([-3.0, 6.0, 4.0])
+    def arc2(f): t = (f - 30) / _FPS; return pb + vb * t + 0.5 * g * t * t
+    fixes = {}
+    for f in range(3, 58, 4):
+        w = arc1(f) if f <= 30 else arc2(f)
+        fixes[f] = (tuple(w), 30.0)
+    out = fit_split_arcs_to_fixes(fixes, fps=_FPS)
+    assert out is not None
+    fa0, split, (p1, v1), (p2, v2) = out
+    assert abs(split - 30) <= 4
+    for f in (11, 23):
+        t = (f - fa0) / _FPS
+        w = np.asarray(p1) + np.asarray(v1) * t + 0.5 * g * t * t
+        assert np.linalg.norm(w - arc1(f)) < 0.25, f
+    for f in (39, 51):
+        t = (f - split) / _FPS
+        w = np.asarray(p2) + np.asarray(v2) * t + 0.5 * g * t * t
+        assert np.linalg.norm(w - arc2(f)) < 0.35, f

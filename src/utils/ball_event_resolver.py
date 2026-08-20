@@ -247,7 +247,7 @@ def resolve_events(
     # gravity-arc fit through the bracketing hard knots (pixels as rays;
     # W4: real in-span detections densify the fit).
     from src.utils.ball_flight_chains import refit_airborne_chains
-    chain_updates, chain_diags = refit_airborne_chains(
+    chain_updates, chain_diags, chain_arcs = refit_airborne_chains(
         anchor_by_frame=anchor_by_frame,
         world_for_anchor=world_for_anchor,
         per_frame_K=per_frame_K, per_frame_R=per_frame_R,
@@ -403,6 +403,30 @@ def resolve_events(
                 # No accepted fit: an unflipped roll stays a roll.
                 new_segments.append(seg)
         segments = tuple(new_segments)
+
+    # Accepted fix-arcs OWN the render inside their range: any ballistic
+    # segment fully inside an arc's interval carries that arc's hints, so
+    # keyframes and in-between frames trace one identical curve (W5aa).
+    if chain_arcs:
+        g4 = np.array([0.0, 0.0, -9.81])
+        new_segs = []
+        for sg in segments:
+            arc = next((a for a in chain_arcs
+                        if a["lo"] <= sg.start_frame
+                        and sg.end_frame <= a["hi"]
+                        and sg.kind == "ballistic"), None)
+            if arc is None:
+                new_segs.append(sg)
+                continue
+            dt = (sg.start_frame - arc["f0"]) / fps
+            p0r = (np.asarray(arc["p0"]) + np.asarray(arc["v0"]) * dt
+                   + 0.5 * g4 * dt * dt)
+            v0r = np.asarray(arc["v0"]) + g4 * dt
+            new_segs.append(dataclasses.replace(
+                sg, hints={**(sg.hints or {}), "gravity": -9.81,
+                           "fit_p0": [float(x) for x in p0r],
+                           "fit_v0": [float(x) for x in v0r]}))
+        segments = tuple(new_segs)
 
     keyframe_set = dataclasses.replace(keyframe_set, segments=segments)
 

@@ -106,8 +106,12 @@ def refit_airborne_chains(
     extra_observations: dict[int, tuple[float, float]] | None = None,
     manual_frames: frozenset[int] | None = None,
     world_fixes: dict[int, tuple] | None = None,
-) -> tuple[dict[int, tuple[float, float, float]], list[dict]]:
-    """Return ``({airborne_frame: refit_world}, diagnostics)``.
+) -> tuple[dict[int, tuple[float, float, float]], list[dict], list[dict]]:
+    """Return ``({airborne_frame: refit_world}, diagnostics, arcs)``.
+
+    ``arcs`` lists accepted fix-arc specs ``{lo, hi, f0, p0, v0}`` so the
+    renderer can draw the SAME arc between the updated keyframes (segment
+    hints), not a re-derived one.
 
     ``world_fixes`` maps frames to ``(xyz, weight)`` absolute constraints
     (cross-replay triangulation) — the only monocular-external depth truth
@@ -126,6 +130,7 @@ def refit_airborne_chains(
     """
     updates: dict[int, tuple[float, float, float]] = {}
     diags: list[dict] = []
+    arcs: list[dict] = []
     extra_observations = extra_observations or {}
     strong_fixes = {
         f: entry for f, entry in (world_fixes or {}).items()
@@ -272,6 +277,10 @@ def refit_airborne_chains(
                         "mode": "fix_arc", "n_fixes": len(span_fixes),
                         "residual_px": float(med_c),
                     })
+                    arcs.append({"lo": int(lo_fix), "hi": int(hi_fix),
+                                 "f0": int(ff0),
+                                 "p0": [float(x) for x in cp0],
+                                 "v0": [float(x) for x in cv0]})
                     continue
                 split2 = (fit_split_arcs_to_fixes(span_fixes, fps=fps)
                           if len(span_fixes) >= 6 else None)
@@ -300,6 +309,14 @@ def refit_airborne_chains(
                         "n_fixes": len(span_fixes),
                         "residual_px": float(med_c),
                     })
+                    arcs.append({"lo": int(lo2), "hi": int(s_frame),
+                                 "f0": int(fa0),
+                                 "p0": [float(x) for x in pa2],
+                                 "v0": [float(x) for x in va2]})
+                    arcs.append({"lo": int(s_frame), "hi": int(hi2),
+                                 "f0": int(s_frame),
+                                 "p0": [float(x) for x in pb2],
+                                 "v0": [float(x) for x in vb2]})
                     continue
                 diags.append({
                     "kind": "chain_fit_fix_arc_rejected",
@@ -369,7 +386,7 @@ def refit_airborne_chains(
             t = (f - f0) / fps
             w = p0 + v0 * t + 0.5 * g * t * t
             updates[f] = (float(w[0]), float(w[1]), float(w[2]))
-    return updates, diags
+    return updates, diags, arcs
 
 
 # Minimum in-span detections for a segment-level fit: with only the two

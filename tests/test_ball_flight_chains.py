@@ -74,7 +74,7 @@ def test_chain_refit_recovers_true_airborne_positions():
     per_K = {f: c[0] for f, c in cams.items()}
     per_R = {f: c[1] for f, c in cams.items()}
     per_t = {f: c[2] for f, c in cams.items()}
-    updates, diags = refit_airborne_chains(
+    updates, diags, _arcs = refit_airborne_chains(
         anchor_by_frame=anchors, world_for_anchor=worlds,
         per_frame_K=per_K, per_frame_R=per_R, per_frame_t=per_t,
         distortion=_DIST, fps=_FPS,
@@ -96,7 +96,7 @@ def test_unbracketed_airborne_run_is_flagged_not_touched():
     per_K = {f: c[0] for f, c in cams.items()}
     per_R = {f: c[1] for f, c in cams.items()}
     per_t = {f: c[2] for f, c in cams.items()}
-    updates, diags = refit_airborne_chains(
+    updates, diags, _arcs = refit_airborne_chains(
         anchor_by_frame=anchors, world_for_anchor=worlds,
         per_frame_K=per_K, per_frame_R=per_R, per_frame_t=per_t,
         distortion=_DIST, fps=_FPS,
@@ -119,7 +119,7 @@ def test_single_corrupt_click_does_not_collapse_the_chain():
     per_K = {f: c[0] for f, c in cams.items()}
     per_R = {f: c[1] for f, c in cams.items()}
     per_t = {f: c[2] for f, c in cams.items()}
-    updates, diags = refit_airborne_chains(
+    updates, diags, _arcs = refit_airborne_chains(
         anchor_by_frame=anchors, world_for_anchor=worlds,
         per_frame_K=per_K, per_frame_R=per_R, per_frame_t=per_t,
         distortion=_DIST, fps=_FPS,
@@ -174,7 +174,7 @@ def test_chain_refit_uses_extra_detection_observations():
     per_K = {f: c[0] for f, c in cams.items()}
     per_R = {f: c[1] for f, c in cams.items()}
     per_t = {f: c[2] for f, c in cams.items()}
-    updates, diags = refit_airborne_chains(
+    updates, diags, _arcs = refit_airborne_chains(
         anchor_by_frame=anchors, world_for_anchor=worlds,
         per_frame_K=per_K, per_frame_R=per_R, per_frame_t=per_t,
         distortion=_DIST, fps=_FPS, extra_observations=extra,
@@ -204,7 +204,7 @@ def test_poisoned_extra_observations_do_not_break_the_fit():
     per_K = {f: c[0] for f, c in cams.items()}
     per_R = {f: c[1] for f, c in cams.items()}
     per_t = {f: c[2] for f, c in cams.items()}
-    updates, diags = refit_airborne_chains(
+    updates, diags, _arcs = refit_airborne_chains(
         anchor_by_frame=anchors, world_for_anchor=worlds,
         per_frame_K=per_K, per_frame_R=per_R, per_frame_t=per_t,
         distortion=_DIST, fps=_FPS, extra_observations=extra,
@@ -231,7 +231,7 @@ def test_auto_touch_knots_are_soft_manual_are_hard():
     per_R = {f: c[1] for f, c in cams.items()}
     per_t = {f: c[2] for f, c in cams.items()}
     # Hard everywhere (legacy): the corrupt knot bends the arc.
-    hard_updates, _ = refit_airborne_chains(
+    hard_updates, _, _a1 = refit_airborne_chains(
         anchor_by_frame=anchors, world_for_anchor=worlds,
         per_frame_K=per_K, per_frame_R=per_R, per_frame_t=per_t,
         distortion=_DIST, fps=_FPS,
@@ -239,7 +239,7 @@ def test_auto_touch_knots_are_soft_manual_are_hard():
     )
     # End knot marked AUTO (soft): the ray observations win; interior
     # airborne positions return to the true arc.
-    soft_updates, diags = refit_airborne_chains(
+    soft_updates, diags, _a2 = refit_airborne_chains(
         anchor_by_frame=anchors, world_for_anchor=worlds,
         per_frame_K=per_K, per_frame_R=per_R, per_frame_t=per_t,
         distortion=_DIST, fps=_FPS,

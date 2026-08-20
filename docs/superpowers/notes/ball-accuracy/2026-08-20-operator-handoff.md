@@ -1,13 +1,14 @@
 # Ball sub-20cm: operator handoff — the last mile
 
-**State (branch `ball-sub20cm-accuracy`, 95 commits):** 119 of 885 measurable
-dense frames (13.4%) exceed 20 cm. Every autonomous axis is exhausted and
-measured (solver hypotheses certified; replay-pair path proven to need
-operator cameras, W6; measurement noise floor probed moot). The residual is
-data-bound. This doc turns the three continuations into concrete checklists.
+**State (branch `ball-sub20cm-accuracy`, ~100 commits, updated after W7):**
+60 of 881 measurable dense frames (6.8%) exceed 20 cm — down from 119
+(13.4%) after the W7 off-ray touch-keyframe fix cleared origi01's four
+biggest spans without operator input. The remaining spans are being
+per-frame decomposed before any data-bound claim (the W7 lesson); this
+doc lists the operator continuations for whatever survives that pass.
 
-Derived from current shipped artifacts on 2026-08-20; failing-frame total
-reconciles exactly with the certification (17+77+13+12 = 119 over 885).
+Totals per clip (same-day re-certification): origi01 18/355,
+gberch 17/308, s013 13/172, kroupi01 12/46.
 
 ## Path A — anchors at flagged spans (~45 min, removes up to ~100 frames)
 
@@ -16,17 +17,15 @@ pick the true state — `grounded` / `player_touch` with bone / `bounce`).
 Spans sorted by impact. Anchoring the top 8 spans covers ~70% of the
 residual.
 
-**origi01** (77 failing — 65% of everything; serve `output-origi`):
+**origi01** (updated 2026-08-20 after the W7 off-ray touch fix — was 77
+failing, now 18; the [4–9]/[91–115]/[135–146]/[150–161]/[225–233] spans
+cleared without operator input; serve `output-origi`):
 
 | Span | Frames failing | Note |
 |---|---|---|
-| [91–115] | 24 | 23-frame anchor gap (88 → 111); 1–2 anchors ~f95/f105 |
-| [135–146] | 11 | between anchors 140/149; bend the solver can't explain |
-| [225–233] | 7 | inside 224/234 bracket — likely hidden touch |
-| [367–373] | 6 | |
-| [150–154] + [158–161] | 9 | flanks anchor 155 |
-| [4–9] | 4 | clip head, before anchor 7 settles |
-| smaller: [38]×1 [207]×1 [212–214]×2 [248]×1 [263]×1 [279]×1 [298–301]×3 [426–428]×3 [432–434]×2 [458]×1 | 16 | one anchor each only if chasing the strict bar |
+| [369–374] | 6 | |
+| [426–428] + [432–434] | 5 | |
+| singletons 38, 207, 248, 263, 279, 298, 458 | 7 | one anchor each only if chasing the strict bar |
 
 **gberch** (17 failing; serve `output`):
 [182–189]×4, [395–401]×6, [322]×1, [336–337]×2, [382]×1, [388–389]×2, [408]×1

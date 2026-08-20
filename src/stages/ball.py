@@ -1466,6 +1466,17 @@ class BallStage(BaseStage):
                     offset_b_minus_a=refined_offset, cfg=cr_cfg,
                     distortion_a=arts_a.distortion, distortion_b=arts_b.distortion,
                 )
+                # Static world features (flags, line marks) triangulate
+                # consistently at ANY offset — only fixes whose detections
+                # MOVE in both views are the ball (W5v).
+                from src.utils.ball_cross_replay import filter_moving_fixes
+                n_before = len(pair_fixes)
+                pair_fixes = filter_moving_fixes(pair_fixes, obs_a, obs_b)
+                if n_before != len(pair_fixes):
+                    logger.info(
+                        "ball: cross-replay: %d static-pair fix(es) "
+                        "filtered for %s / %s", n_before - len(pair_fixes),
+                        align_a.shot_id, align_b.shot_id)
                 if not pair_fixes:
                     logger.info(
                         "ball: cross-replay: no inlier fixes for pair %s / %s",

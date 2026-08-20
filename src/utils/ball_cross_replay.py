@@ -241,3 +241,44 @@ def triangulate_pair(
             )
         )
     return fixes
+
+
+def _locally_moving(obs: Obs, frame: int, min_move_px: float,
+                    window: int) -> bool:
+    """True when the detection stream around ``frame`` shows real motion.
+
+    A static pair (corner flag, line mark seen by both detectors)
+    triangulates consistently at ANY offset; the ball in a replayed
+    passage moves. Motion is the maximum pixel displacement from the
+    frame's own detection to any neighbour within ``±window``.
+    """
+    here = obs.get(frame)
+    if here is None:
+        return False
+    (u0, v0), _ = here
+    for f in range(frame - window, frame + window + 1):
+        if f == frame:
+            continue
+        rec = obs.get(f)
+        if rec is None:
+            continue
+        (u, v), _ = rec
+        if (u - u0) ** 2 + (v - v0) ** 2 >= min_move_px ** 2:
+            return True
+    return False
+
+
+def filter_moving_fixes(
+    fixes: list[PairFix],
+    obs_a: Obs,
+    obs_b: Obs,
+    *,
+    min_move_px: float = 3.0,
+    window: int = 2,
+) -> list[PairFix]:
+    """Keep only fixes whose detections move in BOTH views (W5v)."""
+    return [
+        f for f in fixes
+        if _locally_moving(obs_a, f.frame_a, min_move_px, window)
+        and _locally_moving(obs_b, f.frame_b, min_move_px, window)
+    ]

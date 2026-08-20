@@ -138,3 +138,28 @@ def test_refine_pair_offset_keeps_saved_when_too_few_pairs():
     )
     assert n_pairs < CrossReplayCfg().min_pairs_for_refine
     assert refined == 7.0
+
+
+class TestMovingFixFilter:
+    """W5v: static world features (corner flags, line marks) triangulate
+    consistently at ANY offset — a fix is the ball only when the
+    underlying detections MOVE in both views."""
+
+    def test_static_pair_fix_removed_moving_kept(self):
+        from src.utils.ball_cross_replay import PairFix, filter_moving_fixes
+
+        obs_a = {10: ((100.0, 100.0), 0.9), 12: ((130.0, 100.0), 0.9),
+                 14: ((160.0, 100.0), 0.9),
+                 30: ((500.0, 300.0), 0.9), 32: ((500.5, 300.0), 0.9),
+                 34: ((500.0, 300.5), 0.9)}
+        obs_b = {20: ((700.0, 400.0), 0.9), 22: ((725.0, 400.0), 0.9),
+                 24: ((750.0, 400.0), 0.9),
+                 40: ((900.0, 500.0), 0.9), 42: ((900.2, 500.0), 0.9),
+                 44: ((900.0, 500.3), 0.9)}
+        moving = PairFix(frame_a=12, frame_b=22, xyz=(1.0, 2.0, 3.0),
+                         ray_miss_m=0.05, parallax_deg=20.0)
+        static = PairFix(frame_a=32, frame_b=42, xyz=(9.0, 9.0, 0.0),
+                         ray_miss_m=0.01, parallax_deg=25.0)
+        out = filter_moving_fixes([moving, static], obs_a, obs_b,
+                                  min_move_px=3.0, window=2)
+        assert out == [moving]

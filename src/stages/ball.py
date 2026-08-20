@@ -464,6 +464,70 @@ def _write_observations_sidecar(
     path.write_text(json.dumps(payload))
 
 
+def _veto_flight_obs(
+    ball_out_path: Path,
+    keyframe_set,
+    track: "BallTrack",
+    per_frame_K: dict[int, np.ndarray],
+    per_frame_R: dict[int, np.ndarray],
+    per_frame_t: dict[int, np.ndarray],
+    distortion: tuple[float, float],
+) -> int:
+    """W9 — relabel physically impossible detections inside ballistic
+    spans. Interior detections never shape a two-knot arc, so the rendered
+    arc can honestly judge them; vetoed rows get ``source="flight_veto"``
+    in the observations sidecar (solve re-reads and grading both stop
+    treating them as truth). Returns the number of relabeled rows."""
+    from src.utils.ball_track_clean import veto_flight_contradicted
+
+    obs_path = ball_out_path.with_name(
+        ball_out_path.name.replace("ball_track", "ball_observations"))
+    if not obs_path.exists():
+        return 0
+    payload = json.loads(obs_path.read_text())
+    rows = payload.get("frames", [])
+    row_by_frame = {r["frame"]: r for r in rows}
+    world_by_frame = {f.frame: f.world_xyz for f in track.frames
+                     if f.world_xyz is not None}
+    vetoed_total: list[int] = []
+    for seg in getattr(keyframe_set, "segments", ()) or ():
+        if getattr(seg, "kind", None) != "ballistic":
+            continue
+        lo, hi = int(seg.start_frame), int(seg.end_frame)
+        uvs: dict[int, tuple[float, float]] = {}
+        arc_px: dict[int, tuple[float, float]] = {}
+        mpp: dict[int, float] = {}
+        for f in range(lo + 1, hi):
+            r = row_by_frame.get(f)
+            w = world_by_frame.get(f)
+            if (r is None or r.get("uv") is None or w is None
+                    or r.get("source") not in ("detector", "second_pass",
+                                               "foot_guided")
+                    or f not in per_frame_K):
+                continue
+            K, R, t = per_frame_K[f], per_frame_R[f], per_frame_t[f]
+            proj = project_world_to_image(
+                K, R, t, distortion,
+                np.asarray(w, dtype=float).reshape(1, 3))[0]
+            C = (-np.asarray(R).T
+                 @ np.asarray(t, dtype=float).reshape(3, 1)).ravel()
+            depth = float(np.linalg.norm(np.asarray(w) - C))
+            uvs[f] = (float(r["uv"][0]), float(r["uv"][1]))
+            arc_px[f] = (float(proj[0]), float(proj[1]))
+            mpp[f] = depth / float(np.asarray(K)[0][0])
+        if not uvs:
+            continue
+        vetoed = veto_flight_contradicted(
+            uvs, arc_px, mpp_by_frame=mpp, fps=float(track.fps))
+        for f in vetoed:
+            row_by_frame[f]["vetoed_source"] = row_by_frame[f]["source"]
+            row_by_frame[f]["source"] = "flight_veto"
+        vetoed_total.extend(vetoed)
+    if vetoed_total:
+        obs_path.write_text(json.dumps(payload))
+    return len(vetoed_total)
+
+
 def _build_tracker(cfg: dict, max_gap_frames: int | None = None) -> BallTracker:
     """IMM tracker from the ball config; optional max-gap override for
     corridor prediction (predictions must persist through long gaps)."""
@@ -2238,6 +2302,21 @@ class BallStage(BaseStage):
                 ball_out_path, exc,
             )
 
+        n_flight_vetoed = 0
+        if solver_name == "events" and event_keyframes is not None:
+            try:
+                n_flight_vetoed = _veto_flight_obs(
+                    ball_out_path, event_keyframes, track,
+                    per_frame_K, per_frame_R, per_frame_t, distortion,
+                )
+                if n_flight_vetoed:
+                    logger.info(
+                        "ball: flight veto relabeled %d physically "
+                        "impossible detection(s) inside ballistic spans",
+                        n_flight_vetoed)
+            except Exception as exc:  # noqa: BLE001 — enrichment only
+                logger.warning("ball: flight veto failed: %s", exc)
+
         for span in result.diagnostics.get("underconstrained_spans", []):
             logger.warning(
                 "ball: span %d-%d could not be explained by a physical "
@@ -2326,4 +2405,6 @@ class BallStage(BaseStage):
             # completed or fell back to whole-shot piecewise (F8).
             diag["mode_search_fallback"] = mode_search_fallback
             diag["mode_search"] = result.diagnostics.get("mode_search", {})
+        if n_flight_vetoed:
+            diag["flight_vetoed"] = n_flight_vetoed
         diag_path.write_text(json.dumps(diag, indent=2))

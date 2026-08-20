@@ -71,3 +71,60 @@ class TestClickContradictedVeto:
         out = veto_click_contradicted(uvs, clicks, max_px=60.0,
                                       max_gap_frames=6)
         assert set(out) == {25}   # no close bracket → operator silent
+
+
+class TestFlightContradictedVeto:
+    """W9: detections inside a BALLISTIC span never shaped the arc (two-
+    knot arcs come from anchors), so the arc can honestly judge them. A
+    hard detection far off the arc that is locally STATIC (net corner,
+    goal furniture) or a TELEPORTER (no continuous ball reaches it) is
+    not a ball observation — relabel it so solve sidecars and grading
+    stop treating it as truth."""
+
+    @staticmethod
+    def _mk(uvs):
+        return {f: (float(u), float(v)) for f, (u, v) in uvs.items()}
+
+    def test_static_far_cluster_vetoed(self):
+        from src.utils.ball_track_clean import veto_flight_contradicted
+        # Arc reprojection moves ~30 px/frame; obs 200-206 follow it, but
+        # 207-210 sit still 100 px away (net corner lock-on).
+        arc_px = {f: (400.0 + 30 * (f - 200), 500.0) for f in range(200, 212)}
+        uvs = {f: arc_px[f] for f in range(200, 207)}
+        for f in range(207, 211):
+            uvs[f] = (447.0 + 0.5 * (f - 207), 605.0)
+        vetoed = veto_flight_contradicted(
+            self._mk(uvs), arc_px, mpp_by_frame={f: 0.02 for f in arc_px})
+        assert set(vetoed) == {207, 208, 209, 210}
+
+    def test_teleporter_vetoed_smooth_kept(self):
+        from src.utils.ball_track_clean import veto_flight_contradicted
+        arc_px = {f: (400.0 + 30 * (f - 0), 500.0) for f in range(0, 8)}
+        uvs = {f: arc_px[f] for f in range(0, 8)}
+        # Frame 4: oscillating goal-mouth lock 200 px off the arc, its
+        # neighbours 180+ px away in pixel space (infeasible ball step).
+        uvs[4] = (400.0 + 30 * 4 + 200.0, 700.0)
+        vetoed = veto_flight_contradicted(
+            self._mk(uvs), arc_px, mpp_by_frame={f: 0.02 for f in arc_px})
+        assert vetoed == [4]
+
+    def test_on_arc_and_moving_obs_kept(self):
+        from src.utils.ball_track_clean import veto_flight_contradicted
+        arc_px = {f: (400.0 + 30 * f, 500.0) for f in range(0, 8)}
+        uvs = {f: (arc_px[f][0] + 5.0, arc_px[f][1] - 4.0)
+               for f in range(0, 8)}   # small honest residual, moving
+        vetoed = veto_flight_contradicted(
+            self._mk(uvs), arc_px, mpp_by_frame={f: 0.02 for f in arc_px})
+        assert vetoed == []
+
+    def test_far_but_moving_smoothly_kept(self):
+        from src.utils.ball_track_clean import veto_flight_contradicted
+        # 100 px off the arc but moving coherently (a REAL ball the arc
+        # missed — e.g. a deflection the solve got wrong): never veto;
+        # the metric must keep charging the track for it.
+        arc_px = {f: (400.0 + 30 * f, 500.0) for f in range(0, 8)}
+        uvs = {f: (arc_px[f][0] + 100.0, arc_px[f][1] + 80.0)
+               for f in range(0, 8)}
+        vetoed = veto_flight_contradicted(
+            self._mk(uvs), arc_px, mpp_by_frame={f: 0.02 for f in arc_px})
+        assert vetoed == []

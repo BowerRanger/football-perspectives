@@ -100,3 +100,74 @@ def veto_click_contradicted(
             continue
         out[f] = uv
     return out
+
+
+def veto_flight_contradicted(
+    uvs: dict[int, UV],
+    arc_px: dict[int, UV],
+    *,
+    mpp_by_frame: dict[int, float],
+    far_px: float = 60.0,
+    static_px_per_frame: float = 1.5,
+    static_window: int = 2,
+    max_ball_speed_m_s: float = 40.0,
+    fps: float = 25.0,
+    max_island_frames: int = 2,
+) -> list[int]:
+    """Frames whose detection a BALLISTIC span proves non-ball (W9).
+
+    Interior detections never shape a two-knot arc, so the arc's
+    reprojection can honestly judge them. A detection ``far_px`` off the
+    arc is vetoed when it is physically impossible as a ball:
+
+    - a **teleport island**: a run of ≤ ``max_island_frames`` frames whose
+      pixel steps to every neighbouring detection exceed what a ball at
+      that depth can travel per frame (oscillating goal-mouth lock-ons);
+    - a **static lock-on**: local drift ≤ ``static_px_per_frame`` while
+      the arc moves away (net corners, furniture).
+
+    A far-but-coherent run is NEVER vetoed — it may be a real deflection
+    the solve missed, and the metric must keep charging the track for it.
+    Returns the sorted list of vetoed frames.
+    """
+    frames = sorted(f for f in uvs if uvs[f] is not None)
+    if not frames:
+        return []
+
+    def _step_feasible(fa: int, fb: int) -> bool:
+        ua, ub = uvs[fa], uvs[fb]
+        gap = abs(fb - fa)
+        mpp = max(mpp_by_frame.get(fa, 0.02), 1e-6)
+        budget = (max_ball_speed_m_s / fps) * gap / mpp
+        return ((ua[0] - ub[0]) ** 2 + (ua[1] - ub[1]) ** 2) <= budget ** 2
+
+    # Connected components under feasible-step adjacency.
+    components: list[list[int]] = [[frames[0]]]
+    for fa, fb in zip(frames, frames[1:]):
+        if fb - fa <= static_window + 1 and _step_feasible(fa, fb):
+            components[-1].append(fb)
+        else:
+            components.append([fb])
+
+    def _far(f: int) -> bool:
+        uv, arc = uvs.get(f), arc_px.get(f)
+        if uv is None or arc is None:
+            return False
+        return ((uv[0] - arc[0]) ** 2 + (uv[1] - arc[1]) ** 2) > far_px ** 2
+
+    vetoed: set[int] = set()
+    for comp in components:
+        if any(not _far(f) for f in comp):
+            continue   # touches the arc somewhere — could be the ball
+        if len(comp) <= max_island_frames and len(comp) < len(frames):
+            vetoed.update(comp)   # teleport island, wholly off the arc
+            continue
+        internal_static = all(
+            ((uvs[fa][0] - uvs[fb][0]) ** 2
+             + (uvs[fa][1] - uvs[fb][1]) ** 2)
+            <= (static_px_per_frame * (fb - fa)) ** 2
+            for fa, fb in zip(comp, comp[1:])
+        ) if len(comp) >= 2 else False
+        if internal_static:
+            vetoed.update(comp)   # static lock-on while the arc moves away
+    return sorted(vetoed)

@@ -328,3 +328,55 @@ def test_summarize_splits_held_out_by_evidence_availability():
     assert abs(s["held_out_evidenced"]["max"] - 0.10) < 1e-9
     assert s["held_out_unevidenced"]["n"] == 1
     assert abs(s["held_out_unevidenced"]["max"] - 3.00) < 1e-9
+
+
+class TestTouchGroundGT:
+    """A touch whose joint-on-ray point lies below the pitch is a GROUNDED
+    touch: ray ∩ z=r is exact GT (physics + click ray), and the depth-soft
+    joint convention must not produce underground ground truth."""
+
+    def _cam(self):
+        fwd = np.array([0.0, 20.0, -10.0])
+        fwd /= np.linalg.norm(fwd)
+        up = np.array([0.0, 0.0, 1.0])
+        right = np.cross(fwd, up)
+        right /= np.linalg.norm(right)
+        down = np.cross(fwd, right)
+        R = np.stack([right, down, fwd])
+        C = np.array([0.0, -20.0, 10.0])
+        K = np.array([[1500.0, 0.0, 960.0], [0.0, 1500.0, 540.0],
+                      [0.0, 0.0, 1.0]])
+        return K, R, -R @ C
+
+    def test_underground_joint_projection_gives_ground_exact_gt(self):
+        from src.utils.ball_eval import anchor_gt_world, ray_plane_z, pixel_ray
+        from src.schemas.ball_anchor import BallAnchor
+        from src.utils.camera_projection import project_world_to_image
+        K, R, t = self._cam()
+        ball = np.array([2.0, 6.0, 0.11])
+        uv = project_world_to_image(K, R, t, (0.0, 0.0), ball.reshape(1, 3))[0]
+        anc = BallAnchor(frame=0, image_xy=(float(uv[0]), float(uv[1])),
+                         state="player_touch", player_id="P1", bone="r_foot")
+        # Joint far beyond the ground intersection along the ray: its on-ray
+        # projection would be underground.
+        joint = (3.8, 12.0, -0.4)
+        gt, kind = anchor_gt_world(anc, K, R, t, (0.0, 0.0),
+                                   ball_radius=0.11, joint_world=joint)
+        assert kind == "ground_exact"
+        assert gt is not None and abs(gt[2] - 0.11) < 1e-6
+        assert np.linalg.norm(np.asarray(gt) - ball) < 0.05
+
+    def test_above_ground_joint_keeps_joint_depth_gt(self):
+        from src.utils.ball_eval import anchor_gt_world
+        from src.schemas.ball_anchor import BallAnchor
+        from src.utils.camera_projection import project_world_to_image
+        K, R, t = self._cam()
+        ball = np.array([1.0, 5.0, 0.6])
+        uv = project_world_to_image(K, R, t, (0.0, 0.0), ball.reshape(1, 3))[0]
+        anc = BallAnchor(frame=0, image_xy=(float(uv[0]), float(uv[1])),
+                         state="player_touch", player_id="P1", bone="r_foot")
+        joint = (1.0, 5.1, 0.6)
+        gt, kind = anchor_gt_world(anc, K, R, t, (0.0, 0.0),
+                                   ball_radius=0.11, joint_world=joint)
+        assert kind == "joint_depth"
+        assert gt is not None and gt[2] > 0.11

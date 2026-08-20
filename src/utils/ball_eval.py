@@ -81,7 +81,16 @@ def anchor_gt_world(anchor: BallAnchor, K, R, t, distortion, *,
             # along the sight-line (the resolver's physical convention).
             # joint_depth GT therefore carries ~±ball_radius model
             # uncertainty; ground_exact rows are the strict gate.
-            return C + (along - ball_radius) * d, "joint_depth"
+            P = C + (along - ball_radius) * d
+            if P[2] >= ball_radius:
+                return P, "joint_depth"
+            # Joint-depth point below the pitch ⇒ the touch is GROUNDED and
+            # {click ray, z=r} determine it exactly. The depth-soft player
+            # solve must not mint underground ground truth (mirrors the
+            # resolver's ground clamp).
+            X = ray_plane_z(C, d, ball_radius)
+            if X is not None:
+                return X, "ground_exact"
     return None, "ray_only"
 
 

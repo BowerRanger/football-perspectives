@@ -17,6 +17,7 @@ See ``docs/superpowers/specs/2026-06-15-ball-touch-events-design.md`` §5-§11.
 from __future__ import annotations
 
 import dataclasses
+import math
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -42,6 +43,15 @@ class _PlayerCtx(Protocol):
 # A ground-clamped touch may snap to the on-ray ground point only when that
 # point is genuinely within reach of the contacting joint.
 _CLAMP_CONTACT_MAX_M = 0.6
+
+# ...or when the click ray is steep enough that ray ∩ z=r is trustworthy on
+# its own. The operator clicked the BALL's pixel: on a normal broadcast
+# elevation the ray + ground plane fully determine a grounded ball, and the
+# (depth-soft) player solve must not veto them — origi01 showed FK joints
+# metres off the click ray at range. Below this floor the along-ray depth
+# noise of a grazing ray explodes (~px_noise / tan(elev)), so the joint-side
+# vertical lift remains the lesser evil.
+_GROUND_SNAP_MIN_ELEV_RAD = math.radians(3.0)
 
 
 @dataclass
@@ -122,7 +132,15 @@ def _resolve_touch_world(
                 K=K, R=R, t=t, plane_z=ball_radius, distortion=distortion,
             ), dtype=float)
             joint = np.asarray(bone_world, dtype=float)
-            if float(np.linalg.norm(ground_pt - joint)) <= _CLAMP_CONTACT_MAX_M:
+            in_reach = (
+                float(np.linalg.norm(ground_pt - joint)) <= _CLAMP_CONTACT_MAX_M
+            )
+            cam_c = (-np.asarray(R, dtype=float).T
+                     @ np.asarray(t, dtype=float).reshape(3)).reshape(3)
+            ray = ground_pt - cam_c
+            sin_elev = abs(float(ray[2])) / max(float(np.linalg.norm(ray)), 1e-9)
+            steep = sin_elev >= math.sin(_GROUND_SNAP_MIN_ELEV_RAD)
+            if in_reach or steep:
                 clamped = ground_pt
         except Exception:  # noqa: BLE001 — grazing ray: fall through
             clamped = None

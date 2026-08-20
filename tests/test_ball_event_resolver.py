@@ -212,3 +212,46 @@ def test_touch_clamp_prefers_vertical_lift_when_ground_point_is_far():
     # The clamp must stay near the joint, never slide metres along the ray.
     assert np.linalg.norm(np.asarray(world)[:2] - joint[:2]) < 0.5
     assert res.diagnostics.get("touch_ground_clamped", 0) == 1
+
+
+def test_touch_snaps_to_ray_ground_when_joint_far_but_ray_steep():
+    """Broadcast-geometry regression (origi01 f111): the operator clicked
+    the BALL's pixel; the FK joint is metres off that ray because the
+    player solve is depth-wrong at range. On a normal broadcast elevation
+    (>= ~8 deg) ray ∩ z=r is exact ball position — the soft player solve
+    must never veto the hard click ray + ground plane."""
+    R, t = _cam_zup()   # ~26 deg elevation — comfortably steep
+    true_ball = np.array([2.0, 6.0, _RADIUS])   # grounded ball, clicked
+    # Joint laterally ~2 m off the click ray, deep enough that projecting
+    # it onto the ray lands underground (the clamp path).
+    joint = (3.8, 7.5, -0.4)
+    ctx = _FakeCtx({(0, "P1", "r_foot"): joint})
+    anc = BallAnchor(frame=0, image_xy=_uv_zup(true_ball, R, t),
+                     state="player_touch", player_id="P1", bone="r_foot")
+    res = _resolve_zup({0: anc}, ctx, R, t)
+    world, _ = res.world_by_frame[0]
+    # Lands at ray ∩ z=r — NOT lifted vertically at the joint-depth point.
+    assert np.linalg.norm(np.asarray(world) - true_ball) < 0.05
+    assert res.diagnostics.get("touch_ground_clamped", 0) == 1
+
+
+def test_touch_grazing_ray_still_lifts_vertically():
+    """The W2a grazing defense survives: below the elevation floor the
+    along-ray depth noise explodes, so the vertical lift stays."""
+    fwd = np.array([0.0, 60.0, -1.9])
+    fwd /= np.linalg.norm(fwd)
+    up = np.array([0.0, 0.0, 1.0])
+    right = np.cross(fwd, up)
+    right /= np.linalg.norm(right)
+    down = np.cross(fwd, right)
+    R = np.stack([right, down, fwd])
+    C = np.array([0.0, -60.0, 2.0])
+    t = -R @ C
+    joint = np.array([0.0, 0.0, -0.15])
+    uv = project_world_to_image(_K2, R, t, _DIST, joint.reshape(1, 3))[0]
+    ctx = _FakeCtx({(0, "P1", "r_foot"): tuple(joint)})
+    anc = BallAnchor(frame=0, image_xy=(float(uv[0]), float(uv[1])),
+                     state="player_touch", player_id="P1", bone="r_foot")
+    res = _resolve_zup({0: anc}, ctx, R, t)
+    world, _ = res.world_by_frame[0]
+    assert np.linalg.norm(np.asarray(world)[:2] - joint[:2]) < 0.5

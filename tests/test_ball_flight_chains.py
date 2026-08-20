@@ -425,3 +425,80 @@ def test_closed_form_split_arc_from_fixes():
         t = (f - split) / _FPS
         w = np.asarray(p2) + np.asarray(v2) * t + 0.5 * g * t * t
         assert np.linalg.norm(w - arc2(f)) < 0.35, f
+
+
+class TestRejectedChainNeighborRedepth:
+    """kroupi regression: a lone airborne-bucket anchor between two
+    depth-hard knots whose click is NOT on the single bracketing arc
+    (unanchored lift mid-chain) makes the chain fit reject — honestly.
+    But the fallback then kept the BUCKET depth: on a shallow ray that
+    is metres deep of the ball, rendering an impossible out-and-back
+    spike. The rejected-chain fallback must instead take depth from the
+    gravity arc through the hard neighbours, projected onto the
+    anchor's own click ray (ray-faithful, physics depth)."""
+
+    def _fixture(self):
+        fwd = np.array([0.0, 40.0, -2.4])
+        fwd /= np.linalg.norm(fwd)
+        up = np.array([0.0, 0.0, 1.0])
+        right = np.cross(fwd, up)
+        right /= np.linalg.norm(right)
+        down = np.cross(fwd, right)
+        R = np.stack([right, down, fwd])
+        C = np.array([0.0, -40.0, 2.5])
+        t = -R @ C
+        p0 = np.array([1.0, 6.0, _R_])
+        p1 = np.array([0.2, 7.4, _R_])
+        w4_click = np.array([0.6, 6.7, 1.6])   # off the p0->p1 arc (43px)
+        def _uvl(w):
+            p = project_world_to_image(_K, R, t, _DIST,
+                                       np.asarray([w]))[0]
+            return (float(p[0]), float(p[1]))
+        anchors = {
+            0: BallAnchor(frame=0, image_xy=_uvl(p0), state="grounded"),
+            4: BallAnchor(frame=4, image_xy=_uvl(w4_click),
+                          state="airborne_low"),
+            8: BallAnchor(frame=8, image_xy=_uvl(p1), state="grounded"),
+        }
+        from src.utils.ball_eval import pixel_ray, ray_plane_z
+        Cc, d = pixel_ray(anchors[4].image_xy, _K, R, t)
+        bucket_world = np.asarray(ray_plane_z(Cc, d, 1.0))
+        worlds = {0: p0, 4: bucket_world, 8: p1}
+        return R, t, anchors, worlds, bucket_world
+
+    def _run(self, R, t, anchors, worlds, max_residual_px=5.0):
+        from src.utils.ball_flight_chains import refit_airborne_chains
+        return refit_airborne_chains(
+            anchor_by_frame=anchors,
+            world_for_anchor={f: np.asarray(w) for f, w in worlds.items()},
+            per_frame_K={f: _K for f in range(9)},
+            per_frame_R={f: R for f in range(9)},
+            per_frame_t={f: t for f in range(9)},
+            distortion=_DIST,
+            fps=_FPS,
+            extra_observations={},
+            manual_frames=frozenset(anchors),
+            world_fixes=None,
+            max_residual_px=max_residual_px,
+        )
+
+    def test_rejected_chain_redepths_lone_bucket_onto_neighbor_arc(self):
+        R, t, anchors, worlds, bucket_world = self._fixture()
+        # Force the rejection path (kroupi's real chain rejects at 188 px
+        # median on its shallow-ray geometry; a synthetic 3-click chain
+        # can't reach that — median over [knot, mid, knot] ≈ 0).
+        updates, diags, _a = self._run(R, t, anchors, worlds,
+                                       max_residual_px=0.0)
+        fit = [d for d in diags if d.get("kind") == "chain_fit"]
+        assert fit and not fit[0]["accepted"]
+        assert 4 in updates, "rejected chain left the bucket depth"
+        new_w = np.asarray(updates[4])
+        # Moved well off the bucket-depth point, toward the neighbours…
+        assert np.linalg.norm(new_w - bucket_world) > 1.0
+        # …stays ray-faithful to the operator's click…
+        from src.utils.ball_eval import pixel_ray, point_ray_distance
+        Cc, d = pixel_ray(anchors[4].image_xy, _K, R, t)
+        lat, _along = point_ray_distance(new_w, Cc, d)
+        assert lat < 0.05
+        # …and at a physically sane height.
+        assert 0.0 <= new_w[2] <= 3.0

@@ -375,10 +375,32 @@ def refit_airborne_chains(
             "residual_px": float(residual),
         })
         if not ok:
+            # Rejection fallback (kroupi-class): a LONE bucket anchor
+            # between two depth-hard knots keeps a config-default depth —
+            # on a shallow ray that is metres deep of the ball, rendering
+            # an impossible out-and-back spike. The chain honestly isn't
+            # one arc (unanchored lift), but the bucket depth is still the
+            # worst estimate available: take depth from the gravity arc
+            # through the hard neighbours instead, projected onto the
+            # anchor's own click ray (ray-faithful; depth from physics).
+            redepthed = _redepth_lone_bucket(
+                start, end, air_frames, anchor_by_frame, world_for_anchor,
+                per_frame_K, per_frame_R, per_frame_t, distortion, fps,
+            )
+            if redepthed is not None:
+                f_air, w_new = redepthed
+                updates[f_air] = (float(w_new[0]), float(w_new[1]),
+                                  float(w_new[2]))
+                diags.append({
+                    "kind": "chain_reject_redepth", "span": [start, end],
+                    "frame": int(f_air),
+                })
             logger.info(
                 "ball flight-chain [%d,%d]: fit rejected "
-                "(residual %.1fpx > %.1f or implausible arc) — "
-                "bucket heights kept", start, end, residual, max_residual_px,
+                "(residual %.1fpx > %.1f or implausible arc) — %s",
+                start, end, residual, max_residual_px,
+                "neighbor-arc redepth applied" if redepthed is not None
+                else "bucket heights kept",
             )
             continue
         g = np.array([0.0, 0.0, -9.81])
@@ -387,6 +409,61 @@ def refit_airborne_chains(
             w = p0 + v0 * t + 0.5 * g * t * t
             updates[f] = (float(w[0]), float(w[1]), float(w[2]))
     return updates, diags, arcs
+
+
+def _redepth_lone_bucket(
+    start: int,
+    end: int,
+    air_frames: list[int],
+    anchor_by_frame,
+    world_for_anchor,
+    per_frame_K,
+    per_frame_R,
+    per_frame_t,
+    distortion: tuple[float, float],
+    fps: float,
+):
+    """Depth-from-neighbours fallback for a rejected chain.
+
+    Applies only to a chain with exactly ONE airborne-bucket anchor whose
+    bracketing knots are depth-hard (non-bucket states with resolved
+    worlds). Returns ``(frame, world)`` — the gravity-arc-through-
+    neighbours position at the air frame, projected onto the anchor's
+    click ray — or ``None`` when the shape doesn't apply or the result
+    is not physically sane.
+    """
+    if len(air_frames) != 1:
+        return None
+    f_air = air_frames[0]
+    anc = anchor_by_frame.get(f_air)
+    if anc is None or anc.image_xy is None:
+        return None
+    for kf in (start, end):
+        state = getattr(anchor_by_frame.get(kf), "state", "")
+        if state in AIRBORNE_BUCKETS or world_for_anchor.get(kf) is None:
+            return None
+    K = per_frame_K.get(f_air)
+    R = per_frame_R.get(f_air)
+    t = per_frame_t.get(f_air)
+    if K is None or R is None or t is None:
+        return None
+    w_p = np.asarray(world_for_anchor[start], dtype=float)
+    w_n = np.asarray(world_for_anchor[end], dtype=float)
+    T = (end - start) / fps
+    if T <= 0:
+        return None
+    g = np.array([0.0, 0.0, -9.81])
+    v_arc = (w_n - w_p) / T - 0.5 * g * T
+    tt = (f_air - start) / fps
+    pos = w_p + v_arc * tt + 0.5 * g * tt * tt
+    from src.utils.camera_projection import project_point_onto_pixel_ray
+    w_new = project_point_onto_pixel_ray(
+        pos, (float(anc.image_xy[0]), float(anc.image_xy[1])),
+        np.asarray(K), np.asarray(R), np.asarray(t), distortion,
+    )
+    if not np.all(np.isfinite(w_new)) or w_new[2] < 0.0:
+        return None
+    return f_air, np.asarray(w_new, dtype=float)
 
 
 # Minimum in-span detections for a segment-level fit: with only the two

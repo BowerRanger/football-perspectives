@@ -127,15 +127,26 @@ def refit_airborne_chains(
     updates: dict[int, tuple[float, float, float]] = {}
     diags: list[dict] = []
     extra_observations = extra_observations or {}
+    strong_fixes = {
+        f: entry for f, entry in (world_fixes or {}).items()
+    }
     for start, air_frames, end in _chains(anchor_by_frame, world_for_anchor):
         if start is None or end is None:
-            diags.append({
-                "kind": "underconstrained_chain",
-                "air_frames": list(air_frames),
-                "note": "airborne run lacks a bracketing hard knot; "
-                        "bucket heights kept — add a bracketing anchor",
-            })
-            continue
+            n_strong = sum(1 for f in strong_fixes
+                           if air_frames and
+                           air_frames[0] - 3 <= f <= air_frames[-1] + 3)
+            if n_strong < 2 or not air_frames:
+                diags.append({
+                    "kind": "underconstrained_chain",
+                    "air_frames": list(air_frames),
+                    "note": "airborne run lacks a bracketing hard knot; "
+                            "bucket heights kept — add a bracketing anchor",
+                })
+                continue
+            # W5w: >=2 absolute cross-replay fixes ARE the missing depth
+            # anchors — synthesize the bracket from the run itself.
+            start = start if start is not None else air_frames[0]
+            end = end if end is not None else air_frames[-1]
         chain_frames = [start, *air_frames, end]
         anchor_obs = []
         for f in chain_frames:
@@ -177,11 +188,16 @@ def refit_airborne_chains(
                        else _AUTO_KNOT_WEIGHT_SOLE_DEPTH)
         for kf in (start, end):
             w = np.asarray(world_for_anchor[kf], dtype=float)
-            if manual_frames is None or kf in manual_frames:
+            state = getattr(anchor_by_frame.get(kf), "state", "")
+            depth_soft = state in AIRBORNE_BUCKETS   # bucket z is a guess
+            if (manual_frames is None or kf in manual_frames) \
+                    and not depth_soft:
                 knots[kf - f0] = w
             else:
                 conf = float(getattr(anchor_by_frame[kf], "confidence", 1.0))
-                soft_fixes.append((kf - f0, w, auto_weight * conf))
+                wt = (_AUTO_KNOT_WEIGHT_TIEBREAK if depth_soft
+                      else auto_weight)
+                soft_fixes.append((kf - f0, w, wt * conf))
         z_ranges = {
             f - f0: bucket
             for f in air_frames
@@ -296,6 +312,8 @@ def refit_ballistic_segment(
     distortion: tuple[float, float],
     fps: float,
     world_fixes: dict[int, tuple] | None = None,
+    start_depth_soft: bool = False,
+    end_depth_soft: bool = False,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
     """Gravity-arc fit for a ballistic SEGMENT with no interior anchors.
 
@@ -317,15 +335,23 @@ def refit_ballistic_segment(
                    else _AUTO_KNOT_WEIGHT_SOLE_DEPTH)
     knots: dict[int, np.ndarray] = {}
     fixes: list[tuple[int, np.ndarray, float]] = []
-    for f, w, is_manual, conf in (
-        (start_frame, start_world, start_is_manual, start_confidence),
-        (end_frame, end_world, end_is_manual, end_confidence),
+    for f, w, is_manual, conf, depth_soft in (
+        (start_frame, start_world, start_is_manual, start_confidence,
+         start_depth_soft),
+        (end_frame, end_world, end_is_manual, end_confidence,
+         end_depth_soft),
     ):
         arr = np.asarray(w, dtype=float)
-        if is_manual:
+        # An AIRBORNE anchor's keyframe world is a bucket-height guess:
+        # the operator's click constrains the RAY (already an observation),
+        # never the depth — bucket worlds must not out-weigh real depth
+        # constraints (sub-20cm campaign W5w).
+        if is_manual and not depth_soft:
             knots[f - start_frame] = arr
         else:
-            fixes.append((f - start_frame, arr, auto_weight * float(conf)))
+            wt = (auto_weight if not depth_soft
+                  else _AUTO_KNOT_WEIGHT_TIEBREAK)
+            fixes.append((f - start_frame, arr, wt * float(conf)))
     f0 = obs[0][0]
     shift = f0 - start_frame
     Ks = [np.asarray(per_frame_K[f]) for f, _ in obs]

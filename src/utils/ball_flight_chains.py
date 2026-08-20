@@ -252,7 +252,11 @@ def refit_airborne_chains(
                 med_c = _arc_residual_px(
                     np.asarray(cp0), np.asarray(cv0), gate_obs,
                     aK, aR, aT, distortion, fps, ff0)
-                if np.isfinite(med_c) and med_c <= 3 * max_residual_px:
+                # Gate at 4× the base residual: the fixes' own measured
+                # click-consistency is ~0.6 m ≈ 14 px at 90 m depth, so a
+                # 15 px gate rejected truth-level agreement; junk arcs
+                # measure 89–112 px, far above 20 px (W5z2).
+                if np.isfinite(med_c) and med_c <= 4 * max_residual_px:
                     g2 = np.array([0.0, 0.0, -9.81])
                     for f in air_frames:
                         if not (lo_fix <= f <= hi_fix):

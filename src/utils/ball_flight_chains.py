@@ -239,13 +239,24 @@ def refit_airborne_chains(
             cf = fit_arc_to_fixes(span_fixes, fps=fps)
             if cf is not None:
                 ff0, (cp0, cv0) = cf
-                aK, aR, aT = _cams_for(anchor_obs)
+                lo_fix = min(span_fixes) - 2
+                hi_fix = max(span_fixes) + 2
+                # The arc claims only the fix-covered interval: gating on
+                # (or updating) frames it must EXTRAPOLATE to imports
+                # pre-/post-event structure it cannot know about.
+                in_range_obs = [(f, uv) for f, uv in anchor_obs
+                                if lo_fix <= f <= hi_fix]
+                gate_obs = in_range_obs if len(in_range_obs) >= 2 \
+                    else anchor_obs
+                aK, aR, aT = _cams_for(gate_obs)
                 med_c = _arc_residual_px(
-                    np.asarray(cp0), np.asarray(cv0), anchor_obs,
+                    np.asarray(cp0), np.asarray(cv0), gate_obs,
                     aK, aR, aT, distortion, fps, ff0)
                 if np.isfinite(med_c) and med_c <= 3 * max_residual_px:
                     g2 = np.array([0.0, 0.0, -9.81])
                     for f in air_frames:
+                        if not (lo_fix <= f <= hi_fix):
+                            continue
                         t2 = (f - ff0) / fps
                         w2 = (np.asarray(cp0) + np.asarray(cv0) * t2
                               + 0.5 * g2 * t2 * t2)

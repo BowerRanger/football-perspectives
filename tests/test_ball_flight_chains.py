@@ -502,3 +502,57 @@ class TestRejectedChainNeighborRedepth:
         assert lat < 0.05
         # …and at a physically sane height.
         assert 0.0 <= new_w[2] <= 3.0
+
+
+class TestTrimmedSegmentRetry:
+    """W11: one junk detection inside a short flight (origi01 chip
+    [429,433]: goal-mouth lock at f432) drags the median gate over the
+    limit and the whole fit rejects. A leave-one-out retry recovers the
+    arc from the remaining evidence — same gates, one drop, only for
+    short contaminated spans."""
+
+    def _setup(self):
+        R, t = _cam()
+        p0 = np.array([1.0, 8.0, _R_])
+        v0 = np.array([2.0, 1.5, 9.81 * 0.2])   # 10-frame hop
+        end = _arc(p0, v0, 10, 0)
+        obs = {}
+        for f in (3, 5, 7):
+            obs[f] = _uv(_arc(p0, v0, f, 0), R, t)
+        return R, t, p0, v0, end, obs
+
+    def _fit(self, R, t, p0, end, obs):
+        from src.utils.ball_flight_chains import refit_ballistic_segment
+        return refit_ballistic_segment(
+            start_frame=0, end_frame=10,
+            start_world=tuple(p0), end_world=tuple(end),
+            start_is_manual=True, end_is_manual=True,
+            extra_observations=obs,
+            per_frame_K={f: _K for f in range(11)},
+            per_frame_R={f: R for f in range(11)},
+            per_frame_t={f: t for f in range(11)},
+            distortion=_DIST, fps=_FPS,
+        )
+
+    def test_clean_obs_fit_accepts(self):
+        R, t, p0, v0, end, obs = self._setup()
+        fit = self._fit(R, t, p0, end, obs)
+        assert fit is not None
+
+    def test_one_junk_obs_recovered_by_trim(self):
+        R, t, p0, v0, end, obs = self._setup()
+        obs[5] = (obs[5][0] + 220.0, obs[5][1] - 180.0)   # goal-mouth lock
+        fit = self._fit(R, t, p0, end, obs)
+        assert fit is not None, "trimmed retry did not recover the arc"
+        # The recovered arc matches the true one at the junk frame.
+        g = np.array([0.0, 0.0, -9.81])
+        w5 = (np.asarray(fit[0]) + np.asarray(fit[1]) * (5 / _FPS)
+              + 0.5 * g * (5 / _FPS) ** 2)
+        assert np.linalg.norm(w5 - _arc(p0, v0, 5, 0)) < 0.3
+
+    def test_majority_junk_still_rejects(self):
+        R, t, p0, v0, end, obs = self._setup()
+        obs[3] = (obs[3][0] + 200.0, obs[3][1] + 150.0)
+        obs[5] = (obs[5][0] - 240.0, obs[5][1] - 160.0)
+        fit = self._fit(R, t, p0, end, obs)
+        assert fit is None

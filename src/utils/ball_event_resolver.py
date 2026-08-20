@@ -348,6 +348,12 @@ def resolve_events(
             wb = kf_world2.get(seg.end_frame)
             n_obs_in = sum(1 for f in hard_obs
                            if seg.start_frame < f < seg.end_frame)
+            # Span floor 6: W11 measured a 4-frame ballistic floor as a
+            # corpus no-op — the one 4-frame candidate (origi01 [429,433])
+            # is DATA-contradictory: gravity through its two anchors
+            # allows ~3 cm of apex while its interior detections climb
+            # ~130 px, so the fit rightly rejects and the span needs
+            # operator review, not a looser gate.
             if (not _flight_candidate(seg) or wa is None or wb is None
                     or seg.end_frame - seg.start_frame < 6):
                 if seg.kind == "ballistic":

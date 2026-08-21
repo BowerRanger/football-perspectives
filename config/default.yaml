@@ -645,6 +645,10 @@ ball:
     # checkpoint: third_party/wasb_sbdt/pretrained_weights/wasb_soccer_best.pth.tar  # stock fallback
     confidence: 0.3
     input_size: [512, 288]
+    # Metal inference on the Mac (unset -> CPU, which makes dashboard runs
+    # take hours; every sub-20cm campaign eval ran mps). The Linux GPU box
+    # overrides to cuda.
+    device: mps
   tracker:
     process_noise_grounded_px: 4.0
     process_noise_flight_px: 12.0

@@ -27,6 +27,16 @@
 #
 # Reserved-for-future fields (NOT consumed yet — see docs/FEATURE_IDEAS.md):
 # - ad_boards: { height_m, touchline_offset_m, goalline_offset_m }
+#
+# ---------------------------------------------------------------------------
+# Premier League 2026/27 pitch dimensions (researched 2026-08-22).
+# Most PL pitches are the FIFA/league-standard 105 x 68 m; the exceptions
+# below are per-club figures from the 2025/26 pitch-size lists
+# (premierleaguenow.co.uk, huck-net.co.uk) and stadium Wikipedia pages.
+# Every club declares dimensions explicitly so the viewer / ball stage
+# never silently leans on the codebase default. Mowing patterns vary
+# match-to-match everywhere — all entries carry the league-default
+# 5.5 m along-touchline stripes; override per-clip in the anchor JSON.
 
 stadiums:
   default_premier_league:
@@ -44,6 +54,146 @@ stadiums:
       origin_x_m: 0.0
       origin_y_m: 0.0
 
+  # ---- Premier League 2026/27 clubs (alphabetical by club) ----
+
+  emirates_stadium:
+    display_name: "Emirates Stadium (Arsenal)"
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  villa_park:
+    display_name: "Villa Park (Aston Villa)"
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  vitality_stadium:
+    display_name: "Vitality Stadium (AFC Bournemouth)"
+    # AFC Bournemouth's Dean Court has the smallest *capacity* in the
+    # Premier League, but the playing surface itself is the full FIFA
+    # reference 105 m x 68 m.
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  gtech_community_stadium:
+    display_name: "Gtech Community Stadium (Brentford)"
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  amex_stadium:
+    display_name: "Amex Stadium (Brighton & Hove Albion)"
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  stamford_bridge:
+    display_name: "Stamford Bridge (Chelsea)"
+    # Constrained ground. Wikipedia lists 103 x 67 m; the 2025/26
+    # pitch-size lists give 103.3 x 67.7 m. Using the round figure —
+    # the sub-metre spread is below what the camera stage can resolve
+    # from broadcast anchors anyway.
+    pitch_length_m: 103.0
+    pitch_width_m: 67.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  cbs_arena:
+    display_name: "CBS Arena (Coventry City)"
+    # Wikipedia's "120 x 68 m field size" is the total grass area
+    # (the arena was built rugby-capable); the football playing
+    # surface is the standard 105 x 68 m (football-stadiums.co.uk).
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  selhurst_park:
+    display_name: "Selhurst Park (Crystal Palace)"
+    # Full-width but short: 101 x 68 m.
+    pitch_length_m: 101.0
+    pitch_width_m: 68.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  hill_dickinson_stadium:
+    display_name: "Hill Dickinson Stadium (Everton)"
+    # New Bramley-Moore Dock ground (opened 2025) — built to the full
+    # 105 x 68 m spec, unlike Goodison Park's ~100.5 m pitch.
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  craven_cottage:
+    display_name: "Craven Cottage (Fulham)"
+    # Smallest pitch in the 2026/27 Premier League: 100 x 65 m.
+    pitch_length_m: 100.0
+    pitch_width_m: 65.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  mkm_stadium:
+    display_name: "MKM Stadium (Hull City)"
+    # Rugby-league-capable total field is 114 x 74 m; the football
+    # playing surface is the standard 105 x 68 m (Wikipedia).
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  portman_road:
+    display_name: "Portman Road (Ipswich Town)"
+    # Narrow ground, 66 m wide. The pitch was lengthened from 102 m to
+    # ~106 m in the summer-2026 redevelopment (plans reported by
+    # twtd.co.uk gave "around 106 x 66"; club has not published an
+    # exact figure). If a clip's goal-to-goal geometry looks ~1 m off,
+    # re-check this length against the club's published spec.
+    pitch_length_m: 106.0
+    pitch_width_m: 66.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  elland_road:
+    display_name: "Elland Road (Leeds United)"
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
   anfield:
     display_name: "Anfield (Liverpool FC)"
     # Liverpool report Anfield's pitch as 101 m x 68 m (shorter than the
@@ -54,24 +204,63 @@ stadiums:
     # ball stage's flight-segment x-bounds.
     pitch_length_m: 101.0
     pitch_width_m: 68.0
-    # Mow pattern at Anfield varies by match — leave the stripe width as
-    # the league default. Per-clip mow-stripe overrides should go in the
-    # anchor JSON if needed.
     mowing:
       orientation: along_touchline
       stripe_width_m: 5.5
       origin_y_m: 0.0
 
-  vitality_stadium:
-    display_name: "Vitality Stadium (AFC Bournemouth)"
-    # AFC Bournemouth's Dean Court has the smallest *capacity* in the
-    # Premier League, but the playing surface itself is the full FIFA
-    # reference 105 m x 68 m. Declared explicitly so the web pitch viewer
-    # and the ball stage's flight-segment x-bounds don't silently lean on
-    # the codebase default.
+  etihad_stadium:
+    display_name: "Etihad Stadium (Manchester City)"
     pitch_length_m: 105.0
     pitch_width_m: 68.0
-    # Mow pattern varies by match — keep the league-default stripe width.
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  old_trafford:
+    display_name: "Old Trafford (Manchester United)"
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  st_james_park:
+    display_name: "St James' Park (Newcastle United)"
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  city_ground:
+    display_name: "City Ground (Nottingham Forest)"
+    # Notably WIDER than the league standard: 105 x 71 m (consistent
+    # across the 2025/26 pitch-size lists). The extra 3 m of width
+    # matters for the ball stage's y-bounds on crossing plays.
+    pitch_length_m: 105.0
+    pitch_width_m: 71.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  stadium_of_light:
+    display_name: "Stadium of Light (Sunderland)"
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
+    mowing:
+      orientation: along_touchline
+      stripe_width_m: 5.5
+      origin_y_m: 0.0
+
+  tottenham_hotspur_stadium:
+    display_name: "Tottenham Hotspur Stadium (Tottenham Hotspur)"
+    pitch_length_m: 105.0
+    pitch_width_m: 68.0
     mowing:
       orientation: along_touchline
       stripe_width_m: 5.5

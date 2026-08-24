@@ -1,0 +1,134 @@
+{
+ "clip": "origi01",
+ "output_dir": "output-origi",
+ "detector": "wasb",
+ "holdout": false,
+ "n_folds": 0,
+ "summary": {
+  "anchors_held_out": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 0
+  },
+  "held_out_evidenced": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 0
+  },
+  "held_out_unevidenced": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 0
+  },
+  "anchors_kept": {
+   "n": 59,
+   "p50": 7.105427357601002e-15,
+   "p95": 0.1034825711071375,
+   "max": 0.4370642779244684,
+   "n_over": 3,
+   "n_missing": 0,
+   "n_3d": 35
+  },
+  "fixes": {
+   "n": 99,
+   "p50": 2.3685683971335263,
+   "p95": 28.41827436458836,
+   "max": 66.67973956962098,
+   "n_over": 93,
+   "n_missing": 0
+  },
+  "dense": {
+   "n": 354,
+   "p50": 0.055160336264901785,
+   "p95": 0.8682710077367621,
+   "max": 1.5467835630691835,
+   "n_over": 66,
+   "n_missing": 0
+  },
+  "naturalness": {
+   "n_violations": 6,
+   "by_kind": {
+    "heading_break": 4,
+    "roll_speedup": 2
+   }
+  },
+  "threshold_m": 0.2,
+  "held_out_by_state": {}
+ },
+ "touch_recall": {
+  "strict": {
+   "n_manual": 14,
+   "n_auto": 30,
+   "true_positive": 3,
+   "false_positive": 27,
+   "recall": 0.21428571428571427,
+   "precision": 0.1
+  },
+  "relaxed": {
+   "n_manual": 14,
+   "n_auto": 30,
+   "true_positive": 7,
+   "false_positive": 23,
+   "recall": 0.5,
+   "precision": 0.23333333333333334
+  }
+ },
+ "per_fold": [
+  {
+   "fold": null,
+   "n_kept": 60,
+   "n_held_out": 0
+  }
+ ],
+ "worst_held_out": [],
+ "violations": [
+  {
+   "frame": 12,
+   "kind": "heading_break",
+   "value": 14.359592230933199,
+   "limit": 12.0
+  },
+  {
+   "frame": 319,
+   "kind": "heading_break",
+   "value": 146.43245540218575,
+   "limit": 12.0
+  },
+  {
+   "frame": 369,
+   "kind": "roll_speedup",
+   "value": 1.2267669092367735,
+   "limit": 1.15
+  },
+  {
+   "frame": 370,
+   "kind": "roll_speedup",
+   "value": 1.1835871923862153,
+   "limit": 1.15
+  },
+  {
+   "frame": 371,
+   "kind": "heading_break",
+   "value": 15.720679777507332,
+   "limit": 12.0
+  },
+  {
+   "frame": 372,
+   "kind": "heading_break",
+   "value": 23.54258771626151,
+   "limit": 12.0
+  }
+ ]
+}

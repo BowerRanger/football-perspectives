@@ -3,7 +3,7 @@
 	"tasks": [
 		{
 			"label": "UE: Rebuild & Reattach",
-			"detail": "Launch FootballPerspectives editor (builds first if C++ exists), wait for MCP tools, reload window",
+			"detail": "Launch FootballPerspectives editor (builds first if C++ exists), wait for MCP tools; Claude Code reattaches automatically (no reload)",
 			"type": "shell",
 			"command": {
 				"value": "/Users/joebower/workplace/FootballPerspectives 5.8/Scripts/ue-rebuild-reattach.sh",
@@ -19,13 +19,14 @@
 		},
 		{
 			"label": "UE: Rebuild & Reattach + Continue",
-			"detail": "Same, then auto-submit 'continue' to Claude Code after reload (for autonomous runs)",
+			"detail": "Legacy: force window reload, then auto-submit 'continue' to Claude Code (only if auto-reattach fails)",
 			"type": "shell",
 			"command": {
 				"value": "/Users/joebower/workplace/FootballPerspectives 5.8/Scripts/ue-rebuild-reattach.sh",
 				"quoting": "strong"
 			},
 			"args": [
+				"--reload",
 				"--continue"
 			],
 			"problemMatcher": [],

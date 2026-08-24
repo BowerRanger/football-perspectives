@@ -45,6 +45,43 @@ python recon.py run --input highlights.mp4 --output ./output/ --stages prepare_s
 python recon.py serve --output ./output/ --port 8001
 ```
 
+## Dev Environment & Testing
+
+**Always use `.venv311`** (Python 3.11, torch 2.1.2 — matches the pyproject pins): `.venv311/bin/python` for `recon.py`, pytest, and scripts. The other venvs in the repo (`.venv`, `.venv313`) are scratch environments with unpinned or missing deps — do not use them for pipeline or test runs.
+
+```bash
+.venv311/bin/python -m pytest tests/ -q     # default suite (~1300 tests); e2e/fbx auto-skip
+.venv311/bin/python -m pytest tests/test_ball_*.py -q   # scoped run when touching ball code
+```
+
+Known failures on `main` as of 2026-07-05 (pre-existing — do not attribute to your change; remove this note when fixed): `test_ball_stage.py::test_aerial_arc_promotes_grounded_run_to_flight` (linear trajectory wrongly promoted to flight) and `test_blender_export_smpl_skeleton.py::test_player_fbx_has_24_bones_and_full_keyframes` (Blender snapshot not written on this Mac).
+
+Markers (`pyproject.toml`): `unit`, `integration`, `e2e` (real fixtures/GPU, skipped by default), `fbx` (needs Blender on PATH). Tests follow `tests/test_<module>.py` naming — when you change `src/utils/foo.py`, run `tests/test_foo*.py` plus any `test_<stage>_stage*.py` that wires it in. GPU-dependent stage runs (GVHMR, real WASB detector) cannot be validated on this Mac — flag them for a GPU-box run instead of claiming them verified.
+
+## Repo Map
+
+- `src/stages/` — one module per pipeline stage (the seven stages above).
+- `src/utils/` — the actual algorithms; stage modules are thin orchestrators. The `ball_*` family (~40 modules) implements the ball stage; camera solving lives in `anchor_solver.py`, `line_camera_refine.py`, `feature_propagator.py`, `bundle_adjust.py` and friends.
+- `src/web/` — FastAPI dashboard + static JS panels; `src/schemas/` — JSON schemas for stage sidecars; `src/pipeline/` — runner/manifest plumbing.
+- `scripts/` — eval harnesses, probes, and one-off validation CLIs (not shipped); the `probe_*` / `eval_*` scripts document past investigations.
+- `third_party/` — vendored research code (GVHMR, WASB-SBDT, PnLCalib). **Never edit vendored source**: integrate via context-manager shims (cwd redirect, device redirect, numpy/chumpy patches) in `src/utils/` wrappers, e.g. `gvhmr_estimator.py`, `wasb_ball_detector.py`.
+- `docs/superpowers/specs/` and `docs/superpowers/plans/` — dated design docs and implementation plans (`YYYY-MM-DD-topic.md`). Check here for the reasoning behind any subsystem before redesigning it.
+
+## Test Clips & Evaluation
+
+Evaluation output dirs live at the repo root, one per clip: `output/` (**gberch** — the primary ball/touch validation shot), `output-origi`/`output-origi-global` (Origi vs Barcelona), `output-japan`, `output-kroupi`. Source media is in `test-media/` (with `ground_truth/`). `output/CROSS_CLIP_EVALUATION.md` records cross-clip results. `ball_pre_*`/`ball_phase*` subdirs are frozen before/after snapshots — don't delete them.
+
+- **Touch recall** (ball stage): `scripts/run_touch_recall_validation.py --output <dir> --shot <shot>` (GPU box for the stage runs; `--report-only` reprints from snapshots locally). Manual anchors are the pseudo-ground-truth.
+- **Ball anchor accuracy without a detector**: `tests/test_ball_anchor_accuracy.py` — the no-op-detector harness; a no-op detector opts out of second-pass redetection.
+- **Camera quality**: judge by anchor-click reprojection (`scripts/eval_anchor_clicks.py`), not by eyeballing a single run — PnLCalib on MPS is nondeterministic across runs.
+
+## Conventions & Gotchas
+
+- **SMPL FK root orientation**: `thetas[0]` is IGNORED; `root_R` carries the root world orientation. Applying both flips the body upside down.
+- **Operator input always wins**: manual ball anchors override auto-anchors; `manual` sync-map offsets override auto-alignment. Never let an automatic pass overwrite operator data.
+- **Count-preserving passes**: `ball.touch_attribution` must never add/remove events, only relabel (same length/order). Preserve this invariant in any edit.
+- **Model weights are gitignored** (fine-tuned WASB checkpoint, `/checkpoints`); regen via `scripts/build_finetune_corpus.py` + `scripts/finetune_wasb.py`. Never commit weights.
+
 ## Pipeline Architecture
 
 The pipeline has 7 sequential stages. Each stage reads from previous stage outputs in `output/` and writes its own subdirectory. Stages are independently re-runnable.
@@ -150,15 +187,24 @@ Scan for `Assertion failed`, `Fatal error`, `Error:`, or a call stack ending wit
 | `IsCreatedByConstructionScript` in `DestroySpawnedObject` | Stale spawnable template during save — LS was open | Close LS before saving; re-run Load Reconstruction |
 | `RerunConstructionScripts` re-entrancy during startup | `/tmp/pyexec_job.py` left a live material-edit job from previous session | Write no-op: `echo 'import pathlib,json; pathlib.Path("/tmp/pyexec_out.json").write_text(json.dumps({"noop":True}))' > /tmp/pyexec_job.py` |
 | `Array index out of bounds` in `LeaderPoseComponent` | Kit part mesh using `MeshComp` (Mannequin skeleton) as leader — bone count mismatch | Clear `LeaderPoseComponent` on all part components in BP_PlayerActor |
+| `FPCGRuntimeGenScheduler::OnObjectsReplaced` → `UStruct::IsChildOf` after `SetObjectProperties` → `RerunConstructionScripts` | UE 5.8 release: MCP `set_properties` emits full PostEditChangeProperty; setting `RunId` on BP_PyExec reruns its Construction Script inside the HTTP tick and the PCG plugin's OnObjectsReplaced handler crashes on a stale object | **Do not bump BP_PyExec RunId via MCP.** Run editor Python via `Scripts/ue_py.py` instead (see below) |
+| `APlayerCameraManager::UpdateViewTarget` SIGSEGV right after MRQ "Initializing Camera Cut" | UE 5.8.0 Mac engine bug: a Sequencer camera-cut view target on a spawnable camera crashes the camera manager in game worlds (reproduced in in-editor PIE AND `-game` child, with both CameraActor and CineCameraActor, binding id verified correct) | No fix from our side. Editor-viewport Sequencer playback works fine. For renders, try a POSSESSABLE camera (level actor) instead of a spawnable, or retest on 5.8.1 |
 
 If the crash is from a Python script run via `load_reconstruction` or `build_sequence`, the traceback will appear above the callstack in the log.
+
+**Running editor Python (UE 5.8 release):** use Python remote execution, NOT the BP_PyExec RunId bump:
+```bash
+python3 "/Users/joebower/workplace/FootballPerspectives 5.8/Scripts/ue_py.py" -c "import unreal; unreal.log('hi')"
+python3 "/Users/joebower/workplace/FootballPerspectives 5.8/Scripts/ue_py.py" /path/to/script.py
+```
+Requires `bRemoteExecution=True` (already set in `Config/DefaultEngine.ini`). Editor log output from the command is echoed back. Note: the MCP `ProgrammaticToolset.execute_tool_script` is NOT a substitute — it is sandboxed (no `unreal` import, only math/json/re/etc.) and can only batch other toolset calls. `Scripts/mcp_call.py` talks JSON-RPC to the MCP server directly (raw-socket SSE transport) for tool calls when the session's MCP index is stale. The BP_PyExec bridge remains only for editor-startup jobs (`/tmp/pyexec_job.py` runs on Construction Script reruns — always leave a no-op behind).
 
 ### 4. Relaunch
 After applying any fix (or immediately if no fix is needed):
 ```bash
-bash "/Users/joebower/workplace/FootballPerspectives 5.8/Scripts/ue-rebuild-reattach.sh" --continue
+bash "/Users/joebower/workplace/FootballPerspectives 5.8/Scripts/ue-rebuild-reattach.sh"
 ```
-Always pass `--continue` so the script arms the auto-continue helper before reloading VS Code — this resumes all open Claude panels automatically after the window reloads. Run it via Bash with `run_in_background=true` and a 360 s timeout — it takes ~2 min on a cold start.
+No VS Code reload is needed: Claude Code's MCP client reconnects automatically when the editor's server comes back on port 8123, and the session keeps running. (`--reload --continue` restores the legacy reload+auto-resume behaviour if reattach ever fails.) Run it via Bash with `run_in_background=true` and a 360 s timeout — it takes ~2 min on a cold start.
 
 **Before relaunching, always write a no-op to `/tmp/pyexec_job.py`** to prevent BP_PyExec from running a stale job on startup:
 ```bash

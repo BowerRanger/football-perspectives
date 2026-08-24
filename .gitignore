@@ -210,7 +210,12 @@ __marimo__/
 .worktrees/
 
 # Football Perspectives
+# .claude/agents is tracked (project agent team); the rest of .claude is local state
+.claude/settings.local.json
+.claude/worktrees/
+.claude/scheduled_tasks.lock
 /output
+/output-*
 /checkpoints
 /data/models/
 .venv311/

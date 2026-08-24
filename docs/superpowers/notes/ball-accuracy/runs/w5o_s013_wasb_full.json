@@ -1,0 +1,116 @@
+{
+ "clip": "s013",
+ "output_dir": "output-japan",
+ "detector": "wasb",
+ "holdout": false,
+ "n_folds": 0,
+ "summary": {
+  "anchors_held_out": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 0
+  },
+  "held_out_evidenced": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 0
+  },
+  "held_out_unevidenced": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 0
+  },
+  "anchors_kept": {
+   "n": 13,
+   "p50": 1.5888218580782548e-14,
+   "p95": 0.17484081973015136,
+   "max": 0.20399236657724962,
+   "n_over": 1,
+   "n_missing": 0,
+   "n_3d": 10
+  },
+  "fixes": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0
+  },
+  "dense": {
+   "n": 172,
+   "p50": 0.040813498666645597,
+   "p95": 0.23673223503106341,
+   "max": 1.6595522470241455,
+   "n_over": 16,
+   "n_missing": 0
+  },
+  "naturalness": {
+   "n_violations": 3,
+   "by_kind": {
+    "heading_break": 1,
+    "roll_speedup": 2
+   }
+  },
+  "threshold_m": 0.2,
+  "held_out_by_state": {}
+ },
+ "touch_recall": {
+  "strict": {
+   "n_manual": 7,
+   "n_auto": 19,
+   "true_positive": 2,
+   "false_positive": 17,
+   "recall": 0.2857142857142857,
+   "precision": 0.10526315789473684
+  },
+  "relaxed": {
+   "n_manual": 7,
+   "n_auto": 19,
+   "true_positive": 4,
+   "false_positive": 15,
+   "recall": 0.5714285714285714,
+   "precision": 0.21052631578947367
+  }
+ },
+ "per_fold": [
+  {
+   "fold": null,
+   "n_kept": 14,
+   "n_held_out": 0
+  }
+ ],
+ "worst_held_out": [],
+ "violations": [
+  {
+   "frame": 17,
+   "kind": "heading_break",
+   "value": 149.82885678832963,
+   "limit": 12.0
+  },
+  {
+   "frame": 63,
+   "kind": "roll_speedup",
+   "value": 1.1576612584690211,
+   "limit": 1.15
+  },
+  {
+   "frame": 64,
+   "kind": "roll_speedup",
+   "value": 1.1513599448786982,
+   "limit": 1.15
+  }
+ ]
+}

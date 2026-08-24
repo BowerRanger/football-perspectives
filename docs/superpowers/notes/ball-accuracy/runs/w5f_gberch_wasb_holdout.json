@@ -1,0 +1,315 @@
+{
+ "clip": "gberch",
+ "output_dir": "output",
+ "detector": "wasb",
+ "holdout": true,
+ "n_folds": 2,
+ "summary": {
+  "anchors_held_out": {
+   "n": 57,
+   "p50": 0.27076234868389415,
+   "p95": 5.164880642702131,
+   "max": 6.616079975900495,
+   "n_over": 31,
+   "n_missing": 1,
+   "n_3d": 42
+  },
+  "held_out_evidenced": {
+   "n": 57,
+   "p50": 0.27076234868389415,
+   "p95": 5.164880642702131,
+   "max": 6.616079975900495,
+   "n_over": 31,
+   "n_missing": 1,
+   "n_3d": 42
+  },
+  "held_out_unevidenced": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 0
+  },
+  "anchors_kept": {
+   "n": 27,
+   "p50": 7.105427357601002e-15,
+   "p95": 0.05947416305726285,
+   "max": 0.3011573779387958,
+   "n_over": 1,
+   "n_missing": 0,
+   "n_3d": 20
+  },
+  "fixes": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0
+  },
+  "dense": {
+   "n": 337,
+   "p50": 0.033485914657192695,
+   "p95": 2.6716280716359475,
+   "max": 5.3999799802591255,
+   "n_over": 56,
+   "n_missing": 0
+  },
+  "naturalness": {
+   "n_violations": 10,
+   "by_kind": {
+    "roll_speedup": 8,
+    "heading_break": 2
+   }
+  },
+  "threshold_m": 0.2,
+  "held_out_by_state": {
+   "airborne_low": {
+    "n": 13,
+    "p50": 0.3374175384147978,
+    "p95": 5.6456575663016135,
+    "max": 6.616079975900495,
+    "n_over": 7,
+    "n_missing": 0
+   },
+   "bounce": {
+    "n": 5,
+    "p50": 0.5308392210074369,
+    "p95": 3.1477367798651708,
+    "max": 3.362352517685398,
+    "n_over": 5,
+    "n_missing": 0
+   },
+   "goal_impact": {
+    "n": 1,
+    "p50": 3.1538265943967754,
+    "p95": 3.1538265943967754,
+    "max": 3.1538265943967754,
+    "n_over": 1,
+    "n_missing": 0
+   },
+   "grounded": {
+    "n": 30,
+    "p50": 0.11213282313798428,
+    "p95": 1.3586567007885264,
+    "max": 5.829566040567886,
+    "n_over": 10,
+    "n_missing": 1
+   },
+   "player_touch": {
+    "n": 8,
+    "p50": 1.0516946223870873,
+    "p95": 5.186553842265385,
+    "max": 6.506077557846299,
+    "n_over": 8,
+    "n_missing": 0
+   }
+  }
+ },
+ "touch_recall": {
+  "strict": {
+   "n_manual": 8,
+   "n_auto": 21,
+   "true_positive": 3,
+   "false_positive": 18,
+   "recall": 0.375,
+   "precision": 0.14285714285714285
+  },
+  "relaxed": {
+   "n_manual": 8,
+   "n_auto": 21,
+   "true_positive": 4,
+   "false_positive": 17,
+   "recall": 0.5,
+   "precision": 0.19047619047619047
+  }
+ },
+ "per_fold": [
+  {
+   "fold": 0,
+   "n_kept": 28,
+   "n_held_out": 31
+  },
+  {
+   "fold": 1,
+   "n_kept": 31,
+   "n_held_out": 28
+  }
+ ],
+ "worst_held_out": [
+  {
+   "frame": 55,
+   "state": "airborne_low",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 6.616079975900495,
+   "err_3d_m": null,
+   "reproj_px": 340.2898727004972,
+   "depth_m": 70.33120495928287,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 56,
+   "state": "player_touch",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 6.506077557846299,
+   "err_3d_m": null,
+   "reproj_px": 336.6234555657384,
+   "depth_m": 69.95037657115128,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 188,
+   "state": "grounded",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 3.1748419507257535,
+   "err_3d_m": 5.829566040567886,
+   "reproj_px": 205.75953290857203,
+   "depth_m": 52.14810009190581,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 394,
+   "state": "airborne_low",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 4.998709293235696,
+   "err_3d_m": null,
+   "reproj_px": 283.5206881997325,
+   "depth_m": 80.97528257948335,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 60,
+   "state": "airborne_low",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 4.4937457625611925,
+   "err_3d_m": null,
+   "reproj_px": 227.53935354327822,
+   "depth_m": 71.88221711195017,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 65,
+   "state": "bounce",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 3.2475413846159094,
+   "err_3d_m": 3.362352517685398,
+   "reproj_px": 173.47441558354734,
+   "depth_m": 68.89674103473476,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 402,
+   "state": "goal_impact",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 3.1538265943967754,
+   "err_3d_m": null,
+   "reproj_px": 178.24026025473677,
+   "depth_m": 84.6847853214056,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 49,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 2.722818593878577,
+   "err_3d_m": 2.7360097990436945,
+   "reproj_px": 136.86710878364585,
+   "depth_m": 72.60259898498644,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 88,
+   "state": "bounce",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 1.1448132885268223,
+   "err_3d_m": 2.289273828584262,
+   "reproj_px": 66.89888730254471,
+   "depth_m": 63.30505627113954,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 164,
+   "state": "grounded",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 1.9029883825576912,
+   "err_3d_m": 2.0870507015704876,
+   "reproj_px": 132.56990224465076,
+   "depth_m": 50.14809841626794,
+   "evidence_nearby": true
+  }
+ ],
+ "violations": [
+  {
+   "frame": 42,
+   "kind": "roll_speedup",
+   "value": 3.567945276692953,
+   "limit": 1.15
+  },
+  {
+   "frame": 158,
+   "kind": "roll_speedup",
+   "value": 1.2578548344192264,
+   "limit": 1.15
+  },
+  {
+   "frame": 195,
+   "kind": "heading_break",
+   "value": 31.5569142386972,
+   "limit": 12.0
+  },
+  {
+   "frame": 203,
+   "kind": "roll_speedup",
+   "value": 1.1604509540137078,
+   "limit": 1.15
+  },
+  {
+   "frame": 204,
+   "kind": "roll_speedup",
+   "value": 1.1904162728702685,
+   "limit": 1.15
+  },
+  {
+   "frame": 290,
+   "kind": "roll_speedup",
+   "value": 2.0287827637973006,
+   "limit": 1.15
+  },
+  {
+   "frame": 291,
+   "kind": "heading_break",
+   "value": 35.166763288400844,
+   "limit": 12.0
+  },
+  {
+   "frame": 295,
+   "kind": "roll_speedup",
+   "value": 1.705946900038009,
+   "limit": 1.15
+  },
+  {
+   "frame": 296,
+   "kind": "roll_speedup",
+   "value": 1.4793331924781243,
+   "limit": 1.15
+  },
+  {
+   "frame": 338,
+   "kind": "roll_speedup",
+   "value": 1.3340959299624962,
+   "limit": 1.15
+  }
+ ]
+}

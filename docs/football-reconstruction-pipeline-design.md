@@ -11,7 +11,18 @@ this file is kept in sync with it.
 > directly for foot anchoring. The 2D-keypoint preview is written as
 > `output/hmr_world/PXXX_kp2d.json` for the dashboard overlay. Below the
 > pipeline still reads as 7 stages — treat all references to a separate
-> `pose_2d` stage as historical. The current production pipeline has 6 stages.
+> `pose_2d` stage as historical.
+>
+> **Update — 2026-06:** a `refined_poses` stage (per-player translation
+> cleanup: gap-fill, Hampel outlier rejection, velocity limiting — see
+> `docs/superpowers/specs/2026-05-30-refined-poses-jitter-reduction-design.md`)
+> was inserted between `hmr_world` and `ball`, so the production pipeline is
+> back to 7 stages: `prepare_shots`, `tracking`, `camera`, `hmr_world`,
+> `refined_poses`, `ball`, `export`. The `ball` stage was also reworked from
+> the ground-projection + parabolic-fit design below to an event-based
+> auto-anchor + piecewise physical solve (see
+> `docs/superpowers/specs/2026-07-02-ball-stage-improvement-design.md`);
+> CLAUDE.md's "Key Design Decisions" reflects the current behaviour.
 
 ---
 

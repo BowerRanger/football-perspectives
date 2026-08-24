@@ -1,0 +1,94 @@
+{
+ "clip": "kroupi01",
+ "output_dir": "output-kroupi",
+ "detector": "wasb",
+ "holdout": false,
+ "n_folds": 0,
+ "summary": {
+  "anchors_held_out": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 0
+  },
+  "held_out_evidenced": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 0
+  },
+  "held_out_unevidenced": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 0
+  },
+  "anchors_kept": {
+   "n": 12,
+   "p50": 3.6216330088872556e-15,
+   "p95": 0.20305016853041033,
+   "max": 0.42020943741288114,
+   "n_over": 1,
+   "n_missing": 0,
+   "n_3d": 8
+  },
+  "fixes": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0
+  },
+  "dense": {
+   "n": 46,
+   "p50": 0.049264499189466224,
+   "p95": 2.63109293930429,
+   "max": 6.21393757067352,
+   "n_over": 12,
+   "n_missing": 0
+  },
+  "naturalness": {
+   "n_violations": 0,
+   "by_kind": {}
+  },
+  "threshold_m": 0.2,
+  "held_out_by_state": {}
+ },
+ "touch_recall": {
+  "strict": {
+   "n_manual": 3,
+   "n_auto": 11,
+   "true_positive": 2,
+   "false_positive": 9,
+   "recall": 0.6666666666666666,
+   "precision": 0.18181818181818182
+  },
+  "relaxed": {
+   "n_manual": 3,
+   "n_auto": 11,
+   "true_positive": 2,
+   "false_positive": 9,
+   "recall": 0.6666666666666666,
+   "precision": 0.18181818181818182
+  }
+ },
+ "per_fold": [
+  {
+   "fold": null,
+   "n_kept": 12,
+   "n_held_out": 0
+  }
+ ],
+ "worst_held_out": [],
+ "violations": []
+}

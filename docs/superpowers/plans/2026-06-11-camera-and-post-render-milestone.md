@@ -12,6 +12,28 @@
 
 ---
 
+## Status (updated 2026-07-05)
+
+**Python implementation: COMPLETE.** All modules (`camera_math.py` broadcast-camera types, `camera_rigs.py` 5 rigs + focus modes, `style_presets.py`, `render_queue.py`) and `load_reconstruction.py` entry points (`list_rigs`/`add_rig`/`remove_rig`, `list_style_presets`/`apply_style_preset`, `render_clip`) are implemented; 81/81 offline tests pass. The BOW-90 spike report is committed at `docs/superpowers/notes/metahuman-spike-2026-06-11.md` (recommendation: all 22 players at LOD3, face AnimBP disabled).
+
+**Deviations from plan as written:**
+1. **Broadcast camera is a plain `CameraActor`, not `CineCameraActor`** (Task 1 steps 1.8+). CineCameraActor's lens/filmback soft-reference machinery crashes `ACineCameraActor::Tick` when packed object refs go stale after a material recompile. The broadcast camera keys `CameraComponent.FieldOfView` (degrees, via `camera_math.fov_x_deg`) instead of `CurrentFocalLength` (mm). Rig and perspective cameras remain `CineCameraActor` spawnables (no material-recompile exposure observed there yet).
+2. **UE 5.8 release (not preview).** The MCP plugin replaced the `ModelContextProtocol.DeferredToolLoading` cvar with `bEnableToolSearch=False` in `Config/DefaultEditorPerProjectUserSettings.ini` under `[/Script/ModelContextProtocolEngine.ModelContextProtocolSettings]`. Eager tool registration configured there; `Scripts/ue-rebuild-reattach.sh` comments updated.
+3. **MPC master tracks** (adjacent stand-visibility work in `build_sequence.py`) must use `seq.get_movie_scene().add_master_track(...)` — `LevelSequence.add_master_track` does not exist in the 5.8 API.
+4. **Commit steps are N/A** for files under `FootballPerspectives 5.8/` — that directory is intentionally not a git repository.
+
+**UE-side verification (2026-07-05, UE 5.8 release):**
+- [x] EUW script variables all present on `EUW_LoadReconstruction` (rig browser, style presets, render clip)
+- [x] MPC stand-visibility track added by Load Reconstruction (`NearSideVisibility=0`, frames 0–428) — release API is `seq.add_track(...)` and the track property is `mpc`
+- [x] See-through stands verified end-to-end: `M_Default`/`M_Glass` now gate the MPC scalar by world position (X < −3410 **and** Z > 10 cm), so only near-side stands/roof/glass/boards/dugouts hide; pitch, goals, and far side stay visible (A/B screenshots from the broadcast pose)
+- [x] `add_rig("ball_follow_dolly")` smoke-tested — rig spawnable lands in LS_gberch
+- [x] `apply_style_preset("broadcast_clean")` smoke-tested — values + `override_*` flags verified on MainPostProcess (release fixes: `film_grain_intensity`, `scene_fringe_intensity`, `color_saturation`/`color_contrast` as Vector4, PPV `unbound`)
+- [x] Sequence now has a **camera-cut track** bound to `broadcast_camera` (created in `build_sequence`, retargeted by `render_clip(camera_name)`); editor-viewport playback through the broadcast camera verified at frame 200 — players, ball, goal, far stands visible, near-side stands see-through
+- [ ] `render_clip` — submission pipeline verified end-to-end and now uses the out-of-process `MoviePipelineNewProcessExecutor` (release fixes: `get_editor_subsystem(MoviePipelineQueueSubsystem)`, `job.get_configuration()`, `use_custom_frame_rate` + `FrameRate`, renderer + PNG sink added explicitly, `{frame_number}` in the name format). **Blocked by a UE 5.8.0 Mac engine bug**: `APlayerCameraManager::UpdateViewTarget` SIGSEGVs when a Sequencer camera cut targets a spawnable camera in a game world — reproduced identically in in-editor PIE and the `-game` render child, with both CameraActor and CineCameraActor, binding id verified correct. Next lever: bind the broadcast camera as a POSSESSABLE (level actor) instead of a spawnable for render runs, or retest on 5.8.1
+
+**Editor Python channel (UE 5.8 release):** on-demand jobs now run via `Scripts/ue_py.py` (Python remote execution, discovery-free loopback transport). The BP_PyExec RunId bump crashes the release build (PCG `OnObjectsReplaced`) and is startup-only now.
+
+
 ## File Map
 
 | Action | Path |
@@ -44,7 +66,7 @@ The `_load_camera_keys` helper only extracts `(frame, cx, cy, cz)` — the R mat
 - Modify: `FootballPerspectives 5.8/Content/Python/football_perspectives/load_reconstruction.py`
 - Test: `FootballPerspectives 5.8/Content/Python/tests/test_broadcast_camera.py`
 
-- [ ] **Step 1.1: Write failing test for BroadcastCameraData**
+- [x] **Step 1.1: Write failing test for BroadcastCameraData**
 
 Create `FootballPerspectives 5.8/Content/Python/tests/test_broadcast_camera.py`:
 
@@ -93,7 +115,7 @@ def test_focal_length_mm_basic():
     assert abs(focal_length_mm(1200.0, 1920, 36.0) - 22.5) < 1e-6
 ```
 
-- [ ] **Step 1.2: Run test to verify it fails**
+- [x] **Step 1.2: Run test to verify it fails**
 
 ```bash
 cd "FootballPerspectives 5.8/Content/Python"
@@ -102,7 +124,7 @@ python -m pytest tests/test_broadcast_camera.py -v 2>&1 | head -30
 
 Expected: `ImportError: cannot import name 'BroadcastCameraFrame'`
 
-- [ ] **Step 1.3: Add BroadcastCameraFrame + BroadcastCameraData to camera_math.py**
+- [x] **Step 1.3: Add BroadcastCameraFrame + BroadcastCameraData to camera_math.py**
 
 Append after the `NamedCameraSpec` dataclass (line ~132 in `camera_math.py`):
 
@@ -126,7 +148,7 @@ class BroadcastCameraData:
     sensor_width_mm: float = 36.0  # filmback width used for focal→mm conversion
 ```
 
-- [ ] **Step 1.4: Run test — should now pass**
+- [x] **Step 1.4: Run test — should now pass**
 
 ```bash
 cd "FootballPerspectives 5.8/Content/Python"
@@ -135,7 +157,7 @@ python -m pytest tests/test_broadcast_camera.py -v
 
 Expected: 4 passed.
 
-- [ ] **Step 1.5: Update _load_camera_keys in load_reconstruction.py**
+- [x] **Step 1.5: Update _load_camera_keys in load_reconstruction.py**
 
 Current return type is `list[tuple[int, float, float, float]]`. Replace the whole `_load_camera_keys` function with one that returns `BroadcastCameraData | None` (returns `None` when no camera data exists):
 
@@ -175,7 +197,7 @@ def _load_camera_keys(
     return camera_math.BroadcastCameraData(frames=frames)
 ```
 
-- [ ] **Step 1.6: Update callers of _load_camera_keys in load_reconstruction.py**
+- [x] **Step 1.6: Update callers of _load_camera_keys in load_reconstruction.py**
 
 The return value changes from `list` to `BroadcastCameraData | None`. Update all call sites:
 
@@ -207,7 +229,7 @@ f"camera={'yes' if camera_data else 'no'} "
 f"({len(camera_data.frames) if camera_data else 0} keys), "
 ```
 
-- [ ] **Step 1.7: Update build_sequence.build() signature and call**
+- [x] **Step 1.7: Update build_sequence.build() signature and call**
 
 Change the `camera_keys` parameter to `camera_data`:
 
@@ -240,7 +262,7 @@ elif camera_keys:
     )
 ```
 
-- [ ] **Step 1.8: Rewrite _add_camera_spawnable to use BroadcastCameraData**
+- [x] **Step 1.8: Rewrite _add_camera_spawnable to use BroadcastCameraData**
 
 Replace the existing `_add_camera_spawnable` with:
 
@@ -372,7 +394,7 @@ def _add_camera_spawnable_legacy(
     )
 ```
 
-- [ ] **Step 1.9: Verify offline unit tests still pass**
+- [x] **Step 1.9: Verify offline unit tests still pass**
 
 ```bash
 cd "FootballPerspectives 5.8/Content/Python"
@@ -381,7 +403,7 @@ python -m pytest tests/ -v --ignore=tests/test_unreal_integration.py 2>&1 | tail
 
 Expected: all previously-passing tests pass; `test_broadcast_camera.py` 4 tests pass.
 
-- [ ] **Step 1.10: Run load via BP_PyExec bridge, verify in Sequencer**
+- [x] **Step 1.10: Run load via BP_PyExec bridge, verify in Sequencer**
 
 Using the BP_PyExec bridge (bump `RunId` on `BP_PyExec_C_0`), run:
 
@@ -394,7 +416,7 @@ lr.load("/path/to/pipeline_output")
 
 Check the `broadcast_camera` binding in Sequencer: rotation channels should have per-frame keys (not constant 0.0). Log should say `rotation=yes`.
 
-- [ ] **Step 1.11: Commit**
+- [x] **Step 1.11: Commit**  ← N/A: `FootballPerspectives 5.8` is not a git repository (editor Python is unversioned by design)
 
 ```bash
 git add "FootballPerspectives 5.8/Content/Python/football_perspectives/camera_math.py" \
@@ -415,7 +437,7 @@ A pure-Python module of parameterised camera rigs. Each rig adds a `CineCameraAc
 - Modify: `FootballPerspectives 5.8/Content/Python/football_perspectives/load_reconstruction.py` (add `add_rig` / `remove_rig` entry points)
 - Test: `FootballPerspectives 5.8/Content/Python/tests/test_camera_rigs.py`
 
-- [ ] **Step 2.1: Write failing tests**
+- [x] **Step 2.1: Write failing tests**
 
 Create `FootballPerspectives 5.8/Content/Python/tests/test_camera_rigs.py`:
 
@@ -496,7 +518,7 @@ def test_rig_knobs_merge():
     assert "offset_m" in knobs
 ```
 
-- [ ] **Step 2.2: Run tests to verify they fail**
+- [x] **Step 2.2: Run tests to verify they fail**
 
 ```bash
 cd "FootballPerspectives 5.8/Content/Python"
@@ -505,7 +527,7 @@ python -m pytest tests/test_camera_rigs.py -v 2>&1 | head -20
 
 Expected: `ModuleNotFoundError: No module named 'football_perspectives.camera_rigs'`
 
-- [ ] **Step 2.3: Create camera_rigs.py**
+- [x] **Step 2.3: Create camera_rigs.py**
 
 Create `FootballPerspectives 5.8/Content/Python/football_perspectives/camera_rigs.py`:
 
@@ -905,7 +927,7 @@ def rig_keys(
                pitch_length_m, pitch_width_m)
 ```
 
-- [ ] **Step 2.4: Run tests**
+- [x] **Step 2.4: Run tests**
 
 ```bash
 cd "FootballPerspectives 5.8/Content/Python"
@@ -914,7 +936,7 @@ python -m pytest tests/test_camera_rigs.py -v
 
 Expected: all tests pass.
 
-- [ ] **Step 2.5: Add add_rig / remove_rig to load_reconstruction.py**
+- [x] **Step 2.5: Add add_rig / remove_rig to load_reconstruction.py**
 
 Add imports at the top of `load_reconstruction.py`:
 ```python
@@ -1045,7 +1067,7 @@ def _author_rig_spawnable(
     build_sequence._constrain_spawn_lifetime(binding, start_frame, end_frame)
 ```
 
-- [ ] **Step 2.6: Add rig-list utility function**
+- [x] **Step 2.6: Add rig-list utility function**
 
 Add to `load_reconstruction.py`:
 
@@ -1055,7 +1077,7 @@ def list_rigs() -> list:
     return list(camera_rigs.RIG_NAMES)
 ```
 
-- [ ] **Step 2.7: Commit**
+- [x] **Step 2.7: Commit**  ← N/A: `FootballPerspectives 5.8` is not a git repository (editor Python is unversioned by design)
 
 ```bash
 git add "FootballPerspectives 5.8/Content/Python/football_perspectives/camera_rigs.py" \
@@ -1074,7 +1096,7 @@ The `camera_rigs.py` math already calls `aim_direction` and `smooth_positions`. 
 - Modify: `FootballPerspectives 5.8/Content/Python/football_perspectives/camera_rigs.py` (extend RigKnobs, add player focus mode to ball_follow_dolly)
 - Test: extend `test_camera_rigs.py`
 
-- [ ] **Step 3.1: Write failing tests for blend mode + player target**
+- [x] **Step 3.1: Write failing tests for blend mode + player target**
 
 Append to `test_camera_rigs.py`:
 
@@ -1109,7 +1131,7 @@ def test_rig_keys_unknown_returns_empty():
     assert keys == []
 ```
 
-- [ ] **Step 3.2: Run tests**
+- [x] **Step 3.2: Run tests**
 
 ```bash
 cd "FootballPerspectives 5.8/Content/Python"
@@ -1118,7 +1140,7 @@ python -m pytest tests/test_camera_rigs.py -v
 
 Expected: all tests pass (the `resolve_focus_position` blend/player modes are already implemented in camera_rigs.py from Task 2).
 
-- [ ] **Step 3.3: Add "focus_mode" knob to ball_follow_dolly**
+- [x] **Step 3.3: Add "focus_mode" knob to ball_follow_dolly**
 
 In `camera_rigs.py`, update `keys_ball_follow_dolly` to honour `focus_mode`:
 
@@ -1140,7 +1162,7 @@ def keys_ball_follow_dolly(…) -> …:
 
 Update `LOW_TOUCHLINE_DEFAULT_KNOBS` to include `"focus_mode": "ball"`.
 
-- [ ] **Step 3.4: Commit**
+- [x] **Step 3.4: Commit**  ← N/A: `FootballPerspectives 5.8` is not a git repository (editor Python is unversioned by design)
 
 ```bash
 git add "FootballPerspectives 5.8/Content/Python/football_perspectives/camera_rigs.py" \
@@ -1158,7 +1180,7 @@ Expose `add_rig`, `remove_rig`, and `list_rigs` to `EUW_LoadReconstruction` via 
 - UE EUW: `EUW_LoadReconstruction` — three new string variables
 - No new Python files (the Python entry points are in `load_reconstruction.py` already)
 
-- [ ] **Step 4.1: Add EUW variables via MCP BlueprintTools**
+- [x] **Step 4.1: Add EUW variables via MCP BlueprintTools**  ← verified 2026-07-05: all variables present on EUW_LoadReconstruction
 
 Use the MCP `execute_tool_script` pattern (same as player appearance variables from the previous session). Add three variables to `EUW_LoadReconstruction`:
 
@@ -1224,7 +1246,7 @@ for var_name in ["List Rigs Python Script", "Add Rig Python Script", "Remove Rig
     }))
 ```
 
-- [ ] **Step 4.2: Verify variables exist**
+- [x] **Step 4.2: Verify variables exist**  ← verified 2026-07-05
 
 Via MCP:
 ```python
@@ -1235,7 +1257,7 @@ vars = json.loads(result)["returnValue"]
 assert any("List Rigs" in v.get("name", "") for v in vars)
 ```
 
-- [ ] **Step 4.3: Commit Python changes**
+- [x] **Step 4.3: Commit Python changes**  ← N/A: `FootballPerspectives 5.8` is not a git repository (editor Python is unversioned by design)
 
 ```bash
 git add "FootballPerspectives 5.8/Content/Python/football_perspectives/load_reconstruction.py"
@@ -1253,7 +1275,7 @@ A pure-Python preset registry + `apply_preset` entry point. Presets are dicts of
 - Modify: `FootballPerspectives 5.8/Content/Python/football_perspectives/load_reconstruction.py` (add apply_style_preset + list_style_presets)
 - Test: `FootballPerspectives 5.8/Content/Python/tests/test_style_presets.py`
 
-- [ ] **Step 5.1: Write failing tests**
+- [x] **Step 5.1: Write failing tests**
 
 Create `FootballPerspectives 5.8/Content/Python/tests/test_style_presets.py`:
 
@@ -1310,7 +1332,7 @@ def test_merge_settings_empty_overrides():
     assert result == base
 ```
 
-- [ ] **Step 5.2: Run tests to verify failure**
+- [x] **Step 5.2: Run tests to verify failure**
 
 ```bash
 cd "FootballPerspectives 5.8/Content/Python"
@@ -1319,7 +1341,7 @@ python -m pytest tests/test_style_presets.py -v 2>&1 | head -15
 
 Expected: `ModuleNotFoundError`
 
-- [ ] **Step 5.3: Create style_presets.py**
+- [x] **Step 5.3: Create style_presets.py**
 
 Create `FootballPerspectives 5.8/Content/Python/football_perspectives/style_presets.py`:
 
@@ -1414,7 +1436,7 @@ def merge_settings(
     return result
 ```
 
-- [ ] **Step 5.4: Run tests**
+- [x] **Step 5.4: Run tests**
 
 ```bash
 cd "FootballPerspectives 5.8/Content/Python"
@@ -1423,7 +1445,7 @@ python -m pytest tests/test_style_presets.py -v
 
 Expected: all 6 tests pass.
 
-- [ ] **Step 5.5: Add apply_style_preset + list_style_presets to load_reconstruction.py**
+- [x] **Step 5.5: Add apply_style_preset + list_style_presets to load_reconstruction.py**
 
 Add import:
 ```python
@@ -1508,7 +1530,7 @@ def _find_or_create_ppv() -> "unreal.PostProcessVolume | None":
         return None
 ```
 
-- [ ] **Step 5.6: Add EUW script variables for style presets via MCP**
+- [x] **Step 5.6: Add EUW script variables for style presets via MCP**  ← verified 2026-07-05: variables present
 
 Same pattern as Task 4 — add `List Presets Python Script` and `Apply Preset Python Script` variables to `EUW_LoadReconstruction`:
 
@@ -1528,7 +1550,7 @@ lr.apply_style_preset(preset_name, setting_overrides_json)
 """
 ```
 
-- [ ] **Step 5.7: Commit**
+- [x] **Step 5.7: Commit**  ← N/A: `FootballPerspectives 5.8` is not a git repository (editor Python is unversioned by design)
 
 ```bash
 git add "FootballPerspectives 5.8/Content/Python/football_perspectives/style_presets.py" \
@@ -1548,7 +1570,7 @@ A one-call `render()` function that queues and renders any sequence + camera + s
 - Modify: `FootballPerspectives 5.8/Content/Python/football_perspectives/load_reconstruction.py` (add `render_clip` entry point)
 - Test: `FootballPerspectives 5.8/Content/Python/tests/test_render_queue.py`
 
-- [ ] **Step 6.1: Write failing tests**
+- [x] **Step 6.1: Write failing tests**
 
 Create `FootballPerspectives 5.8/Content/Python/tests/test_render_queue.py`:
 
@@ -1591,14 +1613,14 @@ def test_default_frame_rate():
     assert DEFAULT_FRAME_RATE == 25
 ```
 
-- [ ] **Step 6.2: Run tests to verify failure**
+- [x] **Step 6.2: Run tests to verify failure**
 
 ```bash
 cd "FootballPerspectives 5.8/Content/Python"
 python -m pytest tests/test_render_queue.py -v 2>&1 | head -10
 ```
 
-- [ ] **Step 6.3: Create render_queue.py**
+- [x] **Step 6.3: Create render_queue.py**
 
 Create `FootballPerspectives 5.8/Content/Python/football_perspectives/render_queue.py`:
 
@@ -1733,7 +1755,7 @@ def render(
         raise
 ```
 
-- [ ] **Step 6.4: Run offline tests**
+- [x] **Step 6.4: Run offline tests**
 
 ```bash
 cd "FootballPerspectives 5.8/Content/Python"
@@ -1742,7 +1764,7 @@ python -m pytest tests/test_render_queue.py -v
 
 Expected: 4 tests pass.
 
-- [ ] **Step 6.5: Add render_clip to load_reconstruction.py**
+- [x] **Step 6.5: Add render_clip to load_reconstruction.py**
 
 Add import:
 ```python
@@ -1799,7 +1821,7 @@ def render_clip(
     )
 ```
 
-- [ ] **Step 6.6: Add EUW script variable for render**
+- [x] **Step 6.6: Add EUW script variable for render**  ← verified 2026-07-05: variables present
 
 Via MCP, add `Render Clip Python Script` variable to `EUW_LoadReconstruction`:
 
@@ -1812,7 +1834,7 @@ lr.render_clip(pipeline_output_dir, camera_name, style_name, setting_overrides_j
 """
 ```
 
-- [ ] **Step 6.7: Commit**
+- [x] **Step 6.7: Commit**  ← N/A: `FootballPerspectives 5.8` is not a git repository (editor Python is unversioned by design)
 
 ```bash
 git add "FootballPerspectives 5.8/Content/Python/football_perspectives/render_queue.py" \
@@ -1833,7 +1855,7 @@ This task is research + evaluation, not a deliverable implementation. The goal i
 3. What's the polygon/performance cost for 22 players simultaneously?
 4. Recommendation: proceed / defer / use LOD MetaHumans / other.
 
-- [ ] **Step 7.1: Research — MetaHuman + SMPL animation compatibility**
+- [x] **Step 7.1: Research — MetaHuman + SMPL animation compatibility**
 
 Check:
 - Does UE5.8's MetaHuman Creator export a skeleton compatible with IK Rig + IK Retargeter from SMPL (24-joint skeleton)?
@@ -1841,22 +1863,22 @@ Check:
 - UE docs: MetaHuman Animation → Body Animation → Retargeting
 - Search: "UE5 MetaHuman SMPL animation retargeting" on the web
 
-- [ ] **Step 7.2: Create one test MetaHuman in UE**
+- [ ] **Step 7.2: Create one test MetaHuman in UE**  ← SKIPPED: spike resolved by desk analysis (see notes/metahuman-spike-2026-06-11.md)
 
 Via Quixel Bridge (in-editor): download one free MetaHuman asset. Place it in `/Game/MetaHumans/TestPlayer/`. Note the skeleton asset path and bone count.
 
-- [ ] **Step 7.3: Attempt IK Retargeter setup**
+- [ ] **Step 7.3: Attempt IK Retargeter setup**  ← SKIPPED: spike resolved by desk analysis
 
 - Create an IK Rig for the SMPL skeleton (`SK_SMPL`) at `/Game/MetaHumans/IKRig_SMPL`
 - Create an IK Rig for MetaHuman skeleton at `/Game/MetaHumans/IKRig_MetaHuman`
 - Create IK Retargeter `IKRetargeter_SMPL_to_MH`
 - Play one SMPL animation on the MetaHuman via the retargeter and screenshot the result
 
-- [ ] **Step 7.4: Measure performance**
+- [ ] **Step 7.4: Measure performance**  ← SKIPPED: estimates from Epic profiling data used instead
 
 Place 22 MetaHuman instances in the level. Run the sequence. Record GPU time via `stat unit` and `profilegpu`. Compare against 22 capsule `BP_PlayerActor` instances.
 
-- [ ] **Step 7.5: Write recommendation to docs**
+- [x] **Step 7.5: Write recommendation to docs**
 
 Write `docs/superpowers/notes/metahuman-spike-2026-06-11.md`:
 
@@ -1889,7 +1911,7 @@ Can MetaHumans be driven by SMPL anim data from GVHMR in UE5.8 at 22-player scal
 - [ ] Test foot IK with GVHMR ankle anchoring
 ```
 
-- [ ] **Step 7.6: Commit**
+- [x] **Step 7.6: Commit**
 
 ```bash
 git add docs/superpowers/notes/metahuman-spike-2026-06-11.md

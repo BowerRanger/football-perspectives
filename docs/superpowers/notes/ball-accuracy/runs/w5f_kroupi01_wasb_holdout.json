@@ -1,0 +1,279 @@
+{
+ "clip": "kroupi01",
+ "output_dir": "output-kroupi",
+ "detector": "wasb",
+ "holdout": true,
+ "n_folds": 2,
+ "summary": {
+  "anchors_held_out": {
+   "n": 12,
+   "p50": 2.138070542628146,
+   "p95": 9.056738638361205,
+   "max": 10.875556906903796,
+   "n_over": 11,
+   "n_missing": 0,
+   "n_3d": 8
+  },
+  "held_out_evidenced": {
+   "n": 12,
+   "p50": 2.138070542628146,
+   "p95": 9.056738638361205,
+   "max": 10.875556906903796,
+   "n_over": 11,
+   "n_missing": 0,
+   "n_3d": 8
+  },
+  "held_out_unevidenced": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 0
+  },
+  "anchors_kept": {
+   "n": 4,
+   "p50": 4.440892098500626e-16,
+   "p95": 0.021568242618949195,
+   "max": 0.025374403081116555,
+   "n_over": 0,
+   "n_missing": 0,
+   "n_3d": 3
+  },
+  "fixes": {
+   "n": 0,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "n_over": 0,
+   "n_missing": 0
+  },
+  "dense": {
+   "n": 40,
+   "p50": 0.5672705774431781,
+   "p95": 5.120959192603881,
+   "max": 6.324354604981606,
+   "n_over": 23,
+   "n_missing": 0
+  },
+  "naturalness": {
+   "n_violations": 4,
+   "by_kind": {
+    "heading_break": 3,
+    "roll_speedup": 1
+   }
+  },
+  "threshold_m": 0.2,
+  "held_out_by_state": {
+   "airborne_low": {
+    "n": 2,
+    "p50": 1.5276989435045778,
+    "p95": 2.0194686367953705,
+    "max": 2.074109713827681,
+    "n_over": 2,
+    "n_missing": 0
+   },
+   "airborne_mid": {
+    "n": 1,
+    "p50": 5.9074429686134815,
+    "p95": 5.9074429686134815,
+    "max": 5.9074429686134815,
+    "n_over": 1,
+    "n_missing": 0
+   },
+   "goal_impact": {
+    "n": 1,
+    "p50": 5.4268562709768755,
+    "p95": 5.4268562709768755,
+    "max": 5.4268562709768755,
+    "n_over": 1,
+    "n_missing": 0
+   },
+   "grounded": {
+    "n": 5,
+    "p50": 2.2020313714286113,
+    "p95": 7.002976842427965,
+    "max": 7.568614600462726,
+    "n_over": 4,
+    "n_missing": 0
+   },
+   "player_touch": {
+    "n": 3,
+    "p50": 0.8841935413109342,
+    "p95": 9.876420570344509,
+    "max": 10.875556906903796,
+    "n_over": 3,
+    "n_missing": 0
+   }
+  }
+ },
+ "touch_recall": {
+  "strict": {
+   "n_manual": 3,
+   "n_auto": 6,
+   "true_positive": 1,
+   "false_positive": 5,
+   "recall": 0.3333333333333333,
+   "precision": 0.16666666666666666
+  },
+  "relaxed": {
+   "n_manual": 3,
+   "n_auto": 6,
+   "true_positive": 1,
+   "false_positive": 5,
+   "recall": 0.3333333333333333,
+   "precision": 0.16666666666666666
+  }
+ },
+ "per_fold": [
+  {
+   "fold": 0,
+   "n_kept": 4,
+   "n_held_out": 8
+  },
+  {
+   "fold": 1,
+   "n_kept": 8,
+   "n_held_out": 4
+  }
+ ],
+ "worst_held_out": [
+  {
+   "frame": 114,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 4.23395761391954,
+   "err_3d_m": 10.875556906903796,
+   "reproj_px": 253.3362284443996,
+   "depth_m": 54.381424687789305,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 106,
+   "state": "grounded",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 3.3052097465356094,
+   "err_3d_m": 7.568614600462726,
+   "reproj_px": 204.5811679843189,
+   "depth_m": 50.09641404764998,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 130,
+   "state": "airborne_mid",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 5.9074429686134815,
+   "err_3d_m": null,
+   "reproj_px": 426.6197781639488,
+   "depth_m": 51.72755192259269,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 142,
+   "state": "goal_impact",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 5.4268562709768755,
+   "err_3d_m": null,
+   "reproj_px": 415.2228539419548,
+   "depth_m": 54.36327352523905,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 0,
+   "state": "grounded",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 3.8716321054111087,
+   "err_3d_m": 4.740425810288923,
+   "reproj_px": 361.5681580110896,
+   "depth_m": 27.170420312427698,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 39,
+   "state": "grounded",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 1.1978838829811203,
+   "err_3d_m": 2.2020313714286113,
+   "reproj_px": 123.83434116998697,
+   "depth_m": 24.887267653139325,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 122,
+   "state": "airborne_low",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 2.074109713827681,
+   "err_3d_m": null,
+   "reproj_px": 147.56253200539953,
+   "depth_m": 48.70102819393878,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 154,
+   "state": "airborne_low",
+   "kind": "ray_only",
+   "held_out": true,
+   "lateral_m": 0.9812881731814748,
+   "err_3d_m": null,
+   "reproj_px": 80.40875366915148,
+   "depth_m": 57.945997937386664,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 42,
+   "state": "player_touch",
+   "kind": "joint_depth",
+   "held_out": true,
+   "lateral_m": 0.6401916977787969,
+   "err_3d_m": 0.8841935413109342,
+   "reproj_px": 67.64168734423366,
+   "depth_m": 24.321247988340726,
+   "evidence_nearby": true
+  },
+  {
+   "frame": 56,
+   "state": "grounded",
+   "kind": "ground_exact",
+   "held_out": true,
+   "lateral_m": 0.7152019562046756,
+   "err_3d_m": 0.839542215194912,
+   "reproj_px": 59.38123674138597,
+   "depth_m": 30.45058351745351,
+   "evidence_nearby": true
+  }
+ ],
+ "violations": [
+  {
+   "frame": 9,
+   "kind": "heading_break",
+   "value": 17.438028745250676,
+   "limit": 12.0
+  },
+  {
+   "frame": 10,
+   "kind": "heading_break",
+   "value": 30.977413174638855,
+   "limit": 12.0
+  },
+  {
+   "frame": 11,
+   "kind": "heading_break",
+   "value": 30.63486109833961,
+   "limit": 12.0
+  },
+  {
+   "frame": 11,
+   "kind": "roll_speedup",
+   "value": 1.380579039502347,
+   "limit": 1.15
+  }
+ ]
+}

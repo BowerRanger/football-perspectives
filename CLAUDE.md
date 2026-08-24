@@ -8,6 +8,20 @@ A Python CLI tool (`recon.py`) that reconstructs 3D player animations and ball t
 
 The full technical design is in `docs/football-reconstruction-pipeline-design.md`.
 
+## Agent Team
+
+Project-scoped subagents live in `.claude/agents/` (prefixed `fp-` to avoid colliding with global agents). Workflow for multi-part work: dispatch **fp-lead** to get a delegation plan (it is plan-only), then dispatch the ICs it names — in parallel where the plan marks tasks independent — and finish with **fp-qa** as the verification gate. For small single-domain tasks, dispatch the matching IC directly.
+
+| Agent | Role |
+|---|---|
+| `fp-lead` | Project lead — decomposes work into IC assignments with acceptance criteria; never edits code |
+| `fp-generalist` | Generalist IC — cross-cutting/small tasks (config, CLI wiring, runner plumbing, docs) |
+| `fp-ball-camera` | Specialist IC — `ball_*` family, ball/camera stages, calibration, ball-accuracy evals |
+| `fp-pipeline-3d` | Specialist IC — GVHMR/SMPL, foot anchoring, refined_poses, glTF/FBX export |
+| `fp-web` | Specialist IC — FastAPI dashboard + static JS panels + viewer |
+| `fp-ue5` | Specialist IC — UE5 editor Python, unreal-mcp bridge, crash recovery |
+| `fp-qa` | QA/eval IC — runs tests/evals, reports evidence, APPROVED/REJECTED verdict; never edits code |
+
 ## Commands
 
 ```bash

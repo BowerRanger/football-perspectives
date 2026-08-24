@@ -255,3 +255,92 @@ def test_touch_grazing_ray_still_lifts_vertically():
     res = _resolve_zup({0: anc}, ctx, R, t)
     world, _ = res.world_by_frame[0]
     assert np.linalg.norm(np.asarray(world)[:2] - joint[:2]) < 0.5
+
+
+def _cam_low():
+    """Shallow low camera (kroupi-class): 2.5 m high, 40 m back."""
+    fwd = np.array([0.0, 40.0, -2.4])
+    fwd /= np.linalg.norm(fwd)
+    up = np.array([0.0, 0.0, 1.0])
+    right = np.cross(fwd, up)
+    right /= np.linalg.norm(right)
+    down = np.cross(fwd, right)
+    R = np.stack([right, down, fwd])
+    C = np.array([0.0, -40.0, 2.5])
+    return R, -R @ C
+
+
+def test_lone_bucket_anchor_takes_depth_from_gravity_through_neighbors():
+    """kroupi regression: an airborne-bucket anchor alone between two
+    depth-hard anchors was placed at ray ∩ z=bucket_height — metres deep
+    of the true ball on a shallow ray, rendering an impossible out-and-
+    back spike. Depth must come from the gravity arc through the hard
+    neighbours, projected onto the anchor's own click ray."""
+    R, t = _cam_low()
+    T = 8 / 25.0
+    g = np.array([0.0, 0.0, -9.81])
+    p0 = np.array([1.0, 6.0, _RADIUS])
+    p1 = np.array([0.2, 7.4, _RADIUS])
+    v0 = (p1 - p0) / T - 0.5 * g * T
+    w4 = p0 + v0 * (4 / 25.0) + 0.5 * g * (4 / 25.0) ** 2   # true mid pos
+    anchors = {
+        0: BallAnchor(frame=0, image_xy=_uv_zup2(p0, R, t),
+                      state="grounded"),
+        4: BallAnchor(frame=4, image_xy=_uv_zup2(w4, R, t),
+                      state="airborne_low"),
+        8: BallAnchor(frame=8, image_xy=_uv_zup2(p1, R, t),
+                      state="grounded"),
+    }
+    res = resolve_events(
+        anchor_by_frame=anchors,
+        player_ctx=_FakeCtx({}),
+        per_frame_K={f: _K2 for f in range(9)},
+        per_frame_R={f: R for f in range(9)},
+        per_frame_t={f: t for f in range(9)},
+        distortion=_DIST,
+        ball_radius=_RADIUS,
+        goal_geometry=None,
+        n_frames=9,
+        fps=25.0,
+        clip_id="c",
+        image_size=(1920, 1080),
+    )
+    world, _ = res.world_by_frame[4]
+    assert np.linalg.norm(np.asarray(world) - w4) < 0.35, (
+        f"bucket depth kept: {world} vs true {w4}")
+
+
+def test_bucket_anchor_in_air_run_keeps_bucket_depth():
+    """Two adjacent airborne anchors: neither is 'lone between hard
+    knots', so the neighbour-arc redepth must NOT apply (the chain path
+    owns those)."""
+    R, t = _cam_low()
+    w4 = np.array([1.0, 10.0, 1.0])
+    w6 = np.array([0.8, 11.0, 1.2])
+    anchors = {
+        4: BallAnchor(frame=4, image_xy=_uv_zup2(w4, R, t),
+                      state="airborne_low"),
+        6: BallAnchor(frame=6, image_xy=_uv_zup2(w6, R, t),
+                      state="airborne_low"),
+    }
+    res = resolve_events(
+        anchor_by_frame=anchors,
+        player_ctx=_FakeCtx({}),
+        per_frame_K={f: _K2 for f in range(9)},
+        per_frame_R={f: R for f in range(9)},
+        per_frame_t={f: t for f in range(9)},
+        distortion=_DIST,
+        ball_radius=_RADIUS,
+        goal_geometry=None,
+        n_frames=9,
+        fps=25.0,
+        clip_id="c",
+        image_size=(1920, 1080),
+    )
+    world, _ = res.world_by_frame[4]
+    assert abs(world[2] - 1.0) < 0.3   # stays near the bucket height
+
+
+def _uv_zup2(world, R, t):
+    uv = project_world_to_image(_K2, R, t, _DIST, np.asarray([world]))[0]
+    return (float(uv[0]), float(uv[1]))

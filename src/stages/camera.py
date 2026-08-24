@@ -63,6 +63,18 @@ def _circle_in_view_fraction(
     return float(inside.sum()) / len(ang)
 
 
+def _is_empty_anchor_set(anchors_path: Path) -> bool:
+    """True when the file parses to an anchor set with zero anchors.
+    The anchor editor saves such a file the moment a shot is opened, so
+    it is not operator data — auto-generation may replace it and the
+    solve must not be attempted on it. Unreadable files return False so
+    the existing load-error paths still surface the real problem."""
+    try:
+        return not AnchorSet.load(anchors_path).anchors
+    except Exception:  # noqa: BLE001 - fall through to normal load errors
+        return False
+
+
 def _generate_auto_anchors(shot_id, clip_path, cfg):
     """Run the PnLCalib auto-anchor pipeline for one shot. Returns an
     AnchorSet or None. Heavy imports are local so the camera stage has no
@@ -161,7 +173,11 @@ class CameraStage(BaseStage):
         if not aa.get("enabled", False):
             return
         mode = aa.get("mode", "replace_when_empty")
-        if anchors_path.exists() and mode == "replace_when_empty":
+        if (
+            anchors_path.exists()
+            and mode == "replace_when_empty"
+            and not _is_empty_anchor_set(anchors_path)
+        ):
             return
         try:
             generated = _generate_auto_anchors(shot_id, clip_path, cfg)
@@ -209,10 +225,11 @@ class CameraStage(BaseStage):
         """Single-shot camera solve. The body is the original run() logic
         with file paths parameterised on shot_id."""
         self._ensure_anchors(shot_id, anchors_path, clip_path, cfg)
-        if not anchors_path.exists():
+        if not anchors_path.exists() or _is_empty_anchor_set(anchors_path):
             logger.warning(
                 "camera stage: no anchors for shot %s (auto-generation "
-                "produced none and no manual anchors exist); skipping shot.",
+                "produced none and no manual anchors exist); skipping shot. "
+                "Place keyframes via the anchor editor and re-run.",
                 shot_id,
             )
             return

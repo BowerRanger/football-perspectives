@@ -38,6 +38,37 @@ def test_ensure_anchors_skips_when_manual_exists(tmp_path):
     assert anchors_path.read_text() == before
 
 
+def test_ensure_anchors_replaces_empty_manual_set(tmp_path, monkeypatch):
+    """A file the anchor editor saved with zero anchors is not operator
+    data — replace_when_empty must still auto-generate over it."""
+    stage = CameraStage.__new__(CameraStage)
+    stage.output_dir = tmp_path
+    anchors_path = tmp_path / "camera" / "s1_anchors.json"
+    anchors_path.parent.mkdir(parents=True)
+    AnchorSet(clip_id="s1", image_size=(1920, 1080), anchors=()).save(anchors_path)
+    cfg = {"auto_anchors": {"enabled": True, "mode": "replace_when_empty"}}
+    monkeypatch.setattr(
+        "src.stages.camera._generate_auto_anchors",
+        lambda shot_id, clip_path, cfg: _anchor_set(),
+    )
+    stage._ensure_anchors("s1", anchors_path, tmp_path / "s1.mp4", cfg)
+    assert len(AnchorSet.load(anchors_path).anchors) == 1
+
+
+def test_run_shot_skips_when_anchors_file_empty(tmp_path):
+    """An existing-but-empty anchors file must behave like a missing one:
+    skip the shot with a warning instead of crashing in the solver."""
+    stage = CameraStage.__new__(CameraStage)
+    stage.output_dir = tmp_path
+    anchors_path = tmp_path / "camera" / "s1_anchors.json"
+    anchors_path.parent.mkdir(parents=True)
+    AnchorSet(clip_id="s1", image_size=(1920, 1080), anchors=()).save(anchors_path)
+    before = anchors_path.read_text()
+    cfg = {"auto_anchors": {"enabled": False}}
+    stage._run_shot("s1", anchors_path, tmp_path / "s1.mp4", cfg)
+    assert anchors_path.read_text() == before
+
+
 def test_ensure_anchors_noop_when_disabled(tmp_path):
     stage = CameraStage.__new__(CameraStage)
     stage.output_dir = tmp_path

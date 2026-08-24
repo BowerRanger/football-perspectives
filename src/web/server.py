@@ -112,6 +112,34 @@ def _active_manifest_shot_ids(output_dir: Path) -> list[str]:
         return []
 
 
+def _shot_fps(output_dir: Path, shot_id: str) -> float | None:
+    """The shot clip's frame rate from the shots manifest, or None.
+
+    Derived per shot from its frame/time span (retimed slow-mo shots
+    included — their manifest entries are in shot-local retimed frames),
+    falling back to the manifest-level fps. None when no manifest exists
+    (legacy output dirs) so callers can apply their own fallback rather
+    than trusting a fabricated value."""
+    from src.schemas.shots import ShotsManifest
+
+    manifest_path = output_dir / "shots" / "shots_manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = ShotsManifest.load(manifest_path)
+    except Exception:
+        return None
+    for shot in manifest.shots:
+        if shot.id != shot_id:
+            continue
+        span_s = shot.end_time - shot.start_time
+        span_frames = shot.end_frame - shot.start_frame + 1
+        if span_s > 0 and span_frames > 0:
+            return span_frames / span_s
+        break
+    return manifest.fps if manifest.fps > 0 else None
+
+
 def _is_allowed_input(output_dir: Path, resolved: Path) -> bool:
     """True when ``resolved`` may be fed to prepare_shots: an upload in
     ``output/source/`` or the source video the manifest already records
@@ -2823,7 +2851,11 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             {"frame": frame_idx, "boxes": frames_map[frame_idx]}
             for frame_idx in sorted(frames_map)
         ]
-        return {"shot_id": result.shot_id, "frames": frames}
+        return {
+            "shot_id": result.shot_id,
+            "frames": frames,
+            "fps": _shot_fps(output_dir, shot_id),
+        }
 
     def _player_name_index() -> dict[tuple[str, str], str]:
         """Build ``{(shot_id, pid_in_hmr_filename) → player_name}`` from

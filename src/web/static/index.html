@@ -1346,9 +1346,12 @@ async function buildTrackEditor(container, shotId, preview) {
   const frameIndex = new Map();
   for (const f of frames) frameIndex.set(f.frame, f.boxes || []);
 
-  // Camera fps (for frame ↔ time conversion).
+  // Frame ↔ time conversion. Prefer the shot's own fps (from the shots
+  // manifest, delivered in the /tracking/frames payload): the camera
+  // track only exists once the camera stage has run, and the final
+  // fallback of 30 misplaces every box on 25 fps clips.
   const cam = await fetchJsonOrNull("/camera/track");
-  const fps = (cam && cam.fps) || 30;
+  const fps = (framesData && framesData.fps) || (cam && cam.fps) || 30;
 
   // Filter to player + goalkeeper rows; the ball gets drawn but is not edited.
   const editable = preview.tracks.filter((t) => t.class_name === "player" || t.class_name === "goalkeeper");

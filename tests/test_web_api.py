@@ -1340,6 +1340,70 @@ def test_smpl_model_includes_shapedirs_when_present(client, monkeypatch, tmp_pat
     assert len(body["joint_shapedirs"]) == n_joints
 
 
+def _write_min_tracks(tmp: Path, shot_id: str) -> None:
+    from src.schemas.tracks import Track, TrackFrame, TracksResult
+
+    result = TracksResult(
+        shot_id=shot_id,
+        tracks=[
+            Track(
+                track_id="T001",
+                class_name="player",
+                team="A",
+                frames=[TrackFrame(frame=0, bbox=[1, 2, 3, 4], confidence=0.9, pitch_position=None)],
+            )
+        ],
+    )
+    result.save(tmp / "tracks" / f"{shot_id}_tracks.json")
+
+
+@pytest.mark.integration
+def test_tracking_frames_includes_shot_fps_from_manifest(client) -> None:
+    """The bbox-overlay payload must carry the shot's own fps so the
+    dashboard's frame↔time conversion works before the camera stage has
+    run (the old client-side fallback of 30 misplaced every box on
+    25 fps clips)."""
+    from src.schemas.shots import Shot, ShotsManifest
+
+    c, tmp = client
+    _write_min_tracks(tmp, "s009")
+    manifest = ShotsManifest(
+        source_file="reel.mp4",
+        fps=25.0,
+        total_frames=443,
+        shots=[
+            Shot(
+                id="s009",
+                start_frame=0,
+                end_frame=442,
+                start_time=0.0,
+                end_time=17.72,
+                clip_file="shots/s009.mp4",
+            )
+        ],
+    )
+    (tmp / "shots").mkdir()
+    manifest.save(tmp / "shots" / "shots_manifest.json")
+
+    resp = c.get("/tracking/frames?shot_id=s009")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["fps"] == pytest.approx(25.0, abs=0.01)
+
+
+@pytest.mark.integration
+def test_tracking_frames_fps_null_without_manifest(client) -> None:
+    """No shots manifest → fps must be null (client falls back to the
+    camera-track fps), never a fabricated number."""
+    c, tmp = client
+    _write_min_tracks(tmp, "s009")
+
+    resp = c.get("/tracking/frames?shot_id=s009")
+    assert resp.status_code == 200
+    assert resp.json()["fps"] is None
+
+
+@pytest.mark.integration
 def test_camera_metrics_endpoint(tmp_path):
     """The shot-summary metrics endpoint returns the honest dashboard signals."""
     import json as _json

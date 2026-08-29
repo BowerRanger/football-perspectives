@@ -610,6 +610,7 @@ class CameraStage(BaseStage):
         """
         from src.utils.line_detector import DetectorConfig
         from src.utils.line_camera_refine import refine_camera_from_lines
+        from src.utils.video_reader import VideoFrameReader
 
         det_cfg = DetectorConfig(
             search_strip_px=int(cfg.get("line_extraction_strip_px", 25)),
@@ -630,12 +631,12 @@ class CameraStage(BaseStage):
         # `array == None` is element-wise, raising on the truth test.
         n_covered = sum(1 for k in per_frame_K if k is not None)
         rms_values: list[float] = []
+        frame_reader = VideoFrameReader(cap)
         for idx in range(n_frames):
             if per_frame_K[idx] is None:
                 continue
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ok, frame = cap.read()
-            if not ok:
+            frame = frame_reader.read(idx)
+            if frame is None:
                 continue
             result = refine_camera_from_lines(
                 frame,
@@ -717,6 +718,7 @@ class CameraStage(BaseStage):
         )
         from src.utils.static_c_profile import make_c_grid, profile_camera_centre
         from src.utils.static_line_solver import solve_static_camera_from_lines
+        from src.utils.video_reader import VideoFrameReader, read_frames
 
         det_cfg = DetectorConfig(
             search_strip_px=int(cfg.get("line_extraction_strip_px", 25)),
@@ -743,12 +745,7 @@ class CameraStage(BaseStage):
         covered = [
             i for i in range(len(per_frame_K)) if per_frame_K[i] is not None
         ]
-        frames_bgr: dict[int, np.ndarray] = {}
-        for i in covered:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-            ok, frame = cap.read()
-            if ok:
-                frames_bgr[i] = frame
+        frames_bgr: dict[int, np.ndarray] = read_frames(cap, covered)
 
         def _cameras_from_arrays() -> dict[int, dict]:
             return {
@@ -1301,12 +1298,7 @@ class CameraStage(BaseStage):
                 i for i in range(len(per_frame_K))
                 if per_frame_K[i] is None and not (_lo < i < _hi)
             ]
-            ext_bgr: dict[int, np.ndarray] = {}
-            for i in uncovered:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-                ok, fr = cap.read()
-                if ok:
-                    ext_bgr[i] = fr
+            ext_bgr: dict[int, np.ndarray] = read_frames(cap, uncovered)
             ext_cams = (
                 self._pnlcalib_bootstrap_cameras(ext_bgr, cfg) if ext_bgr else {}
             )
@@ -1397,14 +1389,8 @@ class CameraStage(BaseStage):
             # under-determined drift.
             prop_min_lines = int(cfg.get("line_extraction_propagate_min_lines", 3))
             n_total = len(per_frame_K)
-            _cache: dict[int, np.ndarray | None] = {}
-
-            def _read(i: int):
-                if i not in _cache:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-                    ok, fr = cap.read()
-                    _cache[i] = fr if ok else None
-                return _cache[i]
+            _prop_reader = VideoFrameReader(cap)
+            _read = _prop_reader.read
 
             def _seed(nb1: int, nb2: int, steps: int) -> tuple[np.ndarray, float]:
                 """Velocity-extrapolate ``steps`` pan-steps beyond nb1 using the
@@ -2063,12 +2049,7 @@ class CameraStage(BaseStage):
                 key=lambda f: (_board_cal_quality(f), _far_touchline_vis(f)),
                 reverse=True)
             cal_fids = sorted(_cands_b[:10])
-            cal_frames: dict[int, np.ndarray] = {}
-            for f in cal_fids:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, f)
-                ok, im = cap.read()
-                if ok:
-                    cal_frames[f] = im
+            cal_frames: dict[int, np.ndarray] = read_frames(cap, cal_fids)
             if len(cal_frames) >= 3:
                 cal_cams = {
                     f: {"K": per_frame_K[f], "R": per_frame_R[f],
@@ -2106,10 +2087,10 @@ class CameraStage(BaseStage):
                 bd_cx, bd_cy = sol.principal_point
                 n_bd_entries = 0
                 n_bd_resolved = 0
+                _bd_reader = VideoFrameReader(cap)
                 for f in _covered_b:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, f)
-                    ok, im = cap.read()
-                    if not ok:
+                    im = _bd_reader.read(f)
+                    if im is None:
                         continue
                     det_b = detect_board_line(
                         im, per_frame_K[f], per_frame_R[f], per_frame_t[f],
@@ -2230,6 +2211,7 @@ class CameraStage(BaseStage):
             int(cfg.get("line_extraction_circle_lens_rounds", 3))
             if bool(cfg.get("line_extraction_circle_lens", True)) else 0)
         _lens_prev_circ: float | None = None
+        _lens_reader = VideoFrameReader(cap)
         for _lens_round in range(_lens_rounds):
             import dataclasses
 
@@ -2244,9 +2226,8 @@ class CameraStage(BaseStage):
             ]
             ell: dict[int, tuple] = {}
             for fid in covered_now[::max(1, len(covered_now) // 120)]:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, fid)
-                ok, img = cap.read()
-                if not ok:
+                img = _lens_reader.read(fid)
+                if img is None:
                     continue
                 ed = detect_circle_ellipse(
                     img, per_frame_K[fid], per_frame_R[fid], per_frame_t[fid],
@@ -2812,15 +2793,15 @@ class CameraStage(BaseStage):
             from src.utils.static_line_solver import _dist5 as _dist5_fn
             cx_o, cy_o = sol.principal_point
             _dist5_o = _dist5_fn(sol.distortion)
+            _resolve_reader = VideoFrameReader(cap)
 
             def _resolve(i: int, R_seed: np.ndarray, fx_seed: float):
                 """Re-detect + line-solve a rejected frame from a CLEAN seed.
                 Returns (R, fx, lines) when it fits and stays near the seed, else
                 None — so a frame rejected for a transient bad solve recovers its
                 line-accurate camera instead of a flickery pure interpolation."""
-                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-                ok, img = cap.read()
-                if not ok:
+                img = _resolve_reader.read(i)
+                if img is None:
                     return None
                 seed_K = np.array(
                     [[fx_seed, 0.0, cx_o], [0.0, fx_seed, cy_o], [0.0, 0.0, 1.0]])
@@ -3088,6 +3069,7 @@ class CameraStage(BaseStage):
                 n_relock = 0
                 rl_gates = {"noR": 0, "noimg": 0, "nodet": 0, "rms": 0,
                             "rot": 0}
+                _relock_reader = VideoFrameReader(cap)
                 for g in sorted(gp_underdet):
                     if per_frame_R[g] is None:
                         rl_gates["noR"] += 1
@@ -3096,9 +3078,8 @@ class CameraStage(BaseStage):
                     if img_g is None:
                         # bridged frames gained coverage AFTER frames_bgr
                         # was snapshotted (pre-propagation) — read on demand
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, g)
-                        ok_g, img_g = cap.read()
-                        if not ok_g:
+                        img_g = _relock_reader.read(g)
+                        if img_g is None:
                             rl_gates["noimg"] += 1
                             continue
                     det = _rl_det(

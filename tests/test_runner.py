@@ -1,11 +1,17 @@
 """Tests for src.pipeline.runner.resolve_stages — single-mode stage resolution."""
 
+import json
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from src.pipeline.runner import resolve_stages
+from src.pipeline.runner import (
+    _hmr_world_per_shot_seconds,
+    _TeeStdout,
+    resolve_stages,
+)
 
 
 @pytest.mark.unit
@@ -262,3 +268,186 @@ def test_run_pipeline_shot_filter_propagates_to_stage(
         shot_filter="alpha",
     )
     assert captured["shot_filter"] == "alpha"
+
+
+# ---------------------------------------------------------------------------
+# Timing instrumentation (output/timings.json)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_hmr_world_per_shot_seconds_groups_by_shot() -> None:
+    """'done in' lines are bucketed by the shot_id prefix of the
+    <shot>__<player> label; each player's cost is the gap since the
+    previous 'done in' line (or stage_start for the first)."""
+    lines = [
+        (10.5, "[hmr_world] (1/3) A__P001 done in 0.5s  (avg 0.5s/player, ~1.0s remaining)"),
+        (11.2, "[hmr_world] (2/3) A__P002 done in 0.7s  (avg 0.6s/player, ~0.6s remaining)"),
+        (12.0, "[hmr_world] (3/3) B__P001 done in 0.8s  (avg 0.67s/player, ~0.0s remaining)"),
+        (12.1, "[hmr_world] done — total wall 1.6s"),
+    ]
+    per_shot = _hmr_world_per_shot_seconds(lines, stage_start=10.0)
+    assert per_shot["A"] == pytest.approx(0.5 + 0.7)
+    assert per_shot["B"] == pytest.approx(0.8)
+
+
+@pytest.mark.unit
+def test_hmr_world_per_shot_seconds_ignores_non_done_lines() -> None:
+    """'cached'/'skipped'/summary lines carry no per-player timing signal
+    and must not be counted or mistaken for a shot bucket."""
+    lines = [
+        (10.3, "[hmr_world] (1/2) A__P001 cached, skipping"),
+        (11.0, "[hmr_world] (2/2) A__P002 done in 0.6s  (avg 0.6s/player, ~0.0s remaining)"),
+        (11.1, "[hmr_world] done — total wall 1.1s"),
+    ]
+    per_shot = _hmr_world_per_shot_seconds(lines, stage_start=10.0)
+    assert per_shot == {"A": pytest.approx(1.0)}
+
+
+@pytest.mark.unit
+def test_hmr_world_per_shot_seconds_empty_shot_id() -> None:
+    """Legacy single-shot fallback uses shot_id="" (label "__P001");
+    rpartition must still bucket it correctly rather than raising."""
+    lines = [
+        (10.4, "[hmr_world] (1/1) __P001 done in 0.4s  (avg 0.4s/player, ~0.0s remaining)"),
+    ]
+    per_shot = _hmr_world_per_shot_seconds(lines, stage_start=10.0)
+    assert per_shot == {"": pytest.approx(0.4)}
+
+
+@pytest.mark.unit
+def test_tee_stdout_writes_through_and_buffers_lines() -> None:
+    """_TeeStdout must forward every write to the wrapped stream
+    unchanged (console output is not silenced) while also splitting
+    writes into timestamped complete lines."""
+    import io
+
+    real = io.StringIO()
+    tee = _TeeStdout(real)
+    tee.write("[hmr_world] (1/1) A__P001 done in 0.1s\n")
+    tee.write("partial-line-no-newline-yet")
+    assert real.getvalue() == (
+        "[hmr_world] (1/1) A__P001 done in 0.1s\npartial-line-no-newline-yet"
+    )
+    # Only the terminated line is captured; the trailing partial write
+    # stays buffered until its newline arrives.
+    assert len(tee.lines) == 1
+    assert tee.lines[0][1] == "[hmr_world] (1/1) A__P001 done in 0.1s"
+    assert isinstance(tee.lines[0][0], float)
+
+
+@pytest.mark.unit
+def test_run_pipeline_writes_timings_json(tmp_path: Path, monkeypatch) -> None:
+    """Every stage that actually runs gets a 'seconds' + 'per_shot' entry
+    in output/timings.json; non-hmr_world stages get an empty per_shot
+    (they don't expose a per-shot progress signal)."""
+    from src.pipeline.base import BaseStage
+    from src.pipeline.runner import run_pipeline
+
+    class FakeCameraStage(BaseStage):
+        name = "camera"
+
+        def is_complete(self) -> bool:
+            return False
+
+        def run(self) -> None:
+            time.sleep(0.01)
+
+    def fake_stage_class(name: str):
+        if name == "camera":
+            return FakeCameraStage
+        return None
+
+    monkeypatch.setattr("src.pipeline.runner._stage_class", fake_stage_class)
+    run_pipeline(output_dir=tmp_path, stages="camera", from_stage=None, config={})
+
+    timings = json.loads((tmp_path / "timings.json").read_text())
+    assert set(timings["stages"]) == {"camera"}
+    cam = timings["stages"]["camera"]
+    assert cam["seconds"] > 0.0
+    assert cam["per_shot"] == {}
+    assert timings["total_seconds"] == pytest.approx(cam["seconds"])
+
+
+@pytest.mark.unit
+def test_run_pipeline_hmr_world_per_shot_breakdown(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """When the stage under timing is named 'hmr_world', the runner taps
+    its per-player 'done in' stdout progress to build a per-shot
+    breakdown, without the stage itself needing to change."""
+    from src.pipeline.base import BaseStage
+    from src.pipeline.runner import run_pipeline
+
+    class FakeHmrWorldStage(BaseStage):
+        name = "hmr_world"
+
+        def is_complete(self) -> bool:
+            return False
+
+        def run(self) -> None:
+            time.sleep(0.01)
+            print("[hmr_world] (1/2) A__P001 done in 0.0s  "
+                  "(avg 0.0s/player, ~0.0s remaining)")
+            time.sleep(0.01)
+            print("[hmr_world] (2/2) B__P002 done in 0.0s  "
+                  "(avg 0.0s/player, ~0.0s remaining)")
+            print("[hmr_world] done — total wall 0.0s")
+
+    def fake_stage_class(name: str):
+        if name == "hmr_world":
+            return FakeHmrWorldStage
+        return None
+
+    monkeypatch.setattr("src.pipeline.runner._stage_class", fake_stage_class)
+    run_pipeline(output_dir=tmp_path, stages="hmr_world", from_stage=None, config={})
+
+    # Console output must still be visible (write-through), not swallowed.
+    out = capsys.readouterr().out
+    assert "A__P001 done in" in out
+    assert "B__P002 done in" in out
+
+    timings = json.loads((tmp_path / "timings.json").read_text())
+    hmr = timings["stages"]["hmr_world"]
+    assert set(hmr["per_shot"]) == {"A", "B"}
+    assert hmr["per_shot"]["A"] > 0.0
+    assert hmr["per_shot"]["B"] > 0.0
+    # Per-shot buckets can't exceed the stage's own measured wall time.
+    assert sum(hmr["per_shot"].values()) <= hmr["seconds"] + 1e-6
+
+
+@pytest.mark.unit
+def test_run_pipeline_timings_partial_rerun_preserves_other_stages(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A later run_pipeline call restricted to one stage (e.g. --from-stage
+    or a single --stages name) must not erase timings recorded for stages
+    that aren't part of this invocation."""
+    from src.pipeline.base import BaseStage
+    from src.pipeline.runner import run_pipeline
+
+    class FakeStage(BaseStage):
+        def is_complete(self) -> bool:
+            return False
+
+        def run(self) -> None:
+            pass
+
+    class FakeCameraStage(FakeStage):
+        name = "camera"
+
+    class FakeBallStage(FakeStage):
+        name = "ball"
+
+    def fake_stage_class(name: str):
+        return {"camera": FakeCameraStage, "ball": FakeBallStage}.get(name)
+
+    monkeypatch.setattr("src.pipeline.runner._stage_class", fake_stage_class)
+    run_pipeline(output_dir=tmp_path, stages="camera", from_stage=None, config={})
+    run_pipeline(output_dir=tmp_path, stages="ball", from_stage=None, config={})
+
+    timings = json.loads((tmp_path / "timings.json").read_text())
+    assert set(timings["stages"]) == {"camera", "ball"}
+    assert timings["total_seconds"] == pytest.approx(
+        timings["stages"]["camera"]["seconds"] + timings["stages"]["ball"]["seconds"]
+    )

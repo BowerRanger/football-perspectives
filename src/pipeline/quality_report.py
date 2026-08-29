@@ -320,5 +320,17 @@ def write_quality_report(output_dir: Path) -> None:
                 "mean_offset_m": float(jitter.get("mean_offset_m", 0.0)),
             }
 
+    # Runtime instrumentation (purely additive — see src/pipeline/runner.py):
+    # per-stage wall seconds written by run_pipeline to timings.json, plus
+    # per-shot breakdown where a stage already exposes it. Mirrored
+    # verbatim; missing file just omits the section, same as every other
+    # section here.
+    timings_path = output_dir / "timings.json"
+    if timings_path.exists():
+        try:
+            report["timings"] = json.loads(timings_path.read_text())
+        except Exception:
+            pass
+
     out = output_dir / "quality_report.json"
     out.write_text(json.dumps(report, indent=2))

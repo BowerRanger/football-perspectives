@@ -395,6 +395,68 @@ def test_quality_report_no_prepare_section_without_groups(
     report = json.loads((tmp_path / "quality_report.json").read_text())
     assert "prepare_shots" not in report
 
+
+@pytest.mark.unit
+def test_quality_report_omits_timings_when_missing(tmp_path: Path) -> None:
+    """No timings.json (e.g. quality_report run standalone, or an older
+    output dir predating the runner's timing instrumentation) → no
+    'timings' key. Mirrors the 'match'/'jitter_correction' omit pattern."""
+    write_quality_report(tmp_path)
+    report = json.loads((tmp_path / "quality_report.json").read_text())
+    assert "timings" not in report
+
+
+@pytest.mark.unit
+def test_quality_report_mirrors_timings_additively(tmp_path: Path) -> None:
+    """timings.json (written by src.pipeline.runner.run_pipeline) is
+    mirrored verbatim under report['timings']. Purely additive: every
+    other section built from an existing fixture in this file must be
+    completely unaffected by timings.json being present."""
+    AnchorSet(
+        clip_id="play",
+        image_size=(1280, 720),
+        anchors=(
+            Anchor(
+                frame=0,
+                landmarks=(
+                    LandmarkObservation(name="x", image_xy=(0.0, 0.0), world_xyz=(0.0, 0.0, 0.0)),
+                ),
+            ),
+        ),
+    ).save(tmp_path / "camera" / "anchors.json")
+    eye = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    CameraTrack(
+        clip_id="play", fps=30.0, image_size=(1280, 720), t_world=[0.0, 0.0, 0.0],
+        frames=(CameraFrame(frame=0, K=eye, R=eye, confidence=0.9, is_anchor=True),),
+    ).save(tmp_path / "camera" / "camera_track.json")
+
+    timings_payload = {
+        "stages": {
+            "camera": {"seconds": 1.5, "per_shot": {}},
+            "hmr_world": {"seconds": 42.0, "per_shot": {"play": 42.0}},
+        },
+        "total_seconds": 43.5,
+    }
+    (tmp_path / "timings.json").write_text(json.dumps(timings_payload))
+
+    write_quality_report(tmp_path)
+    report = json.loads((tmp_path / "quality_report.json").read_text())
+
+    # New section mirrors the file verbatim.
+    assert report["timings"] == timings_payload
+    # Pre-existing section (built from the fixtures above, same as
+    # test_quality_report_aggregates_three_stages) is untouched — same
+    # keys, same values as when timings.json is absent.
+    assert report["camera"]["anchor_count"] == 1
+    assert "timings" in report
+    # Additive-only: the key set gained exactly 'timings', nothing else
+    # changed shape (camera keys unchanged from the no-timings case).
+    assert set(report["camera"]) == {
+        "anchor_count", "low_confidence_frame_count",
+        "low_confidence_frame_ranges", "mean_anchor_residual_px",
+        "body_drift_max_m", "distortion",
+    }
+
 @pytest.mark.unit
 def test_quality_report_ball_per_shot_with_diag(tmp_path: Path) -> None:
     """Per-shot ball entries pull anchoring/solver diagnostics from the

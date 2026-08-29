@@ -22,7 +22,7 @@ import pytest
 from src.schemas.camera_track import CameraFrame, CameraTrack
 from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.tracks import Track, TrackFrame, TracksResult
-from src.stages.hmr_world import HmrWorldStage
+from src.stages.hmr_world import HmrWorldStage, build_track_camera_R
 
 
 def _identity_track(n_frames: int) -> CameraTrack:
@@ -63,14 +63,35 @@ def _identity_track(n_frames: int) -> CameraTrack:
     )
 
 
+class _StubGVHMREstimator:
+    """Stand-in for the real ``GVHMREstimator``.
+
+    hmr_world.py codes against the frozen interface
+    ``GVHMREstimator(checkpoint, device=..., extractor_device="cpu")``
+    regardless of whether ``src/utils/gvhmr_estimator.py`` (owned by a
+    concurrent edit) has landed the ``extractor_device`` kwarg yet. Tests
+    monkeypatch this stub in so they never depend on that landing order,
+    and never need torch/GVHMR weights.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+
 @pytest.fixture
 def fake_gvhmr(monkeypatch):
-    """Replace run_on_track with a deterministic stub that needs no weights.
+    """Replace run_on_track (and the GVHMREstimator constructor) with
+    deterministic stubs that need no weights.
 
     Emits high-confidence ankle keypoints at a fixed pixel for every frame —
     the foot-anchor ray-cast through that pixel onto the pitch ground plane
     drives the root-z assertion downstream.
     """
+    monkeypatch.setattr(
+        "src.utils.gvhmr_estimator.GVHMREstimator",
+        _StubGVHMREstimator,
+        raising=False,
+    )
 
     def _runner(
         track_frames,
@@ -78,10 +99,12 @@ def fake_gvhmr(monkeypatch):
         video_path,
         checkpoint,
         device,
+        extractor_device=None,
         batch_size,
         max_sequence_length,
         estimator=None,
         per_frame_K=None,
+        per_frame_R=None,
     ):
         n = len(track_frames)
         # COCO-17: keypoints 15/16 are left/right ankles. Other joints are
@@ -243,6 +266,12 @@ def test_hmr_world_reuses_one_estimator_across_players(
     )
     tr.save(track_dir / "play_tracks.json")
 
+    monkeypatch.setattr(
+        "src.utils.gvhmr_estimator.GVHMREstimator",
+        _StubGVHMREstimator,
+        raising=False,
+    )
+
     seen_estimator_ids: list[int | None] = []
 
     def _runner(
@@ -251,10 +280,12 @@ def test_hmr_world_reuses_one_estimator_across_players(
         video_path,
         checkpoint,
         device,
+        extractor_device=None,
         batch_size,
         max_sequence_length,
         estimator=None,
         per_frame_K=None,
+        per_frame_R=None,
     ):
         seen_estimator_ids.append(id(estimator) if estimator is not None else None)
         n = len(track_frames)
@@ -485,3 +516,314 @@ def test_player_filter_isolates_one_player(tmp_path: Path) -> None:
         if k[0] == stage.shot_filter and k[1] == stage.player_filter
     }
     assert list(filtered) == [("alpha", "P001")]
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (GVHMR inference-time campaign): build_track_camera_R
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_build_track_camera_R_empty_map_returns_none() -> None:
+    track_frames = [(i, (0, 0, 10, 10)) for i in range(5)]
+    assert build_track_camera_R(track_frames, {}) is None
+
+
+@pytest.mark.unit
+def test_build_track_camera_R_no_matching_frames_returns_none() -> None:
+    """per_frame_R has entries, but none for any frame in track_frames."""
+    track_frames = [(i, (0, 0, 10, 10)) for i in range(3)]
+    per_frame_R = {100: np.eye(3), 200: np.eye(3)}
+    assert build_track_camera_R(track_frames, per_frame_R) is None
+
+
+@pytest.mark.unit
+def test_build_track_camera_R_dense_when_all_frames_present() -> None:
+    track_frames = [(i, (0, 0, 10, 10)) for i in range(4)]
+    per_frame_R = {i: np.eye(3) * (i + 1) for i in range(4)}
+    dense = build_track_camera_R(track_frames, per_frame_R)
+    assert dense is not None
+    assert dense.shape == (4, 3, 3)
+    for i in range(4):
+        np.testing.assert_array_equal(dense[i], per_frame_R[i])
+
+
+@pytest.mark.unit
+def test_build_track_camera_R_head_gap_backfilled_from_next() -> None:
+    """Frames 0,1 have no camera R; the nearest AVAILABLE frame is 2
+    (forward) since there's no earlier data -- backfill from it (never
+    average)."""
+    track_frames = [(i, (0, 0, 10, 10)) for i in range(4)]
+    R2 = np.eye(3) * 5.0
+    R3 = np.eye(3) * 9.0
+    per_frame_R = {2: R2, 3: R3}
+    dense = build_track_camera_R(track_frames, per_frame_R)
+    assert dense is not None
+    np.testing.assert_array_equal(dense[0], R2)
+    np.testing.assert_array_equal(dense[1], R2)
+    np.testing.assert_array_equal(dense[2], R2)
+    np.testing.assert_array_equal(dense[3], R3)
+
+
+@pytest.mark.unit
+def test_build_track_camera_R_tail_gap_forward_filled_from_prev() -> None:
+    """Frames 4,5 have no camera R and come AFTER the last available
+    frame (3) -- forward-fill from it (never average, never look ahead
+    to nonexistent future data)."""
+    track_frames = [(i, (0, 0, 10, 10)) for i in range(6)]
+    R2 = np.eye(3) * 3.0
+    R3 = np.eye(3) * 7.0
+    per_frame_R = {2: R2, 3: R3}
+    dense = build_track_camera_R(track_frames, per_frame_R)
+    assert dense is not None
+    np.testing.assert_array_equal(dense[0], R2)  # head gap -> next (R2)
+    np.testing.assert_array_equal(dense[1], R2)
+    np.testing.assert_array_equal(dense[2], R2)
+    np.testing.assert_array_equal(dense[3], R3)
+    np.testing.assert_array_equal(dense[4], R3)  # tail gap -> prev (R3)
+    np.testing.assert_array_equal(dense[5], R3)
+
+
+@pytest.mark.unit
+def test_build_track_camera_R_middle_gap_prefers_previous() -> None:
+    """A gap strictly between two available frames fills from the
+    PREVIOUS frame (forward-fill), even when the next available frame
+    is numerically closer -- matches the documented 'prev, else next'
+    priority, not nearest-by-distance."""
+    track_frames = [(i, (0, 0, 10, 10)) for i in range(6)]
+    R0 = np.eye(3) * 2.0
+    R5 = np.eye(3) * 11.0
+    per_frame_R = {0: R0, 5: R5}  # frames 1-4 missing; frame 4 is nearer to 5
+    dense = build_track_camera_R(track_frames, per_frame_R)
+    assert dense is not None
+    for i in range(5):
+        np.testing.assert_array_equal(dense[i], R0)
+    np.testing.assert_array_equal(dense[5], R5)
+
+
+@pytest.mark.unit
+def test_build_track_camera_R_frame_order_independent_of_track_frames_ordering() -> None:
+    """Looks up per_frame_R by track_frames' frame index (not list
+    position) -- an out-of-order track_frames list still resolves each
+    slot to its own frame's R."""
+    track_frames = [(3, (0, 0, 10, 10)), (1, (0, 0, 10, 10)), (2, (0, 0, 10, 10))]
+    per_frame_R = {1: np.eye(3) * 1.0, 2: np.eye(3) * 2.0, 3: np.eye(3) * 3.0}
+    dense = build_track_camera_R(track_frames, per_frame_R)
+    assert dense is not None
+    np.testing.assert_array_equal(dense[0], per_frame_R[3])
+    np.testing.assert_array_equal(dense[1], per_frame_R[1])
+    np.testing.assert_array_equal(dense[2], per_frame_R[2])
+
+
+@pytest.mark.integration
+def test_process_player_passes_dense_camera_r_to_run_on_track(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Task 3 wiring: process_player builds a dense per-track-frame R
+    (via build_track_camera_R) from the shot's camera track and passes
+    it through run_on_track as per_frame_R, so GVHMR can skip its
+    internal SimpleVO camera-rotation estimate."""
+    n_frames = 10
+
+    (tmp_path / "shots").mkdir()
+    (tmp_path / "shots" / "play.mp4").write_bytes(b"")
+
+    track = _identity_track(n_frames)
+    track.save(tmp_path / "camera" / "camera_track.json")
+
+    track_dir = tmp_path / "tracks"
+    track_dir.mkdir()
+    tr = TracksResult(
+        shot_id="play",
+        tracks=[
+            Track(
+                track_id="T001",
+                class_name="player",
+                team="A",
+                player_id="P001",
+                player_name="",
+                frames=[
+                    TrackFrame(frame=i, bbox=[100, 100, 200, 400], confidence=0.9, pitch_position=None)
+                    for i in range(n_frames)
+                ],
+            ),
+        ],
+    )
+    tr.save(track_dir / "play_tracks.json")
+
+    monkeypatch.setattr(
+        "src.utils.gvhmr_estimator.GVHMREstimator",
+        _StubGVHMREstimator,
+        raising=False,
+    )
+
+    seen_per_frame_R: list = []
+
+    def _runner(
+        track_frames,
+        *,
+        video_path,
+        checkpoint,
+        device,
+        extractor_device=None,
+        batch_size,
+        max_sequence_length,
+        estimator=None,
+        per_frame_K=None,
+        per_frame_R=None,
+    ):
+        seen_per_frame_R.append(per_frame_R)
+        n = len(track_frames)
+        kp2d = np.zeros((n, 17, 3), dtype=np.float32)
+        kp2d[:, 15] = (150.0, 380.0, 0.9)
+        kp2d[:, 16] = (160.0, 380.0, 0.9)
+        return {
+            "thetas": np.zeros((n, 24, 3)),
+            "betas": np.tile(np.linspace(0, 1, 10), (n, 1)),
+            "root_R_cam": np.tile(np.eye(3), (n, 1, 1)),
+            "root_t_cam": np.zeros((n, 3)),
+            "joint_confidence": np.full((n, 24), 0.9),
+            "kp2d": kp2d,
+        }
+
+    monkeypatch.setattr(
+        "src.utils.gvhmr_estimator.run_on_track", _runner, raising=False
+    )
+
+    stage = HmrWorldStage(
+        config={
+            "hmr_world": {
+                "min_track_frames": 5,
+                "checkpoint": "ignored",
+                "ground_snap_velocity": 0.0,
+            }
+        },
+        output_dir=tmp_path,
+    )
+    stage.run()
+
+    assert len(seen_per_frame_R) == 1
+    passed_R = seen_per_frame_R[0]
+    assert passed_R is not None
+    assert passed_R.shape == (n_frames, 3, 3)
+    expected_R = np.array(_identity_track(1).frames[0].R)
+    for i in range(n_frames):
+        np.testing.assert_allclose(passed_R[i], expected_R)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "hmr_world_cfg, expected_extractor_device",
+    [
+        # Key absent from config -> defaults to "cpu" (current behaviour).
+        ({}, "cpu"),
+        ({"extractor_device": "mps"}, "mps"),
+        ({"extractor_device": "auto"}, "auto"),
+    ],
+)
+def test_hmr_world_forwards_extractor_device_to_both_call_sites(
+    tmp_path: Path,
+    monkeypatch,
+    hmr_world_cfg: dict,
+    expected_extractor_device: str,
+) -> None:
+    """The ``hmr_world.extractor_device`` config knob is read once and
+    forwarded to BOTH GVHMR call sites: the ``GVHMREstimator`` constructor
+    (built once per stage run) and ``run_on_track`` (called once per
+    player). Absent from config, both sites see the "cpu" default.
+    """
+    n_frames = 10
+
+    (tmp_path / "shots").mkdir()
+    (tmp_path / "shots" / "play.mp4").write_bytes(b"")
+
+    track = _identity_track(n_frames)
+    track.save(tmp_path / "camera" / "camera_track.json")
+
+    track_dir = tmp_path / "tracks"
+    track_dir.mkdir()
+    tr = TracksResult(
+        shot_id="play",
+        tracks=[
+            Track(
+                track_id="T001",
+                class_name="player",
+                team="A",
+                player_id="P001",
+                player_name="",
+                frames=[
+                    TrackFrame(
+                        frame=i,
+                        bbox=[100, 100, 200, 400],
+                        confidence=0.9,
+                        pitch_position=None,
+                    )
+                    for i in range(n_frames)
+                ],
+            ),
+        ],
+    )
+    tr.save(track_dir / "play_tracks.json")
+
+    ctor_calls: list[dict] = []
+
+    class _RecordingEstimator:
+        def __init__(self, **kwargs) -> None:
+            ctor_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "src.utils.gvhmr_estimator.GVHMREstimator",
+        _RecordingEstimator,
+        raising=False,
+    )
+
+    run_calls: list[dict] = []
+
+    def _runner(
+        track_frames,
+        *,
+        video_path,
+        checkpoint,
+        device,
+        extractor_device=None,
+        batch_size,
+        max_sequence_length,
+        estimator=None,
+        per_frame_K=None,
+        per_frame_R=None,
+    ):
+        run_calls.append({"device": device, "extractor_device": extractor_device})
+        n = len(track_frames)
+        kp2d = np.zeros((n, 17, 3), dtype=np.float32)
+        kp2d[:, 15] = (150.0, 380.0, 0.9)
+        kp2d[:, 16] = (160.0, 380.0, 0.9)
+        return {
+            "thetas": np.zeros((n, 24, 3)),
+            "betas": np.tile(np.linspace(0, 1, 10), (n, 1)),
+            "root_R_cam": np.tile(np.eye(3), (n, 1, 1)),
+            "root_t_cam": np.zeros((n, 3)),
+            "joint_confidence": np.full((n, 24), 0.9),
+            "kp2d": kp2d,
+        }
+
+    monkeypatch.setattr(
+        "src.utils.gvhmr_estimator.run_on_track", _runner, raising=False
+    )
+
+    stage = HmrWorldStage(
+        config={
+            "hmr_world": {
+                "min_track_frames": 5,
+                "checkpoint": "ignored",
+                "ground_snap_velocity": 0.0,
+                **hmr_world_cfg,
+            }
+        },
+        output_dir=tmp_path,
+    )
+    stage.run()
+
+    assert len(ctor_calls) == 1
+    assert ctor_calls[0]["extractor_device"] == expected_extractor_device
+    assert len(run_calls) == 1
+    assert run_calls[0]["extractor_device"] == expected_extractor_device

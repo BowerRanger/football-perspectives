@@ -406,6 +406,13 @@ hmr_world:
   # trips an MPS assertion (dimension[1] (120) ... subRange) at exactly
   # the model's configured max_len. CPU is slower but stable.
   device: cpu
+  # Device for ViTPose+HMR2 feature extraction only — the GVHMR transformer
+  # itself still runs on `device` above. auto|mps|cpu; auto = mps on Apple
+  # Silicon when available, else cpu (and never splits when `device` is cuda).
+  # Default auto since 2026-08-29: measured 3.3-4.3x per-player on gberch
+  # P012/P014 with all required parity metrics passing at 100-1000x margin
+  # and zero MPS fallbacks (scripts/bench_gvhmr_inference.py --compare-against).
+  extractor_device: auto
   checkpoint: third_party/gvhmr/inputs/checkpoints/gvhmr/gvhmr_siga24_release.ckpt
   batch_size: 16
   max_sequence_length: 120

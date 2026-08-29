@@ -22,11 +22,14 @@ import os
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
+
+from src.utils.video_reader import read_frames
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,24 @@ _GVHMR_SHIMS = _REPO_ROOT / "third_party" / "gvhmr_shims"
 # CPU/GPU bound and saturates one device anyway, so concurrent calls
 # weren't speeding anything up — they were just corrupting state.
 _GVHMR_INFERENCE_LOCK = threading.Lock()
+
+# Phases instrumented with perf_counter inside ``_estimate_sequence_locked``.
+# Order matches the pipeline: write the crop sequence to a temp video, decode
+# + preprocess it (shared-decode mode only — legacy_decode leaves this at
+# 0.0 since decode is folded into vitpose_extract/hmr2_extract instead),
+# ViTPose-Huge 2D keypoints, HMR2 ViT features, SimpleVO camera-rotation
+# estimate (0.0 when a calibrated R_w2c_per_frame is supplied or static_cam
+# is set), the GVHMR transformer's predict() call, and SMPL forward
+# kinematics. See ``GVHMREstimator.timing_totals``.
+_TIMING_KEYS: tuple[str, ...] = (
+    "temp_video_write",
+    "decode_preproc",
+    "vitpose_extract",
+    "hmr2_extract",
+    "simple_vo",
+    "model_predict",
+    "fk",
+)
 
 
 @contextlib.contextmanager
@@ -134,6 +155,56 @@ def _normalize_device(device: str) -> str:
     return requested
 
 
+def _normalize_extractor_device(requested: str, main_device: str) -> str:
+    """Resolve the ViTPose/HMR2-feature extractor device against the
+    already-resolved main device.
+
+    ``'auto'`` never splits extraction onto a second device when the main
+    device is CUDA (a GPU box has no reason to hop tensors between
+    devices for extraction — it's all one fast device already); on a
+    non-CUDA main device it prefers MPS when the backend is available,
+    else falls back to main.  Explicit ``'cpu'``/``'cuda'`` pass through
+    unchanged (aside from the ``'cuda'`` -> ``'cuda:0'`` normalisation
+    ``_normalize_device`` also applies).  An explicit ``'mps'`` request
+    does NOT silently degrade to main when the backend is unavailable —
+    it raises so a misconfigured ``extractor_device='mps'`` fails loudly
+    at model-load time (see ``GVHMREstimator._load_model``) instead of
+    quietly running everything on CPU or crashing deep inside a batch
+    loop.
+    """
+    requested_norm = (requested or "cpu").strip().lower()
+    main_norm = (main_device or "cpu").strip().lower()
+
+    def _mps_available() -> bool:
+        try:
+            import torch
+        except ImportError:
+            return False
+        backend = getattr(torch.backends, "mps", None)
+        return bool(backend is not None and backend.is_available())
+
+    if requested_norm == "auto":
+        if main_norm == "cuda" or main_norm.startswith("cuda:"):
+            return main_norm
+        if _mps_available():
+            return "mps"
+        return main_norm
+
+    if requested_norm == "mps":
+        if not _mps_available():
+            raise RuntimeError(
+                "extractor_device='mps' was requested but the MPS backend "
+                "is not available on this machine. Use extractor_device="
+                "'auto' to fall back gracefully, or 'cpu' explicitly."
+            )
+        return "mps"
+
+    if requested_norm == "cuda":
+        return "cuda:0"
+
+    return requested_norm
+
+
 class GVHMREstimator:
     """Wraps GVHMR inference for per-track video sequences.
 
@@ -149,6 +220,16 @@ class GVHMREstimator:
         submodule.
     device:
         PyTorch device string (``"auto"`` selects CUDA > MPS > CPU).
+    extractor_device:
+        PyTorch device string for the ViTPose/HMR2 feature extractors
+        only (default ``"cpu"``, matching every existing caller
+        bit-for-bit). ``"auto"`` prefers MPS over ``device`` when
+        available and ``device`` isn't CUDA; GPU boxes never split.
+        Explicit ``"mps"`` on a machine without the MPS backend raises
+        at ``_load_model`` time. A RuntimeError from an extract call
+        while split permanently falls back to ``device`` for the rest
+        of this estimator's lifetime — see ``resolved_extractor_device``
+        and ``extractor_fallback_count``.
     """
 
     def __init__(
@@ -156,6 +237,7 @@ class GVHMREstimator:
         checkpoint: str = "third_party/gvhmr/inputs/checkpoints/gvhmr/gvhmr_siga24_release.ckpt",
         device: str = "auto",
         static_cam: bool = False,
+        extractor_device: str = "cpu",
     ) -> None:
         self._checkpoint = Path(checkpoint)
         if not self._checkpoint.is_absolute():
@@ -170,6 +252,45 @@ class GVHMREstimator:
         self._vitpose: Any | None = None
         self._extractor: Any | None = None
         self._available: bool | None = None
+        # One dict per ``estimate_sequence`` call (i.e. per chunk), keyed by
+        # ``_TIMING_KEYS``. Populated by ``_estimate_sequence_locked``;
+        # inspect directly or via ``timing_totals()``.
+        self.timings: list[dict[str, float]] = []
+        # Hybrid-device shim: the ViTPose/HMR2 preprocessors can run on a
+        # different device than the main GVHMR transformer. On Apple
+        # Silicon this lets extraction use MPS (~4-5x over CPU) while the
+        # transformer -- whose RoPE implementation SIGABRTs on MPS --
+        # stays on ``self._device``. ``'auto'`` and explicit ``'mps'``
+        # are resolved lazily in ``_load_model`` via
+        # ``_normalize_extractor_device`` (which is what actually raises
+        # for an unavailable explicit ``'mps'`` — kept out of the
+        # constructor so building an estimator never raises). Stored
+        # unresolved here so the type stays ``str`` even before the
+        # first ``_load_model`` call; for ``'cpu'``/explicit values this
+        # already equals the resolved value.
+        self._extractor_device_requested = str(extractor_device or "cpu")
+        self.resolved_extractor_device: str = self._extractor_device_requested
+        # Bumped every time an extractor-device RuntimeError forces a
+        # permanent fallback to the main device (see
+        # ``_run_extractor_phase``). Stays 0 for extractor_device="cpu"
+        # (matches main -> the try/except fallback path never engages).
+        self.extractor_fallback_count: int = 0
+
+    def timing_totals(self) -> dict[str, float]:
+        """Sum per-chunk timings recorded in :attr:`timings`.
+
+        Returns one key per :data:`_TIMING_KEYS` phase (summed across every
+        recorded chunk), plus ``"total"`` (grand sum across phases) and
+        ``"n_chunks"`` (number of ``estimate_sequence`` calls recorded so
+        far). Safe to call before any chunk has run (all zeros).
+        """
+        totals: dict[str, float] = {k: 0.0 for k in _TIMING_KEYS}
+        for record in self.timings:
+            for k in _TIMING_KEYS:
+                totals[k] += float(record.get(k, 0.0))
+        totals["total"] = sum(totals[k] for k in _TIMING_KEYS)
+        totals["n_chunks"] = float(len(self.timings))
+        return totals
 
     @property
     def available(self) -> bool:
@@ -182,7 +303,7 @@ class GVHMREstimator:
                 self._available = False
         return self._available
 
-    def _patch_gvhmr_preprocessors(self) -> None:
+    def _patch_gvhmr_preprocessors(self, extractor_device: str) -> None:
         """Replace ``.cuda()`` with ``.to(device)`` in GVHMR's preprocessors.
 
         The earlier ``_redirect_cuda`` context-manager approach (patching
@@ -196,14 +317,30 @@ class GVHMREstimator:
         ``VitPoseExtractor`` and ``Extractor`` so they don't call
         ``.cuda()`` at all, and to wrap their ``extract`` methods so
         inline ``imgs.cuda()`` becomes ``imgs.to(device)``.
+
+        ``extractor_device`` is the CALLER's (this ``_load_model``
+        invocation's) resolved extractor device — but the class-level
+        ``_fp_patched`` guard below means ``__init__``/``extract`` are
+        only ever replaced ONCE, process-wide, on the vendored classes.
+        A naive closure over ``extractor_device`` would therefore freeze
+        every later estimator (even one built with a different device)
+        to whatever the FIRST-ever call passed in — a real coupling bug
+        we hit in practice. The fix: the patched ``extract``/
+        ``extract_video_features`` methods redirect ``.cuda()`` to
+        ``getattr(self, "_fp_device", extractor_device)`` — a
+        PER-INSTANCE attribute — instead of this closure. ``_load_model``
+        then explicitly re-sets both the model placement and
+        ``self._fp_device`` on every freshly constructed
+        ``VitPoseExtractor``/``Extractor`` instance immediately after
+        construction, so the closure's captured value only matters as a
+        cold-start default for the very first instance ever built.
         """
-        import types
         import torch
 
         from hmr4d.utils.preproc import vitpose as _vitpose_mod
         from hmr4d.utils.preproc import vitfeat_extractor as _ext_mod
 
-        device = self._device
+        device = extractor_device
 
         # ── VitPoseExtractor ───────────────────────────────────────────
         if not getattr(_vitpose_mod.VitPoseExtractor, "_fp_patched", False):
@@ -221,12 +358,14 @@ class GVHMREstimator:
 
             def _patched_extract(self, video_path, bbx_xys, img_ds=0.5):
                 # Force ``.cuda()`` on intermediate tensors to instead use
-                # the configured device.  Easiest: temporarily patch
-                # ``Tensor.cuda`` for the duration of the call.
+                # THIS INSTANCE's current device, not the device captured
+                # in this closure at first-patch time (see the docstring
+                # above for why that distinction matters).
+                redirect_device = getattr(self, "_fp_device", device)
                 orig = torch.Tensor.cuda
 
                 def _to_device(t, *_a, **_kw):
-                    return t.to(device)
+                    return t.to(redirect_device)
 
                 torch.Tensor.cuda = _to_device  # type: ignore[method-assign]
                 try:
@@ -247,12 +386,16 @@ class GVHMREstimator:
             def _patched_ext_init(self, tqdm_leave=True):
                 self.extractor = load_hmr2().to(device).eval()
                 self.tqdm_leave = tqdm_leave
+                self._fp_device = device
 
             def _patched_ext_extract(self, video_path, bbx_xys, img_ds=0.5):
+                # Per-instance redirect target — see the matching note on
+                # ``_patched_extract`` above.
+                redirect_device = getattr(self, "_fp_device", device)
                 orig = torch.Tensor.cuda
 
                 def _to_device(t, *_a, **_kw):
-                    return t.to(device)
+                    return t.to(redirect_device)
 
                 torch.Tensor.cuda = _to_device  # type: ignore[method-assign]
                 try:
@@ -323,6 +466,15 @@ class GVHMREstimator:
 
         self._ensure_imports()
 
+        # Resolve the extractor device before any heavy hydra/checkpoint
+        # work. "Fail fast": an explicit extractor_device="mps" request
+        # on a machine without the MPS backend raises here rather than
+        # silently falling back or crashing deep inside a batch loop
+        # much later.
+        self.resolved_extractor_device = _normalize_extractor_device(
+            self._extractor_device_requested, self._device
+        )
+
         import hydra  # type: ignore[import-untyped]
         from hydra import compose, initialize_config_module  # type: ignore[import-untyped]
         from hmr4d.model.gvhmr.gvhmr_pl_demo import DemoPL  # type: ignore[import-untyped]
@@ -370,19 +522,98 @@ class GVHMREstimator:
             self._model = model
 
             # Patch GVHMR's preprocessors to use .to(device) instead of
-            # the hardcoded .cuda() before instantiating them.
-            self._patch_gvhmr_preprocessors()
+            # the hardcoded .cuda() before instantiating them, placing
+            # them on the resolved extractor device (may differ from the
+            # main device -- see the hybrid-device shim docs above).
+            self._patch_gvhmr_preprocessors(self.resolved_extractor_device)
 
             # Load preprocessors (weights downloaded on first use into their own dirs)
             self._vitpose = VitPoseExtractor()
             self._extractor = Extractor()
 
+            # Explicit, per-instance placement -- overrides whatever
+            # device the patched __init__'s closure captured for THIS
+            # process's first-ever VitPoseExtractor/Extractor (the
+            # process-wide coupling bug described in
+            # _patch_gvhmr_preprocessors's docstring). This guarantees
+            # both the model weights and self._fp_device (read by the
+            # patched extract() for its per-mini-batch .cuda() redirect)
+            # always match THIS estimator's resolved extractor device,
+            # independent of load order across estimator instances.
+            self._vitpose.pose.to(self.resolved_extractor_device).eval()
+            self._vitpose._fp_device = self.resolved_extractor_device
+            self._extractor.extractor.to(self.resolved_extractor_device).eval()
+            self._extractor._fp_device = self.resolved_extractor_device
+
             # Load SMPLX body model for FK.  GVHMR outputs 21-body-joint SMPLX
             # params (body_pose is 63D).  The "supermotion" variant is
-            # SmplxLite, which accepts exactly those params.
+            # SmplxLite, which accepts exactly those params. Always the
+            # main device -- unaffected by the extractor-device split.
             self._body_model = make_smplx("supermotion").to(self._device)
 
-        logger.info("GVHMR loaded successfully on %s", self._device)
+        logger.info(
+            "GVHMR loaded successfully on %s (extractor_device=%s)",
+            self._device, self.resolved_extractor_device,
+        )
+
+    def _run_extractor_phase(self, fn, *, phase: str):
+        """Run one GVHMR preprocessor call (ViTPose keypoints or HMR2
+        image features) under the resolved extractor device, and move
+        the result back to the main device before returning.
+
+        ``fn`` takes no arguments and returns the raw extractor output
+        tensor. When ``resolved_extractor_device`` already equals the
+        main device (extractor_device="cpu" — every existing caller),
+        ``fn()`` runs completely unwrapped: no try/except, no
+        ``_redirect_cuda``, no extra device hop. That keeps this path
+        bit-identical to the pre-split code.
+
+        When the two devices differ, a ``RuntimeError`` from ``fn()``
+        (e.g. an MPS op gap) triggers a one-time, permanent fallback:
+        both preprocessor models move to main, ``resolved_extractor_device``
+        becomes main for the rest of this estimator's life (no flapping
+        between chunks), ``extractor_fallback_count`` is bumped, and
+        ``fn()`` is retried once on main — a second failure propagates.
+
+        Must be called with ``_GVHMR_INFERENCE_LOCK`` held (true for
+        every call site — both live inside ``_estimate_sequence_locked``).
+        """
+        import torch
+
+        main = self._device
+        extractor_device = self.resolved_extractor_device
+
+        if extractor_device == main:
+            return fn()
+
+        try:
+            with _redirect_cuda(extractor_device):
+                result = fn()
+        except RuntimeError as exc:
+            logger.warning(
+                "GVHMR %s failed on extractor device %s (%s) — falling "
+                "back to main device %s for the remainder of this "
+                "estimator's lifetime", phase, extractor_device, exc, main,
+            )
+            if extractor_device == "mps":
+                try:
+                    torch.mps.empty_cache()
+                except Exception:  # noqa: BLE001 - best-effort cleanup only
+                    pass
+            self._vitpose.pose.to(main)
+            self._vitpose._fp_device = main
+            self._extractor.extractor.to(main)
+            self._extractor._fp_device = main
+            self.resolved_extractor_device = main
+            self.extractor_fallback_count += 1
+            # Retry once on main; a second failure propagates to the caller.
+            with _redirect_cuda(main):
+                result = fn()
+            extractor_device = main
+
+        if extractor_device == "mps":
+            torch.mps.synchronize()
+        return result.to(main)
 
     def estimate_sequence(
         self,
@@ -390,6 +621,8 @@ class GVHMREstimator:
         bboxes: list[list[float]],
         fps: float = 30.0,
         K_per_frame: np.ndarray | None = None,
+        R_w2c_per_frame: np.ndarray | None = None,
+        legacy_decode: bool = False,
     ) -> dict[str, np.ndarray]:
         # Serialise across the whole process — see the lock's docstring
         # for the rationale. This blocks rather than failing because the
@@ -397,7 +630,7 @@ class GVHMREstimator:
         # the prior estimate finishes.
         with _GVHMR_INFERENCE_LOCK:
             return self._estimate_sequence_locked(
-                frames_bgr, bboxes, fps, K_per_frame
+                frames_bgr, bboxes, fps, K_per_frame, R_w2c_per_frame, legacy_decode
             )
 
     def _estimate_sequence_locked(
@@ -406,6 +639,8 @@ class GVHMREstimator:
         bboxes: list[list[float]],
         fps: float = 30.0,
         K_per_frame: np.ndarray | None = None,
+        R_w2c_per_frame: np.ndarray | None = None,
+        legacy_decode: bool = False,
     ) -> dict[str, np.ndarray]:
         """Run GVHMR on a tracked player's video sequence.
 
@@ -417,6 +652,29 @@ class GVHMREstimator:
             Per-frame bounding boxes ``[x1, y1, x2, y2]``.
         fps:
             Video frame rate.
+        K_per_frame:
+            Optional ``(N, 3, 3)`` calibrated per-frame intrinsics; see
+            ``run_on_track``.
+        R_w2c_per_frame:
+            Optional ``(N, 3, 3)`` calibrated per-frame world-to-camera
+            rotation (OpenCV convention), frame-aligned with
+            ``frames_bgr``. When supplied and its length matches
+            ``n_frames``, it's used directly to build ``cam_angvel`` and
+            SimpleVO is skipped entirely (SimpleVO is a comparatively
+            expensive SIFT+pycolmap two-view solve, and the calibrated
+            camera track is more accurate for our broadcast pan/tilt/zoom
+            rig anyway). Mismatched length or ``None`` falls back to the
+            existing behaviour: SimpleVO when ``static_cam`` is False,
+            else identity. ``static_cam`` semantics are otherwise
+            unchanged — it still controls ``model.predict(static_cam=...)``
+            regardless of which R_w2c source was used.
+        legacy_decode:
+            When True, restores the pre-single-decode behaviour where
+            ViTPose and the HMR2 feature extractor each independently
+            call the vendored ``get_batch()`` (i.e. decode + preprocess
+            the temp video twice). Default False shares one ``get_batch()``
+            call between both extractors. Kept as a bench/regression
+            escape hatch — not used by the pipeline.
 
         Returns
         -------
@@ -434,10 +692,13 @@ class GVHMREstimator:
         import torch
         from hmr4d.utils.geo.hmr_cam import get_bbx_xys_from_xyxy, estimate_K  # type: ignore[import-untyped]
         from hmr4d.utils.geo_transform import compute_cam_angvel  # type: ignore[import-untyped]
+        from hmr4d.utils.preproc.vitfeat_extractor import get_batch  # type: ignore[import-untyped]
 
         n_frames = len(frames_bgr)
         if n_frames == 0:
             return self._empty_result()
+
+        timing: dict[str, float] = dict.fromkeys(_TIMING_KEYS, 0.0)
 
         # Convert bboxes [x1,y1,x2,y2] → tensors
         bbx_xyxy = torch.tensor(bboxes, dtype=torch.float32)  # (N, 4)
@@ -447,23 +708,90 @@ class GVHMREstimator:
 
         # Write frames to a temp video for GVHMR's preprocessors
         # (they expect a video path, not raw frames)
+        t0 = time.perf_counter()
         tmp_video = self._write_temp_video(frames_bgr, fps)
+        timing["temp_video_write"] = time.perf_counter() - t0
+
+        # Calibrated camera rotation takes priority over SimpleVO — see
+        # the R_w2c_per_frame docstring above.
+        R_w2c: torch.Tensor | None = None
+        if R_w2c_per_frame is not None and len(R_w2c_per_frame) == n_frames:
+            R_w2c = torch.tensor(
+                np.asarray(R_w2c_per_frame, dtype=np.float32), dtype=torch.float32
+            )  # (N, 3, 3)
 
         # GVHMR's preprocessors also call ``.cuda()`` on per-batch tensors
-        # during inference, so keep the redirect active here.
-        R_w2c: torch.Tensor | None = None
+        # during inference. Each extract phase runs on the resolved
+        # extractor device (``_run_extractor_phase`` handles its own
+        # ``_redirect_cuda`` scoping, plus the MPS-fallback retry policy);
+        # SimpleVO is a separate SIFT+pycolmap pipeline, unrelated to the
+        # extractor split, and keeps running under the main-device redirect.
         try:
-            with _redirect_cuda(self._device):
-                # ViTPose: 2D keypoints
-                kp2d = self._vitpose.extract(str(tmp_video), bbx_xys)  # (N, 17, 3)
+            if legacy_decode:
+                # Bench/regression escape hatch: each extractor
+                # decodes + preprocesses the temp video independently
+                # (the original, pre-single-decode behaviour).
+                t0 = time.perf_counter()
+                kp2d = self._run_extractor_phase(
+                    lambda: self._vitpose.extract(str(tmp_video), bbx_xys),
+                    phase="vitpose_extract",
+                )  # (N, 17, 3)
+                timing["vitpose_extract"] = time.perf_counter() - t0
 
-                # ViT features: HMR2.0 backbone
-                f_imgseq = self._extractor.extract_video_features(str(tmp_video), bbx_xys)  # (N, 1024)
+                t0 = time.perf_counter()
+                f_imgseq = self._run_extractor_phase(
+                    lambda: self._extractor.extract_video_features(str(tmp_video), bbx_xys),
+                    phase="hmr2_extract",
+                )  # (N, 1024)
+                timing["hmr2_extract"] = time.perf_counter() - t0
+            else:
+                # Single shared decode: call the vendored get_batch()
+                # once and feed the same cropped/normalised tensor to
+                # both extractors, instead of each decoding the temp
+                # video independently. NOTE: the outer ``bbx_xys``
+                # (used below for ``data["bbx_xys"]``) is intentionally
+                # left untouched — only this adjusted copy is passed
+                # to the extractors, matching what get_batch() would
+                # have returned internally for either legacy call.
+                # get_batch() itself never calls .cuda() (pure decode +
+                # normalise), so it runs outside any device redirect and
+                # its output stays a plain CPU tensor — the extractors'
+                # own per-mini-batch .cuda() redirect (inside
+                # _run_extractor_phase) is what moves slices to the
+                # extractor device; do NOT pre-move the whole tensor here.
+                t0 = time.perf_counter()
+                imgs, bbx_xys_adj = get_batch(str(tmp_video), bbx_xys, img_ds=0.5)
+                timing["decode_preproc"] = time.perf_counter() - t0
+                # MPS has no float64 kernels; a silently-upcast imgs
+                # tensor reaching an MPS-placed extractor would crash far
+                # from this call site. Fail here with a clear message.
+                assert imgs.dtype == torch.float32, (
+                    f"get_batch() returned imgs dtype {imgs.dtype}, expected "
+                    "float32 (required for the MPS extractor path)"
+                )
 
-                # Camera trajectory via SimpleVO (broadcast cameras pan).
-                # Skipped if static_cam was forced on by the caller.
-                if not self._static_cam:
+                t0 = time.perf_counter()
+                kp2d = self._run_extractor_phase(
+                    lambda: self._vitpose.extract(imgs, bbx_xys_adj),
+                    phase="vitpose_extract",
+                )  # (N, 17, 3)
+                timing["vitpose_extract"] = time.perf_counter() - t0
+
+                t0 = time.perf_counter()
+                f_imgseq = self._run_extractor_phase(
+                    lambda: self._extractor.extract_video_features(imgs, bbx_xys_adj),
+                    phase="hmr2_extract",
+                )  # (N, 1024)
+                timing["hmr2_extract"] = time.perf_counter() - t0
+
+            # Camera trajectory via SimpleVO (broadcast cameras pan).
+            # Skipped when a calibrated R_w2c was supplied above, or
+            # when static_cam was forced on by the caller.
+            if R_w2c is None and not self._static_cam:
+                with _redirect_cuda(self._device):
+                    t0 = time.perf_counter()
                     R_w2c = self._estimate_camera_rotations(tmp_video, n_frames)
+                    timing["simple_vo"] = time.perf_counter() - t0
         finally:
             tmp_video.unlink(missing_ok=True)
 
@@ -501,10 +829,20 @@ class GVHMREstimator:
             for k, v in data.items()
         }
 
+        # Crash-safety guard: a tensor left on a non-main device here
+        # (e.g. a stale extractor-device hop) would otherwise reach the
+        # transformer's RoPE implementation, which SIGABRTs the whole
+        # process on MPS instead of raising a catchable exception. Fail
+        # with a clear RuntimeError instead — unreachable by construction
+        # once this passes.
+        _assert_predict_inputs_on(self._device, data, self._model)
+
         # Run GVHMR — keep the cuda redirect active because postprocess hops
         # (IK, static-joint refinement) also hardcode .cuda() internally.
+        t0 = time.perf_counter()
         with torch.no_grad(), _redirect_cuda(self._device):
             pred = self._model.predict(data, static_cam=self._static_cam)
+        timing["model_predict"] = time.perf_counter() - t0
 
         # Extract incam params: global_orient maps SMPL canonical (y-up)
         # straight to OpenCV camera frame (y-down, z-into-scene). The
@@ -524,9 +862,11 @@ class GVHMREstimator:
         betas_avg = betas.mean(axis=0)  # (10,)
 
         # 3D joint positions via SMPL FK
+        t0 = time.perf_counter()
         joints_3d = self._forward_kinematics(
             global_orient, body_pose, betas_avg, transl
         )  # (N, 22, 3)
+        timing["fk"] = time.perf_counter() - t0
 
         # pred_cam from network
         net_outputs = pred.get("net_outputs", {})
@@ -543,6 +883,22 @@ class GVHMREstimator:
         # weak-perspective pred_cam (which was calibrated for in-camera
         # joints, not gravity-view ones).
         kp2d_np = kp2d.detach().cpu().numpy().astype(np.float32)  # (N, 17, 3)
+
+        self.timings.append(timing)
+        chunk_total = sum(timing[k] for k in _TIMING_KEYS)
+        logger.info(
+            "GVHMR chunk timing n=%d legacy_decode=%s calibrated_R=%s "
+            "extractor_device=%s: "
+            "temp_video_write=%.3fs decode_preproc=%.3fs vitpose_extract=%.3fs "
+            "hmr2_extract=%.3fs simple_vo=%.3fs model_predict=%.3fs fk=%.3fs "
+            "total=%.3fs",
+            n_frames, legacy_decode, R_w2c_per_frame is not None,
+            self.resolved_extractor_device,
+            timing["temp_video_write"], timing["decode_preproc"],
+            timing["vitpose_extract"], timing["hmr2_extract"],
+            timing["simple_vo"], timing["model_predict"], timing["fk"],
+            chunk_total,
+        )
 
         return {
             "global_orient": global_orient.astype(np.float32),
@@ -648,6 +1004,40 @@ class GVHMREstimator:
         }
 
 
+def _assert_predict_inputs_on(main_device: str, data: dict, model: Any) -> None:
+    """Guard against the MPS RoPE SIGABRT: ``model.predict()`` must never
+    see a tensor placed on a non-main device (e.g. a leftover from a
+    stale extractor-device hop). A device mismatch reaching the
+    transformer's RoPE implementation crashes the whole process with
+    SIGABRT on MPS instead of raising a catchable Python exception, so
+    this check must run — and raise a normal, catchable ``RuntimeError``
+    naming the offending key — before every ``model.predict()`` call.
+
+    Checks every ``torch.Tensor`` value in ``data`` plus the model's own
+    parameters (``next(model.parameters())``, best-effort — a model
+    double without ``.parameters()``, e.g. a test fake, skips just that
+    half of the check); non-tensor values in ``data`` are ignored.
+    """
+    import torch
+
+    main_type = torch.device(main_device).type
+    for key, value in data.items():
+        if isinstance(value, torch.Tensor) and value.device.type != main_type:
+            raise RuntimeError(
+                f"GVHMR predict() input {key!r} is on device {value.device} "
+                f"but the main device is {main_device!r}"
+            )
+    try:
+        model_device = next(model.parameters()).device
+    except (StopIteration, AttributeError, TypeError):
+        model_device = None
+    if model_device is not None and model_device.type != main_type:
+        raise RuntimeError(
+            f"GVHMR model parameters are on device {model_device} but the "
+            f"main device is {main_device!r}"
+        )
+
+
 def _axis_angle_to_matrix(aa: np.ndarray) -> np.ndarray:
     """Convert (N, 3) axis-angle vectors to (N, 3, 3) rotation matrices.
 
@@ -694,28 +1084,38 @@ def _read_video_frames(
     Frames missing from the video (eof reached) are returned as black images
     matching the first decoded frame's shape. Raises if the video cannot
     be opened at all.
+
+    Decodes via :func:`src.utils.video_reader.read_frames`, which sweeps the
+    (sorted, deduped) indices in a single sequential pass — grab()-skipping
+    small gaps and only issuing an explicit seek for large ones — instead of
+    a ``cap.set(CAP_PROP_POS_FRAMES)`` seek per frame. ``run_on_track`` calls
+    this once per player track, so on a multi-player shot this avoids
+    re-seeking through the whole clip once per player.
     """
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
+        cap.release()
         raise RuntimeError(f"cannot open video {video_path}")
     try:
-        # Sort/dedupe so seeking is monotonic and we only decode each frame once.
-        wanted = sorted(set(frame_indices))
-        cache: dict[int, np.ndarray] = {}
-        last_shape: tuple[int, int, int] | None = None
-        for fi in wanted:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, float(fi))
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                if last_shape is None:
-                    last_shape = (720, 1280, 3)
-                cache[fi] = np.zeros(last_shape, dtype=np.uint8)
-            else:
-                last_shape = frame.shape
-                cache[fi] = frame
-        return [cache[fi] for fi in frame_indices]
+        decoded = read_frames(cap, frame_indices)
     finally:
         cap.release()
+
+    # Sort/dedupe so the black-frame fallback shape tracks "last decoded
+    # frame" in the same order the old per-frame-seek loop did.
+    wanted = sorted(set(frame_indices))
+    cache: dict[int, np.ndarray] = {}
+    last_shape: tuple[int, int, int] | None = None
+    for fi in wanted:
+        frame = decoded.get(fi)
+        if frame is None:
+            if last_shape is None:
+                last_shape = (720, 1280, 3)
+            cache[fi] = np.zeros(last_shape, dtype=np.uint8)
+        else:
+            last_shape = frame.shape
+            cache[fi] = frame
+    return [cache[fi] for fi in frame_indices]
 
 
 def run_on_track(
@@ -728,6 +1128,9 @@ def run_on_track(
     max_sequence_length: int,
     estimator: "GVHMREstimator | None" = None,
     per_frame_K: np.ndarray | None = None,
+    per_frame_R: np.ndarray | None = None,
+    legacy_decode: bool = False,
+    extractor_device: str = "cpu",
 ) -> dict[str, np.ndarray]:
     """Run GVHMR over a single player's track.
 
@@ -742,7 +1145,8 @@ def run_on_track(
     device:
         PyTorch device string (``"auto"``, ``"cpu"``, ``"mps"``, ``"cuda:0"``).
     batch_size:
-        Reserved for future use; current GVHMR predict() is sequence-level.
+        Inert — GVHMR's ``model.predict()`` is sequence-level, not
+        batched. Reserved for future use.
     max_sequence_length:
         Maximum number of frames per inference call. Long tracks are
         chunked to avoid the MPS allocation issue noted in the spec.
@@ -760,6 +1164,25 @@ def run_on_track(
         on broadcast telephoto shots. Missing-camera frames should be
         backfilled (e.g. with the shot's median K) by the caller so the
         array is dense.
+    per_frame_R:
+        Optional ``(N, 3, 3)`` array of per-frame calibrated world-to-
+        camera rotation (OpenCV convention), aligned to ``track_frames``
+        order — typically built via
+        ``src.stages.hmr_world.build_track_camera_R``. When supplied,
+        this replaces GVHMR's internal SimpleVO camera-rotation estimate
+        (skipped entirely) for every chunk. ``None`` preserves the
+        existing SimpleVO/identity fallback.
+    legacy_decode:
+        Passed straight through to ``estimate_sequence`` for every
+        chunk; see its docstring. Bench/regression escape hatch, not
+        used by the pipeline.
+    extractor_device:
+        Passed straight through to ``GVHMREstimator``'s constructor when
+        this call builds a fresh estimator (``estimator=None``); ignored
+        when a pre-constructed ``estimator`` is supplied (it already
+        carries its own resolved extractor device). Default ``"cpu"``
+        matches every existing caller bit-for-bit — see
+        ``GVHMREstimator.__init__`` for the hybrid-device semantics.
 
     Returns
     -------
@@ -799,7 +1222,9 @@ def run_on_track(
         )
 
     if estimator is None:
-        estimator = GVHMREstimator(checkpoint=str(checkpoint), device=device)
+        estimator = GVHMREstimator(
+            checkpoint=str(checkpoint), device=device, extractor_device=extractor_device,
+        )
 
     frame_indices = [int(fi) for fi, _ in track_frames]
     bboxes = [list(map(float, bb)) for _, bb in track_frames]
@@ -820,8 +1245,13 @@ def run_on_track(
         sub_K = (
             per_frame_K[start:end] if per_frame_K is not None else None
         )
+        sub_R = (
+            per_frame_R[start:end] if per_frame_R is not None else None
+        )
         out = estimator.estimate_sequence(
-            sub_frames, sub_bboxes, K_per_frame=sub_K
+            sub_frames, sub_bboxes,
+            K_per_frame=sub_K, R_w2c_per_frame=sub_R,
+            legacy_decode=legacy_decode,
         )
 
         global_orient = out["global_orient"]                # (M, 3)

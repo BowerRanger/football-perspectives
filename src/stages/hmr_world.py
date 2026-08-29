@@ -279,6 +279,7 @@ class HmrWorldStage(BaseStage):
             estimator = GVHMREstimator(
                 checkpoint=str(cfg.get("checkpoint", "")),
                 device=str(cfg.get("device", "auto")),
+                extractor_device=str(cfg.get("extractor_device", "cpu")),
             )
 
         run_start = time.time()
@@ -428,6 +429,65 @@ class HmrWorldStage(BaseStage):
         )
 
 
+def build_track_camera_R(
+    track_frames: list[tuple[int, tuple[int, int, int, int]]],
+    per_frame_R: dict[int, np.ndarray],
+) -> np.ndarray | None:
+    """Build a dense ``(N, 3, 3)`` world-to-camera rotation array aligned
+    to ``track_frames`` order, for GVHMR's calibrated-camera-R path
+    (``run_on_track``'s ``per_frame_R`` / ``estimate_sequence``'s
+    ``R_w2c_per_frame``).
+
+    ``per_frame_R`` (the camera_track's per-frame R, same dict already
+    used a few lines below to convert root rotation into pitch frame)
+    rarely covers every track frame exactly — camera anchors and
+    propagation can leave small per-shot gaps. Missing frames are filled
+    from the NEAREST available frame's R: the previous frame when one has
+    already been seen, otherwise the next available frame (for a leading
+    gap before any camera data). Rotations are never averaged — blending
+    two rotation matrices isn't a rotation.
+
+    Returns ``None`` when ``per_frame_R`` is empty or none of its keys
+    match any frame in ``track_frames`` (the caller then falls back to
+    GVHMR's own SimpleVO estimate).
+
+    Factored out as a module-level helper (rather than inlined in
+    ``process_player``) so ``scripts/bench_gvhmr_inference.py`` can build
+    the identical dense-R array outside the stage.
+    """
+    if not per_frame_R:
+        return None
+    frame_indices = [int(fi) for fi, _ in track_frames]
+    n = len(frame_indices)
+    resolved: list[np.ndarray | None] = [None] * n
+    for i, fi in enumerate(frame_indices):
+        R = per_frame_R.get(fi)
+        if R is not None:
+            resolved[i] = np.asarray(R, dtype=np.float32)
+    if all(r is None for r in resolved):
+        return None
+
+    # Forward-fill: propagate each frame's R to subsequent missing frames
+    # (nearest previous available frame).
+    last: np.ndarray | None = None
+    for i in range(n):
+        if resolved[i] is not None:
+            last = resolved[i]
+        elif last is not None:
+            resolved[i] = last
+
+    # Backward-fill any remaining leading gap (no previous frame existed
+    # yet) from the next available frame.
+    nxt: np.ndarray | None = None
+    for i in range(n - 1, -1, -1):
+        if resolved[i] is not None:
+            nxt = resolved[i]
+        elif nxt is not None:
+            resolved[i] = nxt
+
+    return np.stack(resolved, axis=0).astype(np.float32)
+
+
 def process_player(
     *,
     player_id: str,
@@ -501,15 +561,22 @@ def process_player(
             [per_frame_K.get(int(fi), K_median) for fi, _ in track_frames]
         ).astype(np.float32)
 
+    # Dense per-track-frame calibrated camera R (world-to-camera), for
+    # GVHMR's camera-rotation conditioning. When available this replaces
+    # GVHMR's internal SimpleVO estimate — see build_track_camera_R.
+    gvhmr_R = build_track_camera_R(track_frames, per_frame_R)
+
     hmr_out = run_on_track(
         track_frames=track_frames,
         video_path=video_path,
         checkpoint=Path(cfg.get("checkpoint", "")),
         device=str(cfg.get("device", "auto")),
+        extractor_device=str(cfg.get("extractor_device", "cpu")),
         batch_size=int(cfg.get("batch_size", 16)),
         max_sequence_length=int(cfg.get("max_sequence_length", 120)),
         estimator=estimator,
         per_frame_K=gvhmr_K,
+        per_frame_R=gvhmr_R,
     )
     thetas = np.asarray(hmr_out["thetas"])             # (N, 24, 3)
     betas_all = np.asarray(hmr_out["betas"])           # (N, 10)

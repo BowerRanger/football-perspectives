@@ -35,6 +35,9 @@ from src.schemas.ball_fixes import BallFixSet  # noqa: E402
 from src.schemas.ball_track import BallTrack  # noqa: E402
 from src.schemas.camera_track import CameraTrack  # noqa: E402
 from src.utils import ball_eval as BE  # noqa: E402
+from src.utils.ball_detection_cache import (  # noqa: E402
+    CachingBallDetector as CachingDetector,
+)
 from src.utils.ball_detector import BallDetector  # noqa: E402
 
 # Top-level entries never linked into an overlay: ball outputs (replaced by
@@ -51,68 +54,6 @@ class NoopDetector(BallDetector):
 
     def detect(self, frame):  # noqa: ANN001
         return None
-
-
-class CachingDetector(BallDetector):
-    """Content-hash cache around a real detector.
-
-    Detector inference dominates eval runtime (a WASB hold-out run costs
-    CPU-hours); frames decode deterministically, so caching on a frame-content
-    hash lets one run pay and every later run — including the second fold of
-    the same run — replay. Crops from the second-pass/foot-guided loops hash
-    differently from full frames, so all passes cache correctly.
-    """
-
-    def __init__(self, inner: BallDetector, cache_path: Path):
-        self._inner = inner
-        self._path = Path(cache_path)
-        self._detect: dict[str, tuple | None] = {}
-        self._cands: dict[str, list] = {}
-        self._dirty = 0
-        self.SUPPORTS_REDETECT = getattr(inner, "SUPPORTS_REDETECT", True)
-        if self._path.exists():
-            data = json.loads(self._path.read_text())
-            self._detect = {k: (tuple(v) if v is not None else None)
-                            for k, v in data.get("detect", {}).items()}
-            self._cands = {k: [tuple(c) for c in v]
-                           for k, v in data.get("candidates", {}).items()}
-
-    @staticmethod
-    def _key(frame) -> str:
-        import hashlib
-        h = hashlib.md5(frame[::4, ::4].tobytes())
-        h.update(str(frame.shape).encode())
-        return h.hexdigest()
-
-    def detect(self, frame):  # noqa: ANN001
-        k = self._key(frame)
-        if k in self._detect:
-            return self._detect[k]
-        det = self._inner.detect(frame)
-        self._detect[k] = tuple(det) if det is not None else None
-        self._dirty += 1
-        if self._dirty >= 200:
-            self.save()
-        return det
-
-    def detect_candidates(self, frame, min_score, top_k=5):  # noqa: ANN001
-        k = f"{self._key(frame)}:{min_score}:{top_k}"
-        if k in self._cands:
-            return list(self._cands[k])
-        out = self._inner.detect_candidates(frame, min_score, top_k)
-        self._cands[k] = [tuple(c) for c in out]
-        self._dirty += 1
-        return out
-
-    def save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps({
-            "detect": {k: (list(v) if v is not None else None)
-                       for k, v in self._detect.items()},
-            "candidates": {k: [list(c) for c in v]
-                           for k, v in self._cands.items()},
-        }))
-        self._dirty = 0
 
 
 def build_overlay(src_output: Path, tmp_root: Path, shot_id: str,

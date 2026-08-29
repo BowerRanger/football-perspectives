@@ -101,6 +101,7 @@ from src.utils.ball_context_prior import (
     ContextPriorCfg,
     load_player_boxes,
 )
+from src.utils.ball_detection_cache import CachingBallDetector, wrap_if_enabled
 from src.utils.ball_cross_replay import (
     CrossReplayCfg,
     PairFix,
@@ -844,7 +845,21 @@ class BallStage(BaseStage):
     def run(self) -> None:
         cfg = self.config.get("ball", {})
         detector = self.ball_detector if self.ball_detector is not None else _build_detector(cfg)
+        # Opt-in persistent detection cache (ball.detection_cache.enabled,
+        # default false): wraps whichever detector was just built/injected
+        # at the detect/detect_candidates boundary only, so it never
+        # touches anchor merge, event minting or touch_attribution. Flush
+        # on every exit path so a later run replays fully rather than
+        # falling through to the wrapped detector for whatever the
+        # periodic autosave hadn't persisted yet.
+        detector = wrap_if_enabled(detector, cfg, self.output_dir)
+        try:
+            self._run_all_shots(detector, cfg)
+        finally:
+            if isinstance(detector, CachingBallDetector):
+                detector.save()
 
+    def _run_all_shots(self, detector: BallDetector, cfg: dict) -> None:
         manifest_path = self.output_dir / "shots" / "shots_manifest.json"
         if not manifest_path.exists():
             # Legacy single-shot path. Use the unprefixed file names.

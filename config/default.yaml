@@ -434,6 +434,21 @@ ball:
   # third_party/wasb_sbdt). yolo is the COCO class-32 fallback. fake is
   # used only in tests via dependency injection.
   detector: wasb
+  # Opt-in persistent detection cache: wraps the detector built above at
+  # the detect/detect_candidates boundary with a frame-content-hash
+  # cache (src/utils/ball_detection_cache.py), so a ball-stage re-run
+  # (e.g. after editing anchors) replays stored detections instead of
+  # re-running WASB inference. Cache key = frame content hash + a
+  # detector fingerprint (checkpoint path/sha256/size, confidence,
+  # input_size) so swapping the checkpoint or editing ball.wasb.* auto-
+  # invalidates stale entries. Default off: first-run behaviour is
+  # identical whether this is enabled or not. Cache files are gitignored
+  # — never committed, never treated as model weights.
+  detection_cache:
+    enabled: false
+    # Relative paths resolve against the run's --output dir; an absolute
+    # path is used as-is.
+    path: ball/detection_cache.json
   ball_radius_m: 0.11
   # Ball back-end: events | piecewise | global.
   #   events    (default) — resolve a sparse set of 3-D events (player

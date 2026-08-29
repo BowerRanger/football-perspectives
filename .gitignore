@@ -226,3 +226,11 @@ test-media/
 # Vendored WASB-SBDT source is tracked; its model checkpoint is not (5.8 MB
 # binary, downloaded once). Path referenced by config/default.yaml ball.detector.
 third_party/wasb_sbdt/pretrained_weights/
+
+# Ball stage's opt-in persistent detection cache (ball.detection_cache.*,
+# src/utils/ball_detection_cache.py). Per-run iteration artifact, not
+# model weights and never committed — matches the default
+# ball/detection_cache.json path under any --output dir, plus any custom
+# location a user points ball.detection_cache.path at.
+detection_cache.json
+**/detection_cache.json

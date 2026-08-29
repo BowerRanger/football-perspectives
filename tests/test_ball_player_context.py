@@ -16,9 +16,17 @@ from src.schemas.refined_pose import RefinedPose
 from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.sync_map import Alignment, GroupSync, SyncMap
 from src.utils.ball_anchor_heights import BONE_TO_SMPL_INDEX
-from src.utils.ball_player_context import JointSample, PlayerContext
+from src.utils.ball_player_context import (
+    JointSample,
+    PlayerContext,
+    _discover_hmr,
+    _discover_refined,
+    _load_hmr,
+    _load_refined,
+    _sync_offset,
+)
 from src.utils.camera_projection import project_world_to_image
-from src.utils.smpl_skeleton import compute_joint_world
+from src.utils.smpl_skeleton import compute_all_joint_worlds, compute_joint_world
 
 SHOT = "shot01"
 N_FRAMES = 5
@@ -49,6 +57,24 @@ def _per_frame_cams(n: int):
         {i: R for i in range(n)},
         {i: t for i in range(n)},
     )
+
+
+def _camera_looking_away_from_pitch() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Same intrinsics/position as ``_camera_looking_down_pitch`` but the
+    optical axis points away from the pitch, so pitch-side joints land
+    behind the camera (cam_z <= 0) -> ``uv=None``."""
+    K = np.array([[1200.0, 0.0, 960.0], [0.0, 1200.0, 540.0], [0.0, 0.0, 1.0]])
+    cam_centre = np.array([52.5, -20.0, 15.0])
+    target = np.array([52.5, -60.0, 40.0])  # away from the pitch, not toward it
+    fwd = target - cam_centre
+    fwd = fwd / np.linalg.norm(fwd)
+    world_up = np.array([0.0, 0.0, 1.0])
+    right = np.cross(fwd, world_up)
+    right /= np.linalg.norm(right)
+    down = np.cross(fwd, right)
+    R = np.stack([right, down, fwd])
+    t = -R @ cam_centre
+    return K, R, t
 
 
 def _make_track_arrays(n: int, *, seed: int, base_xy: tuple[float, float]):
@@ -220,3 +246,161 @@ class TestDegradation:
         _write_hmr_track(tmp_path, "P001", seed=11)
         ctx = _load_ctx(tmp_path)
         assert ctx.joint_world(0, "P001", "left_pinky") is None
+
+
+def _reference_load(
+    output_dir: Path,
+    shot_id: str,
+    *,
+    per_frame_K: dict[int, np.ndarray],
+    per_frame_R: dict[int, np.ndarray],
+    per_frame_t: dict[int, np.ndarray],
+    distortion: tuple[float, float] = (0.0, 0.0),
+    bones: tuple[str, ...] | None = None,
+) -> dict[int, tuple[JointSample, ...]]:
+    """Frozen copy of the PRE-batch ``PlayerContext.load`` frame/player
+    loop: one ``compute_all_joint_worlds`` (single-frame FK) call per
+    player per frame, one ``project_world_to_image`` call per player per
+    frame. This is the oracle the batched-FK rewrite must match exactly
+    (world_xyz, uv incl. None, ordering). Reuses the unchanged discovery
+    helpers (``_discover_refined`` etc.) since only the FK/projection
+    batching is in scope for the rewrite, not source discovery.
+    """
+    bone_names = tuple(bones) if bones is not None else tuple(BONE_TO_SMPL_INDEX)
+    joint_indices = np.array(
+        [BONE_TO_SMPL_INDEX[b] for b in bone_names], dtype=int
+    )
+    offset = _sync_offset(output_dir, shot_id)
+    refined_paths = _discover_refined(output_dir)
+    hmr_paths = _discover_hmr(output_dir, shot_id)
+
+    loaded = {}
+    for pid in sorted(set(refined_paths) | set(hmr_paths)):
+        refined = (
+            _load_refined(refined_paths[pid], offset)
+            if pid in refined_paths else None
+        )
+        hmr = _load_hmr(hmr_paths[pid]) if pid in hmr_paths else None
+        if refined is not None or hmr is not None:
+            loaded[pid] = (refined, hmr)
+
+    samples_by_frame: dict[int, tuple[JointSample, ...]] = {}
+    for fi in sorted(per_frame_K):
+        K, R, t = per_frame_K[fi], per_frame_R[fi], per_frame_t[fi]
+        frame_samples: list[JointSample] = []
+        for pid, (refined, hmr) in loaded.items():
+            chosen = None
+            idx = None
+            for candidate in (refined, hmr):
+                if candidate is None:
+                    continue
+                idx = candidate.index_by_local_frame.get(fi)
+                if idx is not None:
+                    chosen = candidate
+                    break
+            if chosen is None or idx is None:
+                continue
+            track = chosen.track
+            all_joints = compute_all_joint_worlds(
+                track.thetas[idx], track.root_R[idx], track.root_t[idx],
+            )
+            worlds = all_joints[joint_indices]
+            cam_z = (worlds @ R.T + t)[:, 2]
+            uvs = project_world_to_image(K, R, t, distortion, worlds)
+            conf = float(track.confidence[idx])
+            for bone, world, uv, z in zip(bone_names, worlds, uvs, cam_z):
+                frame_samples.append(JointSample(
+                    player_id=pid,
+                    bone=bone,
+                    world_xyz=(
+                        float(world[0]), float(world[1]), float(world[2])
+                    ),
+                    uv=(float(uv[0]), float(uv[1])) if z > 0 else None,
+                    confidence=conf,
+                ))
+        if frame_samples:
+            samples_by_frame[fi] = tuple(frame_samples)
+    return samples_by_frame
+
+
+class TestBatchedFkRegression:
+    """Pins ``PlayerContext.load`` against the pre-batch reference loop
+    on a synthetic multi-frame, multi-player track that exercises:
+    refined source, hmr fallback (mixed per-frame per-player, i.e. the
+    same player drawing FK inputs from two different track arrays across
+    the query range), a sync offset, and a forced ``uv=None`` frame
+    (camera facing away from the pitch).
+    """
+
+    N = 6
+
+    def _build_track(self, tmp_path: Path) -> tuple[
+        dict[int, np.ndarray], dict[int, np.ndarray], dict[int, np.ndarray]
+    ]:
+        offset = 2
+        _write_sync_map(tmp_path, offset)
+        # P001: hmr-only, covers every query frame.
+        _write_hmr_track(tmp_path, "P001", seed=101, base_xy=(40.0, 25.0), n=self.N)
+        # P002: refined covers local frames 0-3 (via frame_shift=-offset),
+        # hmr covers all 6 -> frames 4-5 fall back to hmr. Exercises a
+        # single player's FK batch drawing rows from two different track
+        # objects at different per-track indices.
+        _write_refined_track(
+            tmp_path, "P002", seed=102, frame_shift=-offset,
+            base_xy=(55.0, 35.0), n=4,
+        )
+        _write_hmr_track(tmp_path, "P002", seed=103, base_xy=(55.0, 35.0), n=self.N)
+
+        Ks, Rs, ts = _per_frame_cams(self.N)
+        # Frame 4's camera faces away from the pitch -> every sample at
+        # that frame must come back with uv=None.
+        K_away, R_away, t_away = _camera_looking_away_from_pitch()
+        Ks[4], Rs[4], ts[4] = K_away, R_away, t_away
+        return Ks, Rs, ts
+
+    def test_batched_load_matches_reference_loop(self, tmp_path):
+        Ks, Rs, ts = self._build_track(tmp_path)
+        distortion = (0.1, -0.02)
+
+        expected = _reference_load(
+            tmp_path, SHOT,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=distortion,
+        )
+        ctx = PlayerContext.load(
+            tmp_path, SHOT,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=distortion,
+        )
+
+        # Sanity: the scenario actually exercises what it claims to.
+        assert expected, "reference loop produced no samples at all"
+        assert 4 in expected, "expected samples at the away-camera frame"
+        assert any(s.uv is None for s in expected[4]), (
+            "away-camera frame should yield uv=None samples"
+        )
+        assert any(s.player_id == "P002" for s in expected[0]), (
+            "P002 should be present via refined at frame 0"
+        )
+        assert any(s.player_id == "P002" for s in expected[5]), (
+            "P002 should be present via hmr fallback at frame 5"
+        )
+
+        assert set(ctx._by_frame.keys()) == set(expected.keys())
+        for fi, expected_samples in expected.items():
+            got_samples = ctx.joints_at(fi)
+            assert len(got_samples) == len(expected_samples), fi
+            for got, exp in zip(got_samples, expected_samples):
+                assert got.player_id == exp.player_id
+                assert got.bone == exp.bone
+                assert got.confidence == pytest.approx(exp.confidence)
+                np.testing.assert_allclose(
+                    got.world_xyz, exp.world_xyz, atol=1e-9, rtol=1e-9,
+                )
+                if exp.uv is None:
+                    assert got.uv is None, (fi, got.player_id, got.bone)
+                else:
+                    assert got.uv is not None, (fi, got.player_id, got.bone)
+                    np.testing.assert_allclose(
+                        got.uv, exp.uv, atol=1e-6, rtol=1e-6,
+                    )

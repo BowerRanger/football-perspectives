@@ -204,6 +204,115 @@ def compute_all_joint_worlds(
     return global_pos @ root_R.T + root_t
 
 
+def _axis_angle_to_matrix_batch(aa: np.ndarray) -> np.ndarray:
+    """Convert (N, 3) axis-angle vectors to (N, 3, 3) rotation matrices.
+
+    Vectorized Rodrigues' formula (same shape as the one in
+    ``gvhmr_estimator._axis_angle_to_matrix``, duplicated locally so this
+    module keeps its own zero-torch-dependency contract). The near-zero
+    cutoff intentionally matches :func:`axis_angle_to_matrix` exactly
+    (``theta < 1e-12`` -> identity) so batched and per-frame FK agree to
+    float64 precision — a looser cutoff here would diverge from the
+    single-frame path for tiny-but-nonzero rotations.
+    """
+    aa = np.asarray(aa, dtype=np.float64).reshape(-1, 3)
+    n = aa.shape[0]
+    out = np.tile(np.eye(3), (n, 1, 1))
+    if n == 0:
+        return out
+
+    theta = np.linalg.norm(aa, axis=1)  # (N,)
+    nonzero = theta >= 1e-12
+    if not np.any(nonzero):
+        return out
+
+    axis = aa[nonzero] / theta[nonzero, np.newaxis]  # (M, 3)
+    th = theta[nonzero]
+    sin_t = np.sin(th)[:, np.newaxis, np.newaxis]
+    cos_t = np.cos(th)[:, np.newaxis, np.newaxis]
+
+    M = axis.shape[0]
+    K = np.zeros((M, 3, 3), dtype=np.float64)
+    K[:, 0, 1] = -axis[:, 2]
+    K[:, 0, 2] = axis[:, 1]
+    K[:, 1, 0] = axis[:, 2]
+    K[:, 1, 2] = -axis[:, 0]
+    K[:, 2, 0] = -axis[:, 1]
+    K[:, 2, 1] = axis[:, 0]
+
+    K2 = K @ K
+    R = np.eye(3) + sin_t * K + (1.0 - cos_t) * K2
+    out[nonzero] = R
+    return out
+
+
+def compute_all_joint_worlds_batch(
+    thetas: np.ndarray,
+    root_R: np.ndarray,
+    root_t: np.ndarray,
+    rest_joints: np.ndarray | None = None,
+) -> np.ndarray:
+    """Batched forward-kinematics: world positions of all 24 SMPL joints,
+    vectorized over frames. Shape (F, 24, 3).
+
+    Vectorized-over-frames counterpart to :func:`compute_all_joint_worlds`,
+    for callers that need FK on a whole track at once (export, refined
+    poses) instead of one Python-level call per frame. Same conventions:
+    ``thetas[:, 0]`` (per-frame global orient) is ignored — ``root_R``
+    already carries each frame's root world orientation. Output is
+    numerically identical (to float64 precision) to stacking
+    ``compute_all_joint_worlds`` over frames.
+
+    Inputs:
+        thetas: (F, 24, 3) axis-angle, one row per frame per joint.
+        root_R: (F, 3, 3) per-frame world rotation of the root joint.
+        root_t: (F, 3) per-frame pelvis translation in pitch world (metres).
+        rest_joints: optional (24, 3) override of the rest-pose joint
+            table, as in the single-frame functions.
+    """
+    rest = (
+        np.asarray(rest_joints, dtype=np.float64)
+        if rest_joints is not None else SMPL_REST_JOINTS_YUP
+    )
+    thetas = np.asarray(thetas, dtype=np.float64)
+    root_R = np.asarray(root_R, dtype=np.float64)
+    root_t = np.asarray(root_t, dtype=np.float64)
+
+    if thetas.ndim != 3 or thetas.shape[1:] != (24, 3):
+        raise ValueError(f"thetas must have shape (F, 24, 3), got {thetas.shape}")
+    n_frames = thetas.shape[0]
+    if root_R.shape != (n_frames, 3, 3):
+        raise ValueError(
+            f"root_R must have shape ({n_frames}, 3, 3), got {root_R.shape}"
+        )
+    if root_t.shape != (n_frames, 3):
+        raise ValueError(
+            f"root_t must have shape ({n_frames}, 3), got {root_t.shape}"
+        )
+
+    local_rot = _axis_angle_to_matrix_batch(thetas.reshape(-1, 3)).reshape(
+        n_frames, 24, 3, 3
+    )
+
+    global_rot = np.empty((n_frames, 24, 3, 3), dtype=np.float64)
+    global_pos = np.empty((n_frames, 24, 3), dtype=np.float64)
+    global_rot[:, 0] = np.eye(3)
+    global_pos[:, 0] = rest[0]
+    for j in range(1, 24):
+        p = SMPL_PARENTS[j]
+        global_rot[:, j] = np.einsum(
+            "fik,fkl->fil", global_rot[:, p], local_rot[:, j]
+        )
+        offset = rest[j] - rest[p]
+        global_pos[:, j] = global_pos[:, p] + np.einsum(
+            "fik,k->fi", global_rot[:, p], offset
+        )
+
+    # Canonical y-up -> pitch world, per frame: pos = root_R @ global_pos[j] + root_t.
+    world_pos = np.einsum("fba,fja->fjb", root_R, global_pos) + root_t[:, np.newaxis, :]
+    return world_pos
+
+
 def compute_joint_world(
     thetas: np.ndarray,
     root_R: np.ndarray,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from src.utils.smpl_skeleton import (
     SMPL_JOINT_NAMES,
@@ -10,6 +11,8 @@ from src.utils.smpl_skeleton import (
     SMPL_REST_JOINTS_YUP,
     axis_angle_to_matrix,
     axis_angle_to_quaternion,
+    compute_all_joint_worlds,
+    compute_all_joint_worlds_batch,
     compute_joint_world,
     compute_joint_world_pose,
     parent_relative_offsets_yup,
@@ -166,3 +169,122 @@ def test_compute_joint_world_pose_composes_joint_and_root_rotation() -> None:
 
     expected = root_R @ axis_angle_to_matrix(np.array([0.0, np.pi / 2, 0.0]))
     np.testing.assert_allclose(R_world, expected, atol=1e-9)
+
+
+# --- compute_all_joint_worlds_batch --------------------------------------
+
+
+def test_compute_all_joint_worlds_batch_matches_loop_random_poses() -> None:
+    """Batched FK must exactly match calling compute_all_joint_worlds
+    per-frame, for randomized poses (root rotation + translation)."""
+    rng = np.random.default_rng(42)
+    F = 37
+    thetas = rng.normal(scale=0.6, size=(F, 24, 3))
+    root_axis_angle = rng.normal(scale=np.pi, size=(F, 3))
+    root_R = np.stack([axis_angle_to_matrix(a) for a in root_axis_angle])
+    root_t = rng.normal(scale=5.0, size=(F, 3))
+
+    batch = compute_all_joint_worlds_batch(thetas, root_R, root_t)
+    expected = np.stack(
+        [
+            compute_all_joint_worlds(thetas[f], root_R[f], root_t[f])
+            for f in range(F)
+        ]
+    )
+
+    assert batch.shape == (F, 24, 3)
+    np.testing.assert_allclose(batch, expected, atol=1e-9)
+
+
+def test_compute_all_joint_worlds_batch_near_zero_axis_angle() -> None:
+    """Small-magnitude axis-angle rows exercise Rodrigues' small-angle
+    branch — batch must agree with the per-frame path to <=1e-9, including
+    exact zeros and magnitudes far below the 1e-12 identity cutoff."""
+    rng = np.random.default_rng(7)
+    F = 10
+    thetas = rng.normal(scale=1e-10, size=(F, 24, 3))
+    thetas[0] = 0.0  # exact zero row
+    thetas[1, 5] = np.array([0.0, 0.0, np.pi / 3])  # one real rotation mixed in
+    root_R = np.stack([np.eye(3) for _ in range(F)])
+    root_t = np.zeros((F, 3))
+
+    batch = compute_all_joint_worlds_batch(thetas, root_R, root_t)
+    expected = np.stack(
+        [
+            compute_all_joint_worlds(thetas[f], root_R[f], root_t[f])
+            for f in range(F)
+        ]
+    )
+
+    np.testing.assert_allclose(batch, expected, atol=1e-9)
+
+
+def test_compute_all_joint_worlds_batch_single_frame() -> None:
+    """F=1 edge case: a batch of one frame matches the single-frame call."""
+    rng = np.random.default_rng(3)
+    thetas = rng.normal(scale=0.4, size=(1, 24, 3))
+    root_R = axis_angle_to_matrix(np.array([0.1, -0.2, 0.3]))[np.newaxis, ...]
+    root_t = np.array([[1.5, -2.5, 0.0]])
+
+    batch = compute_all_joint_worlds_batch(thetas, root_R, root_t)
+    expected = compute_all_joint_worlds(thetas[0], root_R[0], root_t[0])
+
+    assert batch.shape == (1, 24, 3)
+    np.testing.assert_allclose(batch[0], expected, atol=1e-9)
+
+
+def test_compute_all_joint_worlds_batch_custom_rest_joints() -> None:
+    """``rest_joints`` override passes through unchanged, matching the
+    single-frame function's optional parameter."""
+    rng = np.random.default_rng(11)
+    F = 4
+    thetas = rng.normal(scale=0.3, size=(F, 24, 3))
+    root_R = np.stack([np.eye(3) for _ in range(F)])
+    root_t = np.zeros((F, 3))
+    rest = SMPL_REST_JOINTS_YUP * 1.05  # different bone lengths
+
+    batch = compute_all_joint_worlds_batch(thetas, root_R, root_t, rest_joints=rest)
+    expected = np.stack(
+        [
+            compute_all_joint_worlds(thetas[f], root_R[f], root_t[f], rest_joints=rest)
+            for f in range(F)
+        ]
+    )
+
+    np.testing.assert_allclose(batch, expected, atol=1e-9)
+
+
+def test_compute_all_joint_worlds_batch_rejects_shape_mismatch() -> None:
+    thetas = np.zeros((3, 24, 3))
+    root_R = np.stack([np.eye(3)] * 2)  # wrong F (2 instead of 3)
+    root_t = np.zeros((3, 3))
+    with pytest.raises(ValueError):
+        compute_all_joint_worlds_batch(thetas, root_R, root_t)
+
+
+def test_compute_all_joint_worlds_batch_ignores_theta0() -> None:
+    """Same convention as the single-frame path: thetas[:, 0] (global
+    orient) must be ignored in the batched FK too."""
+    F = 5
+    thetas = np.zeros((F, 24, 3))
+    thetas[:, 0] = np.array([0.0, 0.0, np.pi])  # 180 deg pelvis, must be ignored
+    root_R = np.stack([np.eye(3) for _ in range(F)])
+    root_t = np.zeros((F, 3))
+
+    batch = compute_all_joint_worlds_batch(thetas, root_R, root_t)
+    head_idx = SMPL_JOINT_NAMES.index("head")
+    for f in range(F):
+        np.testing.assert_allclose(
+            batch[f, head_idx], SMPL_REST_JOINTS_YUP[head_idx], atol=1e-9
+        )
+
+
+def test_compute_all_joint_worlds_batch_does_not_mutate_single_frame_functions() -> None:
+    """Sanity check that adding the batch path left the existing
+    single-frame API and its outputs untouched."""
+    thetas = np.zeros((24, 3))
+    root_R = np.eye(3)
+    root_t = np.array([1.0, 2.0, 3.0])
+    result = compute_all_joint_worlds(thetas, root_R, root_t)
+    assert result.shape == (24, 3)
+    np.testing.assert_allclose(result[0], root_t, atol=1e-9)

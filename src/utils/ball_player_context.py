@@ -26,7 +26,7 @@ import numpy as np
 
 from src.utils.ball_anchor_heights import BONE_TO_SMPL_INDEX
 from src.utils.camera_projection import project_world_to_image
-from src.utils.smpl_skeleton import compute_all_joint_worlds
+from src.utils.smpl_skeleton import compute_all_joint_worlds_batch
 
 logger = logging.getLogger(__name__)
 
@@ -193,11 +193,23 @@ class PlayerContext:
             if refined is not None or hmr is not None:
                 loaded[pid] = (refined, hmr)
 
-        samples_by_frame: dict[int, tuple[JointSample, ...]] = {}
-        for fi in sorted(per_frame_K):
-            K, R, t = per_frame_K[fi], per_frame_R[fi], per_frame_t[fi]
-            frame_samples: list[JointSample] = []
-            for pid, (refined, hmr) in loaded.items():
+        frame_list = sorted(per_frame_K)
+
+        # Per player: gather every query frame's FK inputs (drawn from
+        # whichever of refined/hmr covers that frame, same precedence as
+        # before) and run ONE batched FK call over the player's whole
+        # valid-frame span, instead of one `compute_all_joint_worlds`
+        # call per player per frame. Numerically identical to the
+        # per-frame loop (see `compute_all_joint_worlds_batch` docstring).
+        player_bones: dict[str, dict[int, np.ndarray]] = {}
+        player_conf: dict[str, dict[int, float]] = {}
+        for pid, (refined, hmr) in loaded.items():
+            valid_frames: list[int] = []
+            thetas_rows: list[np.ndarray] = []
+            root_R_rows: list[np.ndarray] = []
+            root_t_rows: list[np.ndarray] = []
+            conf_rows: list[float] = []
+            for fi in frame_list:
                 chosen: _LoadedTrack | None = None
                 idx: int | None = None
                 for candidate in (refined, hmr):
@@ -210,16 +222,46 @@ class PlayerContext:
                 if chosen is None or idx is None:
                     continue
                 track = chosen.track
-                all_joints = compute_all_joint_worlds(
-                    track.thetas[idx],          # type: ignore[attr-defined]
-                    track.root_R[idx],          # type: ignore[attr-defined]
-                    track.root_t[idx],          # type: ignore[attr-defined]
-                )
-                worlds = all_joints[joint_indices]
-                cam_z = (worlds @ R.T + t)[:, 2]
-                uvs = project_world_to_image(K, R, t, distortion, worlds)
-                conf = float(track.confidence[idx])  # type: ignore[attr-defined]
-                for bone, world, uv, z in zip(bone_names, worlds, uvs, cam_z):
+                valid_frames.append(fi)
+                thetas_rows.append(track.thetas[idx])      # type: ignore[attr-defined]
+                root_R_rows.append(track.root_R[idx])      # type: ignore[attr-defined]
+                root_t_rows.append(track.root_t[idx])      # type: ignore[attr-defined]
+                conf_rows.append(float(track.confidence[idx]))  # type: ignore[attr-defined]
+            if not valid_frames:
+                continue
+            all_joints = compute_all_joint_worlds_batch(
+                np.stack(thetas_rows), np.stack(root_R_rows), np.stack(root_t_rows),
+            )
+            worlds_by_frame = all_joints[:, joint_indices]  # (F, n_bones, 3)
+            player_bones[pid] = {
+                fi: worlds_by_frame[j] for j, fi in enumerate(valid_frames)
+            }
+            player_conf[pid] = dict(zip(valid_frames, conf_rows))
+
+        # Projection: grouped per frame across players, since every
+        # player at a given frame shares the same (K, R, t) — one
+        # `project_world_to_image` call per frame instead of one per
+        # player per frame.
+        samples_by_frame: dict[int, tuple[JointSample, ...]] = {}
+        for fi in frame_list:
+            present_pids = [pid for pid in loaded if fi in player_bones.get(pid, {})]
+            if not present_pids:
+                continue
+            K, R, t = per_frame_K[fi], per_frame_R[fi], per_frame_t[fi]
+            worlds_concat = np.concatenate(
+                [player_bones[pid][fi] for pid in present_pids], axis=0
+            )
+            cam_z = (worlds_concat @ R.T + t)[:, 2]
+            uvs = project_world_to_image(K, R, t, distortion, worlds_concat)
+            frame_samples: list[JointSample] = []
+            start = 0
+            n_bones = len(bone_names)
+            for pid in present_pids:
+                worlds = worlds_concat[start:start + n_bones]
+                pid_uvs = uvs[start:start + n_bones]
+                pid_z = cam_z[start:start + n_bones]
+                conf = player_conf[pid][fi]
+                for bone, world, uv, z in zip(bone_names, worlds, pid_uvs, pid_z):
                     frame_samples.append(JointSample(
                         player_id=pid,
                         bone=bone,
@@ -229,6 +271,7 @@ class PlayerContext:
                         uv=(float(uv[0]), float(uv[1])) if z > 0 else None,
                         confidence=conf,
                     ))
+                start += n_bones
             if frame_samples:
                 samples_by_frame[fi] = tuple(frame_samples)
 

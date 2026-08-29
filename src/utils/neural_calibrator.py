@@ -118,12 +118,43 @@ def _download_if_missing(url: str, dest: Path) -> None:
     tmp.replace(dest)
 
 
+def _paths_shadowing_pnlcalib(paths: list[str]) -> list[str]:
+    """sys.path entries that would shadow PnLCalib's ``utils``/``model``.
+
+    PnLCalib's packages are NAMESPACE packages (no ``__init__.py``), so a
+    REGULAR ``utils`` or ``model`` package anywhere on sys.path beats them
+    regardless of path order.  Any ``.../src`` entry providing one must be
+    removed for the import to work — crucially not just this checkout's
+    ``src`` (the old behaviour): the editable install pins the primary
+    checkout's ``src`` into every venv process, so code running from a git
+    worktree would remove ``<worktree>/src``, leave ``<main>/src`` behind,
+    and every ``calibrate()`` would fail with ``No module named
+    'utils.utils_calib'`` — silently disabling the PnLCalib bootstrap and
+    changing camera solves on poor-coverage clips (the origi01 baseline
+    artifact, debugged 2026-08-25).  Only ``src``-named entries are pruned
+    so site-packages is never touched mid-import.
+    """
+    out = []
+    for p in paths:
+        try:
+            base = Path(p or ".")
+            if base.name != "src":
+                continue
+            if ((base / "utils" / "__init__.py").exists()
+                    or (base / "model" / "__init__.py").exists()):
+                out.append(p)
+        except OSError:
+            continue
+    return out
+
+
 def _import_pnlcalib_modules() -> dict[str, Any]:
     """Import PnLCalib's inference helpers, keeping sys.path clean afterwards.
 
     PnLCalib uses bare ``import utils.*`` / ``import model.*``.  Our project
     installs ``src/`` on sys.path via an editable install, so ``utils`` would
-    normally resolve to ``src/utils/``.  We temporarily remove ``src/`` and put
+    normally resolve to ``src/utils/``.  We temporarily remove every
+    shadowing ``src/`` entry (see :func:`_paths_shadowing_pnlcalib`) and put
     the PnLCalib root first.  The loaded modules remain in ``sys.modules`` as
     ``utils``/``model``/``sn_calibration``, but our own code never does bare
     ``import utils`` — it always uses ``from src.utils.X import Y`` — so there
@@ -135,8 +166,7 @@ def _import_pnlcalib_modules() -> dict[str, Any]:
             "Run `git submodule update --init --recursive`."
         )
 
-    src_path = str(_REPO_ROOT / "src")
-    removed = [p for p in sys.path if p == src_path or p.rstrip("/") == src_path]
+    removed = _paths_shadowing_pnlcalib(sys.path)
     for p in removed:
         sys.path.remove(p)
     sys.path.insert(0, str(_PNLCALIB_ROOT))

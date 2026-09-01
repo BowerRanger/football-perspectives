@@ -84,6 +84,16 @@ _MIN_CAPSULE_BONE_LEN_M = 0.02
 # fallback so a missing team classification never crashes the build.
 _FALLBACK_KIT_HEX = {"shirt": "#888888", "shorts": "#666666", "socks": "#888888"}
 
+# --- Toon-look constants ----------------------------------------------
+# Ball kit is not team-configurable (single shared texture) — same
+# pattern as SKIN_COLOR_HEX above.
+BALL_COLOR_HEX = "#f2f2f2"
+# Blob-shadow disc radii (Task 7 brief / controller ruling): per-player
+# large enough to read under a standing figure, ball tighter to its
+# smaller footprint.
+PLAYER_SHADOW_RADIUS_M = 0.4
+BALL_SHADOW_RADIUS_M = 0.15
+
 # Task 2's config/default.yaml `render.style` block, verbatim — the
 # fallback whenever `--style-json` omits a key (RenderStage always
 # passes `render.style`, but a bare `{}` — as in the smoke test — must
@@ -426,6 +436,117 @@ def main(argv: list[str]) -> int:
         _build_stadium(palette)
         _build_world(palette)
 
+    # --- Toon materials, outlines, blob shadows -------------------------
+    # Cel-shaded look (Task 7): Diffuse -> Shader-to-RGB -> constant
+    # ColorRamp -> Emission quantises lighting into `ramp_steps` bands.
+    # ShaderNodeShaderToRGB is EEVEE-only; guarded here (rather than
+    # assumed) since a Cycles-only Blender build would otherwise raise on
+    # node creation — falls back to flat Emission and prints
+    # TOON_FALLBACK_FLAT once. Confirmed present on the Blender 5.1.1
+    # build this task runs against.
+    _shader_to_rgb_available = hasattr(bpy.types, "ShaderNodeShaderToRGB")
+    _toon_material_count = 0
+    _outline_count = 0
+    _printed_toon_fallback = False
+
+    def _toon_material(name: str, rgba, ramp_steps: int) -> object:
+        """Diffuse -> Shader-to-RGB -> constant ColorRamp -> Emission.
+
+        The ramp quantises lighting into ``ramp_steps`` bands (classic cel
+        shading). Emission output keeps the bands flat and print-like.
+        """
+        nonlocal _toon_material_count, _printed_toon_fallback
+        mat = bpy.data.materials.new(name)
+        mat.use_nodes = True
+        nt = mat.node_tree
+        nt.nodes.clear()
+        out = nt.nodes.new("ShaderNodeOutputMaterial")
+
+        if not _shader_to_rgb_available:
+            if not _printed_toon_fallback:
+                print("TOON_FALLBACK_FLAT")
+                _printed_toon_fallback = True
+            emit = nt.nodes.new("ShaderNodeEmission")
+            emit.inputs["Color"].default_value = rgba
+            nt.links.new(emit.outputs["Emission"], out.inputs["Surface"])
+            _toon_material_count += 1
+            return mat
+
+        diffuse = nt.nodes.new("ShaderNodeBsdfDiffuse")
+        diffuse.inputs["Color"].default_value = rgba
+        to_rgb = nt.nodes.new("ShaderNodeShaderToRGB")
+        ramp = nt.nodes.new("ShaderNodeValToRGB")
+        ramp.color_ramp.interpolation = "CONSTANT"
+        # evenly spaced constant stops from 35% to 100% brightness
+        ramp.color_ramp.elements[0].position = 0.0
+        ramp.color_ramp.elements[0].color = tuple(c * 0.35 for c in rgba[:3]) + (1.0,)
+        ramp.color_ramp.elements[1].position = 0.55
+        ramp.color_ramp.elements[1].color = rgba
+        for k in range(1, ramp_steps - 1):
+            el = ramp.color_ramp.elements.new(0.15 + 0.4 * k / max(1, ramp_steps - 1))
+            f = 0.35 + 0.65 * k / max(1, ramp_steps - 1)
+            el.color = tuple(c * f for c in rgba[:3]) + (1.0,)
+        emit = nt.nodes.new("ShaderNodeEmission")
+        nt.links.new(diffuse.outputs["BSDF"], to_rgb.inputs["Shader"])
+        # Blender 5.1.1 adaptation: ValToRGB's factor input socket is
+        # named "Factor", not "Fac" as in the brief's snippet — renamed in
+        # Blender's node socket-name pass. (MixRGB's "Fac" input used
+        # elsewhere in this file is a different node type and unaffected;
+        # verified both against the running Blender before wiring this.)
+        nt.links.new(to_rgb.outputs["Color"], ramp.inputs["Factor"])
+        nt.links.new(ramp.outputs["Color"], emit.inputs["Color"])
+        nt.links.new(emit.outputs["Emission"], out.inputs["Surface"])
+        _toon_material_count += 1
+        return mat
+
+    def _add_outline(obj: object, width_m: float, rgba) -> None:
+        """Inverted-hull outline: Solidify with flipped normals +
+        backface-culled emission black shell."""
+        nonlocal _outline_count
+        mat = bpy.data.materials.new(obj.name + "_outline")
+        mat.use_nodes = True
+        nt = mat.node_tree
+        nt.nodes.clear()
+        out = nt.nodes.new("ShaderNodeOutputMaterial")
+        emit = nt.nodes.new("ShaderNodeEmission")
+        emit.inputs["Color"].default_value = rgba
+        nt.links.new(emit.outputs["Emission"], out.inputs["Surface"])
+        mat.use_backface_culling = True
+        obj.data.materials.append(mat)
+        mod = obj.modifiers.new("Outline", "SOLIDIFY")
+        mod.thickness = -abs(width_m)
+        mod.use_flip_normals = True
+        mod.material_offset = len(obj.data.materials) - 1
+        _outline_count += 1
+
+    def _add_blob_shadow(target_obj: object, radius_m: float) -> object:
+        """Soft dark disc at z=0.01 following the target's XY (drivers)."""
+        bpy.ops.mesh.primitive_circle_add(
+            vertices=24, radius=radius_m,
+            # Blender 5.1.1 adaptation: the operator's fill kwarg is
+            # `fill_type`, not `fill_mode` as in the brief's snippet
+            # (confirmed via bpy.ops.mesh.primitive_circle_add's rna
+            # property list before wiring this in); "NGON" is unchanged.
+            fill_type="NGON")
+        disc = bpy.context.active_object
+        disc.location.z = 0.01
+        for axis in (0, 1):
+            drv = disc.driver_add("location", axis).driver
+            var = drv.variables.new()
+            var.name = "src"
+            var.type = "TRANSFORMS"
+            var.targets[0].id = target_obj
+            var.targets[0].transform_type = ("LOC_X", "LOC_Y")[axis]
+            drv.expression = "src"
+        mat = bpy.data.materials.new(disc.name + "_mat")
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes["Principled BSDF"]
+        bsdf.inputs["Base Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+        bsdf.inputs["Alpha"].default_value = 0.35
+        mat.blend_method = "BLEND"
+        disc.data.materials.append(mat)
+        return disc
+
     # --- Ball ----------------------------------------------------------
 
     def _build_ball(ball_keys: list[dict]) -> object:
@@ -483,7 +604,7 @@ def main(argv: list[str]) -> int:
         return endpoints
 
     def _material_for(materials_cache: dict, colors: dict, pid: str,
-                       zone: str) -> object:
+                       zone: str, ramp_steps: int) -> object:
         key = (pid, zone)
         mat = materials_cache.get(key)
         if mat is not None:
@@ -493,10 +614,7 @@ def main(argv: list[str]) -> int:
         else:
             kit = colors.get(pid) or _fallback_kit_rgba
             rgba = kit.get(zone, _fallback_kit_rgba[zone])
-        mat = bpy.data.materials.new(f"{pid}_{zone}")
-        mat.use_nodes = True
-        bsdf = next(n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED")
-        bsdf.inputs["Base Color"].default_value = rgba
+        mat = _toon_material(f"{pid}_{zone}", rgba, ramp_steps)
         materials_cache[key] = mat
         return mat
 
@@ -505,7 +623,7 @@ def main(argv: list[str]) -> int:
         return (y - y_min) / span
 
     def _add_smpl_mesh_body(arm: object, pid: str, smpl_data, colors: dict,
-                             materials_cache: dict) -> object:
+                             materials_cache: dict, ramp_steps: int) -> object:
         """Full SMPL body mesh skinned to all 24 joints — mirrors
         blender_export_fbx.py's _add_smpl_skinned_mesh, plus per-face kit
         material slots (majority zone of the face's 3 vertices)."""
@@ -541,7 +659,8 @@ def main(argv: list[str]) -> int:
         ]
         slot_index = {}
         for zone in _KIT_ZONES:
-            obj.data.materials.append(_material_for(materials_cache, colors, pid, zone))
+            obj.data.materials.append(
+                _material_for(materials_cache, colors, pid, zone, ramp_steps))
             slot_index[zone] = len(obj.data.materials) - 1
         for poly in mesh.polygons:
             counts: dict = {}
@@ -570,7 +689,7 @@ def main(argv: list[str]) -> int:
         obj.matrix_parent_inverse = tail_mat.inverted()
 
     def _add_capsule_body(arm: object, pid: str, endpoints: list, colors: dict,
-                           materials_cache: dict) -> list:
+                           materials_cache: dict, ramp_steps: int) -> list:
         """Capsule-limb fallback body: one primitive per bone with a
         non-degenerate rest length, bone-parented so it follows the
         armature's per-frame pose."""
@@ -587,7 +706,7 @@ def main(argv: list[str]) -> int:
             mid = (head + tail) / 2.0
             zone = render_look.kit_zone_for_height_fraction(
                 _height_fraction(float(mid[1]), y_min, y_max))
-            mat = _material_for(materials_cache, colors, pid, zone)
+            mat = _material_for(materials_cache, colors, pid, zone, ramp_steps)
 
             z_axis = Vector((0.0, 0.0, 1.0))
             dir_vec = Vector((float(direction[0]), float(direction[1]),
@@ -614,7 +733,7 @@ def main(argv: list[str]) -> int:
         return objs
 
     def _build_players(output_dir: Path, shot_id: str, colors: dict,
-                        smpl_data, pelvis_canon) -> list:
+                        smpl_data, pelvis_canon, style: dict) -> list:
         rest_joints = (
             np.asarray(smpl_data["joint_positions"], dtype=np.float64)
             if smpl_data is not None
@@ -623,6 +742,9 @@ def main(argv: list[str]) -> int:
         endpoints = _bone_rest_endpoints(rest_joints, _bone_children_map())
         materials_cache: dict = {}
         armatures: list = []
+        ramp_steps = style["ramp_steps"]
+        outline_width = style["outline_width_m"]
+        outline_rgba = render_look.hex_to_linear_rgba(style["palette"]["outline"])
 
         for entry in iter_player_fbx_entries(output_dir, np):
             if entry["shot_id"] not in ("", shot_id):
@@ -659,11 +781,16 @@ def main(argv: list[str]) -> int:
                 pb.rotation_mode = "QUATERNION"
 
             # Body — built while the armature is still at rest (identity
-            # object transform, identity pose), then posed below.
+            # object transform, identity pose), then posed below. Every
+            # body part gets an inverted-hull outline (Task 7 toon look).
             if smpl_data is not None:
-                _add_smpl_mesh_body(arm, pid, smpl_data, colors, materials_cache)
+                body_objs = [_add_smpl_mesh_body(
+                    arm, pid, smpl_data, colors, materials_cache, ramp_steps)]
             else:
-                _add_capsule_body(arm, pid, endpoints, colors, materials_cache)
+                body_objs = _add_capsule_body(
+                    arm, pid, endpoints, colors, materials_cache, ramp_steps)
+            for body_obj in body_objs:
+                _add_outline(body_obj, outline_width, outline_rgba)
 
             for i, fi in enumerate(frames.tolist()):
                 fr = int(fi)
@@ -697,6 +824,7 @@ def main(argv: list[str]) -> int:
                 arm.keyframe_insert(data_path="rotation_quaternion", frame=fr)
 
             armatures.append(arm)
+            _add_blob_shadow(arm, PLAYER_SHADOW_RADIUS_M)
 
         print(f"PLAYERS_BUILT {len(armatures)}")
         return armatures
@@ -769,6 +897,8 @@ def main(argv: list[str]) -> int:
 
     _build_environment(style)
 
+    outline_rgba = render_look.hex_to_linear_rgba(style["palette"]["outline"])
+
     ball_path = (
         output_dir / "ball" / (f"{shot}_ball_track.json" if shot else "ball_track.json")
     )
@@ -776,7 +906,12 @@ def main(argv: list[str]) -> int:
         ball_raw = json.loads(ball_path.read_text())
         ball_keys = prepare_ball_keys(ball_raw.get("frames", []))
         if ball_keys:
-            _build_ball(ball_keys)
+            ball_obj = _build_ball(ball_keys)
+            ball_obj.data.materials.append(_toon_material(
+                "M_Ball", render_look.hex_to_linear_rgba(BALL_COLOR_HEX),
+                style["ramp_steps"]))
+            _add_outline(ball_obj, style["outline_width_m"], outline_rgba)
+            _add_blob_shadow(ball_obj, BALL_SHADOW_RADIUS_M)
     else:
         sys.stdout.write(f"[render] no ball track at {ball_path}; skipping ball\n")
 
@@ -792,7 +927,10 @@ def main(argv: list[str]) -> int:
         sys.stdout.write(
             "[render] no SMPL body asset at data/models/smpl_neutral.npz; "
             "using capsule-limb fallback bodies\n")
-    _build_players(output_dir, shot, player_colors, smpl_data, pelvis_canon)
+    _build_players(output_dir, shot, player_colors, smpl_data, pelvis_canon, style)
+
+    print(f"TOON_MATERIALS {_toon_material_count}")
+    print(f"OUTLINES {_outline_count}")
 
     def _camera_track_path(cam_id: str) -> Path:
         if cam_id == "broadcast":

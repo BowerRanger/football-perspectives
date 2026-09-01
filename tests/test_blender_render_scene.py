@@ -8,6 +8,7 @@ posture as tests/test_blender_export_smpl_skeleton.py).
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 
@@ -216,10 +217,17 @@ def test_smoke_render_broadcast_mp4(tmp_path):
 def test_smoke_render_with_player(tmp_path):
     """One player fixture on top of the min fixture; 1 frame at 160x90.
 
-    Asserts only the PLAYERS_BUILT marker + render success — never body
-    type (SMPL-mesh vs capsule fallback) since that depends on whether
+    Asserts the PLAYERS_BUILT marker + render success — never body type
+    (SMPL-mesh vs capsule fallback) since that depends on whether
     data/models/smpl_neutral.npz happens to exist on the machine running
     the suite (it's gitignored; absent by default in a fresh worktree).
+
+    Also exercises the Task 7 toon look (cel-ramp materials + inverted-
+    hull outlines) via a non-default ``--style-json``: the script must
+    print ``TOON_MATERIALS <n>`` (n >= 4 — the 4 kit zones for one
+    player, socks/skin/shorts/shirt, plus the ball) and ``OUTLINES <n>``
+    (n >= 2 — at least one player body part + the ball) after building
+    the scene, regardless of which body-fallback path ran.
     """
     _write_min_fixture(tmp_path)
     _add_player_fixture(tmp_path)
@@ -228,13 +236,22 @@ def test_smoke_render_with_player(tmp_path):
         [_BLENDER, "--background", "--python", script, "--",
          "--output-dir", str(tmp_path), "--shot", "",
          "--cameras", "broadcast", "--width", "160", "--height", "90",
-         "--samples", "1", "--style-json", "{}",
+         "--samples", "1",
+         "--style-json", '{"ramp_steps": 3, "outline_width_m": 0.03}',
          "--frame-start", "0", "--frame-end", "0"],
         capture_output=True, text=True, timeout=600)
     assert res.returncode == 0, res.stderr[-3000:]
     out = tmp_path / "render" / "clip" / "broadcast.mp4"
     assert out.exists() and out.stat().st_size > 0
     assert "PLAYERS_BUILT 1" in res.stdout
+
+    toon_m = re.search(r"^TOON_MATERIALS (\d+)$", res.stdout, re.MULTILINE)
+    assert toon_m is not None, res.stdout[-3000:]
+    assert int(toon_m.group(1)) >= 4
+
+    outlines_m = re.search(r"^OUTLINES (\d+)$", res.stdout, re.MULTILINE)
+    assert outlines_m is not None, res.stdout[-3000:]
+    assert int(outlines_m.group(1)) >= 2
 
 
 @pytest.mark.fbx

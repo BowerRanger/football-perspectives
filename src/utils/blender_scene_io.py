@@ -157,9 +157,13 @@ def load_camera_track(path: Path) -> dict:
 def load_smpl_body_data(repo_root, np_mod):
     """Load data/models/smpl_neutral.npz re-anchored on the foot midpoint.
 
-    Returns (smpl_data | None, pelvis_canon_shifted). Mirrors the FBX
-    exporter's historical behaviour exactly — see that script's git
-    history for the original block.
+    Returns ``(smpl_data, pelvis_canon_shifted)``. ``smpl_data`` is ``None``
+    whenever there's no usable SMPL body asset — either the npz is absent,
+    OR it exists but lacks ``joint_positions``/``v_template`` — so any
+    caller can treat "not None" as "safe to index" without re-checking
+    keys itself. ``pelvis_canon_shifted`` is the zero vector in both of
+    those cases. Mirrors the FBX exporter's historical behaviour — see
+    that script's git history for the original block.
     """
     smpl_npz_path = repo_root / "data" / "models" / "smpl_neutral.npz"
     pelvis_canon_shifted = np_mod.zeros(3, dtype=np_mod.float64)
@@ -167,16 +171,17 @@ def load_smpl_body_data(repo_root, np_mod):
         return None, pelvis_canon_shifted
     from src.utils.smpl_skeleton import SMPL_JOINT_NAMES
     smpl_data = dict(np_mod.load(smpl_npz_path))
-    if "joint_positions" in smpl_data and "v_template" in smpl_data:
-        jp = np_mod.asarray(smpl_data["joint_positions"], dtype=np_mod.float64)
-        l_foot = SMPL_JOINT_NAMES.index("l_foot")
-        r_foot = SMPL_JOINT_NAMES.index("r_foot")
-        shift = -((jp[l_foot] + jp[r_foot]) / 2.0)
-        smpl_data["joint_positions"] = (jp + shift).astype(np_mod.float32)
-        smpl_data["v_template"] = (
-            np_mod.asarray(smpl_data["v_template"], dtype=np_mod.float64) + shift
-        ).astype(np_mod.float32)
-        pelvis_canon_shifted = np_mod.asarray(
-            smpl_data["joint_positions"][0], dtype=np_mod.float64
-        )
+    if "joint_positions" not in smpl_data or "v_template" not in smpl_data:
+        return None, pelvis_canon_shifted
+    jp = np_mod.asarray(smpl_data["joint_positions"], dtype=np_mod.float64)
+    l_foot = SMPL_JOINT_NAMES.index("l_foot")
+    r_foot = SMPL_JOINT_NAMES.index("r_foot")
+    shift = -((jp[l_foot] + jp[r_foot]) / 2.0)
+    smpl_data["joint_positions"] = (jp + shift).astype(np_mod.float32)
+    smpl_data["v_template"] = (
+        np_mod.asarray(smpl_data["v_template"], dtype=np_mod.float64) + shift
+    ).astype(np_mod.float32)
+    pelvis_canon_shifted = np_mod.asarray(
+        smpl_data["joint_positions"][0], dtype=np_mod.float64
+    )
     return smpl_data, pelvis_canon_shifted

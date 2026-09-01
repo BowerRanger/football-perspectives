@@ -354,25 +354,27 @@ def main(argv: list[str]) -> int:
     )
 
     # Reproduce the loader's stdout side effects here — load_smpl_body_data
-    # itself stays print-free so it's usable from plain unit tests.
+    # itself stays print-free so it's usable from plain unit tests. The
+    # helper now collapses "npz absent" and "npz present but missing
+    # required keys" to the same `smpl_data is None` result, so main()
+    # re-checks file existence directly (cheap, no I/O beyond stat) only
+    # to pick the right message text — it never re-derives smpl_data.
     smpl_npz_path = repo_root / "data" / "models" / "smpl_neutral.npz"
-    if smpl_data is None:
-        sys.stdout.write(
-            "[player-fbx] no SMPL body npz found; falling back to placeholder triangle. "
-            f"Run scripts/extract_smpl_neutral.py to enable.\n"
-        )
-    elif not ("joint_positions" in smpl_data and "v_template" in smpl_data):
-        sys.stdout.write(
-            f"[player-fbx] {smpl_npz_path} missing joint_positions or "
-            "v_template; re-run scripts/extract_smpl_neutral.py.\n"
-        )
-        smpl_data = None
-        smpl_joint_positions = None
-    else:
+    if smpl_data is not None:
         sys.stdout.write(
             f"[player-fbx] using real SMPL body mesh from {smpl_npz_path}"
             f" (foot-midpoint anchored; pelvis canon = "
             f"{tuple(float(x) for x in pelvis_canon_shifted)})\n"
+        )
+    elif smpl_npz_path.exists():
+        sys.stdout.write(
+            f"[player-fbx] {smpl_npz_path} missing joint_positions or "
+            "v_template; re-run scripts/extract_smpl_neutral.py.\n"
+        )
+    else:
+        sys.stdout.write(
+            "[player-fbx] no SMPL body npz found; falling back to placeholder triangle. "
+            f"Run scripts/extract_smpl_neutral.py to enable.\n"
         )
 
     # --- A-pose only mode -------------------------------------------------

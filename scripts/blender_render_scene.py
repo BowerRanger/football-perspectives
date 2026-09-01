@@ -188,10 +188,10 @@ def main(argv: list[str]) -> int:
     )
     from src.stages.export import _player_team_class_map
 
-    if args.vertical:
-        sys.stdout.write(
-            "[render] --vertical parsed but not yet implemented (Task 9); ignoring\n"
-        )
+    # --vertical is implemented in the render loop below (Task 8): a
+    # second pass per non-broadcast camera with resolution_x/y swapped
+    # and sensor_fit="VERTICAL" — reframes to 9:16 portrait without
+    # touching the camera's keyed lens values.
     if args.aov:
         sys.stdout.write(
             "[render] --aov parsed but not yet implemented (Task 9); ignoring\n"
@@ -932,11 +932,18 @@ def main(argv: list[str]) -> int:
     print(f"TOON_MATERIALS {_toon_material_count}")
     print(f"OUTLINES {_outline_count}")
 
+    def _safe_cam_id(cam_id: str) -> str:
+        # Matches RenderStage._write_virtual_camera_tracks's safe_id
+        # (src/stages/render.py): ":" -> "_" so player-scoped ids like
+        # "pov:P001" become filesystem/ffmpeg-safe "pov_P001".
+        return cam_id.replace(":", "_")
+
     def _camera_track_path(cam_id: str) -> Path:
         if cam_id == "broadcast":
             return output_dir / "camera" / (
                 f"{shot}_camera_track.json" if shot else "camera_track.json")
-        return output_dir / "render" / shot_dir / "cameras" / f"{cam_id}_camera_track.json"
+        return (output_dir / "render" / shot_dir / "cameras"
+                / f"{_safe_cam_id(cam_id)}_camera_track.json")
 
     broadcast_path = _camera_track_path("broadcast")
     fps = DEFAULT_FPS
@@ -963,12 +970,27 @@ def main(argv: list[str]) -> int:
         )
 
         cam_obj = _add_camera_from_track(cam_id, track, args.width, args.height)
+        safe_id = _safe_cam_id(cam_id)
 
         if args.save_blend:
             bpy.ops.wm.save_as_mainfile(filepath=str(out_dir / "scene.blend"))
 
-        _render(cam_obj, out_dir / f"{cam_id}.mp4", fps,
+        _render(cam_obj, out_dir / f"{safe_id}.mp4", fps,
                 (frame_start, frame_end), args.width, args.height, args.samples)
+
+        # 9:16 portrait pass (Task 8): every non-broadcast camera gets a
+        # second render at swapped (height, width) resolution. Reframed
+        # via sensor_fit="VERTICAL" rather than scaling cam.lens — the
+        # lens values are keyframed (see _add_camera_from_track), so
+        # scaling them would require re-keying every frame; sensor_fit
+        # instead changes how the *existing* keyed lens maps to FOV for
+        # this pass only, then is restored to "HORIZONTAL" for the next
+        # camera's landscape render.
+        if args.vertical and cam_id != "broadcast":
+            cam_obj.data.sensor_fit = "VERTICAL"
+            _render(cam_obj, out_dir / f"{safe_id}_9x16.mp4", fps,
+                    (frame_start, frame_end), args.height, args.width, args.samples)
+            cam_obj.data.sensor_fit = "HORIZONTAL"
 
     return 0
 

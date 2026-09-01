@@ -11,6 +11,7 @@ import pytest
 from src.pipeline.runner import _stage_class, resolve_stages
 from src.schemas.shots import Shot, ShotsManifest
 from src.stages.render import RenderStage
+from tests.conftest import _add_player_fixture, _write_min_fixture
 
 
 def _cfg(**over):
@@ -96,3 +97,68 @@ def test_run_invokes_blender_stub_per_active_shot(tmp_path):
     calls = log.read_text().strip().splitlines()
     assert len(calls) == 1               # excluded shot skipped
     assert "--shot shot01" in calls[0]
+
+
+@pytest.mark.integration
+def test_virtual_camera_tracks_written(tmp_path):
+    _write_min_fixture(tmp_path)          # reuse via a conftest helper
+    _add_player_fixture(tmp_path)
+    cfg = _cfg(cameras=["broadcast", "drone", "pov:P001"])
+    stage = RenderStage(cfg, tmp_path)
+    written = stage._write_virtual_camera_tracks("", ["drone", "pov:P001"])
+    assert set(written) == {"drone", "pov:P001"}
+    cams = tmp_path / "render" / "clip" / "cameras"
+    assert (cams / "drone_camera_track.json").exists()
+    assert (cams / "pov_P001_camera_track.json").exists()
+    track = json.loads((cams / "drone_camera_track.json").read_text())
+    assert track["frames"] and "R" in track["frames"][0]
+
+
+@pytest.mark.unit
+def test_unknown_player_camera_skipped_with_warning(tmp_path, caplog):
+    _write_min_fixture(tmp_path)
+    stage = RenderStage(_cfg(), tmp_path)
+    written = stage._write_virtual_camera_tracks("", ["pov:P999"])
+    assert written == []
+    assert any("P999" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_write_virtual_camera_tracks_no_ids_is_noop(tmp_path):
+    _write_min_fixture(tmp_path)
+    stage = RenderStage(_cfg(), tmp_path)
+    assert stage._write_virtual_camera_tracks("", []) == []
+    assert not (tmp_path / "render").exists()
+
+
+@pytest.mark.unit
+def test_write_virtual_camera_tracks_no_broadcast_camera_warns(tmp_path, caplog):
+    stage = RenderStage(_cfg(), tmp_path)
+    written = stage._write_virtual_camera_tracks("", ["drone"])
+    assert written == []
+    assert any("broadcast" in r.message.lower() for r in caplog.records)
+
+
+@pytest.mark.integration
+def test_run_writes_satisfied_virtual_cameras_and_filters_unsatisfied(tmp_path):
+    """run() must write the vcam tracks before shelling out, and only pass
+    broadcast + the ids that were actually satisfied in --cameras (an
+    unresolvable player ref must never reach the Blender subprocess)."""
+    _write_min_fixture(tmp_path)
+    _add_player_fixture(tmp_path)
+    stub = tmp_path / "fake_blender"
+    log = tmp_path / "calls.jsonl"
+    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    cfg = _cfg(blender_path=str(stub),
+               cameras=["broadcast", "drone", "pov:P001", "pov:P999"])
+    stage = RenderStage(cfg, tmp_path)
+    stage.run()
+    calls = log.read_text().strip().splitlines()
+    assert len(calls) == 1
+    cams_arg = calls[0].split("--cameras ")[1].split(" ")[0]
+    assert set(cams_arg.split(",")) == {"broadcast", "drone", "pov:P001"}
+    cams_dir = tmp_path / "render" / "clip" / "cameras"
+    assert (cams_dir / "drone_camera_track.json").exists()
+    assert (cams_dir / "pov_P001_camera_track.json").exists()
+    assert not (cams_dir / "pov_P999_camera_track.json").exists()

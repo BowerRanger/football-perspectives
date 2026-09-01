@@ -171,6 +171,41 @@ def _ball_section(output_dir: Path, manifest: ShotsManifest | None) -> dict | No
     }
 
 
+def _render_section(output_dir: Path) -> dict | None:
+    """Render-stage diagnostics: per-shot camera outputs + wall time.
+
+    ``None`` when ``render/`` doesn't exist yet (stage not run) or has
+    no shot subdirectories to report on — same None-skip idiom as
+    ``_ball_section``. Camera list is the top-level ``*.mp4`` stems
+    only, sorted — the ``cameras/`` (virtual-camera track sidecars) and
+    ``aov/`` (EXR pass dumps) subdirectories are never *.mp4 so they're
+    naturally excluded by the non-recursive glob.
+    """
+    render_dir = output_dir / "render"
+    if not render_dir.exists():
+        return None
+
+    timings_path = render_dir / "render_timings.json"
+    timings: dict = {}
+    if timings_path.exists():
+        try:
+            timings = json.loads(timings_path.read_text())
+        except Exception:
+            timings = {}
+
+    shots: dict = {}
+    for shot_dir in sorted(p for p in render_dir.iterdir() if p.is_dir()):
+        mp4s = sorted(shot_dir.glob("*.mp4"))
+        shots[shot_dir.name] = {
+            "cameras": [p.stem for p in mp4s],
+            "render_seconds": timings.get(shot_dir.name, timings.get("clip")),
+            "sizes_bytes": {p.stem: p.stat().st_size for p in mp4s},
+        }
+    if not shots:
+        return None
+    return {"shots": shots}
+
+
 def write_quality_report(output_dir: Path) -> None:
     """Aggregate diagnostics from camera/, hmr_world/, ball/ into a single JSON."""
     report: dict = {}
@@ -319,6 +354,10 @@ def write_quality_report(output_dir: Path) -> None:
                 "max_offset_m": float(jitter.get("max_offset_m", 0.0)),
                 "mean_offset_m": float(jitter.get("mean_offset_m", 0.0)),
             }
+
+    render_section = _render_section(output_dir)
+    if render_section is not None:
+        report["render"] = render_section
 
     # Runtime instrumentation (purely additive — see src/pipeline/runner.py):
     # per-stage wall seconds written by run_pipeline to timings.json, plus

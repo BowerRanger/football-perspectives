@@ -150,6 +150,33 @@ def test_smoke_render_broadcast_mp4(tmp_path):
 
 @pytest.mark.fbx
 @pytest.mark.skipif(_BLENDER is None, reason="blender not on PATH")
+def test_smoke_render_aov_writes_exr(tmp_path):
+    """Task 9: --aov wires a multilayer-EXR compositor File Output node
+    alongside the normal mp4 render. One frame is enough to prove the
+    wiring works — this isn't validating render content, just that the
+    per-camera ``aov/<safe_camera>/####.exr`` path gets populated.
+    """
+    _write_min_fixture(tmp_path)
+    script = "scripts/blender_render_scene.py"
+    res = subprocess.run(
+        [_BLENDER, "--background", "--python", script, "--",
+         "--output-dir", str(tmp_path), "--shot", "",
+         "--cameras", "broadcast", "--width", "160", "--height", "90",
+         "--samples", "1", "--style-json", "{}",
+         "--frame-start", "0", "--frame-end", "0", "--aov"],
+        capture_output=True, text=True, timeout=600)
+    assert res.returncode == 0, res.stderr[-3000:]
+    out = tmp_path / "render" / "clip" / "broadcast.mp4"
+    assert out.exists() and out.stat().st_size > 0
+
+    aov_dir = tmp_path / "render" / "clip" / "aov" / "broadcast"
+    exrs = list(aov_dir.glob("*.exr"))
+    assert len(exrs) >= 1, res.stdout[-3000:]
+    assert exrs[0].stat().st_size > 0
+
+
+@pytest.mark.fbx
+@pytest.mark.skipif(_BLENDER is None, reason="blender not on PATH")
 def test_smoke_render_with_player(tmp_path):
     """One player fixture on top of the min fixture; 1 frame at 160x90.
 

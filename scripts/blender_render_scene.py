@@ -191,11 +191,8 @@ def main(argv: list[str]) -> int:
     # --vertical is implemented in the render loop below (Task 8): a
     # second pass per non-broadcast camera with resolution_x/y swapped
     # and sensor_fit="VERTICAL" — reframes to 9:16 portrait without
-    # touching the camera's keyed lens values.
-    if args.aov:
-        sys.stdout.write(
-            "[render] --aov parsed but not yet implemented (Task 9); ignoring\n"
-        )
+    # touching the camera's keyed lens values. --aov (Task 9) is wired
+    # in _setup_aov_compositor/_render below.
 
     output_dir = Path(args.output_dir).resolve()
     shot = args.shot
@@ -848,11 +845,69 @@ def main(argv: list[str]) -> int:
             cam_data.keyframe_insert(data_path="lens", frame=fr)
         return cam_obj
 
+    # --- AOV (Task 9) -----------------------------------------------------
+    # Blender 5.1.1 adaptation: the pre-5.x compositor API this brief was
+    # written against (`scene.use_nodes = True` + `scene.node_tree`) no
+    # longer exists — `scene.node_tree` raises AttributeError, and
+    # `scene.use_nodes` is a deprecated no-op stub (warns, slated for
+    # removal in 6.0) that does NOT create or assign a node group. The
+    # compositor now lives behind `scene.compositing_node_group`, a plain
+    # `CompositorNodeTree` datablock (`bpy.data.node_groups.new(name,
+    # "CompositorNodeTree")`) that must be explicitly assigned to the
+    # scene. The File Output node's socket API changed too — no
+    # `file_slots`/`layer_slots`/`base_path` — sockets are declared via
+    # `node.file_output_items.new(socket_type, name)` where `socket_type`
+    # is a fixed enum (RGBA/FLOAT/VECTOR/...), which creates a same-named
+    # input socket to link into. The Render Layers node's Z-pass output
+    # socket is named "Depth", not "Z". All verified against the running
+    # Blender via a probe script (raw EXR-header dump of a real render)
+    # before wiring any of this — see task-9-report.md.
+    _AOV_PASSES = (
+        ("RGBA", "Image"),
+        ("FLOAT", "Depth"),
+        ("VECTOR", "Normal"),
+        ("RGBA", "CryptoObject00"),
+        ("RGBA", "CryptoObject01"),
+        ("RGBA", "CryptoObject02"),
+    )
+    _aov_file_output_node = None
+
+    def _setup_aov_compositor() -> object:
+        """Enable Z/Normal/Cryptomatte view-layer passes and wire a
+        multilayer-EXR File Output node fed by the Render Layers node.
+
+        Built once per process (cached in ``_aov_file_output_node``) since
+        the graph itself doesn't vary per camera — only the File Output
+        node's ``directory`` changes, which callers set afterwards.
+        """
+        nonlocal _aov_file_output_node
+        if _aov_file_output_node is not None:
+            return _aov_file_output_node
+        vl = bpy.context.view_layer
+        vl.use_pass_z = True
+        vl.use_pass_normal = True
+        vl.use_pass_cryptomatte_object = True
+        group = bpy.data.node_groups.new("Compositing", "CompositorNodeTree")
+        bpy.context.scene.compositing_node_group = group
+        rl = group.nodes.new("CompositorNodeRLayers")
+        rl.layer = vl.name
+        fo = group.nodes.new("CompositorNodeOutputFile")
+        for socket_type, pass_name in _AOV_PASSES:
+            fo.file_output_items.new(socket_type, pass_name)
+        for _, pass_name in _AOV_PASSES:
+            group.links.new(rl.outputs[pass_name], fo.inputs[pass_name])
+        if hasattr(fo.format, "media_type"):
+            fo.format.media_type = "MULTI_LAYER_IMAGE"
+        fo.format.file_format = "OPEN_EXR_MULTILAYER"
+        fo.file_name = "####"
+        _aov_file_output_node = fo
+        return fo
+
     # --- Render ----------------------------------------------------------
 
     def _render(camera_obj: object, out_path: Path, fps: float,
                 frame_range: tuple[int, int], width: int, height: int,
-                samples: int) -> None:
+                samples: int, aov_dir: Path | None = None) -> None:
         scene = bpy.context.scene
         scene.camera = camera_obj
         scene.render.resolution_x = width
@@ -880,10 +935,20 @@ def main(argv: list[str]) -> int:
         scene.render.ffmpeg.codec = "H264"
         # Blender would otherwise append the frame range to the
         # filename (e.g. `broadcast0002.mp4`); the stage/tests expect
-        # the exact path passed in.
+        # the exact path passed in. This scene-level flag also governs
+        # whether the AOV File Output node below appends its own format
+        # extension (".exr") — rather than flip it per-render (risking
+        # the main-output filename regression this comment describes),
+        # the AOV frames are renamed to add ".exr" after the render
+        # completes, below.
         scene.render.use_file_extension = False
         out_path.parent.mkdir(parents=True, exist_ok=True)
         scene.render.filepath = str(out_path)
+
+        if aov_dir is not None:
+            fo = _setup_aov_compositor()
+            aov_dir.mkdir(parents=True, exist_ok=True)
+            fo.directory = str(aov_dir) + "/"
 
         t0 = time.time()
         bpy.ops.render.render(animation=True)
@@ -892,6 +957,13 @@ def main(argv: list[str]) -> int:
         # Eyeballing aid for the stage log; the quality report parses
         # render/render_timings.json (written by RenderStage) instead.
         print(f"RENDER_TIMING {camera_obj.name} {elapsed:.2f} {n_frames}")
+
+        if aov_dir is not None:
+            for fr in range(frame_range[0], frame_range[1] + 1):
+                raw = aov_dir / f"{fr:04d}"
+                if raw.exists():
+                    raw.rename(raw.with_suffix(".exr"))
+            print(f"AOV_RENDER {camera_obj.name} {aov_dir}")
 
     # --- Orchestration ---------------------------------------------------
 
@@ -975,8 +1047,12 @@ def main(argv: list[str]) -> int:
         if args.save_blend:
             bpy.ops.wm.save_as_mainfile(filepath=str(out_dir / "scene.blend"))
 
+        # AOV EXRs (Task 9) are only rendered for the landscape pass, one
+        # subdirectory per camera — never for the 9:16 vertical pass below.
+        aov_dir = (out_dir / "aov" / safe_id) if args.aov else None
         _render(cam_obj, out_dir / f"{safe_id}.mp4", fps,
-                (frame_start, frame_end), args.width, args.height, args.samples)
+                (frame_start, frame_end), args.width, args.height, args.samples,
+                aov_dir=aov_dir)
 
         # 9:16 portrait pass (Task 8): every non-broadcast camera gets a
         # second render at swapped (height, width) resolution. Reframed

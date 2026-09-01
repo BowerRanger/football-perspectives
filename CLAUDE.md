@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Python CLI tool (`recon.py`) that reconstructs 3D player animations and ball trajectories from a single broadcast football camera. It takes a manually-trimmed clip **or a full highlights reel**, runs a 7-stage ML pipeline, and exports glTF (for a browser viewer) and FBX (for Unreal Engine 5).
+A Python CLI tool (`recon.py`) that reconstructs 3D player animations and ball trajectories from a single broadcast football camera. It takes a manually-trimmed clip **or a full highlights reel**, runs an 8-stage ML pipeline, and exports glTF (for a browser viewer) and FBX (for Unreal Engine 5).
 
 The full technical design is in `docs/football-reconstruction-pipeline-design.md`.
 
@@ -40,6 +40,9 @@ python recon.py run --input clip.mp4 --output ./output/ --clean
 # Ingest a full highlights reel (auto split/classify/group/align —
 # inputs ≥ prepare_shots.split.min_input_duration_s take this path)
 python recon.py run --input highlights.mp4 --output ./output/ --stages prepare_shots
+
+# Headless Blender toon render (broadcast/drone/pov/ots cameras, 9:16, AOV EXRs — needs Blender on PATH)
+python recon.py run --input clip.mp4 --output ./output/ --stages render
 
 # Web dashboard (anchor editor + 3D viewer); --port for a second instance
 python recon.py serve --output ./output/ --port 8001
@@ -84,7 +87,7 @@ Evaluation output dirs live at the repo root, one per clip: `output/` (**gberch*
 
 ## Pipeline Architecture
 
-The pipeline has 7 sequential stages. Each stage reads from previous stage outputs in `output/` and writes its own subdirectory. Stages are independently re-runnable.
+The pipeline has 8 sequential stages. Each stage reads from previous stage outputs in `output/` and writes its own subdirectory. Stages are independently re-runnable.
 
 | # | Stage | Input | Output |
 |---|-------|-------|--------|
@@ -95,6 +98,7 @@ The pipeline has 7 sequential stages. Each stage reads from previous stage outpu
 | 5 | `refined_poses` | hmr_world + sync_map | `refined_poses/PXXX_refined.npz` + summary |
 | 6 | `ball` | shots + camera + refined_poses/hmr_world (+ manual anchors) | `ball/<shot>_ball_track.json` + `_ball_anchors_auto.json` + `_ball_observations.json` + `_ball_keyframes.json` + `_ball_diag.json` |
 | 7 | `export` | refined_poses + ball + camera | `export/gltf/scene.glb` + `export/fbx/` |
+| 8 | `render` | refined_poses + ball + camera (+ `export.virtual_cameras` cfg) | `render/<shot>/<camera>.mp4` (+ `_9x16`, `aov/` EXRs, `render_timings.json`) |
 
 The 2D pose stage was collapsed into `hmr_world` (decision D15): GVHMR runs ViTPose internally on each player crop, so `hmr_world` consumes those keypoints directly for foot anchoring and writes them as a `PXXX_kp2d.json` side-output for the dashboard overlay.
 
@@ -133,6 +137,8 @@ The 2D pose stage was collapsed into `hmr_world` (decision D15): GVHMR runs ViTP
 - `ball.shot_chain.*` — strike→impact chain auto-proposal window + launch-speed warn band (chains validated into the diag sidecar; landmark-coincidence "pitch fix" anchors snap grounded balls to exact pitch-feature coordinates)
 - `ball.context_prior.*` — detection veto from compounded context signals (off-pitch ground ray, no player box nearby, pixel-static under camera pan). A detection is dropped only when the prior FACTOR falls to `drop_below` — only signal pairs involving the static-under-pan overlay signature can reach it; confidences are never scaled, so low-confidence clips are not penalized (origi01/origi02 coverage bit-identical to baseline).
 - `ball.touch_attribution.*` — post-pass that relabels each touch event's (player, bone) to the ray-closest joint over a small window around the event frame; strictly count-preserving (never adds or removes events, only relabels — same length/order as input). ON by default since the detector v1 fine-tune (2026-07-04): gberch union touch recall rose 0.500→0.625 with it on top of `foot_guided`. Was OFF from 2026-07-02 through the fine-tune, when the stock detector's ball pixel at touch moments was unreliable and relabelling overwrote body-derived correct labels.
+- `render.*` — toon-render stage: `cameras` (broadcast + virtual ids, e.g. `drone`, `pov:P001`, `ots:P001`), `style.*` (palette/ramp_steps/outline_width_m/grass_stripes tokens for the cel-shaded look), `vertical_variant` (adds a 9:16 pass per non-broadcast camera), `aov_passes` (off by default — adds a `render/<shot>/aov/<camera>/####.exr` multilayer Z+Normal+Cryptomatte pass alongside the mp4).
+- `export.virtual_cameras.*` — shared pov/ots/drone rig params consumed by both `export` and `render`: `pov_fov_deg`/`ots_fov_deg`/`ots_back_m`/`ots_up_m`/`ots_right_m`/`ball_target_max_occlusion_frames`, plus drone-only `drone_fov_deg`/`drone_height_m`/`drone_back_m`/`drone_smooth_frames`.
 
 The ankle-confidence cutoff for foot anchoring (formerly `pose_2d.min_confidence: 0.3`) is now a constant `_ANKLE_CONF_MIN = 0.3` inside `src/stages/hmr_world.py`.
 
@@ -141,7 +147,7 @@ The ankle-confidence cutoff for foot anchoring (formerly `pose_2d.min_confidence
 Beyond Python packages, the pipeline requires:
 - **FFmpeg** (clip handling)
 - **GVHMR submodule + checkpoint** (`third_party/gvhmr/inputs/checkpoints/gvhmr/gvhmr_siga24_release.ckpt`)
-- **Blender ≥ 3.6** (headless, only for FBX export): `snap install blender --classic`
+- **Blender ≥ 3.6** (headless, for FBX export and the render stage's toon renders): `snap install blender --classic`. Both are optional — each stage logs a warning and skips cleanly when Blender isn't found.
 
 GPU: strongly recommended for `hmr_world` (GVHMR); 8GB VRAM minimum, 12GB+ recommended for concurrent ViTPose + YOLOv8x.
 

@@ -856,3 +856,34 @@ export:
     ots_up_m: 0.3
     ots_right_m: 0.0
     ball_target_max_occlusion_frames: 10
+    drone_fov_deg: 55.0
+    drone_height_m: 40.0
+    drone_back_m: 25.0
+    drone_smooth_frames: 25
+
+render:
+  enabled: true
+  blender_path: null          # null → fall back to export.blender_path
+  cameras: [broadcast, drone] # also accepts pov:<PID>, ots:<PID>
+  resolution: [1920, 1080]
+  vertical_variant: false     # additionally render 1080x1920 for non-broadcast cams
+  samples: 16                 # EEVEE taa_render_samples
+  style:
+    palette:
+      grass_light: "#4d9e46"
+      grass_dark: "#3f8a3a"
+      lines: "#f5f5f0"
+      sky_top: "#9ecfe8"
+      sky_bottom: "#e8f4d8"
+      outline: "#1a1a1a"
+    ramp_steps: 3
+    outline_width_m: 0.02
+    grass_stripes: 10
+  teams:
+    defaults:
+      home: {shirt: "#c0392b", shorts: "#ffffff", socks: "#c0392b"}
+      away: {shirt: "#2980b9", shorts: "#2c3e50", socks: "#2980b9"}
+      referee: {shirt: "#222222", shorts: "#222222", socks: "#222222"}
+    by_player: {}             # e.g. {P003: away} — overrides tracking team class
+  aov_passes: false
+  save_blend: false

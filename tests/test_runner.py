@@ -24,6 +24,7 @@ def test_resolve_all():
         "refined_poses",
         "ball",
         "export",
+        "render",
     ]
 
 
@@ -40,7 +41,7 @@ def test_resolve_all_runs_refined_poses_before_ball() -> None:
 @pytest.mark.unit
 def test_resolve_from_refined_poses_includes_ball_and_export() -> None:
     assert resolve_stages("all", "refined_poses") == [
-        "refined_poses", "ball", "export",
+        "refined_poses", "ball", "export", "render",
     ]
 
 
@@ -153,7 +154,7 @@ def test_resolve_unknown_raises():
 @pytest.mark.unit
 def test_resolve_with_from_stage_skips_earlier():
     result = resolve_stages("all", "hmr_world")
-    assert result == ["hmr_world", "refined_poses", "ball", "export"]
+    assert result == ["hmr_world", "refined_poses", "ball", "export", "render"]
 
 
 @pytest.mark.integration

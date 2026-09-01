@@ -23,6 +23,7 @@ _STAGE_NAMES: list[str] = [
     "refined_poses",
     "ball",
     "export",
+    "render",
 ]
 
 
@@ -49,6 +50,9 @@ def _stage_class(name: str) -> type[BaseStage] | None:
     if name == "export":
         from src.stages.export import ExportStage
         return ExportStage
+    if name == "render":
+        from src.stages.render import RenderStage
+        return RenderStage
     raise ValueError(f"Unknown stage: {name!r}")
 
 

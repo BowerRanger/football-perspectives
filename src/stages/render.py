@@ -51,7 +51,8 @@ class RenderStage(BaseStage):
             "--cameras", ",".join(cfg.get("cameras", ["broadcast"])),
             "--width", str(int(w)), "--height", str(int(h)),
             "--samples", str(int(cfg.get("samples", 16))),
-            "--style-json", json.dumps(cfg.get("style", {})),
+            "--style-json", json.dumps(
+                {**cfg.get("style", {}), "teams": cfg.get("teams", {})}),
         ]
         if cfg.get("vertical_variant"):
             args.append("--vertical")

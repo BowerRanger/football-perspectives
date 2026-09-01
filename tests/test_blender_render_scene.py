@@ -49,6 +49,32 @@ def test_parse_args_defaults_and_flags():
     assert (ns.frame_start, ns.frame_end) == (10, 20)
 
 
+def _add_player_fixture(root, n=3):
+    """One synthetic player refined-pose NPZ, key set mirrored against a
+    real ``output/refined_poses/P001_refined.npz`` on disk: player_id,
+    frames, betas, thetas, root_R, root_t, confidence, view_count,
+    contributing_shots. ``iter_player_fbx_entries`` only reads the first
+    six plus contributing_shots (for the sync-offset/shot-id split);
+    view_count/betas are along for the ride to match the real file
+    exactly. An empty ``contributing_shots`` exercises the "legacy
+    single-shot" fallback (shot_id="") that matches ``_write_min_fixture``'s
+    unprefixed ``ball_track.json`` layout, so both fixtures agree on the
+    render's ``--shot ""`` legacy path.
+    """
+    (root / "refined_poses").mkdir()
+    np.savez(root / "refined_poses" / "P001_refined.npz",
+             player_id="P001",
+             frames=np.arange(n),
+             betas=np.zeros(10, dtype=np.float32),
+             thetas=np.zeros((n, 24, 3), dtype=np.float32),
+             root_R=np.tile(np.eye(3, dtype=np.float32), (n, 1, 1)),
+             root_t=np.tile(np.array([52.5, 30.0, 0.95], dtype=np.float32),
+                            (n, 1)),
+             confidence=np.ones(n, dtype=np.float32),
+             view_count=np.ones(n, dtype=np.int32),
+             contributing_shots=np.array([], dtype="<U6"))
+
+
 _BLENDER = shutil.which("blender")
 
 
@@ -108,3 +134,29 @@ def test_smoke_render_broadcast_mp4(tmp_path):
     out = tmp_path / "render" / "clip" / "broadcast.mp4"
     assert out.exists() and out.stat().st_size > 0
     assert "RENDER_TIMING broadcast" in res.stdout
+
+
+@pytest.mark.fbx
+@pytest.mark.skipif(_BLENDER is None, reason="blender not on PATH")
+def test_smoke_render_with_player(tmp_path):
+    """One player fixture on top of the min fixture; 1 frame at 160x90.
+
+    Asserts only the PLAYERS_BUILT marker + render success — never body
+    type (SMPL-mesh vs capsule fallback) since that depends on whether
+    data/models/smpl_neutral.npz happens to exist on the machine running
+    the suite (it's gitignored; absent by default in a fresh worktree).
+    """
+    _write_min_fixture(tmp_path)
+    _add_player_fixture(tmp_path)
+    script = "scripts/blender_render_scene.py"
+    res = subprocess.run(
+        [_BLENDER, "--background", "--python", script, "--",
+         "--output-dir", str(tmp_path), "--shot", "",
+         "--cameras", "broadcast", "--width", "160", "--height", "90",
+         "--samples", "1", "--style-json", "{}",
+         "--frame-start", "0", "--frame-end", "0"],
+        capture_output=True, text=True, timeout=600)
+    assert res.returncode == 0, res.stderr[-3000:]
+    out = tmp_path / "render" / "clip" / "broadcast.mp4"
+    assert out.exists() and out.stat().st_size > 0
+    assert "PLAYERS_BUILT 1" in res.stdout

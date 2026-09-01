@@ -13,11 +13,11 @@ EEVEE to output/render/<shot>/<camera>.mp4.
 Split into module-level pure helpers (importable/testable without
 ``bpy``) and a ``main()`` that lazily imports ``bpy`` — same structure
 as ``scripts/blender_export_fbx.py``. The bpy-dependent scene builders
-(``_build_environment``, ``_build_ball``, ``_add_camera_from_track``,
-``_render``) are nested inside ``main()`` since they close over the
-lazily-imported ``bpy``/``bmesh``/``mathutils`` modules; later tasks
-(players, toon materials, virtual-camera renders, vertical/AOV
-variants) extend those nested functions in place.
+(``_build_environment``, ``_build_ball``, ``_build_players``,
+``_add_camera_from_track``, ``_render``) are nested inside ``main()``
+since they close over the lazily-imported ``bpy``/``bmesh``/
+``mathutils`` modules; later tasks (toon materials, virtual-camera
+renders, vertical/AOV variants) extend those nested functions in place.
 """
 from __future__ import annotations
 
@@ -64,6 +64,25 @@ SENSOR_WIDTH_MM = 36.0
 DEFAULT_FPS = 25.0
 DEFAULT_SUN_ROTATION_DEG = (50.0, 0.0, -30.0)
 DEFAULT_SUN_ENERGY = 3.0
+
+# --- Player constants ------------------------------------------------------
+# Fixed skin tone (not team-configurable) — declared once here, linearised
+# via render_look.hex_to_linear_rgba wherever a material needs it.
+SKIN_COLOR_HEX = "#c68863"
+# The 4 distinct zones `render_look.kit_zone_for_height_fraction` returns
+# (its "skin" zone covers both legs and head/neck rest-height bands).
+_KIT_ZONES = ("socks", "skin", "shorts", "shirt")
+# Axial spine-chain bones get a thicker capsule than limb bones in the
+# no-SMPL-asset fallback body.
+_SPINE_BONES = frozenset({"pelvis", "spine1", "spine2", "spine3", "neck"})
+_LIMB_CAPSULE_RADIUS_M = 0.055
+_SPINE_CAPSULE_RADIUS_M = 0.10
+_HEAD_SPHERE_RADIUS_M = 0.09
+_MIN_CAPSULE_BONE_LEN_M = 0.02
+# Unclassified players (no tracks/*_tracks.json team label) still need a
+# renderable kit — mirrors render_look.resolve_player_colors' own internal
+# fallback so a missing team classification never crashes the build.
+_FALLBACK_KIT_HEX = {"shirt": "#888888", "shorts": "#666666", "socks": "#888888"}
 
 # Task 2's config/default.yaml `render.style` block, verbatim — the
 # fallback whenever `--style-json` omits a key (RenderStage always
@@ -139,12 +158,25 @@ def main(argv: list[str]) -> int:
         return 2
 
     import bmesh  # type: ignore
+    import numpy as np
     from math import radians
 
-    from mathutils import Matrix, Quaternion  # type: ignore
+    from mathutils import Matrix, Quaternion, Vector  # type: ignore
 
     from src.utils import render_look
-    from src.utils.blender_scene_io import load_camera_track, prepare_ball_keys
+    from src.utils.blender_scene_io import (
+        iter_player_fbx_entries,
+        load_camera_track,
+        load_smpl_body_data,
+        prepare_ball_keys,
+    )
+    from src.utils.smpl_skeleton import (
+        SMPL_JOINT_NAMES,
+        SMPL_PARENTS,
+        SMPL_REST_JOINTS_YUP,
+        axis_angle_to_quaternion,
+    )
+    from src.stages.export import _player_team_class_map
 
     if args.vertical:
         sys.stdout.write(
@@ -409,6 +441,266 @@ def main(argv: list[str]) -> int:
             obj.keyframe_insert(data_path="rotation_quaternion", frame=fr)
         return obj
 
+    # --- Players ---------------------------------------------------------
+    # Armature recipe mirrors scripts/blender_export_fbx.py's docstring
+    # convention: canonical rest pose built in y-up axes (no pre-rotation —
+    # the per-frame armature object matrix does the canonical->pitch-world
+    # mapping), pose-bone quaternions from thetas[1:] (pelvis/thetas[0] is
+    # IGNORED — root_R carries the root world orientation; see
+    # src/utils/smpl_skeleton.py's compute_joint_world_pose docstring).
+
+    _fallback_kit_rgba = {
+        part: render_look.hex_to_linear_rgba(hexval)
+        for part, hexval in _FALLBACK_KIT_HEX.items()
+    }
+    _skin_rgba = render_look.hex_to_linear_rgba(SKIN_COLOR_HEX)
+
+    def _bone_children_map() -> dict:
+        children: dict = {j: [] for j in range(24)}
+        for j in range(1, 24):
+            children[SMPL_PARENTS[j]].append(j)
+        return children
+
+    def _bone_rest_endpoints(rest_joints, children: dict) -> list:
+        """(head, tail) per bone in canonical rest space.
+
+        Internal bones (with children) get a tail at the mean of their
+        children's rest positions; leaf bones (hands, feet, head) get a
+        fixed +0.05 z tail so they stay visible. Same table drives both
+        the armature's edit bones and the capsule-fallback geometry.
+        """
+        endpoints = []
+        for j in range(24):
+            head = np.asarray(rest_joints[j], dtype=np.float64)
+            kids = children[j]
+            if kids:
+                tail = np.mean(
+                    [np.asarray(rest_joints[k], dtype=np.float64) for k in kids],
+                    axis=0)
+            else:
+                tail = head + np.array([0.0, 0.0, 0.05])
+            endpoints.append((head, tail))
+        return endpoints
+
+    def _material_for(materials_cache: dict, colors: dict, pid: str,
+                       zone: str) -> object:
+        key = (pid, zone)
+        mat = materials_cache.get(key)
+        if mat is not None:
+            return mat
+        if zone == "skin":
+            rgba = _skin_rgba
+        else:
+            kit = colors.get(pid) or _fallback_kit_rgba
+            rgba = kit.get(zone, _fallback_kit_rgba[zone])
+        mat = bpy.data.materials.new(f"{pid}_{zone}")
+        mat.use_nodes = True
+        bsdf = next(n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED")
+        bsdf.inputs["Base Color"].default_value = rgba
+        materials_cache[key] = mat
+        return mat
+
+    def _height_fraction(y: float, y_min: float, y_max: float) -> float:
+        span = (y_max - y_min) or 1.0
+        return (y - y_min) / span
+
+    def _add_smpl_mesh_body(arm: object, pid: str, smpl_data, colors: dict,
+                             materials_cache: dict) -> object:
+        """Full SMPL body mesh skinned to all 24 joints — mirrors
+        blender_export_fbx.py's _add_smpl_skinned_mesh, plus per-face kit
+        material slots (majority zone of the face's 3 vertices)."""
+        v_template = smpl_data["v_template"]
+        faces = smpl_data["faces"]
+        weights = smpl_data["weights"]
+
+        mesh = bpy.data.meshes.new(f"{pid}_smpl_mesh")
+        verts = [(float(v[0]), float(v[1]), float(v[2])) for v in v_template]
+        face_list = [(int(t[0]), int(t[1]), int(t[2])) for t in faces]
+        mesh.from_pydata(verts, [], face_list)
+        mesh.update()
+        obj = bpy.data.objects.new(f"{pid}_body", mesh)
+        bpy.context.collection.objects.link(obj)
+        obj.parent = arm
+
+        weight_threshold = 1e-5
+        for j, jname in enumerate(SMPL_JOINT_NAMES):
+            vg = obj.vertex_groups.new(name=jname)
+            col = weights[:, j]
+            nonzero = np.where(col > weight_threshold)[0]
+            for vi in nonzero:
+                vg.add([int(vi)], float(col[vi]), "REPLACE")
+        mod = obj.modifiers.new(name="Armature", type="ARMATURE")
+        mod.object = arm
+        mod.use_vertex_groups = True
+
+        y = v_template[:, 1].astype(float)
+        y_min, y_max = float(y.min()), float(y.max())
+        vertex_zones = [
+            render_look.kit_zone_for_height_fraction(_height_fraction(v, y_min, y_max))
+            for v in y
+        ]
+        slot_index = {}
+        for zone in _KIT_ZONES:
+            obj.data.materials.append(_material_for(materials_cache, colors, pid, zone))
+            slot_index[zone] = len(obj.data.materials) - 1
+        for poly in mesh.polygons:
+            counts: dict = {}
+            for vi in poly.vertices:
+                z = vertex_zones[vi]
+                counts[z] = counts.get(z, 0) + 1
+            majority = max(counts.items(), key=lambda kv: kv[1])[0]
+            poly.material_index = slot_index[majority]
+        return obj
+
+    def _parent_to_bone(obj: object, arm: object, bone_name: str) -> None:
+        """Bone-parent ``obj`` to ``bone_name`` while preserving its
+        current world transform (the scripted equivalent of Ctrl-P > Bone,
+        Keep Transform). Must run while the armature is still at rest
+        (identity object transform, identity pose) — capsule bodies are
+        built before any per-frame posing in ``_build_players``.
+        """
+        obj.parent = arm
+        obj.parent_type = "BONE"
+        obj.parent_bone = bone_name
+        pbone = arm.pose.bones[bone_name]
+        bone_len = arm.data.bones[bone_name].length
+        tail_mat = (
+            arm.matrix_world @ pbone.matrix @ Matrix.Translation((0.0, bone_len, 0.0))
+        )
+        obj.matrix_parent_inverse = tail_mat.inverted()
+
+    def _add_capsule_body(arm: object, pid: str, endpoints: list, colors: dict,
+                           materials_cache: dict) -> list:
+        """Capsule-limb fallback body: one primitive per bone with a
+        non-degenerate rest length, bone-parented so it follows the
+        armature's per-frame pose."""
+        y_all = np.array(
+            [pt[1] for head, tail in endpoints for pt in (head, tail)])
+        y_min, y_max = float(y_all.min()), float(y_all.max())
+        objs = []
+        for j, jname in enumerate(SMPL_JOINT_NAMES):
+            head, tail = endpoints[j]
+            direction = tail - head
+            length = float(np.linalg.norm(direction))
+            if length <= _MIN_CAPSULE_BONE_LEN_M:
+                continue
+            mid = (head + tail) / 2.0
+            zone = render_look.kit_zone_for_height_fraction(
+                _height_fraction(float(mid[1]), y_min, y_max))
+            mat = _material_for(materials_cache, colors, pid, zone)
+
+            z_axis = Vector((0.0, 0.0, 1.0))
+            dir_vec = Vector((float(direction[0]), float(direction[1]),
+                               float(direction[2])))
+            quat = z_axis.rotation_difference(dir_vec)
+
+            if jname == "head":
+                bpy.ops.mesh.primitive_uv_sphere_add(radius=_HEAD_SPHERE_RADIUS_M)
+            elif jname in _SPINE_BONES:
+                bpy.ops.mesh.primitive_cylinder_add(
+                    radius=_SPINE_CAPSULE_RADIUS_M, depth=length)
+            else:
+                bpy.ops.mesh.primitive_cylinder_add(
+                    radius=_LIMB_CAPSULE_RADIUS_M, depth=length)
+            obj = bpy.context.active_object
+            obj.name = f"{pid}_{jname}_capsule"
+            obj.rotation_mode = "QUATERNION"
+            obj.location = (float(mid[0]), float(mid[1]), float(mid[2]))
+            obj.rotation_quaternion = quat
+            obj.data.materials.append(mat)
+
+            _parent_to_bone(obj, arm, jname)
+            objs.append(obj)
+        return objs
+
+    def _build_players(output_dir: Path, shot_id: str, colors: dict,
+                        smpl_data, pelvis_canon) -> list:
+        rest_joints = (
+            np.asarray(smpl_data["joint_positions"], dtype=np.float64)
+            if smpl_data is not None
+            else SMPL_REST_JOINTS_YUP
+        )
+        endpoints = _bone_rest_endpoints(rest_joints, _bone_children_map())
+        materials_cache: dict = {}
+        armatures: list = []
+
+        for entry in iter_player_fbx_entries(output_dir, np):
+            if entry["shot_id"] not in ("", shot_id):
+                continue
+            pid = entry["player_id"]
+            frames = np.asarray(entry["frames"])
+            thetas = np.asarray(entry["thetas"])
+            root_R = np.asarray(entry["root_R"])
+            root_t = np.asarray(entry["root_t"])
+            n_frames = int(frames.shape[0])
+            if n_frames == 0:
+                continue
+
+            bpy.ops.object.armature_add(enter_editmode=True)
+            arm = bpy.context.active_object
+            arm.name = f"{pid}_arm"
+            arm.data.name = f"{pid}_arm_data"
+            arm.rotation_mode = "QUATERNION"
+            edit_bones = arm.data.edit_bones
+            for eb in list(edit_bones):
+                edit_bones.remove(eb)
+            bones = []
+            for j, jname in enumerate(SMPL_JOINT_NAMES):
+                eb = edit_bones.new(jname)
+                head, tail = endpoints[j]
+                eb.head = (float(head[0]), float(head[1]), float(head[2]))
+                eb.tail = (float(tail[0]), float(tail[1]), float(tail[2]))
+                if SMPL_PARENTS[j] != -1:
+                    eb.parent = bones[SMPL_PARENTS[j]]
+                    eb.use_connect = False
+                bones.append(eb)
+            bpy.ops.object.mode_set(mode="OBJECT")
+            for pb in arm.pose.bones:
+                pb.rotation_mode = "QUATERNION"
+
+            # Body — built while the armature is still at rest (identity
+            # object transform, identity pose), then posed below.
+            if smpl_data is not None:
+                _add_smpl_mesh_body(arm, pid, smpl_data, colors, materials_cache)
+            else:
+                _add_capsule_body(arm, pid, endpoints, colors, materials_cache)
+
+            for i, fi in enumerate(frames.tolist()):
+                fr = int(fi)
+                # Joints 1..23 only — pelvis (bone 0) stays IDENTITY.
+                # thetas[i, 0] is ignored: root_R carries the root's world
+                # orientation (repo convention — see smpl_skeleton.py).
+                for j in range(1, 24):
+                    pb = arm.pose.bones[SMPL_JOINT_NAMES[j]]
+                    q = axis_angle_to_quaternion(thetas[i, j])
+                    pb.rotation_quaternion = Quaternion(
+                        (float(q[0]), float(q[1]), float(q[2]), float(q[3])))
+                    pb.keyframe_insert(data_path="rotation_quaternion", frame=fr)
+
+                R = root_R[i]
+                # Translation accounts for the foot-midpoint canonical
+                # re-anchor: pelvis_canon is the shifted canonical pelvis
+                # position (zero when smpl_data is None — verified
+                # SMPL_REST_JOINTS_YUP[0] == (0, 0, 0) — so this formula
+                # is exact in both the asset and fallback cases).
+                offset = R @ pelvis_canon
+                loc = root_t[i] - offset
+                arm.location = (float(loc[0]), float(loc[1]), float(loc[2]))
+                m = Matrix((
+                    (float(R[0, 0]), float(R[0, 1]), float(R[0, 2]), 0.0),
+                    (float(R[1, 0]), float(R[1, 1]), float(R[1, 2]), 0.0),
+                    (float(R[2, 0]), float(R[2, 1]), float(R[2, 2]), 0.0),
+                    (0.0, 0.0, 0.0, 1.0),
+                ))
+                arm.rotation_quaternion = m.to_quaternion()
+                arm.keyframe_insert(data_path="location", frame=fr)
+                arm.keyframe_insert(data_path="rotation_quaternion", frame=fr)
+
+            armatures.append(arm)
+
+        print(f"PLAYERS_BUILT {len(armatures)}")
+        return armatures
+
     # --- Camera ----------------------------------------------------------
 
     def _add_camera_from_track(cam_id: str, track: dict, width: int,
@@ -487,6 +779,20 @@ def main(argv: list[str]) -> int:
             _build_ball(ball_keys)
     else:
         sys.stdout.write(f"[render] no ball track at {ball_path}; skipping ball\n")
+
+    team_class = _player_team_class_map(output_dir)
+    player_colors = render_look.resolve_player_colors(
+        style.get("teams", {}) or {}, team_class)
+    smpl_data, pelvis_canon = load_smpl_body_data(_REPO_ROOT, np)
+    if smpl_data is not None:
+        sys.stdout.write(
+            f"[render] using real SMPL body mesh (pelvis canon = "
+            f"{tuple(float(x) for x in pelvis_canon)})\n")
+    else:
+        sys.stdout.write(
+            "[render] no SMPL body asset at data/models/smpl_neutral.npz; "
+            "using capsule-limb fallback bodies\n")
+    _build_players(output_dir, shot, player_colors, smpl_data, pelvis_canon)
 
     def _camera_track_path(cam_id: str) -> Path:
         if cam_id == "broadcast":

@@ -3,6 +3,7 @@ and per-active-shot subprocess invocation against a stub Blender."""
 
 from __future__ import annotations
 
+import json
 import stat
 
 import pytest
@@ -51,6 +52,8 @@ def test_blender_args_shape(tmp_path):
     assert "--cameras" in args
     assert args[args.index("--cameras") + 1] == "broadcast,drone"
     assert "--width" in args and args[args.index("--width") + 1] == "640"
+    style_json = args[args.index("--style-json") + 1]
+    assert "teams" in json.loads(style_json)
 
 
 @pytest.mark.unit

@@ -55,6 +55,10 @@ STADIUM_INNER_R = 75.0
 STADIUM_INNER_H = 2.0
 STADIUM_OUTER_R = 95.0
 STADIUM_OUTER_H = 18.0
+# Two-tone stand shading: both derived from palette["outline"], alternated
+# per angular segment (see _build_stadium) for a flat dark two-tone look.
+STADIUM_DARK_FACTOR = 0.55
+STADIUM_LIGHT_FACTOR = 0.8
 BALL_RADIUS_M = 0.11
 SENSOR_WIDTH_MM = 36.0
 DEFAULT_FPS = 25.0
@@ -157,6 +161,7 @@ def main(argv: list[str]) -> int:
     # keeps output/render/<dir>/<camera>.mp4 stable for single-shot runs.
     shot_dir = shot or "clip"
     out_dir = output_dir / "render" / shot_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
 
@@ -303,6 +308,11 @@ def main(argv: list[str]) -> int:
         the r=95 ground footprint to r=75 at h=2, then the main bowl
         flaring back out to r=95 at h=18 — built directly with bmesh
         so the two extrude+scale stages are explicit.
+
+        Flat dark two-tone stand: two diffuse materials (both shades of
+        `palette["outline"]`) are alternated per angular segment across
+        both extrusion bands, giving vertical light/dark bays around the
+        bowl rather than a single flat tone.
         """
         mesh = bpy.data.meshes.new("StadiumBowl")
         bm = bmesh.new()
@@ -314,16 +324,27 @@ def main(argv: list[str]) -> int:
         ext1 = bmesh.ops.extrude_edge_only(bm, edges=base_edges)
         verts1 = [g for g in ext1["geom"] if isinstance(g, bmesh.types.BMVert)]
         edges1 = [g for g in ext1["geom"] if isinstance(g, bmesh.types.BMEdge)]
+        faces1 = [g for g in ext1["geom"] if isinstance(g, bmesh.types.BMFace)]
         bmesh.ops.translate(bm, verts=verts1, vec=(0.0, 0.0, STADIUM_INNER_H))
         scale1 = STADIUM_INNER_R / STADIUM_OUTER_R
         bmesh.ops.scale(bm, verts=verts1, vec=(scale1, scale1, 1.0))
 
         ext2 = bmesh.ops.extrude_edge_only(bm, edges=edges1)
         verts2 = [g for g in ext2["geom"] if isinstance(g, bmesh.types.BMVert)]
+        faces2 = [g for g in ext2["geom"] if isinstance(g, bmesh.types.BMFace)]
         bmesh.ops.translate(
             bm, verts=verts2, vec=(0.0, 0.0, STADIUM_OUTER_H - STADIUM_INNER_H))
         scale2 = STADIUM_OUTER_R / STADIUM_INNER_R
         bmesh.ops.scale(bm, verts=verts2, vec=(scale2, scale2, 1.0))
+
+        # Alternate material slot 0/1 per angular segment, independently
+        # in each band (both bands index their segments 0..N-1 in the
+        # same order they were created from `base_edges`/`edges1`, so a
+        # given segment gets the same tone in both bands — vertical bays).
+        for i, f in enumerate(faces1):
+            f.material_index = i % 2
+        for i, f in enumerate(faces2):
+            f.material_index = i % 2
 
         bm.to_mesh(mesh)
         bm.free()
@@ -332,8 +353,10 @@ def main(argv: list[str]) -> int:
         obj.location = (PITCH_LENGTH / 2, PITCH_WIDTH / 2, 0.0)
 
         outline = render_look.hex_to_linear_rgba(palette["outline"])
-        dark = (outline[0] * 0.6, outline[1] * 0.6, outline[2] * 0.6, 1.0)
-        obj.data.materials.append(_new_diffuse_material("M_Stand", dark))
+        dark = tuple(c * STADIUM_DARK_FACTOR for c in outline[:3]) + (1.0,)
+        light = tuple(c * STADIUM_LIGHT_FACTOR for c in outline[:3]) + (1.0,)
+        obj.data.materials.append(_new_diffuse_material("M_Stand_Dark", dark))
+        obj.data.materials.append(_new_diffuse_material("M_Stand_Light", light))
 
     def _build_world(palette: dict) -> None:
         top = render_look.hex_to_linear_rgba(palette["sky_top"])

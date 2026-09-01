@@ -57,11 +57,17 @@ def _write_min_fixture(root):
 
     Field names mirror the real pipeline artefacts (checked against
     output/camera/gberch_camera_track.json and
-    output/ball/gberch_ball_track.json on disk): camera frames carry
+    output/ball/gberch_ball_track.json on disk, and against the
+    dataclass schemas in src/schemas/camera_track.py and
+    src/schemas/ball_track.py): camera frames carry
     frame/K/R/t/confidence/is_anchor, the track carries clip_id/fps/
-    image_size/frames; ball frames carry frame/world_xyz/state
-    (prepare_ball_keys additionally reads an optional quat_wxyz —
-    left absent here to exercise its identity-quaternion fallback).
+    image_size/t_world/frames. Ball frames carry frame/world_xyz/
+    state/confidence — `state` must be one of BallFrame's documented
+    Literal values (grounded/flight/occluded/missing; "rolling" is not
+    one of them) and `confidence` is required, not optional; the track
+    also carries the required (if empty) `flight_segments` list.
+    (prepare_ball_keys additionally reads an optional quat_wxyz — left
+    absent here to exercise its identity-quaternion fallback.)
     """
     n = 3
     (root / "camera").mkdir(parents=True)
@@ -80,9 +86,10 @@ def _write_min_fixture(root):
          "t_world": [52.5, -20.0, 20.0], "frames": frames}))
     (root / "ball").mkdir()
     (root / "ball" / "ball_track.json").write_text(json.dumps(
-        {"clip_id": "clip", "fps": 25.0,
+        {"clip_id": "clip", "fps": 25.0, "flight_segments": [],
          "frames": [{"frame": i, "world_xyz": [52.5, 34.0, 0.11],
-                      "state": "rolling"} for i in range(n)]}))
+                      "state": "grounded", "confidence": 1.0}
+                     for i in range(n)]}))
 
 
 @pytest.mark.fbx

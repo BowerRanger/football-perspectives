@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.utils.team_roles import derive_kit_role
+
 # Rest-pose height fractions (0=sole, 1=crown). Arms inherit the shirt
 # color in v1 (long-sleeve reading; acceptable under the toon look).
 _ZONES = (
@@ -40,13 +42,34 @@ def resolve_player_colors(
     teams_cfg: dict,
     team_class: dict[str, tuple[str, str]],
 ) -> dict[str, dict[str, tuple]]:
+    """Resolve each player's shirt/shorts/socks colour from team config.
+
+    ``team_class`` maps ``player_id -> (team, class_name)`` in the real
+    tracking vocabulary (``team`` in ``"A"|"B"|"referee"|"unknown"``,
+    ``class_name`` in ``"player"|"goalkeeper"|"referee"|"ball"`` — see
+    ``src/schemas/tracks.py``). That vocabulary does not match
+    ``render.teams.defaults``'s keys directly (``home``/``away``/
+    ``home_gk``/``away_gk``/``referee``/``unknown``), so every player is
+    routed through :func:`src.utils.team_roles.derive_kit_role` — the same
+    mapping the export/UE kit path uses — to get the canonical kit role
+    first. A ``by_player`` override (keyed by role, e.g. ``{"P003":
+    "away"}``) always wins over the derived role.
+
+    Falls back gracefully when ``defaults`` doesn't have every role: a
+    missing ``*_gk`` role falls back to that side's outfield kit, and
+    anything still unresolved falls back to a neutral gray.
+    """
     defaults = teams_cfg.get("defaults", {})
     overrides = teams_cfg.get("by_player", {})
     fallback = {"shirt": "#888888", "shorts": "#666666", "socks": "#888888"}
     out: dict[str, dict[str, tuple]] = {}
-    for pid, (team, _cls) in team_class.items():
-        key = overrides.get(pid, team)
-        kit = defaults.get(key, fallback)
+    for pid, (team, cls) in team_class.items():
+        role = overrides.get(pid) or derive_kit_role(team, cls)
+        kit = defaults.get(role)
+        if kit is None and role.endswith("_gk"):
+            kit = defaults.get(role[: -len("_gk")])
+        if kit is None:
+            kit = fallback
         out[pid] = {part: hex_to_linear_rgba(kit.get(part, fallback[part]))
                     for part in ("shirt", "shorts", "socks")}
     return out

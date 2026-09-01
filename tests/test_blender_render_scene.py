@@ -11,6 +11,7 @@ import json
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -18,6 +19,11 @@ import pytest
 from scripts.blender_render_scene import _parse_args
 from src.stages.render import RenderStage
 from tests.conftest import _add_player_fixture, _write_min_fixture
+
+# Absolute path, matching tests/test_blender_export_smpl_skeleton.py's
+# convention — a relative "scripts/blender_render_scene.py" only resolves
+# when pytest's cwd happens to be the repo root, which isn't guaranteed.
+_SCRIPT = str(Path(__file__).resolve().parents[1] / "scripts" / "blender_render_scene.py")
 
 
 @pytest.mark.unit
@@ -134,7 +140,7 @@ _BLENDER = shutil.which("blender")
 @pytest.mark.skipif(_BLENDER is None, reason="blender not on PATH")
 def test_smoke_render_broadcast_mp4(tmp_path):
     _write_min_fixture(tmp_path)
-    script = "scripts/blender_render_scene.py"
+    script = _SCRIPT
     res = subprocess.run(
         [_BLENDER, "--background", "--python", script, "--",
          "--output-dir", str(tmp_path), "--shot", "",
@@ -147,6 +153,43 @@ def test_smoke_render_broadcast_mp4(tmp_path):
     assert out.exists() and out.stat().st_size > 0
     assert "RENDER_TIMING broadcast" in res.stdout
 
+    # Pixel-level smoke assertion (spec §7): a corrupt/black/blank/wrong
+    # -size render must not slip through just because ffmpeg exited 0 and
+    # wrote a nonzero-size file. ffprobe pins the container's declared
+    # resolution to the exact --width/--height requested; a decoded frame's
+    # channel means confirm it's neither black (grossly under-lit) nor
+    # some other flat failure mode — the camera looks at the grass pitch
+    # from above, so green should clearly dominate red and blue.
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "json", str(out)],
+        capture_output=True, text=True, timeout=60)
+    assert probe.returncode == 0, probe.stderr
+    dims = json.loads(probe.stdout)["streams"][0]
+    assert (dims["width"], dims["height"]) == (160, 90)
+
+    frame_path = tmp_path / "frame0.png"
+    extract = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(out), "-frames:v", "1", str(frame_path)],
+        capture_output=True, text=True, timeout=60)
+    assert extract.returncode == 0, extract.stderr[-2000:]
+
+    from PIL import Image
+    img = Image.open(frame_path).convert("RGB")
+    arr = np.asarray(img, dtype=np.float64)
+    r_mean = float(arr[..., 0].mean())
+    g_mean = float(arr[..., 1].mean())
+    b_mean = float(arr[..., 2].mean())
+    luminance = 0.299 * r_mean + 0.587 * g_mean + 0.114 * b_mean
+    assert luminance > 15.0, (
+        f"frame looks black (mean luminance {luminance:.1f}); "
+        f"r={r_mean:.1f} g={g_mean:.1f} b={b_mean:.1f}"
+    )
+    assert g_mean > r_mean and g_mean > b_mean, (
+        f"expected a green-dominant grass-pitch frame, got "
+        f"r={r_mean:.1f} g={g_mean:.1f} b={b_mean:.1f}"
+    )
+
 
 @pytest.mark.fbx
 @pytest.mark.skipif(_BLENDER is None, reason="blender not on PATH")
@@ -157,7 +200,7 @@ def test_smoke_render_aov_writes_exr(tmp_path):
     per-camera ``aov/<safe_camera>/####.exr`` path gets populated.
     """
     _write_min_fixture(tmp_path)
-    script = "scripts/blender_render_scene.py"
+    script = _SCRIPT
     res = subprocess.run(
         [_BLENDER, "--background", "--python", script, "--",
          "--output-dir", str(tmp_path), "--shot", "",
@@ -194,7 +237,7 @@ def test_smoke_render_with_player(tmp_path):
     """
     _write_min_fixture(tmp_path)
     _add_player_fixture(tmp_path)
-    script = "scripts/blender_render_scene.py"
+    script = _SCRIPT
     res = subprocess.run(
         [_BLENDER, "--background", "--python", script, "--",
          "--output-dir", str(tmp_path), "--shot", "",
@@ -245,7 +288,7 @@ def test_player_pelvis_ignores_thetas0_and_stays_upright(tmp_path):
     """
     _write_min_fixture(tmp_path)
     _add_hostile_pose_fixture(tmp_path)
-    script = "scripts/blender_render_scene.py"
+    script = _SCRIPT
     res = subprocess.run(
         [_BLENDER, "--background", "--python", script, "--",
          "--output-dir", str(tmp_path), "--shot", "",
@@ -309,7 +352,7 @@ def test_smoke_render_drone_and_vertical(tmp_path):
     written = stage._write_virtual_camera_tracks("", ["drone"])
     assert written == ["drone"]
 
-    script = "scripts/blender_render_scene.py"
+    script = _SCRIPT
     res = subprocess.run(
         [_BLENDER, "--background", "--python", script, "--",
          "--output-dir", str(tmp_path), "--shot", "",
@@ -356,7 +399,7 @@ def test_smoke_render_vertical_and_aov_together(tmp_path):
     written = stage._write_virtual_camera_tracks("", ["drone"])
     assert written == ["drone"]
 
-    script = "scripts/blender_render_scene.py"
+    script = _SCRIPT
     res = subprocess.run(
         [_BLENDER, "--background", "--python", script, "--",
          "--output-dir", str(tmp_path), "--shot", "",

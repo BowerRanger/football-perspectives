@@ -147,7 +147,7 @@ The ankle-confidence cutoff for foot anchoring (formerly `pose_2d.min_confidence
 Beyond Python packages, the pipeline requires:
 - **FFmpeg** (clip handling)
 - **GVHMR submodule + checkpoint** (`third_party/gvhmr/inputs/checkpoints/gvhmr/gvhmr_siga24_release.ckpt`)
-- **Blender ≥ 3.6** (headless, for FBX export and the render stage's toon renders): `snap install blender --classic`. Both are optional — each stage logs a warning and skips cleanly when Blender isn't found.
+- **Blender** (headless, optional — each stage logs a warning and skips cleanly when Blender isn't found): `snap install blender --classic`. FBX export needs **>= 3.6**; the render stage's toon renders need **>= 5.0** (hard-requires 5.x-only compositor + socket APIs — see `scripts/blender_render_scene.py`'s version check).
 
 GPU: strongly recommended for `hmr_world` (GVHMR); 8GB VRAM minimum, 12GB+ recommended for concurrent ViTPose + YOLOv8x.
 

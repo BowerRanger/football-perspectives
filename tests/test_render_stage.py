@@ -43,6 +43,50 @@ def test_render_stage_registered():
 
 
 @pytest.mark.unit
+def test_is_complete_requires_every_active_shot(tmp_path):
+    """A multi-shot manifest with one rendered + one un-rendered shot must
+    not report complete — the pre-fix ``any(render_dir.rglob("*.mp4"))``
+    check considered the stage done the moment ANY shot rendered
+    anywhere, so a failed second shot cache-skipped forever."""
+    (tmp_path / "shots").mkdir()
+    ShotsManifest(
+        source_file="x", fps=25.0, total_frames=10,
+        shots=[
+            Shot(id="shot01", start_frame=0, end_frame=4, start_time=0.0,
+                 end_time=0.166, clip_file="shots/shot01.mp4"),
+            Shot(id="shot02", start_frame=5, end_frame=9, start_time=0.166,
+                 end_time=0.333, clip_file="shots/shot02.mp4"),
+        ],
+    ).save(tmp_path / "shots" / "shots_manifest.json")
+    stage = RenderStage(_cfg(), tmp_path)
+    assert stage.is_complete() is False
+
+    shot01_dir = tmp_path / "render" / "shot01"
+    shot01_dir.mkdir(parents=True)
+    (shot01_dir / "broadcast.mp4").write_bytes(b"x")
+    assert stage.is_complete() is False  # shot02 still missing
+
+    shot02_dir = tmp_path / "render" / "shot02"
+    shot02_dir.mkdir(parents=True)
+    (shot02_dir / "broadcast.mp4").write_bytes(b"x")
+    assert stage.is_complete() is True
+
+
+@pytest.mark.unit
+def test_resolve_blender_double_null_config_returns_none_not_typeerror(tmp_path):
+    """render.blender_path and export.blender_path both explicitly null
+    (not absent) used to raise TypeError from Path(None) — must instead
+    resolve to the "blender" default and warn-and-skip if it's not on
+    PATH, same posture as a missing binary."""
+    cfg = _cfg(blender_path=None)
+    cfg["export"]["blender_path"] = None
+    stage = RenderStage(cfg, tmp_path)
+    # Must not raise; result depends on whether "blender" happens to be
+    # on this machine's PATH, so just assert it doesn't blow up.
+    stage._resolve_blender()
+
+
+@pytest.mark.unit
 def test_blender_args_shape(tmp_path):
     stage = RenderStage(_cfg(), tmp_path)
     args = stage._blender_args("shot01")

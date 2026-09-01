@@ -883,7 +883,10 @@ render:
     defaults:
       home: {shirt: "#c0392b", shorts: "#ffffff", socks: "#c0392b"}
       away: {shirt: "#2980b9", shorts: "#2c3e50", socks: "#2980b9"}
+      home_gk: {shirt: "#f1c40f", shorts: "#2c3e50", socks: "#f1c40f"}
+      away_gk: {shirt: "#27ae60", shorts: "#2c3e50", socks: "#27ae60"}
       referee: {shirt: "#222222", shorts: "#222222", socks: "#222222"}
-    by_player: {}             # e.g. {P003: away} — overrides tracking team class
+      unknown: {shirt: "#888888", shorts: "#666666", socks: "#888888"}
+    by_player: {}             # e.g. {P003: away} — overrides the derived kit role
   aov_passes: false
   save_blend: false

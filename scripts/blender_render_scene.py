@@ -161,9 +161,12 @@ def main(argv: list[str]) -> int:
         )
         return 2
 
-    if tuple(bpy.app.version) < (3, 6, 0):
+    if tuple(bpy.app.version) < (5, 0, 0):
         sys.stderr.write(
-            f"Blender >= 3.6 required, got {bpy.app.version}\n"
+            "Blender >= 5.0 required (this script hard-requires 5.x-only "
+            "APIs: the compositor's scene.compositing_node_group, the "
+            "image-settings media_type enum, and the ColorRamp 'Factor' "
+            f"socket name), got {bpy.app.version}\n"
         )
         return 2
 
@@ -620,10 +623,27 @@ def main(argv: list[str]) -> int:
         return (y - y_min) / span
 
     def _add_smpl_mesh_body(arm: object, pid: str, smpl_data, colors: dict,
-                             materials_cache: dict, ramp_steps: int) -> object:
+                             materials_cache: dict, ramp_steps: int,
+                             endpoints: list) -> list:
         """Full SMPL body mesh skinned to all 24 joints — mirrors
         blender_export_fbx.py's _add_smpl_skinned_mesh, plus per-face kit
-        material slots (majority zone of the face's 3 vertices)."""
+        material slots (majority zone of the face's 3 vertices).
+
+        ``load_smpl_body_data`` only guarantees ``joint_positions``/
+        ``v_template`` are present (it returns ``None`` outright when
+        those are missing) — ``faces``/``weights`` aren't checked there,
+        so an SMPL asset variant missing either key would otherwise
+        KeyError here. Guard them explicitly and fall back to the
+        capsule-limb body (same as the ``smpl_data is None`` path)
+        rather than crash the whole render.
+        """
+        missing = [k for k in ("faces", "weights") if k not in smpl_data]
+        if missing:
+            print(f"[render] SMPL body asset for {pid} missing key(s) "
+                  f"{missing}; falling back to capsule body")
+            return _add_capsule_body(
+                arm, pid, endpoints, colors, materials_cache, ramp_steps)
+
         v_template = smpl_data["v_template"]
         faces = smpl_data["faces"]
         weights = smpl_data["weights"]
@@ -666,7 +686,7 @@ def main(argv: list[str]) -> int:
                 counts[z] = counts.get(z, 0) + 1
             majority = max(counts.items(), key=lambda kv: kv[1])[0]
             poly.material_index = slot_index[majority]
-        return obj
+        return [obj]
 
     def _parent_to_bone(obj: object, arm: object, bone_name: str) -> None:
         """Bone-parent ``obj`` to ``bone_name`` while preserving its
@@ -781,8 +801,9 @@ def main(argv: list[str]) -> int:
             # object transform, identity pose), then posed below. Every
             # body part gets an inverted-hull outline (Task 7 toon look).
             if smpl_data is not None:
-                body_objs = [_add_smpl_mesh_body(
-                    arm, pid, smpl_data, colors, materials_cache, ramp_steps)]
+                body_objs = _add_smpl_mesh_body(
+                    arm, pid, smpl_data, colors, materials_cache, ramp_steps,
+                    endpoints)
             else:
                 body_objs = _add_capsule_body(
                     arm, pid, endpoints, colors, materials_cache, ramp_steps)
@@ -1038,6 +1059,13 @@ def main(argv: list[str]) -> int:
     if broadcast_path.exists():
         fps = float(load_camera_track(broadcast_path).get("fps", DEFAULT_FPS)) or DEFAULT_FPS
 
+    # Build every requested camera FIRST (bailing out on any missing/empty
+    # track before rendering anything), then save the .blend ONCE — rather
+    # than once per camera, which just re-wrote the same file N times and
+    # left scene.camera unset (the file only "usefully" opened on whatever
+    # camera a later render call happened to set). scene.camera is pointed
+    # at the first built camera so the saved file opens on something.
+    cam_entries: list[tuple[str, object, int, int]] = []
     for cam_id in args.cameras:
         cam_path = _camera_track_path(cam_id)
         if not cam_path.exists():
@@ -1056,12 +1084,15 @@ def main(argv: list[str]) -> int:
         frame_end = (
             args.frame_end if args.frame_end is not None else int(frames[-1]["frame"])
         )
-
         cam_obj = _add_camera_from_track(cam_id, track, args.width, args.height)
-        safe_id = _safe_cam_id(cam_id)
+        cam_entries.append((cam_id, cam_obj, frame_start, frame_end))
 
-        if args.save_blend:
-            bpy.ops.wm.save_as_mainfile(filepath=str(out_dir / "scene.blend"))
+    if args.save_blend and cam_entries:
+        bpy.context.scene.camera = cam_entries[0][1]
+        bpy.ops.wm.save_as_mainfile(filepath=str(out_dir / "scene.blend"))
+
+    for cam_id, cam_obj, frame_start, frame_end in cam_entries:
+        safe_id = _safe_cam_id(cam_id)
 
         # AOV EXRs (Task 9) are only rendered for the landscape pass, one
         # subdirectory per camera — never for the 9:16 vertical pass below.

@@ -31,16 +31,36 @@ class RenderStage(BaseStage):
     name = "render"
 
     def is_complete(self) -> bool:
+        # Mirrors ExportStage.is_complete (src/stages/export.py:218-227):
+        # every active shot must have rendered output, not just SOME shot
+        # anywhere under output/render — otherwise a multi-shot manifest
+        # with one rendered + one failed shot cache-skips forever. A
+        # shot "completed" here means its render dir
+        # (output/render/<shot.id>/, or output/render/clip/ for the
+        # legacy no-manifest single-shot layout) has at least one
+        # top-level mp4; per-requested-camera checking is not required.
         render_dir = self.output_dir / "render"
-        return render_dir.exists() and any(render_dir.rglob("*.mp4"))
+        manifest_path = self.output_dir / "shots" / "shots_manifest.json"
+        if not manifest_path.exists():
+            legacy_dir = render_dir / "clip"
+            return legacy_dir.exists() and any(legacy_dir.glob("*.mp4"))
+        manifest = ShotsManifest.load(manifest_path)
+        return all(
+            (render_dir / shot.id).exists()
+            and any((render_dir / shot.id).glob("*.mp4"))
+            for shot in manifest.active_shots()
+        )
 
     def _render_cfg(self) -> dict:
         return self.config.get("render", {})
 
     def _resolve_blender(self) -> str | None:
         cfg = self._render_cfg()
-        path = cfg.get("blender_path") or self.config.get("export", {}).get(
-            "blender_path", "blender")
+        path = (
+            cfg.get("blender_path")
+            or self.config.get("export", {}).get("blender_path", "blender")
+            or "blender"
+        )
         if Path(path).is_absolute():
             return path if Path(path).exists() else None
         return shutil.which(path)

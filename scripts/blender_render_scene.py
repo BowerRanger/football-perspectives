@@ -945,6 +945,22 @@ def main(argv: list[str]) -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         scene.render.filepath = str(out_path)
 
+        # `scene.compositing_node_group` (once assigned by
+        # _setup_aov_compositor, below) stays attached to the scene for
+        # every subsequent render call — Blender doesn't clear it, and
+        # `scene.render.use_compositing` (a separate flag, default True)
+        # is never touched elsewhere, so the compositor keeps running on
+        # every later render regardless of this call's own `aov_dir`. Left
+        # ungated, a landscape pass with `--aov` "poisons" every following
+        # render (e.g. the 9:16 vertical pass, or a next camera without
+        # AOV) into re-firing the File Output node at its stale directory
+        # and stale (wrong-resolution) frame — and since the rename-to-
+        # `.exr` loop below is itself gated on `aov_dir`, that stray write
+        # is left as a corrupt extension-less file. Explicitly gating
+        # `use_compositing` on *this* call's `aov_dir` on every call (not
+        # just when AOV is requested) is what actually scopes the
+        # compositor to the calls that asked for it.
+        scene.render.use_compositing = aov_dir is not None
         if aov_dir is not None:
             fo = _setup_aov_compositor()
             aov_dir.mkdir(parents=True, exist_ok=True)

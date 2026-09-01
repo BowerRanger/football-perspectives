@@ -324,3 +324,57 @@ def test_smoke_render_drone_and_vertical(tmp_path):
     assert (render_dir / "drone.mp4").exists()
     assert (render_dir / "drone_9x16.mp4").exists()
     assert not (render_dir / "broadcast_9x16.mp4").exists()
+
+
+@pytest.mark.fbx
+@pytest.mark.skipif(_BLENDER is None, reason="blender not on PATH")
+def test_smoke_render_vertical_and_aov_together(tmp_path):
+    """Regression test: --vertical --aov together with a non-broadcast
+    camera used to leave a corrupt extension-less EXR-named file under
+    aov/<camera>/.
+
+    ``scene.compositing_node_group`` stays attached to the scene once
+    ``_setup_aov_compositor`` assigns it, and Blender keeps running the
+    compositor on every later render call — including drone's 9:16
+    vertical pass, which never receives an ``aov_dir`` and so never runs
+    the rename-to-``.exr`` step. Without gating ``use_compositing`` per
+    call, that vertical pass would still fire the File Output node at
+    its stale directory/frame, dropping a wrong-resolution file named
+    plain ``0000`` (no extension) next to the real ``0000.exr``.
+
+    Asserts every file under ``aov/<camera>/`` (for every requested
+    camera, not just broadcast) carries the ``.exr`` extension, and that
+    the drone 9:16 mp4 still renders normally alongside it.
+    """
+    _write_min_fixture(tmp_path)
+    _add_player_fixture(tmp_path)
+    cfg = {
+        "render": {"resolution": [160, 90]},
+        "export": {"virtual_cameras": {}},
+    }
+    stage = RenderStage(cfg, tmp_path)
+    written = stage._write_virtual_camera_tracks("", ["drone"])
+    assert written == ["drone"]
+
+    script = "scripts/blender_render_scene.py"
+    res = subprocess.run(
+        [_BLENDER, "--background", "--python", script, "--",
+         "--output-dir", str(tmp_path), "--shot", "",
+         "--cameras", "broadcast,drone", "--width", "160", "--height", "90",
+         "--samples", "1", "--style-json", "{}", "--vertical", "--aov",
+         "--frame-start", "0", "--frame-end", "0"],
+        capture_output=True, text=True, timeout=600)
+    assert res.returncode == 0, res.stderr[-3000:]
+
+    render_dir = tmp_path / "render" / "clip"
+    assert (render_dir / "drone_9x16.mp4").exists()
+    assert (render_dir / "drone_9x16.mp4").stat().st_size > 0
+
+    for cam in ("broadcast", "drone"):
+        aov_dir = render_dir / "aov" / cam
+        files = sorted(aov_dir.iterdir())
+        assert files, f"no AOV output for {cam}: {res.stdout[-3000:]}"
+        for f in files:
+            assert f.suffix == ".exr", (
+                f"non-.exr file leaked into {aov_dir}: {[p.name for p in files]}"
+            )

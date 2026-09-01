@@ -1,0 +1,103 @@
+"""Tests for scripts/blender_render_scene.py.
+
+Split into pure arg-parsing tests (run everywhere) and a Blender smoke
+test (``@pytest.mark.fbx`` — skipped when Blender isn't on PATH, same
+posture as tests/test_blender_export_smpl_skeleton.py).
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+
+import numpy as np
+import pytest
+
+from scripts.blender_render_scene import _parse_args
+
+
+@pytest.mark.unit
+def test_parse_args_after_double_dash():
+    ns = _parse_args([
+        "blender", "--background", "--",
+        "--output-dir", "/tmp/o", "--shot", "shot01",
+        "--cameras", "broadcast,drone", "--width", "640", "--height", "360",
+        "--samples", "4", "--style-json", "{}",
+    ])
+    assert ns.shot == "shot01"
+    assert ns.cameras == ["broadcast", "drone"]
+    assert (ns.width, ns.height) == (640, 360)
+    assert ns.vertical is False and ns.aov is False
+
+
+@pytest.mark.unit
+def test_parse_args_defaults_and_flags():
+    ns = _parse_args([
+        "--output-dir", "/tmp/o",
+        "--vertical", "--aov", "--save-blend",
+        "--frame-start", "10", "--frame-end", "20",
+    ])
+    # No --shot / --cameras / --width / --height / --samples / --style-json
+    # supplied: defaults from the brief's skeleton.
+    assert ns.shot == ""
+    assert ns.cameras == ["broadcast"]
+    assert (ns.width, ns.height) == (1920, 1080)
+    assert ns.samples == 16
+    assert ns.style_json == "{}"
+    assert ns.vertical is True and ns.aov is True and ns.save_blend is True
+    assert (ns.frame_start, ns.frame_end) == (10, 20)
+
+
+_BLENDER = shutil.which("blender")
+
+
+def _write_min_fixture(root):
+    """Minimal single-shot output dir: camera track + ball track, no players.
+
+    Field names mirror the real pipeline artefacts (checked against
+    output/camera/gberch_camera_track.json and
+    output/ball/gberch_ball_track.json on disk): camera frames carry
+    frame/K/R/t/confidence/is_anchor, the track carries clip_id/fps/
+    image_size/frames; ball frames carry frame/world_xyz/state
+    (prepare_ball_keys additionally reads an optional quat_wxyz —
+    left absent here to exercise its identity-quaternion fallback).
+    """
+    n = 3
+    (root / "camera").mkdir(parents=True)
+    K = [[1000.0, 0, 320.0], [0, 1000.0, 180.0], [0, 0, 1.0]]
+    frames = []
+    for i in range(n):
+        # camera 20m up on the near touchline looking at pitch centre
+        from src.utils.virtual_cameras import look_at_view
+        R, t = look_at_view(np.array([52.5, -20.0, 20.0]),
+                             np.array([52.5, 34.0, 0.0]))
+        frames.append({"frame": i, "K": K,
+                        "R": [list(r) for r in R], "t": list(t),
+                        "confidence": 1.0, "is_anchor": False})
+    (root / "camera" / "camera_track.json").write_text(json.dumps(
+        {"clip_id": "clip", "fps": 25.0, "image_size": [640, 360],
+         "t_world": [52.5, -20.0, 20.0], "frames": frames}))
+    (root / "ball").mkdir()
+    (root / "ball" / "ball_track.json").write_text(json.dumps(
+        {"clip_id": "clip", "fps": 25.0,
+         "frames": [{"frame": i, "world_xyz": [52.5, 34.0, 0.11],
+                      "state": "rolling"} for i in range(n)]}))
+
+
+@pytest.mark.fbx
+@pytest.mark.skipif(_BLENDER is None, reason="blender not on PATH")
+def test_smoke_render_broadcast_mp4(tmp_path):
+    _write_min_fixture(tmp_path)
+    script = "scripts/blender_render_scene.py"
+    res = subprocess.run(
+        [_BLENDER, "--background", "--python", script, "--",
+         "--output-dir", str(tmp_path), "--shot", "",
+         "--cameras", "broadcast", "--width", "160", "--height", "90",
+         "--samples", "1", "--style-json", "{}",
+         "--frame-start", "0", "--frame-end", "2"],
+        capture_output=True, text=True, timeout=600)
+    assert res.returncode == 0, res.stderr[-3000:]
+    out = tmp_path / "render" / "clip" / "broadcast.mp4"
+    assert out.exists() and out.stat().st_size > 0
+    assert "RENDER_TIMING broadcast" in res.stdout

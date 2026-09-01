@@ -9,6 +9,7 @@ right, +Y down); per-frame ``t`` satisfies camera-centre ``C = -R.T @ t``.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -84,6 +85,10 @@ class RigConfig:
     ots_up_m: float = 0.3
     ots_right_m: float = 0.0
     ball_target_max_occlusion_frames: int = 10
+    drone_fov_deg: float = 55.0
+    drone_height_m: float = 40.0
+    drone_back_m: float = 25.0
+    drone_smooth_frames: int = 25
 
 
 def _head_pose_world(
@@ -219,4 +224,65 @@ def build_ots_track(
         R, t = look_at_view(center, target)
         conf = float(track.confidence[i]) * (1.0 if ok else 0.5)
         per_frame.append((int(fr), R, t, conf))
+    return _make_track(clip_id, image_size, fps, K, per_frame)
+
+
+def build_drone_track(
+    tracks: Sequence["SmplWorldTrack"],
+    ball_track: object,
+    cfg: RigConfig,
+    image_size: tuple[int, int],
+    fps: float,
+    clip_id: str,
+) -> CameraTrack:
+    """Elevated tactical camera tracking the smoothed action centroid.
+
+    Per frame the action centroid is the mean of all player root
+    positions present on that frame plus the ball (when tracked); the
+    camera sits ``drone_back_m`` toward the near touchline (-y) and
+    ``drone_height_m`` up, looking at the centroid. The centroid is
+    smoothed with a centered moving average over ``drone_smooth_frames``
+    frames so single-frame jitter never reaches the camera.
+    """
+
+    K = intrinsics_from_fov(cfg.drone_fov_deg, image_size)
+    ball_xyz = _ball_xyz_by_frame(ball_track) if ball_track is not None else {}
+
+    # Union of frame indices across tracks.
+    all_frames = sorted({int(f) for tr in tracks
+                         for f in np.asarray(tr.frames).tolist()})
+    if not all_frames:
+        return _make_track(clip_id, image_size, fps, K, [])
+
+    # Raw per-frame centroid.
+    by_frame_pos: dict[int, list[np.ndarray]] = {f: [] for f in all_frames}
+    for tr in tracks:
+        idx = {int(f): i for i, f in enumerate(np.asarray(tr.frames).tolist())}
+        for f, i in idx.items():
+            by_frame_pos[f].append(np.asarray(tr.root_t[i], dtype=np.float64))
+    raw = []
+    for f in all_frames:
+        pts = list(by_frame_pos[f])
+        if f in ball_xyz:
+            pts.append(np.asarray(ball_xyz[f], dtype=np.float64))
+        raw.append(np.mean(pts, axis=0))
+    raw_arr = np.asarray(raw)
+
+    # Centered moving average (edge-padded).
+    win = max(1, int(cfg.drone_smooth_frames))
+    pad = win // 2
+    padded = np.pad(raw_arr, ((pad, pad), (0, 0)), mode="edge")
+    kernel = np.ones(win) / win
+    smooth = np.stack(
+        [np.convolve(padded[:, k], kernel, mode="valid") for k in range(3)],
+        axis=1,
+    )[: len(all_frames)]
+
+    per_frame: list[_FrameTuple] = []
+    for f, target in zip(all_frames, smooth):
+        centre = np.array([target[0],
+                           target[1] - cfg.drone_back_m,
+                           cfg.drone_height_m])
+        R, t = look_at_view(centre, target)
+        per_frame.append((int(f), R, t, 1.0))
     return _make_track(clip_id, image_size, fps, K, per_frame)

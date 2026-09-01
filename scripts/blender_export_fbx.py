@@ -30,140 +30,19 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Iterator
 
+# Ensure the repo's ``src`` package is importable — both when Blender
+# loads this file directly (spec_from_file_location, no package context)
+# and when it's imported normally as ``scripts.blender_export_fbx``.
+repo_root = Path(__file__).resolve().parents[1]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
 
-def iter_player_fbx_entries(
-    output_dir: Path, np_mod,
-) -> Iterator[dict]:
-    """Yield one ``dict`` per (shot, player) FBX to write.
-
-    Prefers ``output/refined_poses/{pid}_refined.npz`` — that's where
-    the rotation-outlier rejection, lean correction, ground snap, and
-    smoothing live. Each refined NPZ is keyed by player_id only and
-    indexed on the shared reference timeline; we apply the sync_map
-    offset for each shot in ``contributing_shots`` to translate into
-    per-shot local frames so the FBX timeline lines up with the
-    per-shot camera FBX.
-
-    Falls back to one entry per ``output/hmr_world/*_smpl_world.npz``
-    file when no refined output is present (e.g. user re-ran
-    ``--stages export`` before running ``refined_poses``).
-
-    The ``np_mod`` argument lets the Blender entry-point pass in the
-    already-imported ``numpy`` rather than re-importing — keeps this
-    helper testable outside Blender too.
-
-    Each yielded entry has keys: ``shot_id``, ``player_id``,
-    ``frames``, ``thetas``, ``root_R``, ``root_t``.
-    """
-    refined_dir = output_dir / "refined_poses"
-    refined_files = (
-        sorted(refined_dir.glob("*_refined.npz"))
-        if refined_dir.exists() else []
-    )
-    if refined_files:
-        sync = None
-        sync_path = output_dir / "shots" / "sync_map.json"
-        if sync_path.exists():
-            try:
-                # Importing src.schemas.sync_map requires repo root on
-                # sys.path; main() does that before invoking us. When
-                # called from a unit test the same applies.
-                from src.schemas.sync_map import SyncMap  # type: ignore
-                sync = SyncMap.load(sync_path)
-            except Exception as exc:
-                sys.stderr.write(
-                    f"[fbx-entries] sync_map.json load failed ({exc}); "
-                    "treating offsets as 0\n"
-                )
-        for path in refined_files:
-            data = np_mod.load(path, allow_pickle=False)
-            player_id = str(data["player_id"])
-            contributing_raw = (
-                data["contributing_shots"]
-                if "contributing_shots" in data.files else []
-            )
-            contributing = [str(s) for s in contributing_raw]
-            if not contributing:
-                # Legacy single-shot refined NPZ — emit with no shot
-                # prefix so the FBX filename matches the older layout.
-                contributing = [""]
-            ref_frames = np_mod.asarray(data["frames"])
-            thetas = np_mod.asarray(data["thetas"])
-            root_R = np_mod.asarray(data["root_R"])
-            root_t = np_mod.asarray(data["root_t"])
-            for sid in contributing:
-                offset = sync.offset_for_shot(sid) if (sync and sid) else 0
-                yield {
-                    "shot_id": sid,
-                    "player_id": player_id,
-                    "frames": ref_frames + int(offset),
-                    "thetas": thetas,
-                    "root_R": root_R,
-                    "root_t": root_t,
-                }
-        return
-
-    hmr_dir = output_dir / "hmr_world"
-    if not hmr_dir.exists():
-        return
-    for path in sorted(hmr_dir.glob("*_smpl_world.npz")):
-        data = np_mod.load(path, allow_pickle=False)
-        yield {
-            "shot_id": (
-                str(data["shot_id"]) if "shot_id" in data.files else ""
-            ),
-            "player_id": str(data["player_id"]),
-            "frames": np_mod.asarray(data["frames"]),
-            "thetas": np_mod.asarray(data["thetas"]),
-            "root_R": np_mod.asarray(data["root_R"]),
-            "root_t": np_mod.asarray(data["root_t"]),
-        }
-
-
-def prepare_ball_keys(ball_frames: list[dict]) -> list[dict]:
-    """Turn ball-track JSON frame dicts into per-frame FBX keys.
-
-    Pure (no ``bpy``/``numpy``) so the FBX ball rotation contract is
-    unit-testable outside Blender.  Each output dict has:
-
-    - ``frame`` (int): the frame index;
-    - ``location`` (list[float]): the ball world position ``world_xyz``;
-    - ``rotation_quaternion`` (list[float]): the ball orientation in
-      Blender's ``(w, x, y, z)`` scalar-first order.  This MATCHES our
-      ``BallFrame.quat_wxyz`` convention, so the quaternion is passed
-      through unchanged (no reordering — unlike the glTF ``(x, y, z, w)``
-      path).
-
-    Frames with a null ``world_xyz`` are dropped (no position to key).
-    Frames missing ``quat_wxyz`` hold the previous rotation; a leading run
-    of missing quats holds the identity ``(1, 0, 0, 0)``.
-    """
-    keys: list[dict] = []
-    last_quat = [1.0, 0.0, 0.0, 0.0]
-    for f in ball_frames:
-        world = f.get("world_xyz")
-        if not world:
-            continue
-        q = f.get("quat_wxyz")
-        if q is not None:
-            last_quat = [float(q[0]), float(q[1]), float(q[2]), float(q[3])]
-        keys.append({
-            "frame": int(f["frame"]),
-            "location": [float(world[0]), float(world[1]), float(world[2])],
-            "rotation_quaternion": list(last_quat),
-        })
-    return keys
-
-
-def _load_shot_ids(output_dir: Path) -> set[str]:
-    """Shot ids from shots_manifest.json (empty set for legacy single-shot)."""
-    manifest_path = output_dir / "shots" / "shots_manifest.json"
-    if not manifest_path.exists():
-        return set()
-    raw = json.loads(manifest_path.read_text())
-    return {s["id"] for s in raw.get("shots", []) if s.get("id")}
+from src.utils.blender_scene_io import (  # noqa: F401 — re-exported names
+    iter_player_fbx_entries,
+    load_shot_ids as _load_shot_ids,
+    prepare_ball_keys,
+)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -203,11 +82,6 @@ def main(argv: list[str]) -> int:
         return 2
 
     import numpy as np
-
-    # Ensure the repo's ``src`` package is importable inside Blender.
-    repo_root = Path(__file__).resolve().parents[1]
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
 
     from src.utils.smpl_skeleton import (  # noqa: E402
         SMPL_JOINT_NAMES,
@@ -468,50 +342,37 @@ def main(argv: list[str]) -> int:
     name_mapping = load_player_names(output_dir)
 
     # Optional: real SMPL body mesh for preview before retargeting.
-    smpl_npz_path = repo_root / "data" / "models" / "smpl_neutral.npz"
-    smpl_data = None
-    smpl_joint_positions = None
     # Pelvis position in canonical-space (after the foot-midpoint shift
     # below). The per-clip branch needs this to compute per-frame
     # ``arm.location = root_t - root_R @ pelvis_canon_shifted`` so the
     # pelvis still lands at root_t even though the canonical layout
     # has been re-anchored on the foot midpoint.
-    pelvis_canon_shifted = np.zeros(3, dtype=np.float64)
-    if smpl_npz_path.exists():
-        smpl_data = dict(np.load(smpl_npz_path))
-        if "joint_positions" in smpl_data and "v_template" in smpl_data:
-            # Re-anchor canonical space so the foot midpoint sits at
-            # (0, 0, 0). Both the bone hierarchy and the mesh vertices
-            # are shifted; the armature object's origin then lands
-            # between the feet at ground level in UE.
-            jp = np.asarray(smpl_data["joint_positions"], dtype=np.float64)
-            l_foot_idx = SMPL_JOINT_NAMES.index("l_foot")
-            r_foot_idx = SMPL_JOINT_NAMES.index("r_foot")
-            foot_midpoint = (jp[l_foot_idx] + jp[r_foot_idx]) / 2.0
-            shift = -foot_midpoint
-            smpl_data["joint_positions"] = (jp + shift).astype(np.float32)
-            smpl_data["v_template"] = (
-                np.asarray(smpl_data["v_template"], dtype=np.float64) + shift
-            ).astype(np.float32)
-            smpl_joint_positions = smpl_data["joint_positions"]
-            pelvis_canon_shifted = np.asarray(
-                smpl_joint_positions[0], dtype=np.float64
-            )
-            sys.stdout.write(
-                f"[player-fbx] using real SMPL body mesh from {smpl_npz_path}"
-                f" (foot-midpoint anchored; pelvis canon = "
-                f"{tuple(float(x) for x in pelvis_canon_shifted)})\n"
-            )
-        else:
-            sys.stdout.write(
-                f"[player-fbx] {smpl_npz_path} missing joint_positions or "
-                "v_template; re-run scripts/extract_smpl_neutral.py.\n"
-            )
-            smpl_data = None
-    else:
+    from src.utils.blender_scene_io import load_smpl_body_data
+    smpl_data, pelvis_canon_shifted = load_smpl_body_data(repo_root, np)
+    smpl_joint_positions = (
+        smpl_data.get("joint_positions") if smpl_data is not None else None
+    )
+
+    # Reproduce the loader's stdout side effects here — load_smpl_body_data
+    # itself stays print-free so it's usable from plain unit tests.
+    smpl_npz_path = repo_root / "data" / "models" / "smpl_neutral.npz"
+    if smpl_data is None:
         sys.stdout.write(
             "[player-fbx] no SMPL body npz found; falling back to placeholder triangle. "
             f"Run scripts/extract_smpl_neutral.py to enable.\n"
+        )
+    elif not ("joint_positions" in smpl_data and "v_template" in smpl_data):
+        sys.stdout.write(
+            f"[player-fbx] {smpl_npz_path} missing joint_positions or "
+            "v_template; re-run scripts/extract_smpl_neutral.py.\n"
+        )
+        smpl_data = None
+        smpl_joint_positions = None
+    else:
+        sys.stdout.write(
+            f"[player-fbx] using real SMPL body mesh from {smpl_npz_path}"
+            f" (foot-midpoint anchored; pelvis canon = "
+            f"{tuple(float(x) for x in pelvis_canon_shifted)})\n"
         )
 
     # --- A-pose only mode -------------------------------------------------

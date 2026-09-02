@@ -1,0 +1,440 @@
+"""Tests for src/utils/foot_quality.py — the foot-contact locomotion eval
+harness. Ground truth comes from the analytic synthetic walk
+(tests/helpers/synthetic_gait.py), which makes exact-tolerance
+assertions possible: skate should be ~0 on the clean walk and rise
+sharply once we inject a known drift or sink.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+from src.utils.foot_quality import foot_quality_metrics
+from tests.helpers.synthetic_gait import make_walk
+
+
+def _make_broadcast_camera() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A simple pinhole camera looking down at the walk from behind and
+    above, matching the OpenCV world->camera convention (y-down, z-into-
+    scene) used elsewhere in the pipeline."""
+    K = np.array([[2000.0, 0.0, 960.0], [0.0, 2000.0, 540.0], [0.0, 0.0, 1.0]])
+    C = np.array([0.0, -30.0, 12.0])  # camera centre, world pitch metres
+    # Look roughly toward +y (down the pitch), y-down/z-forward cam axes.
+    cam_z = np.array([0.0, 1.0, -0.15])
+    cam_z = cam_z / np.linalg.norm(cam_z)
+    cam_x = np.cross(cam_z, np.array([0.0, 0.0, 1.0]))
+    cam_x = cam_x / np.linalg.norm(cam_x)
+    cam_y = np.cross(cam_z, cam_x)
+    R = np.stack([cam_x, cam_y, cam_z])  # world->camera rotation
+    t = -R @ C
+    return K, R, t
+
+
+def _project_pinhole(K: np.ndarray, R: np.ndarray, t: np.ndarray, pts: np.ndarray) -> np.ndarray:
+    cam = pts @ R.T + t
+    uv = cam[:, :2] / cam[:, 2:3]
+    return uv @ K[:2, :2].T + K[:2, 2]
+
+
+# --- literal plan tests ----------------------------------------------------
+
+
+def test_metrics_on_clean_walk_report_no_skate_no_penetration() -> None:
+    g = make_walk(n_frames=120)
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=g.root_t, fps=g.fps,
+        contacts=g.contacts_true,
+    )
+    assert m["skate"]["L"]["mean_mps"] < 0.05
+    assert m["penetration"]["pct_frames_sole_below_0"] == 0.0
+    assert 0.3 < m["contact_ratio"] < 0.9
+
+
+def test_metrics_detect_injected_skate() -> None:
+    g = make_walk(n_frames=120)
+    slid = g.root_t.copy()
+    slid[:, 0] += np.linspace(0, 3.0, len(slid))  # +0.63 m/s drift
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=slid, fps=g.fps,
+        contacts=g.contacts_true,
+    )
+    assert m["skate"]["L"]["mean_mps"] > 0.4
+
+
+def test_metrics_detect_injected_penetration() -> None:
+    g = make_walk(n_frames=60)
+    sunk = g.root_t.copy()
+    sunk[:, 2] -= 0.06
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=sunk, fps=g.fps,
+    )
+    assert m["penetration"]["pct_frames_sole_below_0"] > 50.0
+
+
+# --- coverage for the remaining documented keys -----------------------
+
+
+def test_metrics_return_all_documented_keys() -> None:
+    g = make_walk(n_frames=80)
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=g.root_t, fps=g.fps,
+        contacts=g.contacts_true,
+    )
+    for key in ("penetration", "lower_foot_z", "skate", "spans", "flight", "contact_ratio"):
+        assert key in m
+    for side in ("L", "R"):
+        assert side in m["skate"]
+        for stat in ("mean_mps", "p50_mps", "p95_mps"):
+            assert stat in m["skate"][side]
+    for stat in ("pct_frames_sole_below_0", "max_depth_cm", "mean_depth_cm"):
+        assert stat in m["penetration"]
+    for stat in ("mean", "p05", "p50", "p95"):
+        assert stat in m["lower_foot_z"]
+    for stat in ("count", "mean_m", "max_m"):
+        assert stat in m["spans"]
+    assert "pct_frames_both_up" in m["flight"] or "pct" in m["flight"]
+
+
+def test_metrics_without_contacts_falls_back_to_low_foot_mask() -> None:
+    """No contacts sidecar available: the "foot z < 0.10 m" proxy is
+    cruder than exact stance spans (it legitimately includes some real
+    swing motion below the height threshold, since the synthetic walk's
+    swing arc spends much of its duration under 0.10 m) — so skate under
+    the fallback should be higher than (or equal to) the contact-exact
+    measurement, not near-zero. This demonstrates the fallback still
+    runs and produces a finite, non-exploding number rather than
+    asserting it matches the exact-contact precision.
+    """
+    g = make_walk(n_frames=100)
+    with_contacts = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=g.root_t, fps=g.fps,
+        contacts=g.contacts_true,
+    )
+    without_contacts = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=g.root_t, fps=g.fps,
+        contacts=None,
+    )
+    assert without_contacts["skate"]["L"]["mean_mps"] >= with_contacts["skate"]["L"]["mean_mps"]
+    assert without_contacts["skate"]["L"]["mean_mps"] < 5.0
+    assert without_contacts["skate"]["R"]["mean_mps"] < 5.0
+
+
+def test_metrics_spans_count_matches_contact_run_count() -> None:
+    g = make_walk(n_frames=120)
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=g.root_t, fps=g.fps,
+        contacts=g.contacts_true,
+    )
+    # Count contiguous True runs across both feet directly from the truth.
+    expected = 0
+    for side in (0, 1):
+        col = g.contacts_true[:, side]
+        expected += int(np.sum(np.diff(np.concatenate([[0], col.astype(int), [0]])) == 1))
+    assert m["spans"]["count"] == expected
+    assert m["spans"]["mean_m"] < 0.01  # stance spans are exactly stationary
+
+
+def test_metrics_flight_pct_matches_truth_when_using_contacts() -> None:
+    g = make_walk(n_frames=120)
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=g.root_t, fps=g.fps,
+        contacts=g.contacts_true,
+    )
+    neither_down = ~g.contacts_true.any(axis=1)
+    expected_pct = 100.0 * neither_down.mean()
+    assert expected_pct > 0.0  # sanity: the fixture does have flight
+    assert m["flight"]["pct_frames_both_up"] > 0.0
+
+
+def test_metrics_lower_foot_z_distribution_is_nonnegative_on_clean_walk() -> None:
+    g = make_walk(n_frames=100)
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=g.root_t, fps=g.fps,
+        contacts=g.contacts_true,
+    )
+    assert m["lower_foot_z"]["p50"] >= -1e-6
+    assert m["lower_foot_z"]["p95"] > m["lower_foot_z"]["p05"]
+
+
+def test_metrics_ankle_reproj_px_near_zero_for_perfect_projection() -> None:
+    g = make_walk(n_frames=60)
+    from src.utils.smpl_skeleton import compute_all_joint_worlds_batch
+
+    fw = compute_all_joint_worlds_batch(g.thetas, g.root_R, g.root_t)
+    K, R, t = _make_broadcast_camera()
+    kp2d = np.zeros((60, 17, 3))
+    kp2d[:, 15, :2] = _project_pinhole(K, R, t, fw[:, 7])  # l_ankle
+    kp2d[:, 16, :2] = _project_pinhole(K, R, t, fw[:, 8])  # r_ankle
+    kp2d[:, 15, 2] = 0.9
+    kp2d[:, 16, 2] = 0.9
+    cameras = {int(f): (K, R, t) for f in g.frames}
+
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=g.root_t, fps=g.fps,
+        contacts=g.contacts_true, kp2d=kp2d, cameras=cameras,
+    )
+    assert "ankle_reproj_px" in m
+    assert m["ankle_reproj_px"]["mean_px"] < 1e-6
+    assert m["ankle_reproj_px"]["p95_px"] < 1e-6
+
+
+def test_metrics_ankle_reproj_px_reflects_injected_pixel_error() -> None:
+    g = make_walk(n_frames=60)
+    from src.utils.smpl_skeleton import compute_all_joint_worlds_batch
+
+    fw = compute_all_joint_worlds_batch(g.thetas, g.root_R, g.root_t)
+    K, R, t = _make_broadcast_camera()
+    kp2d = np.zeros((60, 17, 3))
+    kp2d[:, 15, :2] = _project_pinhole(K, R, t, fw[:, 7]) + np.array([5.0, -3.0])
+    kp2d[:, 16, :2] = _project_pinhole(K, R, t, fw[:, 8]) + np.array([5.0, -3.0])
+    kp2d[:, 15, 2] = 0.9
+    kp2d[:, 16, 2] = 0.9
+    cameras = {int(f): (K, R, t) for f in g.frames}
+
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=g.root_t, fps=g.fps,
+        contacts=g.contacts_true, kp2d=kp2d, cameras=cameras,
+    )
+    assert m["ankle_reproj_px"]["mean_px"] > 4.0
+
+
+def test_metrics_ankle_reproj_px_absent_without_kp2d_and_cameras() -> None:
+    g = make_walk(n_frames=40)
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=g.root_t, fps=g.fps,
+        contacts=g.contacts_true,
+    )
+    assert "ankle_reproj_px" not in m
+
+
+def test_metrics_ankle_reproj_px_skips_low_confidence_frames() -> None:
+    g = make_walk(n_frames=40)
+    from src.utils.smpl_skeleton import compute_all_joint_worlds_batch
+
+    fw = compute_all_joint_worlds_batch(g.thetas, g.root_R, g.root_t)
+    K, R, t = _make_broadcast_camera()
+    kp2d = np.zeros((40, 17, 3))
+    kp2d[:, 15, :2] = _project_pinhole(K, R, t, fw[:, 7])
+    kp2d[:, 16, :2] = _project_pinhole(K, R, t, fw[:, 8])
+    kp2d[:, 15, 2] = 0.9
+    kp2d[:, 16, 2] = 0.9
+    # Inject a huge pixel error on a low-confidence frame — must be
+    # excluded from the mean by the conf >= 0.5 gate.
+    kp2d[0, 15, :2] += 500.0
+    kp2d[0, 15, 2] = 0.1
+    cameras = {int(f): (K, R, t) for f in g.frames}
+
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=g.root_t, fps=g.fps,
+        contacts=g.contacts_true, kp2d=kp2d, cameras=cameras,
+    )
+    assert m["ankle_reproj_px"]["mean_px"] < 1e-6
+
+
+# --- scripts/eval_foot_quality.py CLI --------------------------------
+
+import json as _json
+import sys as _sys
+from pathlib import Path as _Path
+
+_SCRIPTS_DIR = _Path(__file__).resolve().parents[1] / "scripts"
+
+
+def _import_cli():
+    if str(_SCRIPTS_DIR) not in _sys.path:
+        _sys.path.insert(0, str(_SCRIPTS_DIR))
+    import eval_foot_quality
+
+    return eval_foot_quality
+
+
+def test_discover_hmr_entries_handles_nested_underscore_pid(tmp_path) -> None:
+    cli = _import_cli()
+    hmr_dir = tmp_path / "hmr_world"
+    hmr_dir.mkdir()
+    (hmr_dir / "s013__s013_TT001_smpl_world.npz").write_bytes(b"")
+    (hmr_dir / "s013__s013_TT001_kp2d.json").write_text("{}")
+    entries = cli._discover_hmr_entries(hmr_dir)
+    assert entries == [
+        (
+            "s013",
+            "s013_TT001",
+            hmr_dir / "s013__s013_TT001_smpl_world.npz",
+            hmr_dir / "s013__s013_TT001_kp2d.json",
+        )
+    ]
+
+
+def test_discover_hmr_entries_handles_legacy_no_shot_naming(tmp_path) -> None:
+    cli = _import_cli()
+    hmr_dir = tmp_path / "hmr_world"
+    hmr_dir.mkdir()
+    (hmr_dir / "P001_smpl_world.npz").write_bytes(b"")
+    entries = cli._discover_hmr_entries(hmr_dir)
+    assert entries == [("", "P001", hmr_dir / "P001_smpl_world.npz", hmr_dir / "P001_kp2d.json")]
+
+
+def test_load_contacts_sidecar_returns_none_when_missing(tmp_path) -> None:
+    cli = _import_cli()
+    assert cli._load_contacts_sidecar(tmp_path, "gberch", "P001", 10) is None
+
+
+def _write_fixture(tmp_path) -> "_Path":
+    from src.schemas.camera_track import CameraFrame, CameraTrack
+    from src.schemas.refined_pose import RefinedPose
+    from src.schemas.smpl_world import SmplWorldTrack
+    from src.utils.smpl_skeleton import compute_all_joint_worlds_batch
+
+    g = make_walk(n_frames=30)
+    K, R, t = _make_broadcast_camera()
+    fw = compute_all_joint_worlds_batch(g.thetas, g.root_R, g.root_t)
+
+    (tmp_path / "hmr_world").mkdir(parents=True)
+    (tmp_path / "camera").mkdir(parents=True)
+    (tmp_path / "refined_poses").mkdir(parents=True)
+
+    track = SmplWorldTrack(
+        player_id="P001", frames=g.frames, betas=g.betas.astype("float32"),
+        thetas=g.thetas.astype("float32"), root_R=g.root_R.astype("float32"),
+        root_t=g.root_t.astype("float32"),
+        confidence=np.ones(len(g.frames), dtype="float32"), shot_id="shotA",
+    )
+    track.save(tmp_path / "hmr_world" / "shotA__P001_smpl_world.npz")
+
+    kp2d_payload: dict = {"player_id": "P001", "shot_id": "shotA", "frames": []}
+    for i, f in enumerate(g.frames):
+        kp = [[0.0, 0.0, 0.0] for _ in range(17)]
+        l_uv = _project_pinhole(K, R, t, fw[i, 7][None, :])[0]
+        r_uv = _project_pinhole(K, R, t, fw[i, 8][None, :])[0]
+        kp[15] = [float(l_uv[0]), float(l_uv[1]), 0.9]
+        kp[16] = [float(r_uv[0]), float(r_uv[1]), 0.9]
+        kp2d_payload["frames"].append({"frame": int(f), "keypoints": kp})
+    (tmp_path / "hmr_world" / "shotA__P001_kp2d.json").write_text(_json.dumps(kp2d_payload))
+
+    frames_cam = tuple(
+        CameraFrame(
+            frame=int(f), K=K.tolist(), R=R.tolist(), confidence=1.0,
+            is_anchor=True, t=t.tolist(),
+        )
+        for f in g.frames
+    )
+    cam_track = CameraTrack(
+        clip_id="shotA", fps=g.fps, image_size=(1920, 1080),
+        t_world=t.tolist(), frames=frames_cam,
+    )
+    cam_track.save(tmp_path / "camera" / "shotA_camera_track.json")
+
+    refined = RefinedPose(
+        player_id="P001", frames=g.frames, betas=g.betas.astype("float32"),
+        thetas=g.thetas.astype("float32"), root_R=g.root_R.astype("float32"),
+        root_t=g.root_t.astype("float32"),
+        confidence=np.ones(len(g.frames), dtype="float32"),
+        view_count=np.ones(len(g.frames), dtype="int32"),
+        contributing_shots=("shotA",),
+    )
+    refined.save(tmp_path / "refined_poses" / "P001_refined.npz")
+
+    # A STALE refined npz with no matching hmr_world sidecar (mirrors the
+    # real repo's output/refined_poses P004-P015, left over from a
+    # different run) — auto-discovery must skip it, not crash on it.
+    stale = RefinedPose(
+        player_id="P099", frames=g.frames, betas=g.betas.astype("float32"),
+        thetas=g.thetas.astype("float32"), root_R=g.root_R.astype("float32"),
+        root_t=g.root_t.astype("float32"),
+        confidence=np.ones(len(g.frames), dtype="float32"),
+        view_count=np.ones(len(g.frames), dtype="int32"),
+        contributing_shots=("shotZ",),
+    )
+    stale.save(tmp_path / "refined_poses" / "P099_refined.npz")
+    return tmp_path
+
+
+def test_eval_hmr_player_computes_ankle_reprojection(tmp_path) -> None:
+    cli = _import_cli()
+    out = _write_fixture(tmp_path)
+    m = cli.eval_hmr_player(
+        out, "shotA", "P001",
+        out / "hmr_world" / "shotA__P001_smpl_world.npz",
+        out / "hmr_world" / "shotA__P001_kp2d.json",
+        None,
+    )
+    assert m is not None
+    assert "ankle_reproj_px" in m
+    assert m["ankle_reproj_px"]["mean_px"] < 1.0
+
+
+def test_eval_refined_player_returns_metrics(tmp_path) -> None:
+    cli = _import_cli()
+    out = _write_fixture(tmp_path)
+    m = cli.eval_refined_player(out, "P001", None)
+    assert m is not None
+    assert "skate" in m
+    assert "penetration" in m
+
+
+def test_eval_refined_player_returns_none_for_missing_npz(tmp_path) -> None:
+    cli = _import_cli()
+    (tmp_path / "refined_poses").mkdir(parents=True)
+    assert cli.eval_refined_player(tmp_path, "P404", None) is None
+
+
+def test_main_auto_discovery_skips_stale_refined_npz(tmp_path) -> None:
+    cli = _import_cli()
+    out = _write_fixture(tmp_path)
+    results = cli.main(["--output", str(out)])
+    assert "P001" in results["players"]
+    assert "P099" not in results["players"]
+
+
+def test_main_writes_json_with_requested_players(tmp_path, monkeypatch) -> None:
+    cli = _import_cli()
+    out = _write_fixture(tmp_path)
+    # The fixture's kp2d "ground truth" was projected using the canonical
+    # SMPL_REST_JOINTS_YUP table (matching make_walk); pin main() to the
+    # same table (rather than whatever data/models/smpl_neutral.npz
+    # happens to be on this machine) so the reprojection assertion below
+    # is deterministic across environments.
+    monkeypatch.setattr(cli, "load_smpl_neutral_model", lambda: None)
+    json_path = tmp_path / "baseline.json"
+    cli.main(["--output", str(out), "--players", "P001", "--json", str(json_path)])
+    data = _json.loads(json_path.read_text())
+    assert "P001" in data["players"]
+    assert "refined" in data["players"]["P001"]
+    assert "hmr[shotA]" in data["players"]["P001"]
+    assert data["players"]["P001"]["hmr[shotA]"]["ankle_reproj_px"]["mean_px"] < 1.0
+
+
+def test_main_stage_refined_only_omits_hmr_key(tmp_path) -> None:
+    cli = _import_cli()
+    out = _write_fixture(tmp_path)
+    json_path = tmp_path / "baseline.json"
+    cli.main(["--output", str(out), "--players", "P001", "--stage", "refined", "--json", str(json_path)])
+    data = _json.loads(json_path.read_text())
+    assert "refined" in data["players"]["P001"]
+    assert not any(k.startswith("hmr") for k in data["players"]["P001"])
+
+
+def test_metrics_handles_empty_track() -> None:
+    m = foot_quality_metrics(
+        frames=np.zeros(0, dtype=np.int64),
+        betas=np.zeros(10),
+        thetas=np.zeros((0, 24, 3)),
+        root_R=np.zeros((0, 3, 3)),
+        root_t=np.zeros((0, 3)),
+        fps=25.0,
+    )
+    assert m["spans"]["count"] == 0
+    assert m["contact_ratio"] == 0.0

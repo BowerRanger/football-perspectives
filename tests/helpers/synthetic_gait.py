@@ -48,9 +48,15 @@ _HIP = {0: 1, 1: 2}
 _KNEE = {0: 4, 1: 5}
 _FOOT = {0: 10, 1: 11}
 
-# Swing peak lift height (metres) and the world-frame sole target.
+# Swing peak lift height (metres) and the world-frame stance foot-joint
+# height. Non-zero (rather than exactly ground level) to match the real
+# pipeline's convention that the SMPL foot *joint* sits a little above
+# the mesh sole (see refined_poses._ground_snap's target_foot_z=0.02 and
+# foot_quality's sole_clearance_m=0.025) — a stance joint held at exactly
+# z=0 would read as permanently penetrating under that sole-offset
+# convention, which is not what a "clean" synthetic walk should assert.
 _SWING_LIFT_M = 0.12
-_STANCE_Z = 0.0
+_STANCE_Z = 0.03
 
 # Fraction of a full gait cycle that a single foot spends in stance.
 # < 0.5 so the two feet's stance windows don't fully tile the cycle,
@@ -206,7 +212,10 @@ def make_walk(
         frac = (t - swing_start_t) / swing_dur
         ease = _smoothstep(frac)
         pos = liftoff + (landing - liftoff) * ease
-        pos[2] = _SWING_LIFT_M * math.sin(math.pi * min(max(frac, 0.0), 1.0))
+        # Continuous with the stance height at both swing endpoints
+        # (frac=0 and frac=1 give sin(...)=0), rising to a peak of
+        # _STANCE_Z + _SWING_LIFT_M mid-swing.
+        pos[2] = _STANCE_Z + _SWING_LIFT_M * math.sin(math.pi * min(max(frac, 0.0), 1.0))
         return pos, False
 
     frames = np.arange(n_frames, dtype=np.int64)

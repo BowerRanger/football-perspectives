@@ -434,6 +434,36 @@ hmr_world:
   # degrees toward the camera. 0 disables; 5 is a good empirical starting
   # point on broadcast clips.
   lean_correction_deg: 5.0
+  # Root-translation anchoring strategy. contact = per-foot ray-cast
+  # stance detection pins the planted foot and carries a smooth delta
+  # correction over the legacy ankle-mid carrier (fixes sliding).
+  # ankle_mid = legacy canonical-offset ankle-midpoint ray-cast, kept
+  # for bit-parity fallback.
+  anchor_mode: contact
+  contact:
+    # Ray-cast world speed (m/s) below which a foot is judged planted
+    # (enter stance). Hysteresis pair with speed_exit_m_s below.
+    speed_enter_m_s: 0.6
+    # Ray-cast world speed (m/s) above which a planted foot is judged
+    # to have left stance (exit hysteresis, always >= speed_enter_m_s).
+    speed_exit_m_s: 1.2
+    # Minimum contiguous frames for a stance span to be trusted —
+    # filters single-frame kick-deceleration false positives.
+    min_span_frames: 4
+    # Max allowed spread (m) of in-span ray-casts around their median
+    # pin; spans exceeding this (kicks, false stances) are rejected.
+    max_pin_spread_m: 0.25
+    # Assumed kp2d pixel jitter, scaled by the local px->m ground
+    # scale to set a noise-adaptive speed floor so far/small players
+    # don't produce spurious stance detections.
+    px_noise: 2.0
+    # Clamp on the stance-pin correction delta |root_stance -
+    # root_carrier| (metres) applied to the dense carrier path.
+    max_correction_m: 0.5
+    # Time constant (s) over which the correction delta decays back
+    # toward the legacy carrier on long no-contact spans (flight,
+    # occlusion) rather than holding a stale pin offset.
+    decay_s: 0.6
 
 ball:
   # Detector backend used by the in-stage detection pass. wasb is the
@@ -746,6 +776,16 @@ ball:
     fix_weight_px_per_m: 30.0
 
 refined_poses:
+  # Ground-snap target height (m) for the in-contact foot joint above
+  # the pitch plane. Historically applied to every frame's lower foot;
+  # now contact-gated (only frames with an in-contact foot are snapped
+  # — see foot_lock below and src/utils/foot_contact.py), so flight
+  # phases keep their FK-consistent z.
+  ground_snap_target_z: 0.02
+  # Frames where the lower foot sits further than this (m) from the
+  # ground are left alone rather than snapped (keeper dives, genuine
+  # airborne moments outside a normal stance).
+  ground_snap_max_distance: 0.30
   # Outlier rejection (per frame, per view) using MAD on root_t.
   outlier_k_sigma: 3.0
   min_contributing_views: 1
@@ -840,6 +880,26 @@ refined_poses:
     # so 2 passes typically push residual error below the per-
     # player HMR noise floor. >3 buys little.
     residual_iterations: 2
+  # Foot-lock finale: runs last, after all smoothing above, so nothing
+  # degrades foot placement afterward. Re-pins each stance span to its
+  # contact-detected median position with two-bone leg IK, then a
+  # penetration guard raises (never lowers) root_t.z so the sole never
+  # dips below the pitch plane.
+  foot_lock:
+    enabled: true
+    # Hard clamp on per-joint IK rotation delta (degrees) when solving
+    # the stance foot onto its pin; spans that would need more are
+    # skipped (reported, not mangled) rather than distorting the leg.
+    ik_max_joint_delta_deg: 10.0
+    # Hard clamp on the low-passed per-frame root XY/Z micro-correction
+    # (m) applied alongside the IK; spans needing more are skipped.
+    max_residual_correction_m: 0.15
+    # Frames of linear ease-in/ease-out at each stance span edge so the
+    # pin doesn't snap on abruptly.
+    edge_ease_frames: 3
+    # Sole proxy offset (m) below the foot joint used by the
+    # penetration guard's ground-clearance check.
+    sole_clearance_m: 0.025
 
 export:
   gltf_enabled: true

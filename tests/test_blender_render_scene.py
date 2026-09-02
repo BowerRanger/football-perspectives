@@ -18,6 +18,8 @@ import pytest
 
 from scripts.blender_render_scene import _parse_args
 from src.stages.render import RenderStage
+from src.utils.blender_scene_io import load_smpl_body_data
+from src.utils.smpl_skeleton import SMPL_JOINT_NAMES, compute_all_joint_worlds
 from tests.conftest import _add_player_fixture, _write_min_fixture
 
 # Absolute path, matching tests/test_blender_export_smpl_skeleton.py's
@@ -91,6 +93,73 @@ def _add_hostile_pose_fixture(root, n=1):
              confidence=np.ones(n, dtype=np.float32),
              view_count=np.ones(n, dtype=np.int32),
              contributing_shots=np.array([], dtype="<U6"))
+
+
+def _add_limb_pose_fixture(root, root_t=(52.5, 30.0, 0.95)):
+    """Regression fixture for the bone-space FK bug (task brief): per-frame
+    pose keying applies raw SMPL theta quaternions to
+    ``pose.bones[...].rotation_quaternion``, which Blender interprets in
+    the bone's LOCAL REST frame. SMPL thetas are only directly applicable
+    there when bone-local == canonical (uniform +Y tail, zero roll, as in
+    ``blender_export_fbx.py``'s ``_build_smpl_armature``); the pre-fix
+    code instead gave internal bones child-mean tails and leaf bones a +Z
+    tail, so limb bones rotate about the WRONG axes.
+
+    Non-zero, differing-axis ~90-degree bends on l_shoulder (16), r_elbow
+    (19) and l_knee (4) — joints deep enough in the chain (r_elbow sits
+    past two non-identity ancestor rotations once posed) that a wrong
+    bone-local frame produces metre-scale world-position errors, while an
+    all-zero-thetas fixture (``_add_player_fixture``) can't distinguish a
+    correct FK from a buggy one (both give the T-pose). Identity root_R /
+    root_t at a known pitch point isolates the bug to the per-bone pose
+    application, independent of the thetas[0]/root_R convention already
+    covered by ``_add_hostile_pose_fixture``.
+
+    Returns ``(thetas, root_R, root_t)`` (frame 0 only) so the caller can
+    feed the identical values into
+    ``src.utils.smpl_skeleton.compute_all_joint_worlds`` as ground truth.
+    """
+    (root / "refined_poses").mkdir()
+    thetas = np.zeros((1, 24, 3), dtype=np.float32)
+    thetas[0, 16] = [np.pi / 2, 0.0, 0.0]   # l_shoulder: 90 deg about X
+    thetas[0, 19] = [0.0, np.pi / 2, 0.0]   # r_elbow: 90 deg about Y
+    thetas[0, 4] = [0.0, 0.0, np.pi / 2]    # l_knee: 90 deg about Z
+    root_R = np.eye(3, dtype=np.float32)
+    root_t_arr = np.array(root_t, dtype=np.float32)
+    np.savez(root / "refined_poses" / "P001_refined.npz",
+             player_id="P001",
+             frames=np.arange(1),
+             betas=np.zeros(10, dtype=np.float32),
+             thetas=thetas,
+             root_R=root_R[np.newaxis, ...],
+             root_t=root_t_arr[np.newaxis, ...],
+             confidence=np.ones(1, dtype=np.float32),
+             view_count=np.ones(1, dtype=np.int32),
+             contributing_shots=np.array([], dtype="<U6"))
+    return thetas, root_R, root_t_arr
+
+
+_PARITY_INSPECT_SCRIPT = """
+import bpy
+import json
+from pathlib import Path
+
+blend_dir = Path(bpy.data.filepath).parent
+joint_names = json.loads((blend_dir / "joint_order.json").read_text())
+
+arm = bpy.data.objects["P001_arm"]
+bpy.context.scene.frame_set(0)
+depsgraph = bpy.context.evaluated_depsgraph_get()
+arm_eval = arm.evaluated_get(depsgraph)
+
+heads = []
+for jname in joint_names:
+    pb = arm_eval.pose.bones[jname]
+    world_head = arm_eval.matrix_world @ pb.head
+    heads.append([world_head.x, world_head.y, world_head.z])
+
+print("PARITY_JSON " + json.dumps({"heads": heads}))
+"""
 
 
 # Run inside a SECOND headless Blender process against the saved
@@ -327,6 +396,102 @@ def test_player_pelvis_ignores_thetas0_and_stays_upright(tmp_path):
         f"body must stand upright (tall along world Z, not Y) — "
         f"z_extent={z_extent:.3f} y_extent={y_extent:.3f}"
     )
+
+
+@pytest.mark.fbx
+@pytest.mark.skipif(_BLENDER is None, reason="blender not on PATH")
+def test_player_limb_joints_match_pure_python_fk(tmp_path):
+    """Ground-truth FK parity test for the bone-space bug.
+
+    Builds a hostile-limb-pose fixture (see ``_add_limb_pose_fixture``),
+    renders it with ``--save-blend``, then shells a SECOND headless
+    Blender process to dump every pose-bone's evaluated world-space HEAD
+    position from the saved .blend. Compares against the pure-python
+    ground truth ``compute_all_joint_worlds`` — the same FK the export/
+    glTF preview path uses — using whichever rest-joint table the render
+    actually built the armature from (the real SMPL asset when
+    ``data/models/smpl_neutral.npz`` is present on this machine, else the
+    hand-typed fallback table; see ``load_smpl_body_data``), so the
+    comparison is exact to float64 precision regardless of which body
+    path is active.
+
+    Also exercises the SMPL-mesh skinning path when the asset is present
+    (task brief item 5): the rendered frame must show non-trivial pixel
+    variance, ruling out a degenerate/invisible skinned body as a silent
+    regression alongside the armature fix. Skipped gracefully when the
+    asset is absent (e.g. CI).
+    """
+    _write_min_fixture(tmp_path)
+    thetas, root_R, root_t = _add_limb_pose_fixture(tmp_path)
+    script = _SCRIPT
+    res = subprocess.run(
+        [_BLENDER, "--background", "--python", script, "--",
+         "--output-dir", str(tmp_path), "--shot", "",
+         "--cameras", "broadcast", "--width", "160", "--height", "90",
+         "--samples", "1", "--style-json", "{}",
+         "--frame-start", "0", "--frame-end", "0", "--save-blend"],
+        capture_output=True, text=True, timeout=600)
+    assert res.returncode == 0, res.stderr[-3000:]
+    assert "PLAYERS_BUILT 1" in res.stdout
+
+    blend_path = tmp_path / "render" / "clip" / "scene.blend"
+    assert blend_path.exists()
+    (blend_path.parent / "joint_order.json").write_text(
+        json.dumps(list(SMPL_JOINT_NAMES)))
+
+    inspect_script = tmp_path / "inspect_parity.py"
+    inspect_script.write_text(_PARITY_INSPECT_SCRIPT)
+    res2 = subprocess.run(
+        [_BLENDER, "--background", str(blend_path), "--python", str(inspect_script)],
+        capture_output=True, text=True, timeout=600)
+    assert res2.returncode == 0, res2.stderr[-3000:]
+    line = next(
+        (ln for ln in res2.stdout.splitlines() if ln.startswith("PARITY_JSON ")),
+        None)
+    assert line is not None, res2.stdout[-3000:]
+    actual = np.asarray(json.loads(line[len("PARITY_JSON "):])["heads"])
+
+    repo_root = Path(__file__).resolve().parents[1]
+    smpl_data, pelvis_canon = load_smpl_body_data(repo_root, np)
+    # compute_all_joint_worlds treats rest_joints[0] as the canonical
+    # origin (world_pos[0] = root_R @ rest[0] + root_t); the render
+    # script instead re-anchors the armature object so the pelvis BONE's
+    # (possibly off-origin, asset-derived) rest head lands exactly at
+    # root_t (see _build_players' `offset = R @ pelvis_canon` comment).
+    # Re-centre the asset's rest table on its own pelvis row so both
+    # sides agree on where "the origin" is — the FK recursion only ever
+    # consumes *differences* between rows past the base case, so this
+    # shift doesn't change anything else about the comparison.
+    rest_joints = (
+        np.asarray(smpl_data["joint_positions"], dtype=np.float64) - pelvis_canon
+        if smpl_data is not None else None
+    )
+    expected = compute_all_joint_worlds(
+        thetas[0], root_R, root_t, rest_joints=rest_joints)
+
+    errors = np.linalg.norm(actual - expected, axis=1)
+    max_error = float(errors.max())
+    assert max_error < 1e-3, (
+        f"max per-joint world-position error {max_error:.4f} m "
+        f"(per-joint: {dict(zip(SMPL_JOINT_NAMES, errors.round(4).tolist()))})"
+    )
+
+    smpl_asset = repo_root / "data" / "models" / "smpl_neutral.npz"
+    if smpl_asset.exists():
+        out = tmp_path / "render" / "clip" / "broadcast.mp4"
+        assert out.exists() and out.stat().st_size > 0
+        frame_path = tmp_path / "parity_frame.png"
+        extract = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(out), "-frames:v", "1", str(frame_path)],
+            capture_output=True, text=True, timeout=60)
+        assert extract.returncode == 0, extract.stderr[-2000:]
+        from PIL import Image
+        img = Image.open(frame_path).convert("RGB")
+        arr = np.asarray(img, dtype=np.float64)
+        assert arr.std() > 5.0, (
+            f"rendered frame looks flat (std={arr.std():.2f}); SMPL mesh "
+            "skinning may be degenerate"
+        )
 
 
 @pytest.mark.fbx

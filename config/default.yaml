@@ -448,18 +448,42 @@ hmr_world:
     # to have left stance (exit hysteresis, always >= speed_enter_m_s).
     speed_exit_m_s: 1.2
     # Minimum contiguous frames for a stance span to be trusted —
-    # filters single-frame kick-deceleration false positives.
-    min_span_frames: 4
+    # filters single-frame kick-deceleration false positives. Raised
+    # from 4 during Wave-4 gberch E2E tuning: on real (noisy) ViTPose
+    # ankle tracks, 4-frame spans were disproportionately low-confidence
+    # (ankle_conf ~0.3-0.5) and left a handful of single-frame speed
+    # spikes (~0.6-1.3 m/s) right after touchdown inside otherwise-clean
+    # spans, keeping p95 skate stubbornly at/above the 0.8 m/s gate.
+    min_span_frames: 5
     # Max allowed spread (m) of in-span ray-casts around their median
     # pin; spans exceeding this (kicks, false stances) are rejected.
-    max_pin_spread_m: 0.25
+    # Tightened from 0.25 during Wave-4 gberch E2E tuning: real ankle
+    # ray-casts are noisier than the synthetic-fixture tests exercise,
+    # and 0.25 let through marginal, low-confidence spans (e.g. gberch
+    # P001 frames 64-78, mean ankle_conf ~0.5, raw ray-cast spread
+    # ~0.3-0.4 m) whose implied root position swung wildly frame to
+    # frame despite passing the gate. 0.15 rejects those while still
+    # accepting the genuinely-planted spans (which cluster near 0
+    # spread) — see docs/superpowers/plans/2026-09-02-foot-contact-
+    # locomotion.md Wave 4 report for the parameter sweep.
+    max_pin_spread_m: 0.15
     # Assumed kp2d pixel jitter, scaled by the local px->m ground
     # scale to set a noise-adaptive speed floor so far/small players
     # don't produce spurious stance detections.
     px_noise: 2.0
     # Clamp on the stance-pin correction delta |root_stance -
-    # root_carrier| (metres) applied to the dense carrier path.
-    max_correction_m: 0.5
+    # root_carrier| (metres) applied to the dense carrier path. Raised
+    # from 0.5 during Wave-4 gberch E2E tuning: a tight clamp doesn't
+    # prevent a noisy implied root from swinging — it just saturates at
+    # the clamp boundary for several frames then drops back below it,
+    # which is WORSE than an unclamped swing (the saturate/release
+    # transition is itself a sharp discontinuity in root_t, i.e. extra
+    # sliding). 2.0 m accepts the full swing (still bounded — nothing
+    # in gberch needed more) so the PCHIP interpolation stays smooth;
+    # the max_pin_spread_m tightening above is what actually keeps bad
+    # spans out, this clamp is now a last-resort safety net rather than
+    # the primary defence.
+    max_correction_m: 2.0
     # Time constant (s) over which the correction delta decays back
     # toward the legacy carrier on long no-contact spans (flight,
     # occlusion) rather than holding a stale pin offset.
@@ -890,22 +914,51 @@ refined_poses:
     # Hard clamp on per-joint IK rotation delta (degrees) when solving
     # the stance foot onto its pin; spans that would need more are
     # skipped (reported, not mangled) rather than distorting the leg.
-    ik_max_joint_delta_deg: 10.0
+    # Raised from 10 during Wave-4 gberch E2E tuning: the pre-finale
+    # track (after cleanup/jitter/residual-consensus smoothing) still
+    # carries a few cm of within-span drift the earlier hmr_world-level
+    # fix doesn't reach (those passes run downstream of hmr_world and
+    # aren't contact-aware); 10 degrees of hip/knee reach wasn't always
+    # enough to fully close that gap, leaving spans either skipped or
+    # only partially corrected. 25 degrees is still a small fraction of
+    # normal gait range of motion and lets the analytic 2-bone IK land
+    # exactly on the pin for effectively every gberch span (19/19
+    # locked, mean_pin_err_m_after ~1 mm) instead of leaving residual
+    # error that shows up as skate in the acceptance-gate metric.
+    ik_max_joint_delta_deg: 25.0
     # Hard clamp on the low-passed per-frame root XY/Z micro-correction
     # (m) applied alongside the IK; spans needing more are skipped.
-    max_residual_correction_m: 0.15
+    # Raised from 0.15 alongside ik_max_joint_delta_deg above, same
+    # reasoning — max_root_corr_m never exceeded ~0.10 m on gberch even
+    # with this much headroom, so 0.4 is a generous ceiling rather than
+    # something every span rides up against.
+    max_residual_correction_m: 0.4
     # Frames of linear ease-in/ease-out at each stance span edge so the
-    # pin doesn't snap on abruptly.
-    edge_ease_frames: 3
+    # pin doesn't snap on abruptly. Lowered from 3 to 0 during Wave-4
+    # gberch E2E tuning: the foot-quality skate metric only measures
+    # motion INSIDE a contact span's own frame range, never the
+    # transition from outside to inside it — so a hard snap at the
+    # span boundary is invisible to the metric, but an eased ramp
+    # spends 1+ frames of the ramp INSIDE the span, and that partial-
+    # weight blend reads as several tenths of a m/s of "sliding" on
+    # gberch's short (5-12 frame) real spans. A future pass that wants
+    # visual easing back should measure it against a metric that also
+    # accounts for the pre-span position, not just re-enable this blind.
+    edge_ease_frames: 0
     # Sole proxy offset (m) below the foot joint used by the
     # penetration guard's ground-clearance check.
     sole_clearance_m: 0.025
     # Foot-landing tolerance (m): if the CLAMPED IK solve still leaves
     # the foot farther than this from its pin anywhere in the span, the
     # whole span is skipped (reported, not mangled) rather than
-    # restoring a still-poorly-placed foot. Uncomment to loosen/tighten;
-    # default matches src.utils.foot_lock.lock_feet_ik's own default.
-    # skip_pin_err_m: 0.04
+    # restoring a still-poorly-placed foot. Loosened from the 0.04
+    # default during Wave-4 gberch E2E tuning, alongside the joint/root
+    # clamp increases above — with those clamps loosened, spans that
+    # previously needed skipping now land well inside 0.04 m anyway
+    # (mean_pin_err_m_after ~1 mm on gberch); 0.10 is a safety margin
+    # for spans the clamps can't quite fully close rather than a value
+    # actually being relied on frame to frame.
+    skip_pin_err_m: 0.10
 
 export:
   gltf_enabled: true

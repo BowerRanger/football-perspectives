@@ -20,9 +20,23 @@ import numpy as np
 import pytest
 
 from src.schemas.camera_track import CameraFrame, CameraTrack
+from src.schemas.foot_contacts import load_foot_contacts
 from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.tracks import Track, TrackFrame, TracksResult
-from src.stages.hmr_world import HmrWorldStage, build_track_camera_R
+from src.stages.hmr_world import (
+    HmrWorldStage,
+    _ANKLE_CONF_MIN,
+    _ANKLE_IN_ROOT,
+    _COCO_LEFT_ANKLE,
+    _COCO_RIGHT_ANKLE,
+    _FOOT_PLANE_Z,
+    anchor_root_translation,
+    build_track_camera_R,
+)
+from src.utils.foot_anchor import ankle_ray_to_pitch, anchor_translation
+from src.utils.smpl_skeleton import compute_all_joint_worlds_batch
+from src.utils.temporal_smoothing import savgol_axis
+from tests.helpers.synthetic_gait import make_walk
 
 
 def _identity_track(n_frames: int) -> CameraTrack:
@@ -171,12 +185,20 @@ def test_hmr_world_emits_track_in_pitch_frame(tmp_path: Path, fake_gvhmr) -> Non
     # 4. Run stage. ground_snap_velocity=0 disables snapping for this fixture
     # (all velocities are zero so the default would halve every frame's z).
     # Ankle keypoints come from the fake GVHMR runner's kp2d output.
+    # anchor_mode=ankle_mid: this test is specifically checking the SMPL
+    # canonical ankle-to-pelvis height math via the FIXED offset
+    # (_ANKLE_IN_ROOT) — the default "contact" mode's posed-FK offset is
+    # beta-adjusted (this fixture's fake betas are nonzero) and additionally
+    # runs a double-support-weighted pin solve, so it would not reproduce
+    # this exact constant. Contact-mode anchoring has its own coverage in
+    # test_contact_mode_pins_stance_feet_on_synthetic_track below.
     stage = HmrWorldStage(
         config={
             "hmr_world": {
                 "min_track_frames": 5,
                 "checkpoint": "ignored",
                 "ground_snap_velocity": 0.0,
+                "anchor_mode": "ankle_mid",
             }
         },
         output_dir=tmp_path,
@@ -827,3 +849,309 @@ def test_hmr_world_forwards_extractor_device_to_both_call_sites(
     assert ctor_calls[0]["extractor_device"] == expected_extractor_device
     assert len(run_calls) == 1
     assert run_calls[0]["extractor_device"] == expected_extractor_device
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (foot-contact locomotion plan): anchor_root_translation
+# ---------------------------------------------------------------------------
+
+
+def _legacy_anchor(
+    *,
+    kp2d: np.ndarray,
+    frame_indices: np.ndarray,
+    per_frame_K: dict,
+    per_frame_R: dict,
+    per_frame_t: dict,
+    distortion: tuple[float, float],
+    root_R: np.ndarray,
+    joint_conf: np.ndarray,
+    root_t_savgol_window: int,
+    root_t_savgol_order: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Verbatim copy of the pre-refactor per-frame translation loop (the
+    old ``process_player`` step 5, hmr_world.py lines 637-741 before this
+    task), used ONLY to prove ``anchor_root_translation``'s
+    ``anchor_mode="ankle_mid"`` path is bit-identical to it.
+
+    The one deliberate divergence: the real per-frame loop floored
+    confidence by GVHMR's per-joint confidence
+    (``min(ankle_conf, joint_conf_min)``), a transient signal that never
+    made it into the refactored interface (it isn't persisted to the
+    npz, so scripts/reanchor_hmr_world.py can never reconstruct it — see
+    ``anchor_root_translation``'s docstring). ``joint_conf`` is fed in
+    here anyway and set to all-ones by the caller so that floor never
+    binds, making this legacy formula reduce to exactly what the
+    refactored function now computes — the bit-parity assertion is
+    therefore a real check of the translation math, not a check that
+    happens to pass because the two formulas trivially agree.
+    """
+    n = int(frame_indices.shape[0])
+    root_t = np.zeros((n, 3), dtype=float)
+    confidence = np.zeros(n, dtype=float)
+    last_anchored: np.ndarray | None = None
+    for i in range(n):
+        fi_int = int(frame_indices[i])
+        R = per_frame_R.get(fi_int)
+        if R is None:
+            continue
+        K = per_frame_K[fi_int]
+        t = per_frame_t[fi_int]
+        kp = kp2d[i]
+        left = kp[_COCO_LEFT_ANKLE]
+        right = kp[_COCO_RIGHT_ANKLE]
+        ankle_conf = float(min(left[2], right[2]))
+        if ankle_conf < _ANKLE_CONF_MIN:
+            if last_anchored is not None:
+                root_t[i] = last_anchored
+            confidence[i] = ankle_conf
+            continue
+        ankle_uv = ((left[0] + right[0]) / 2.0, (left[1] + right[1]) / 2.0)
+        try:
+            foot_world = ankle_ray_to_pitch(
+                ankle_uv, K=K, R=R, t=t,
+                plane_z=_FOOT_PLANE_Z, distortion=distortion,
+            )
+        except ValueError:
+            if last_anchored is not None:
+                root_t[i] = last_anchored
+            confidence[i] = 0.0
+            continue
+        root_t[i] = anchor_translation(foot_world, _ANKLE_IN_ROOT, root_R[i])
+        last_anchored = root_t[i]
+        joint_conf_min = float(joint_conf[i].min()) if joint_conf.size else 0.0
+        confidence[i] = float(min(ankle_conf, joint_conf_min))
+    if root_t_savgol_window > 1 and root_t.shape[0] >= root_t_savgol_window:
+        root_t = savgol_axis(
+            root_t, window=root_t_savgol_window, order=root_t_savgol_order, axis=0,
+        )
+    return root_t, confidence
+
+
+def _synthetic_ankle_mid_fixture(n: int = 40, seed: int = 0):
+    """Deterministic (K, R, t) per frame, kp2d with a mix of confident,
+    low-confidence, and camera-absent frames, and a per-frame root_R that
+    is NOT the identity (already "lean-corrected", as anchor_root_translation
+    expects) — enough variety to exercise hold-last and the offset math
+    without depending on any GVHMR/camera-stage code."""
+    rng = np.random.default_rng(seed)
+    frame_indices = np.arange(n)
+
+    fx = 1400.0
+    K = np.array([[fx, 0.0, 640.0], [0.0, fx, 360.0], [0.0, 0.0, 1.0]])
+    # Camera above and behind the origin, looking down-and-forward —
+    # OpenCV world->camera convention (y-down, z-into-scene).
+    C = np.array([0.0, -15.0, 12.0])
+    fwd = np.array([0.0, 5.0, 0.0]) - C
+    fwd = fwd / np.linalg.norm(fwd)
+    world_up = np.array([0.0, 0.0, 1.0])
+    right = np.cross(fwd, world_up)
+    right = right / np.linalg.norm(right)
+    true_up = np.cross(right, fwd)
+    R = np.stack([right, -true_up, fwd])
+    t = -R @ C
+
+    per_frame_K = {int(f): K for f in frame_indices}
+    per_frame_R = {int(f): R for f in frame_indices}
+    per_frame_t = {int(f): t for f in frame_indices}
+    # Frames 15-17 have no camera entry (propagation gap).
+    for f in (15, 16, 17):
+        del per_frame_R[f]
+
+    kp2d = np.zeros((n, 17, 3), dtype=float)
+    kp2d[:, _COCO_LEFT_ANKLE, 2] = 0.9
+    kp2d[:, _COCO_RIGHT_ANKLE, 2] = 0.9
+    # Walk the ankle pixels along a small path so successive ray-casts
+    # differ (otherwise every anchored frame is trivially identical).
+    for i in range(n):
+        u = 600.0 + 4.0 * i
+        v = 500.0 + rng.normal(0, 1.0)
+        kp2d[i, _COCO_LEFT_ANKLE, :2] = (u - 5.0, v)
+        kp2d[i, _COCO_RIGHT_ANKLE, :2] = (u + 5.0, v)
+    # A handful of low-confidence frames to exercise hold-last.
+    for f in (5, 6, 20):
+        kp2d[f, _COCO_LEFT_ANKLE, 2] = 0.1
+        kp2d[f, _COCO_RIGHT_ANKLE, 2] = 0.1
+
+    root_R = np.tile(np.array([
+        [0.98, 0.0, 0.199],
+        [0.0, 1.0, 0.0],
+        [-0.199, 0.0, 0.98],
+    ]), (n, 1, 1))
+
+    return frame_indices, kp2d, per_frame_K, per_frame_R, per_frame_t, root_R
+
+
+@pytest.mark.unit
+def test_ankle_mid_mode_bit_parity_with_legacy() -> None:
+    frame_indices, kp2d, per_frame_K, per_frame_R, per_frame_t, root_R = (
+        _synthetic_ankle_mid_fixture()
+    )
+    distortion = (0.0, 0.0)
+    joint_conf = np.ones((len(frame_indices), 24))  # never binds, see _legacy_anchor
+
+    root_t_legacy, conf_legacy = _legacy_anchor(
+        kp2d=kp2d, frame_indices=frame_indices, per_frame_K=per_frame_K,
+        per_frame_R=per_frame_R, per_frame_t=per_frame_t, distortion=distortion,
+        root_R=root_R, joint_conf=joint_conf,
+        root_t_savgol_window=5, root_t_savgol_order=2,
+    )
+
+    thetas = np.zeros((len(frame_indices), 24, 3))  # unused by ankle_mid mode
+    betas = np.zeros(10)
+    cfg = {
+        "anchor_mode": "ankle_mid",
+        "root_t_savgol_window": 5,
+        "root_t_savgol_order": 2,
+    }
+    root_t_new, conf_new, contacts_new = anchor_root_translation(
+        kp2d=kp2d, frame_indices=frame_indices, per_frame_K=per_frame_K,
+        per_frame_R=per_frame_R, per_frame_t=per_frame_t, distortion=distortion,
+        thetas=thetas, root_R=root_R, betas=betas, cfg=cfg, fps=25.0,
+    )
+
+    assert contacts_new is None
+    np.testing.assert_allclose(root_t_new, root_t_legacy, atol=1e-10)
+    np.testing.assert_allclose(conf_new, conf_legacy, atol=1e-10)
+
+
+def _lookat_camera(
+    back: float, up: float, look_at: tuple[float, float, float] = (5.0, 0.0, 0.1),
+    fx: float = 2000.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Steep pinhole camera aimed at ``look_at``, OpenCV world->camera
+    convention. Mirrors ``tests/test_foot_contact.py``'s helper of the
+    same name (kept local per repo convention — see that file's
+    docstring) so ankle ray-casts back to the fixed z=0.05 ground plane
+    aren't dominated by the plane-height approximation bias."""
+    K = np.array([[fx, 0.0, 960.0], [0.0, fx, 540.0], [0.0, 0.0, 1.0]])
+    C = np.array([0.0, -back, up])
+    fwd = np.array(look_at) - C
+    fwd = fwd / np.linalg.norm(fwd)
+    world_up = np.array([0.0, 0.0, 1.0])
+    right = np.cross(fwd, world_up)
+    right = right / np.linalg.norm(right)
+    true_up = np.cross(right, fwd)
+    R = np.stack([right, -true_up, fwd])
+    t = -R @ C
+    return K, R, t
+
+
+def _project(K: np.ndarray, R: np.ndarray, t: np.ndarray, pts: np.ndarray) -> np.ndarray:
+    cam = pts @ R.T + t
+    uv = cam[:, :2] / cam[:, 2:3]
+    return uv @ K[:2, :2].T + K[:2, 2]
+
+
+@pytest.mark.unit
+def test_contact_mode_pins_stance_feet_on_synthetic_track() -> None:
+    """End-to-end ``anchor_mode="contact"`` on the analytic walk fixture:
+    ray-cast the TRUE FK ankle positions through a synthetic camera (so
+    detect_contacts sees noise-free evidence), solve, and check that the
+    resulting FK ankle position barely moves (skate speed well under the
+    plan's 0.3 m/s target) during each detected stance span."""
+    g = make_walk(n_frames=120)
+    K, R, t = _lookat_camera(back=10.0, up=20.0)
+    fw = compute_all_joint_worlds_batch(g.thetas, g.root_R, g.root_t)
+
+    kp2d = np.zeros((120, 17, 3), dtype=float)
+    kp2d[..., 2] = 0.9
+    kp2d[:, _COCO_LEFT_ANKLE, :2] = _project(K, R, t, fw[:, 7])
+    kp2d[:, _COCO_RIGHT_ANKLE, :2] = _project(K, R, t, fw[:, 8])
+
+    per_frame_K = {int(f): K for f in g.frames}
+    per_frame_R = {int(f): R for f in g.frames}
+    per_frame_t = {int(f): t for f in g.frames}
+
+    cfg = {
+        "anchor_mode": "contact",
+        "root_t_savgol_window": 5,
+        "root_t_savgol_order": 2,
+        "contact": {
+            "speed_enter_m_s": 0.6,
+            "speed_exit_m_s": 1.2,
+            "min_span_frames": 4,
+            "max_pin_spread_m": 0.25,
+            "px_noise": 2.0,
+            "max_correction_m": 0.5,
+            "decay_s": 0.6,
+        },
+    }
+    root_t, confidence, contacts = anchor_root_translation(
+        kp2d=kp2d, frame_indices=g.frames, per_frame_K=per_frame_K,
+        per_frame_R=per_frame_R, per_frame_t=per_frame_t, distortion=(0.0, 0.0),
+        thetas=g.thetas, root_R=g.root_R, betas=g.betas, cfg=cfg, fps=g.fps,
+    )
+
+    assert contacts is not None
+    assert len(contacts.spans) > 0
+
+    fw_solved = compute_all_joint_worlds_batch(g.thetas, g.root_R, root_t)
+    checked_any = False
+    for span in contacts.spans:
+        ankle_idx = 7 if span.side == 0 else 8
+        seg = fw_solved[span.start:span.end, ankle_idx, :]
+        if seg.shape[0] < 3:
+            continue
+        checked_any = True
+        v = np.linalg.norm(np.diff(seg, axis=0), axis=1) * g.fps
+        assert v.mean() < 0.3, f"stance skate too high for side {span.side}: {v.mean():.3f} m/s"
+    assert checked_any, "no span long enough to measure skate on"
+
+
+@pytest.mark.integration
+def test_sidecar_written_and_round_trips(tmp_path: Path, fake_gvhmr) -> None:
+    """Default anchor_mode (contact) writes a
+    ``{shot}__{pid}_foot_contacts.json`` sidecar that round-trips through
+    ``load_foot_contacts`` with matching frame count / shot / player /
+    anchor_mode metadata."""
+    n_frames = 30
+
+    (tmp_path / "shots").mkdir()
+    (tmp_path / "shots" / "play.mp4").write_bytes(b"")
+
+    track = _identity_track(n_frames)
+    track.save(tmp_path / "camera" / "camera_track.json")
+
+    track_dir = tmp_path / "tracks"
+    track_dir.mkdir()
+    tr = TracksResult(
+        shot_id="play",
+        tracks=[
+            Track(
+                track_id="T001", class_name="player", team="A", player_id="P001",
+                player_name="",
+                frames=[
+                    TrackFrame(frame=i, bbox=[100, 100, 200, 400], confidence=0.9, pitch_position=None)
+                    for i in range(n_frames)
+                ],
+            ),
+        ],
+    )
+    tr.save(track_dir / "play_tracks.json")
+
+    stage = HmrWorldStage(
+        config={
+            "hmr_world": {
+                "min_track_frames": 5,
+                "checkpoint": "ignored",
+                "ground_snap_velocity": 0.0,
+                # anchor_mode omitted -> exercises the "contact" default.
+            }
+        },
+        output_dir=tmp_path,
+    )
+    stage.run()
+
+    sidecar_path = tmp_path / "hmr_world" / "play__P001_foot_contacts.json"
+    assert sidecar_path.exists(), "contact-mode sidecar was not written"
+
+    contacts, meta = load_foot_contacts(sidecar_path)
+    assert contacts.n_frames == n_frames
+    assert meta["shot_id"] == "play"
+    assert meta["player_id"] == "P001"
+    assert meta["anchor_mode"] == "contact"
+
+    npz_path = tmp_path / "hmr_world" / "play__P001_smpl_world.npz"
+    out = SmplWorldTrack.load(npz_path)
+    assert len(out.frames) == n_frames

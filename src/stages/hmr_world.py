@@ -14,15 +14,23 @@ For each (shot_id, player_id) pair in ``output/tracks/{shot_id}_tracks.json``:
 3. Convert root rotation from camera frame to pitch frame via the
    calibrated camera extrinsic for *this shot*, then SLERP-smooth.
 4. Savgol-smooth the per-joint axis-angle pose.
-5. Compute per-frame translation by ankle-anchoring: project the 2D ankle
-   midpoint (from GVHMR's kp2d) to the pitch ground plane (z = 0.05 m) and
-   back-solve the root translation that places the foot exactly there.
+5. Apply the monocular lean-correction to root_R (see
+   ``_apply_lean_correction``), then anchor the per-frame root
+   translation (see ``anchor_root_translation``, shared with
+   ``scripts/reanchor_hmr_world.py``): ``hmr_world.anchor_mode``
+   ``"contact"`` (default) ray-casts each ankle to the pitch ground plane
+   to detect per-foot stance spans and pins the root so the planted foot
+   stops sliding; ``"ankle_mid"`` reproduces the legacy single-offset
+   ankle-midpoint ray-cast anchor.
 
 Outputs per (shot, player) pair:
 - ``output/hmr_world/{shot_id}__{player_id}_smpl_world.npz`` — SmplWorldTrack
 - ``output/hmr_world/{shot_id}__{player_id}_kp2d.json``      — COCO-17 keypoints
   (consumed by the dashboard 2D-overlay panel; same schema the legacy
   pose_2d stage used to emit).
+- ``output/hmr_world/{shot_id}__{player_id}_foot_contacts.json`` — per-foot
+  stance spans (``anchor_mode: contact`` only; see
+  ``src/schemas/foot_contacts.py``).
 
 The ``__`` separator delimits shot_id from player_id at the filename
 level. Both substrings are constrained to ``[A-Za-z0-9_-]`` upstream;
@@ -43,11 +51,19 @@ from src.pipeline.base import BaseStage
 
 logger = logging.getLogger(__name__)
 from src.schemas.camera_track import CameraTrack
+from src.schemas.foot_contacts import save_foot_contacts
 from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.tracks import TracksResult
 from src.utils.foot_anchor import ankle_ray_to_pitch, anchor_translation
+from src.utils.foot_contact import FootContacts, detect_contacts
+from src.utils.foot_lock import solve_root_with_pins
 from src.utils.smpl_pitch_transform import smpl_root_in_pitch_frame
-from src.utils.smpl_skeleton import SMPL_REST_JOINTS_YUP
+from src.utils.smpl_skeleton import (
+    SMPL_REST_JOINTS_YUP,
+    beta_adjusted_rest_joints,
+    compute_canonical_joints_batch,
+    load_smpl_neutral_model,
+)
 from src.utils.temporal_smoothing import (
     ground_snap_z,
     savgol_axis,
@@ -290,6 +306,10 @@ class HmrWorldStage(BaseStage):
             shot_key = (
                 shot_id_for_pid if shot_id_for_pid in camera_tracks_by_shot else ""
             )
+            shot_fps = (
+                camera_tracks_by_shot[shot_key].fps
+                if shot_key in camera_tracks_by_shot else 25.0
+            )
             status = self._process_player(
                 player_id=player_id,
                 shot_id=shot_id_for_pid,
@@ -308,6 +328,7 @@ class HmrWorldStage(BaseStage):
                 root_t_savgol_window=root_t_savgol_window,
                 root_t_savgol_order=root_t_savgol_order,
                 lean_correction_deg=lean_correction_deg,
+                fps=float(shot_fps),
                 estimator=estimator,
             )
             label = _output_key(shot_id_for_pid, player_id)
@@ -403,6 +424,7 @@ class HmrWorldStage(BaseStage):
         root_t_savgol_window: int,
         root_t_savgol_order: int,
         lean_correction_deg: float,
+        fps: float = 25.0,
         estimator: object | None = None,
     ) -> str:
         video_path = self.output_dir / "shots" / f"{shot_id}.mp4"
@@ -424,6 +446,7 @@ class HmrWorldStage(BaseStage):
             root_t_savgol_window=root_t_savgol_window,
             root_t_savgol_order=root_t_savgol_order,
             lean_correction_deg=lean_correction_deg,
+            fps=fps,
             estimator=estimator,
             video_path=video_path,
         )
@@ -488,6 +511,284 @@ def build_track_camera_R(
     return np.stack(resolved, axis=0).astype(np.float32)
 
 
+def _carrier_translation(
+    *,
+    kp2d: np.ndarray,
+    frame_indices: np.ndarray,
+    per_frame_K: dict,
+    per_frame_R: dict,
+    per_frame_t: dict,
+    distortion: tuple[float, float],
+    root_R: np.ndarray,
+    offsets: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-frame ankle-midpoint ray-cast anchor, shared by both
+    ``anchor_mode`` strategies in :func:`anchor_root_translation`.
+
+    Ray-casts the ankle-midpoint COCO pixel to the ``_FOOT_PLANE_Z``
+    pitch plane every frame and back-solves ``root_t`` so that
+    ``offsets[i]`` (the root->foot-midpoint vector, in the root's own
+    canonical frame) lands on that ray-cast point once rotated by
+    ``root_R[i]``. ``offsets`` is the ONLY thing that differs between
+    the two anchor modes: the constant ``_ANKLE_IN_ROOT`` for
+    ``ankle_mid``, a per-frame posed-FK offset for ``contact`` — sharing
+    this one implementation means the two modes can never numerically
+    diverge on the per-frame gating logic itself.
+
+    Frames below ``_ANKLE_CONF_MIN`` confidence, with no camera, or
+    whose ray is parallel to the ground plane hold the last successfully
+    anchored ``root_t`` (never teleport) and carry an attenuated/zero
+    confidence — this is exactly today's (pre-refactor) single-offset
+    loop's gating, generalised to accept any per-frame offset.
+
+    Returns ``(root_t, confidence)``. ``root_t`` is NOT smoothed here —
+    the caller applies the trailing SavGol (see ``anchor_root_translation``,
+    which for ``contact`` mode must smooth the carrier BEFORE the stance
+    pin correction is added, not after).
+    """
+    n = int(frame_indices.shape[0])
+    root_t = np.zeros((n, 3), dtype=float)
+    confidence = np.zeros(n, dtype=float)
+    last_anchored: np.ndarray | None = None
+    for i in range(n):
+        fi_int = int(frame_indices[i])
+        R = per_frame_R.get(fi_int)
+        if R is None:
+            # No camera for this frame — leave translation/confidence zero.
+            continue
+        K = per_frame_K[fi_int]
+        t = per_frame_t[fi_int]
+        kp = kp2d[i]
+        left = kp[_COCO_LEFT_ANKLE]
+        right = kp[_COCO_RIGHT_ANKLE]
+        ankle_conf = float(min(left[2], right[2]))
+        if ankle_conf < _ANKLE_CONF_MIN:
+            if last_anchored is not None:
+                root_t[i] = last_anchored
+            confidence[i] = ankle_conf
+            continue
+        ankle_uv = (
+            (left[0] + right[0]) / 2.0,
+            (left[1] + right[1]) / 2.0,
+        )
+        try:
+            foot_world = ankle_ray_to_pitch(
+                ankle_uv, K=K, R=R, t=t,
+                plane_z=_FOOT_PLANE_Z, distortion=distortion,
+            )
+        except ValueError:
+            # Ray parallel to the ground plane — skip this frame.
+            if last_anchored is not None:
+                root_t[i] = last_anchored
+            confidence[i] = 0.0
+            continue
+        root_t[i] = anchor_translation(foot_world, offsets[i], root_R[i])
+        last_anchored = root_t[i]
+        confidence[i] = ankle_conf
+    return root_t, confidence
+
+
+def _apply_lean_correction(
+    *,
+    root_R_pitch: np.ndarray,
+    frame_indices: np.ndarray,
+    kp2d: np.ndarray,
+    per_frame_K: dict,
+    per_frame_R: dict,
+    per_frame_t: dict,
+    distortion: tuple[float, float],
+    lean_correction_deg: float,
+) -> np.ndarray:
+    """Rotate each frame's ``root_R_pitch`` toward the camera by
+    ``lean_correction_deg`` — the monocular-HMR lean-away-from-camera
+    bias fix. Uses the same ankle-midpoint ray-cast as
+    :func:`_carrier_translation` to find the horizontal camera->foot
+    direction, but is otherwise independent of ``anchor_mode`` (the
+    correction direction doesn't depend on which root->foot offset the
+    translation solve will use).
+
+    MUST run BEFORE :func:`anchor_root_translation`, never inside it:
+    ``scripts/reanchor_hmr_world.py`` loads a saved ``root_R`` that
+    already has this baked in (see that npz's provenance — the stage
+    always applies this pre-pass before calling
+    ``anchor_root_translation``) and must never re-apply it, which would
+    double-lean an already-corrected track.
+
+    Returns a NEW array (never mutates ``root_R_pitch`` in place); frames
+    with no confident ray-cast are left unrotated, matching the original
+    per-frame gating exactly.
+    """
+    out = np.array(root_R_pitch, dtype=float, copy=True)
+    if lean_correction_deg == 0.0:
+        return out
+    n = int(frame_indices.shape[0])
+    for i in range(n):
+        fi_int = int(frame_indices[i])
+        R = per_frame_R.get(fi_int)
+        if R is None:
+            continue
+        K = per_frame_K[fi_int]
+        t = per_frame_t[fi_int]
+        kp = kp2d[i]
+        left = kp[_COCO_LEFT_ANKLE]
+        right = kp[_COCO_RIGHT_ANKLE]
+        ankle_conf = float(min(left[2], right[2]))
+        if ankle_conf < _ANKLE_CONF_MIN:
+            continue
+        ankle_uv = (
+            (left[0] + right[0]) / 2.0,
+            (left[1] + right[1]) / 2.0,
+        )
+        try:
+            foot_world = ankle_ray_to_pitch(
+                ankle_uv, K=K, R=R, t=t,
+                plane_z=_FOOT_PLANE_Z, distortion=distortion,
+            )
+        except ValueError:
+            continue
+        cam_centre = -R.T @ t
+        v_horiz = np.array(
+            [foot_world[0] - cam_centre[0],
+             foot_world[1] - cam_centre[1],
+             0.0],
+            dtype=float,
+        )
+        v_norm = float(np.linalg.norm(v_horiz))
+        if v_norm <= 1e-6:
+            continue
+        v_horiz /= v_norm
+        z_up = np.array([0.0, 0.0, 1.0])
+        lean_axis = np.cross(v_horiz, z_up)
+        lean_axis_norm = float(np.linalg.norm(lean_axis))
+        if lean_axis_norm <= 1e-6:
+            continue
+        lean_axis /= lean_axis_norm
+        ang = np.deg2rad(lean_correction_deg)
+        K_x = np.array([
+            [0.0, -lean_axis[2], lean_axis[1]],
+            [lean_axis[2], 0.0, -lean_axis[0]],
+            [-lean_axis[1], lean_axis[0], 0.0],
+        ])
+        # Rodrigues' rotation matrix.
+        correction_R = (
+            np.eye(3)
+            + np.sin(ang) * K_x
+            + (1 - np.cos(ang)) * K_x @ K_x
+        )
+        out[i] = correction_R @ out[i]
+    return out
+
+
+def _savgol_root_t(root_t: np.ndarray, window: int, order: int) -> np.ndarray:
+    """Same translation-jitter dampener as the pre-refactor stage: SavGol
+    across time on the dense per-frame translation. In ``contact`` mode
+    this MUST run on the carrier before any stance-pin delta is added —
+    see :func:`anchor_root_translation` — otherwise the pins themselves
+    would get smeared by a post-hoc smooth."""
+    if window > 1 and root_t.shape[0] >= window:
+        return savgol_axis(root_t, window=window, order=order, axis=0)
+    return root_t
+
+
+def anchor_root_translation(
+    *,
+    kp2d: np.ndarray,
+    frame_indices: np.ndarray,
+    per_frame_K: dict,
+    per_frame_R: dict,
+    per_frame_t: dict,
+    distortion: tuple[float, float],
+    thetas: np.ndarray,
+    root_R: np.ndarray,
+    betas: np.ndarray,
+    cfg: dict,
+    fps: float,
+) -> tuple[np.ndarray, np.ndarray, FootContacts | None]:
+    """Per-frame root translation anchoring — shared by the ``hmr_world``
+    stage and ``scripts/reanchor_hmr_world.py`` (plan Task 5, spec
+    §2[C]). ``root_R`` must ALREADY carry any lean correction (see
+    :func:`_apply_lean_correction`) — this function never mutates
+    rotation, only reads it.
+
+    ``cfg["anchor_mode"]`` selects the strategy:
+
+    - ``"ankle_mid"`` (legacy): today's canonical-offset ankle-midpoint
+      ray-cast anchor, reproduced with BIT-PARITY (the constant
+      ``_ANKLE_IN_ROOT``, hold-last low-confidence handling, trailing
+      SavGol). Returns ``contacts=None`` — there is no per-foot contact
+      signal in this mode.
+    - ``"contact"`` (default): the SAME ray-cast, but the offset is the
+      per-frame POSED-FK mid-ankle position
+      (``0.5*(canon[:,7]+canon[:,8])``, canonical-frame lateral zeroed,
+      rotated by ``root_R``) instead of the canonical constant — this
+      dense carrier is SavGol-smoothed (BEFORE any per-foot pin
+      correction, so pins are never smeared by a post-hoc smooth), then
+      :func:`src.utils.foot_contact.detect_contacts` finds per-foot
+      stance spans and :func:`src.utils.foot_lock.solve_root_with_pins`
+      pins the root so the stance foot stops sliding.
+
+    ``cfg`` mirrors ``config/default.yaml``'s ``hmr_world`` section:
+    ``anchor_mode``, ``root_t_savgol_window``/``root_t_savgol_order``,
+    and (contact mode only) the ``contact`` sub-dict consumed by
+    ``detect_contacts``/``solve_root_with_pins``.
+
+    Confidence is ``min(left_ankle_conf, right_ankle_conf)`` per frame
+    (0 when the camera is absent or the ray is parallel to the ground) —
+    NOT additionally floored by GVHMR's per-joint confidence the way the
+    pre-refactor code was: that signal is transient (never persisted to
+    the ``*_smpl_world.npz``), so a reanchor running from saved sidecars
+    alone cannot reconstruct it. The floor rarely bound in practice
+    (per-joint confidence is usually well above the ankle threshold).
+    """
+    frame_indices = np.asarray(frame_indices)
+    root_R = np.asarray(root_R, dtype=float)
+    n = int(frame_indices.shape[0])
+    anchor_mode = str(cfg.get("anchor_mode", "contact"))
+    savgol_window = int(cfg.get("root_t_savgol_window", 5))
+    savgol_order = int(cfg.get("root_t_savgol_order", 2))
+
+    if anchor_mode == "ankle_mid":
+        offsets = np.tile(_ANKLE_IN_ROOT, (n, 1))
+        root_t, confidence = _carrier_translation(
+            kp2d=kp2d, frame_indices=frame_indices,
+            per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+            per_frame_t=per_frame_t, distortion=distortion,
+            root_R=root_R, offsets=offsets,
+        )
+        root_t = _savgol_root_t(root_t, savgol_window, savgol_order)
+        return root_t, confidence, None
+
+    # "contact" mode: posed-FK mid-ankle carrier + stance-pinned solve.
+    rest_joints = beta_adjusted_rest_joints(betas, load_smpl_neutral_model())
+    canon = compute_canonical_joints_batch(np.asarray(thetas), rest_joints)
+    offsets = 0.5 * (canon[:, 7, :] + canon[:, 8, :])
+    offsets[:, 0] = 0.0  # zero lateral, matches _ANKLE_IN_ROOT's convention
+
+    root_t_carrier, confidence = _carrier_translation(
+        kp2d=kp2d, frame_indices=frame_indices,
+        per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+        per_frame_t=per_frame_t, distortion=distortion,
+        root_R=root_R, offsets=offsets,
+    )
+    root_t_carrier = _savgol_root_t(root_t_carrier, savgol_window, savgol_order)
+
+    contact_cfg = cfg.get("contact") or {}
+    contacts = detect_contacts(
+        kp2d=kp2d, frame_indices=frame_indices,
+        per_frame_K=per_frame_K, per_frame_R=per_frame_R,
+        per_frame_t=per_frame_t, distortion=distortion,
+        thetas=thetas, root_R=root_R, betas=betas, fps=fps, cfg=contact_cfg,
+    )
+    root_t, _stats = solve_root_with_pins(
+        root_carrier=root_t_carrier, root_R=root_R, thetas=thetas, betas=betas,
+        contacts=contacts, fps=fps,
+        max_correction_m=float(contact_cfg.get("max_correction_m", 0.5)),
+        decay_s=float(contact_cfg.get("decay_s", 0.6)),
+        rest_joints=rest_joints,
+    )
+    return root_t, confidence, contacts
+
+
 def process_player(
     *,
     player_id: str,
@@ -508,6 +809,7 @@ def process_player(
     root_t_savgol_order: int,
     lean_correction_deg: float,
     video_path: Path,
+    fps: float = 25.0,
     estimator: object | None = None,
 ) -> str:
     """Process one player. Returns one of:
@@ -581,7 +883,12 @@ def process_player(
     thetas = np.asarray(hmr_out["thetas"])             # (N, 24, 3)
     betas_all = np.asarray(hmr_out["betas"])           # (N, 10)
     root_R_cam = np.asarray(hmr_out["root_R_cam"])     # (N, 3, 3)
-    joint_conf = np.asarray(hmr_out["joint_confidence"])  # (N, 24)
+    # hmr_out["joint_confidence"] (per-joint GVHMR confidence) used to
+    # floor the anchored-translation confidence below; that floor moved
+    # out when the translation solve was factored into
+    # anchor_root_translation (see that function's docstring) because
+    # the reanchor script — which shares the same code — has no access
+    # to this transient, never-persisted signal.
     kp2d = np.asarray(hmr_out["kp2d"])                 # (N, 17, 3)
 
     # GVHMR's body_pose axis-angles, when fed through our viewer's
@@ -609,16 +916,17 @@ def process_player(
     # 2. Median shape across track.
     betas = np.median(betas_all, axis=0)
 
-    # 3. Convert root rotation to pitch frame and SLERP-smooth.
+    # 3. Convert root rotation to pitch frame and SLERP-smooth. Frames
+    # with no camera entry get an identity root_R placeholder — the
+    # translation solve below (anchor_root_translation) independently
+    # gates on per_frame_R and leaves those frames at zero confidence.
     frame_indices = np.array([fi for fi, _ in track_frames])
     root_R_pitch = np.empty_like(root_R_cam)
-    camera_present = np.zeros(len(frame_indices), dtype=bool)
     for i, fi in enumerate(frame_indices):
         R_t = per_frame_R.get(int(fi))
         if R_t is None:
             root_R_pitch[i] = np.eye(3)
             continue
-        camera_present[i] = True
         root_R_pitch[i] = smpl_root_in_pitch_frame(root_R_cam[i], R_t)
     root_R_pitch = slerp_window(root_R_pitch, window=slerp_w)
 
@@ -627,93 +935,47 @@ def process_player(
         thetas, window=savgol_window, order=savgol_order, axis=0
     ).astype(np.float32)
 
-    # 5. Foot-anchored translation per-frame using GVHMR's internal
-    # ViTPose kp2d (one entry per track frame, aligned with frame_indices).
-    # Frames where a fresh ankle ray-cast succeeded carry their solved
-    # ``root_t``; low-confidence frames hold the last good anchor;
-    # camera-missing frames stay at zero (and zero confidence). The
-    # downstream ``refined_poses`` stage trims the leading/trailing
-    # un-anchored span using ``confidence`` as the anchored signal.
-    root_t = np.zeros((len(frame_indices), 3), dtype=float)
-    confidence = np.zeros(len(frame_indices), dtype=float)
-    last_anchored: np.ndarray | None = None
-    for i, fi in enumerate(frame_indices):
-        fi_int = int(fi)
-        if not camera_present[i]:
-            # No camera — leave translation zero, confidence zero.
-            continue
-        K = per_frame_K[fi_int]
-        R = per_frame_R[fi_int]
-        t = per_frame_t[fi_int]
-        kp = kp2d[i]
-        left = kp[_COCO_LEFT_ANKLE]
-        right = kp[_COCO_RIGHT_ANKLE]
-        ankle_conf = float(min(left[2], right[2]))
-        if ankle_conf < _ANKLE_CONF_MIN:
-            # Low-confidence keypoints: hold last anchor (avoids teleport)
-            # and flag the frame with attenuated confidence per the spec
-            # error-handling philosophy ("flag, don't substitute").
-            if last_anchored is not None:
-                root_t[i] = last_anchored
-            confidence[i] = ankle_conf  # propagate the low score
-            continue
-        ankle_uv = (
-            (left[0] + right[0]) / 2.0,
-            (left[1] + right[1]) / 2.0,
-        )
-        try:
-            foot_world = ankle_ray_to_pitch(
-                ankle_uv, K=K, R=R, t=t,
-                plane_z=_FOOT_PLANE_Z, distortion=distortion,
-            )
-        except ValueError:
-            # Ray parallel to ground — skip this frame.
-            if last_anchored is not None:
-                root_t[i] = last_anchored
-            confidence[i] = 0.0
-            continue
-        # Lean-correction: rotate root_R_pitch[i] around the horizontal
-        # axis perpendicular to (camera → player) by a fixed angle to
-        # counter monocular HMR's away-from-camera bias. Applied
-        # before the foot-anchor translation so the foot stays glued
-        # to its detected pitch position under the corrected R.
-        if lean_correction_deg != 0.0:
-            cam_centre = -R.T @ t
-            v_horiz = np.array(
-                [foot_world[0] - cam_centre[0],
-                 foot_world[1] - cam_centre[1],
-                 0.0],
-                dtype=float,
-            )
-            v_norm = float(np.linalg.norm(v_horiz))
-            if v_norm > 1e-6:
-                v_horiz /= v_norm
-                z_up = np.array([0.0, 0.0, 1.0])
-                lean_axis = np.cross(v_horiz, z_up)
-                lean_axis_norm = float(np.linalg.norm(lean_axis))
-                if lean_axis_norm > 1e-6:
-                    lean_axis /= lean_axis_norm
-                    ang = np.deg2rad(lean_correction_deg)
-                    K_x = np.array([
-                        [0.0, -lean_axis[2], lean_axis[1]],
-                        [lean_axis[2], 0.0, -lean_axis[0]],
-                        [-lean_axis[1], lean_axis[0], 0.0],
-                    ])
-                    # Rodrigues' rotation matrix.
-                    correction_R = (
-                        np.eye(3)
-                        + np.sin(ang) * K_x
-                        + (1 - np.cos(ang)) * K_x @ K_x
-                    )
-                    root_R_pitch[i] = correction_R @ root_R_pitch[i]
-        root_t[i] = anchor_translation(
-            foot_world, _ANKLE_IN_ROOT, root_R_pitch[i]
-        )
-        last_anchored = root_t[i]
-        joint_conf_min = float(joint_conf[i].min()) if joint_conf.size else 0.0
-        confidence[i] = float(min(ankle_conf, joint_conf_min))
+    # 5. Lean-correction pre-pass — the same ankle-mid ray-cast the
+    # translation solve below uses, applied to root_R BEFORE anchoring
+    # (never inside anchor_root_translation — see that function's
+    # docstring for why: the reanchor script consumes a saved root_R
+    # that already has this baked in and must not re-apply it).
+    root_R_pitch = _apply_lean_correction(
+        root_R_pitch=root_R_pitch,
+        frame_indices=frame_indices,
+        kp2d=kp2d,
+        per_frame_K=per_frame_K,
+        per_frame_R=per_frame_R,
+        per_frame_t=per_frame_t,
+        distortion=distortion,
+        lean_correction_deg=lean_correction_deg,
+    )
 
-    # 6. (No ground snap.) The previous ``ground_snap_z`` post-process
+    # 6. Contact-aware (or legacy ankle-mid) root translation anchoring —
+    # shared with scripts/reanchor_hmr_world.py via anchor_root_translation
+    # so a local re-solve from saved sidecars is bit-identical to what a
+    # fresh stage run would compute. Frames with no camera never get a
+    # per_frame_R entry, so no separate gate is needed here
+    # (anchor_root_translation checks per_frame_R itself).
+    anchor_mode = str(cfg.get("anchor_mode", "contact"))
+    anchor_cfg = dict(cfg)
+    anchor_cfg["root_t_savgol_window"] = root_t_savgol_window
+    anchor_cfg["root_t_savgol_order"] = root_t_savgol_order
+    root_t, confidence, contacts = anchor_root_translation(
+        kp2d=kp2d,
+        frame_indices=frame_indices,
+        per_frame_K=per_frame_K,
+        per_frame_R=per_frame_R,
+        per_frame_t=per_frame_t,
+        distortion=distortion,
+        thetas=thetas_smooth,
+        root_R=root_R_pitch,
+        betas=betas,
+        cfg=anchor_cfg,
+        fps=fps,
+    )
+
+    # 7. (No ground snap.) The previous ``ground_snap_z`` post-process
     # halved root_t.z every frame whose per-frame velocity was below
     # threshold — which is every frame for a stationary or slowly-
     # moving player. That collapsed the pelvis toward z=0 (so the
@@ -723,22 +985,6 @@ def process_player(
     # needed. ``ground_snap_velocity`` is kept in the signature for
     # backwards-compat but is now ignored.
     _ = ground_snap_velocity
-
-    # 7. Translation jitter dampener. Camera-tracking jitter feeds
-    # directly into root_t via the per-frame foot-anchor ray-cast;
-    # a Savgol smoother across time absorbs sub-frame noise without
-    # flattening the player's actual motion. Skip when the track is
-    # too short to apply the window or the smoother is disabled.
-    if (
-        root_t_savgol_window > 1
-        and root_t.shape[0] >= root_t_savgol_window
-    ):
-        root_t = savgol_axis(
-            root_t,
-            window=root_t_savgol_window,
-            order=root_t_savgol_order,
-            axis=0,
-        )
 
     track = SmplWorldTrack(
         player_id=str(player_id),
@@ -751,6 +997,16 @@ def process_player(
         shot_id=shot_id,
     )
     track.save(out_dir / f"{out_key}_smpl_world.npz")
+
+    # Contact-mode sidecar: per-foot stance spans + pins so refined_poses
+    # (and the dashboard/eval harness) don't have to re-derive them.
+    # ankle_mid mode has no contact signal (contacts is None) — nothing
+    # to write.
+    if contacts is not None:
+        save_foot_contacts(
+            out_dir / f"{out_key}_foot_contacts.json", contacts,
+            shot_id=shot_id, player_id=player_id, anchor_mode=anchor_mode,
+        )
 
     # Side-output: COCO-17 keypoints for the dashboard 2D-overlay panel.
     # Same JSON schema the legacy pose_2d stage emitted; the renderer

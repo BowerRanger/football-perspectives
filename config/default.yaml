@@ -850,6 +850,24 @@ refined_poses:
     # preserved while monocular depth wobble and tracking teleports are
     # reined in.
     v_max_m_s: 12.0
+    # Physical XY acceleration cap. Frame-to-frame velocity CHANGE is
+    # limited to a_max_m_s2 / fps² metres/frame² (forward/backward, no
+    # lag). Catches isolated super-physical root-translation pops that
+    # survive the Hampel test and the velocity cap above — brief 0.3-0.5 m
+    # excursions coincident with upstream hmr_world anchor/kp2d noise
+    # frames, registering as 100s of m/s² rather than a genuine sprint
+    # direction change (real sprints stay under ~15 m/s²).
+    # 75 m/s² is empirically tuned on gberch, not just "above the human
+    # ceiling": a lower value closer to that ~15 m/s² ceiling (e.g. 40)
+    # also clamps the legitimate, sharp velocity drop at a real footstrike
+    # — the foot-lock finale downstream then can't fully re-pin the
+    # affected stance span, INCREASING stance skate instead of reducing
+    # it. 75 sits above the observed footstrike-adjacent jitter ceiling
+    # (a stable safe zone from ~70-120 m/s² on gberch; spec §6's skate
+    # gate regresses somewhere between 40-45) while still cutting the
+    # measured pop signature materially (~20-35% off p99/max root
+    # acceleration on gberch's three tracked players).
+    a_max_m_s2: 75.0
   # Cross-player camera-jitter correction. Detects frames where every
   # visible player drifts in unison on the pitch and subtracts the
   # common XY shift. Runs per shot, between the per-player clean-up

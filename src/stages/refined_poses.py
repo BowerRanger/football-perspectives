@@ -913,6 +913,49 @@ def _velocity_limit_xy(xy: np.ndarray, max_step: float) -> np.ndarray:
     return 0.5 * (fwd + bwd)
 
 
+def _accel_limit_xy(xy: np.ndarray, max_dv: float) -> np.ndarray:
+    """Forward/backward velocity-change-limited filter on a 2-D path.
+
+    Caps each consecutive frame-to-frame velocity CHANGE (i.e. the XY
+    acceleration, ``v[i] - v[i-1]`` where ``v[i] = xy[i] - xy[i-1]``) at
+    ``max_dv`` metres/frame², running a one-sided limiter forward and
+    backward and averaging the two — the same symmetric, lag-free
+    construction as :func:`_velocity_limit_xy`, one derivative order up.
+
+    ``_velocity_limit_xy`` bounds *speed* and never engages on an
+    isolated-frame pop unless that single frame's displacement itself
+    exceeds the speed cap. A pop that snaps out and back within a frame
+    or two (upstream ``hmr_world`` anchor/kp2d noise, not a real
+    movement) instead shows up as two enormous, opposite-signed
+    *accelerations* — entering and leaving the pop — while never
+    exceeding a generous speed cap. Clamping the velocity change catches
+    exactly that signature without touching a genuine sprint direction
+    change, whose centripetal acceleration sits far below a
+    super-physical pop's.
+    """
+    arr = np.asarray(xy, dtype=float)
+    n = arr.shape[0]
+    if n < 3 or max_dv <= 0.0:
+        return arr.copy()
+
+    def _limit(seq: np.ndarray) -> np.ndarray:
+        out = seq.copy()
+        prev_v = out[1] - out[0]
+        for i in range(2, len(out)):
+            v = out[i] - out[i - 1]
+            dv = v - prev_v
+            d = float(np.linalg.norm(dv))
+            if d > max_dv:
+                v = prev_v + dv * (max_dv / d)
+                out[i] = out[i - 1] + v
+            prev_v = v
+        return out
+
+    fwd = _limit(arr)
+    bwd = _limit(arr[::-1])[::-1]
+    return 0.5 * (fwd + bwd)
+
+
 def _hampel_outlier_mask(
     xy: np.ndarray, *, window: int, k: float, abs_floor: float,
 ) -> np.ndarray:
@@ -975,11 +1018,12 @@ def _clean_player_translation(
     hampel_k: float = 3.0,
     hampel_floor_m: float = 0.6,
     v_max_m_s: float = 12.0,
+    a_max_m_s2: float = 75.0,
 ) -> tuple[SmplWorldTrack, dict]:
     """Per-player robust translation cleanup, run before the cross-player
     consensus and the final smoother.
 
-    Three things, all in physical units so the same config generalises
+    Four things, all in physical units so the same config generalises
     across clips and frame rates:
 
       1. **Gap fill.** The anchored span is resampled onto a uniform
@@ -995,12 +1039,33 @@ def _clean_player_translation(
       3. **Velocity limit.** A physical speed cap (``v_max_m_s``) bounds
          any residual high-frequency depth wobble without flattening a
          genuine sprint. (Artifact #2, wobble.)
+      4. **Acceleration limit.** A physical XY acceleration cap
+         (``a_max_m_s2``) bounds isolated super-physical root-translation
+         pops that survive the above — single-to-few-frame excursions
+         (0.3-0.5 m) too small to trip the Hampel floor and too brief to
+         exceed the velocity cap, but which register as centripetal-
+         acceleration-defying pops (100s of m/s², coincident with
+         upstream ``hmr_world`` anchor/kp2d noise frames) rather than a
+         genuine direction change (real sprints stay under ~15 m/s²).
+         The default (75.0, tuned on gberch — see
+         ``config/default.yaml``'s comment) is deliberately more
+         conservative than the ~15 m/s² "genuine sprint" ceiling might
+         suggest: a naive lower value (e.g. 40, closer to that ceiling)
+         also clamps the legitimate, sharp velocity drop at a real
+         footstrike, which the foot-lock finale downstream then can't
+         fully undo — it INCREASES stance skate rather than reducing it.
+         See :func:`_accel_limit_xy`.
 
     XY only — ``z`` is owned by the per-player ground-snap pass and is
     carried (interpolated) but not clamped here. Returns a new dense
     ``SmplWorldTrack`` plus a stats dict.
     """
-    stats = {"filled_frames": 0, "rejected_frames": 0, "clamped_frames": 0}
+    stats = {
+        "filled_frames": 0,
+        "rejected_frames": 0,
+        "clamped_frames": 0,
+        "accel_clamped_frames": 0,
+    }
     frames = np.asarray(track.frames, dtype=np.int64)
     n = int(len(frames))
     if not enabled or n < 2:
@@ -1035,6 +1100,7 @@ def _clean_player_translation(
 
     hwin = max(3, int(round(hampel_window_s * fps)))
     max_step = float(v_max_m_s) / float(fps) if fps > 0 else float("inf")
+    max_dv = float(a_max_m_s2) / (float(fps) ** 2) if fps > 0 else float("inf")
 
     out_f, out_t, out_R, out_th, out_c = [], [], [], [], []
     for a, b in bounds:
@@ -1078,6 +1144,14 @@ def _clean_player_translation(
         xy = _velocity_limit_xy(xy, max_step)
         stats["clamped_frames"] += int(
             (np.linalg.norm(xy - before, axis=1) > 1e-6).sum()
+        )
+
+        # Physical XY acceleration limit — catches isolated super-
+        # physical pops the velocity cap doesn't (see _accel_limit_xy).
+        before_accel = xy.copy()
+        xy = _accel_limit_xy(xy, max_dv)
+        stats["accel_clamped_frames"] += int(
+            (np.linalg.norm(xy - before_accel, axis=1) > 1e-6).sum()
         )
         dense_t[:, :2] = xy
 
@@ -1318,6 +1392,7 @@ def _clean_single_track(
 
     empty_cleanup_stats = {
         "filled_frames": 0, "rejected_frames": 0, "clamped_frames": 0,
+        "accel_clamped_frames": 0,
     }
     anchored = confidence >= _FRESH_ANCHOR_CONF
     if not anchored.any():
@@ -1461,9 +1536,9 @@ class RefinedPosesStage(BaseStage):
         fps = _load_clip_fps(self.output_dir)
 
         # Per-player robust translation cleanup (gap-fill + outlier
-        # rejection + velocity limit). Disabled when the config block is
-        # absent so minimal-config callers keep the legacy behaviour;
-        # config/default.yaml turns it on for production.
+        # rejection + velocity limit + acceleration limit). Disabled when
+        # the config block is absent so minimal-config callers keep the
+        # legacy behaviour; config/default.yaml turns it on for production.
         cleanup_cfg = (cfg.get("cleanup") or {})
         cleanup_kwargs = {
             "enabled": bool(cleanup_cfg.get("enabled", False)),
@@ -1473,6 +1548,7 @@ class RefinedPosesStage(BaseStage):
             "hampel_k": float(cleanup_cfg.get("hampel_k", 3.0)),
             "hampel_floor_m": float(cleanup_cfg.get("hampel_floor_m", 0.6)),
             "v_max_m_s": float(cleanup_cfg.get("v_max_m_s", 12.0)),
+            "a_max_m_s2": float(cleanup_cfg.get("a_max_m_s2", 75.0)),
         }
 
         sync_map = self._load_sync_map()
@@ -1498,8 +1574,10 @@ class RefinedPosesStage(BaseStage):
             "filled_frames": 0,
             "rejected_frames": 0,
             "clamped_frames": 0,
+            "accel_clamped_frames": 0,
             "assembly_rejected_frames": 0,
             "assembly_clamped_frames": 0,
+            "assembly_accel_clamped_frames": 0,
         }
         # Per-(shot, player) foot contacts (Task 6+8's global-frame-keyed
         # representation — see ``_GlobalFootContacts``), loaded from the
@@ -1530,6 +1608,9 @@ class RefinedPosesStage(BaseStage):
                 cleanup_summary["filled_frames"] += int(c_stats["filled_frames"])
                 cleanup_summary["rejected_frames"] += int(c_stats["rejected_frames"])
                 cleanup_summary["clamped_frames"] += int(c_stats["clamped_frames"])
+                cleanup_summary["accel_clamped_frames"] += int(
+                    c_stats["accel_clamped_frames"]
+                )
                 cleaned_by_shot.setdefault(shot_id, []).append((pid, cleaned))
 
         # 2. Per-shot cross-player JITTER pass. Jitter is a camera
@@ -1721,6 +1802,9 @@ class RefinedPosesStage(BaseStage):
                 cleanup_summary["assembly_clamped_frames"] += int(
                     a_stats["clamped_frames"]
                 )
+                cleanup_summary["assembly_accel_clamped_frames"] += int(
+                    a_stats["accel_clamped_frames"]
+                )
             refined.save(out_dir / f"{pid}_refined.npz")
             diag.save(out_dir / f"{pid}_diagnostics.json")
             summary["players_refined"] += 1
@@ -1735,12 +1819,13 @@ class RefinedPosesStage(BaseStage):
         )
         logger.info(
             "[refined_poses] %d player(s) refined, %d frame(s) total, "
-            "cleanup[%d filled / %d rejected / %d clamped], "
+            "cleanup[%d filled / %d rejected / %d clamped / %d accel-clamped], "
             "%d Δ-jitter / %d residual-consensus frame(s) corrected",
             summary["players_refined"], summary["total_frames"],
             cleanup_summary["filled_frames"],
             cleanup_summary["rejected_frames"],
             cleanup_summary["clamped_frames"],
+            cleanup_summary["accel_clamped_frames"],
             jitter_summary["corrected_frames"],
             residual_summary["corrected_frames"],
         )

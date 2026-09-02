@@ -26,6 +26,7 @@ from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.sync_map import Alignment, GroupSync, SyncMap
 from src.stages.refined_poses import (
     RefinedPosesStage,
+    _accel_limit_xy,
     _clean_player_translation,
     _hampel_outlier_mask,
     _velocity_limit_xy,
@@ -79,6 +80,61 @@ def test_velocity_limit_preserves_genuine_sprint() -> None:
     xy = np.column_stack([np.arange(40) * 0.33, np.zeros(40)])
     out = _velocity_limit_xy(xy, max_step=0.4)
     np.testing.assert_allclose(out, xy, atol=1e-6)
+
+
+# ── _accel_limit_xy ─────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_accel_limit_caps_isolated_pop() -> None:
+    """A static track with one frame popping 0.4 m out and back: after
+    the limit, no consecutive velocity CHANGE exceeds the cap (a pop
+    this small never trips the velocity limiter's own displacement cap,
+    since the per-frame step is still under it -- this is exactly the
+    signature the acceleration limiter exists to catch)."""
+    xy = np.zeros((21, 2))
+    xy[10, 0] = 0.4  # pop out and back within a single frame
+    max_dv = 40.0 / 25.0**2  # a_max_m_s2=40 at 25 fps
+    out = _accel_limit_xy(xy, max_dv)
+    v = np.diff(out, axis=0)
+    dv = np.diff(v, axis=0)
+    dv_mag = np.linalg.norm(dv, axis=1)
+    assert float(dv_mag.max()) <= max_dv + 1e-9
+    # the pop itself must be materially reduced, not just re-centred
+    assert abs(float(out[10, 0])) < 0.15
+
+
+@pytest.mark.unit
+def test_accel_limit_preserves_genuine_curved_sprint() -> None:
+    """A circular-arc sprint at 8 m/s with a 4.27 m turn radius has
+    centripetal acceleration ~15 m/s^2 -- the spec's ceiling for a
+    "genuine sprint direction change" -- well under the default 40 m/s^2
+    cap, and must pass through the limiter untouched."""
+    fps = 25.0
+    v_speed = 8.0
+    accel = 15.0
+    radius = v_speed**2 / accel
+    w = v_speed / radius
+    n = 60
+    t = np.arange(n) / fps
+    xy = np.column_stack([
+        radius * np.sin(w * t), radius * (1.0 - np.cos(w * t)),
+    ])
+    max_dv = 40.0 / fps**2
+    out = _accel_limit_xy(xy, max_dv)
+    # interior points only -- the fwd/bwd limiter anchors its first two
+    # taps unconditionally on each pass, so edge frames trivially match
+    # regardless of whether the limiter is exercised; interior frames are
+    # the ones that prove nothing was clamped.
+    np.testing.assert_allclose(out[3:-3], xy[3:-3], atol=1e-6)
+
+
+@pytest.mark.unit
+def test_accel_limit_disabled_when_max_dv_nonpositive() -> None:
+    xy = np.zeros((10, 2))
+    xy[5, 0] = 3.0
+    out = _accel_limit_xy(xy, max_dv=0.0)
+    np.testing.assert_array_equal(out, xy)
 
 
 # ── _hampel_outlier_mask ────────────────────────────────────────────
@@ -181,6 +237,56 @@ def test_clean_translation_removes_teleport_keeps_position() -> None:
     speeds = np.linalg.norm(np.diff(out.root_t[:, :2], axis=0), axis=1) * 30.0
     assert float(speeds.max()) <= 12.0 + 1e-3
     assert stats["rejected_frames"] >= 1
+
+
+@pytest.mark.unit
+def test_clean_translation_accel_limit_catches_pop_below_velocity_and_hampel_gates() -> None:
+    """A single-frame 0.4 m out-and-back pop is too small to trip the
+    Hampel floor (0.6 m) and too brief to exceed the velocity cap
+    (12 m/s / 25 fps = 0.48 m/frame per the problem statement) -- exactly
+    the class of super-physical pop the acceleration limiter targets that
+    the two existing passes let through untouched."""
+    n = 41
+    frames = np.arange(n)
+    rt = np.column_stack([np.full(n, 10.0), np.full(n, 5.0), np.full(n, 0.9)])
+    rt[20, 0] += 0.4  # pop out and back within one frame
+    tr = _make_track(frames=frames, root_t=rt)
+    out, stats = _clean_player_translation(
+        tr, fps=25.0, enabled=True,
+        hampel_window_s=0.4, hampel_k=3.0, hampel_floor_m=0.6,
+        v_max_m_s=12.0, a_max_m_s2=40.0,
+    )
+    assert stats["rejected_frames"] == 0  # Hampel never sees it
+    assert stats["accel_clamped_frames"] >= 1
+    np.testing.assert_allclose(out.root_t[20, :2], [10.0, 5.0], atol=0.15)
+
+
+@pytest.mark.unit
+def test_clean_translation_accel_limit_preserves_curved_sprint() -> None:
+    """A curved sprint (~15 m/s^2 centripetal acceleration) must survive
+    the full cleanup pipeline (Hampel + velocity + acceleration limit)
+    essentially unchanged -- the acceptance criterion from the design:
+    a genuine direction change is not mistaken for a pop."""
+    fps = 25.0
+    v_speed = 8.0
+    accel = 15.0
+    radius = v_speed**2 / accel
+    w = v_speed / radius
+    n = 60
+    frames = np.arange(n)
+    t = frames / fps
+    xy = np.column_stack([
+        radius * np.sin(w * t), radius * (1.0 - np.cos(w * t)),
+    ])
+    rt = np.column_stack([xy, np.full(n, 0.9)])
+    tr = _make_track(frames=frames, root_t=rt)
+    out, stats = _clean_player_translation(
+        tr, fps=fps, enabled=True,
+        hampel_window_s=0.4, hampel_k=3.0, hampel_floor_m=0.6,
+        v_max_m_s=12.0, a_max_m_s2=40.0,
+    )
+    assert stats["accel_clamped_frames"] == 0
+    np.testing.assert_allclose(out.root_t[:, :2], xy, atol=1e-6)
 
 
 @pytest.mark.unit

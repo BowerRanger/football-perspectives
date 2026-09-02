@@ -36,6 +36,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.schemas.camera_track import CameraTrack  # noqa: E402
+from src.schemas.foot_contacts import load_foot_contacts  # noqa: E402
 from src.schemas.refined_pose import RefinedPose  # noqa: E402
 from src.schemas.smpl_world import SmplWorldTrack  # noqa: E402
 from src.utils.foot_contact import FootContacts  # noqa: E402
@@ -139,7 +140,13 @@ def _load_contacts_sidecar(
     if not path.exists():
         return None
     try:
-        fc = FootContacts.from_json(json.loads(path.read_text()))
+        # Sidecars are wrapped in the versioned schema payload — unwrap
+        # via the schema loader, falling back to a raw FootContacts JSON
+        # for any pre-schema file.
+        try:
+            fc, _meta = load_foot_contacts(path)
+        except ValueError:
+            fc = FootContacts.from_json(json.loads(path.read_text()))
     except Exception:
         return None
     if fc.n_frames != n_frames:

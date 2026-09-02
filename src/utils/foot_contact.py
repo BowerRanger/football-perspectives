@@ -49,14 +49,28 @@ _COCO_ANKLE_IDX = (15, 16)
 # not the ankle: it is the joint the two-bone leg IK actually pins
 # (``src.utils.foot_lock.lock_feet_ik``), and the one whose world
 # position is invariant under root translation drift during a true
-# stance span (the ankle, one rotation earlier in the chain, is not —
-# see ``derive_contacts_from_fk``'s docstring). The ray-cast in
-# :func:`_ray_cast_ankles` targets the COCO *ankle* pixel (15/16)
-# instead, because that is the keypoint GVHMR's ViTPose actually
-# annotates; ``detect_contacts``'s resulting pin is therefore an ankle
-# position (consumed as such by
-# ``src.utils.foot_lock.solve_root_with_pins``'s root->ankle offset).
+# stance span. The ankle, one rotation earlier in the chain, is NOT
+# invariant even during genuine stance: as the body advances over a
+# planted foot the tibia rotates about the (stationary) toe — heel
+# lift — so the ankle sweeps through several centimetres even while the
+# toe never moves (this is what the Wave-4 root-cause diagnosis found:
+# pinning the ankle forced the anatomically-stationary toe to sweep
+# instead). See ``derive_contacts_from_fk``'s docstring for the same
+# point, worked through algebraically. The ray-cast in
+# :func:`_ray_cast_ankles` still targets the COCO *ankle* pixel (15/16),
+# because that is the keypoint GVHMR's ViTPose actually annotates and
+# it drives the (ankle-based) speed signal well — but ``detect_contacts``
+# now AUGMENTS that ray-cast with the current pose's rigid ankle->toe
+# offset before taking the per-span pin (see the toe-offset step in
+# :func:`detect_contacts`), so the pin itself estimates the toe, and is
+# consumed as such by
+# ``src.utils.foot_lock.solve_root_with_pins``'s root->foot offset).
 _SMPL_FOOT_IDX = (10, 11)
+
+# SMPL joint indices for the ankle (left, right) — the ray-cast target
+# (matches the COCO ankle keypoint GVHMR annotates) and the base point
+# the per-frame ankle->toe offset below is measured from.
+_SMPL_ANKLE_IDX = (7, 8)
 
 # Ankle-confidence cutoff below which a keypoint never anchors a
 # ray-cast. Matches ``src.stages.hmr_world._ANKLE_CONF_MIN`` (both trace
@@ -68,8 +82,19 @@ _ANKLE_CONF_MIN = 0.3
 
 # Pitch-frame z of the ray-cast ground plane — matches
 # ``src.stages.hmr_world._FOOT_PLANE_Z`` (see that constant's docstring
-# for why it's a few cm above z=0, not exactly on the turf).
+# for why it's a few cm above z=0, not exactly on the turf). This is the
+# height the ANKLE ray-cast assumes; it is NOT the pin's output z (see
+# ``_PIN_TARGET_Z`` below — the two are independent).
 _FOOT_PLANE_Z = 0.05
+
+# Forced z of every span pin, overriding whatever z the (noisy) toe
+# position estimate happened to carry. Matches
+# ``refined_poses.ground_snap_target_z`` / ``foot_lock.target_foot_z``
+# (config/default.yaml) — the height downstream consumers
+# (``src.utils.foot_lock.solve_root_with_pins``, the contact-aware
+# ground snap) actually want a planted foot pinned at, not the ray-cast
+# ankle-plane height.
+_PIN_TARGET_Z = 0.02
 
 # FK lower-foot gate margin (metres, plan step 5): a foot only counts as
 # a stance candidate if its world-z is no more than this far above the
@@ -396,12 +421,15 @@ def _adaptive_speed_floors(
     return enter, exit_
 
 
-def _fk_lower_foot_gate(
-    thetas: np.ndarray, root_R: np.ndarray, rest_joints: np.ndarray,
-) -> np.ndarray:
+def _fk_lower_foot_gate_from_canon(canon: np.ndarray, root_R: np.ndarray) -> np.ndarray:
     """Per-frame, per-side gate (plan step 5): True where this foot's
     world-z is no more than ``_FK_LOWER_FOOT_MARGIN_M`` above the other
     foot's.
+
+    Takes a precomputed ``canon`` (``compute_canonical_joints_batch``'s
+    output) rather than ``thetas``/``rest_joints`` directly so
+    :func:`detect_contacts` can share the one canonical-FK pass with the
+    ankle->toe offset step below it, instead of recomputing it twice.
 
     Only ``root_R`` (orientation) is applied, not ``root_t`` — the
     shared pelvis translation cancels out of the z *comparison* between
@@ -409,7 +437,6 @@ def _fk_lower_foot_gate(
     whole detector feeds into is solved (see
     ``compute_canonical_joints_batch``'s docstring).
     """
-    canon = compute_canonical_joints_batch(thetas, rest_joints)  # (F, 24, 3)
     foot_canon = canon[:, _SMPL_FOOT_IDX, :]                      # (F, 2, 3)
     foot_rotated = np.einsum("fba,fsa->fsb", root_R, foot_canon)
     fk_z = foot_rotated[:, :, 2]                                  # (F, 2)
@@ -417,6 +444,26 @@ def _fk_lower_foot_gate(
         [fk_z[:, side] <= fk_z[:, 1 - side] + _FK_LOWER_FOOT_MARGIN_M for side in (0, 1)],
         axis=1,
     )
+
+
+def _ankle_to_toe_world_offset(canon: np.ndarray, root_R: np.ndarray) -> np.ndarray:
+    """Per-frame, per-side world-frame vector from the ankle (SMPL 7/8)
+    to the foot/toe (SMPL 10/11), given the current pose.
+
+    This is the rigid FK offset the toe-pin estimate in
+    :func:`detect_contacts` adds to each ray-cast ankle position: since
+    only the toe is exactly stationary during real stance (see
+    ``_SMPL_FOOT_IDX``'s docstring), augmenting the ray-cast (which can
+    only ever measure where the ANKLE keypoint projects to) with this
+    offset turns it into an estimate of the toe instead. Rotation-only
+    (like :func:`_fk_lower_foot_gate_from_canon`) — this is a vector
+    between two joints, not a position, so no ``root_t`` translation
+    applies.
+    """
+    ankle_canon = canon[:, _SMPL_ANKLE_IDX, :]  # (F, 2, 3)
+    foot_canon = canon[:, _SMPL_FOOT_IDX, :]    # (F, 2, 3)
+    offset_canon = foot_canon - ankle_canon
+    return np.einsum("fba,fsa->fsb", root_R, offset_canon)
 
 
 def detect_contacts(
@@ -440,13 +487,22 @@ def detect_contacts(
     §2[B]/§3 for the full algorithm. Summary: ray-cast each confident
     ankle pixel to the ``z=0.05`` pitch plane every frame
     (:func:`_ray_cast_ankles`); NaN-aware 3-frame median filter, then
-    central-difference world speed; a pixel-noise-adaptive hysteresis
-    state machine (:func:`_adaptive_speed_floors`, :func:`_hysteresis_mask`)
-    turns speed into per-frame stance flags; an FK gate
-    (:func:`_fk_lower_foot_gate`) requires the candidate foot to
-    actually be the lower one; and :func:`_build_spans` turns the
-    gated mask into ``min_span_frames``+``max_pin_spread_m``-filtered
-    spans with a robust pin.
+    central-difference world speed (from the raw ankle ray-cast — this
+    SPEED signal is unaffected by the toe augmentation below); a
+    pixel-noise-adaptive hysteresis state machine
+    (:func:`_adaptive_speed_floors`, :func:`_hysteresis_mask`) turns
+    speed into per-frame stance flags; an FK gate
+    (:func:`_fk_lower_foot_gate_from_canon`) requires the candidate foot
+    to actually be the lower one; each ray-cast ankle position is then
+    augmented with the current pose's rigid ankle->toe offset
+    (:func:`_ankle_to_toe_world_offset`) to turn it into a per-frame TOE
+    position estimate — the toe, not the ankle, is what's exactly
+    stationary during real stance (see ``_SMPL_FOOT_IDX``'s docstring for
+    the Wave-4 root-cause diagnosis this fixes) — and :func:`_build_spans`
+    turns the gated mask into ``min_span_frames``+``max_pin_spread_m``-
+    filtered spans with a robust pin over those toe estimates, forced to
+    ``_PIN_TARGET_Z`` (0.02 m, matching where downstream consumers want a
+    planted foot, not the 0.05 m ankle ray-cast plane).
 
     Args:
         kp2d: ``(F, 17, 3)`` COCO-17 keypoints (u, v, conf), aligned
@@ -519,19 +575,36 @@ def detect_contacts(
         axis=1,
     )
 
-    # 5. FK lower-foot gate.
+    # 5. FK lower-foot gate + per-frame ankle->toe world offset (shares
+    #    the one canonical-FK pass — see _fk_lower_foot_gate_from_canon's
+    #    docstring for why this isn't computed twice).
     rest_joints = beta_adjusted_rest_joints(betas, load_smpl_neutral_model())
-    fk_gate = _fk_lower_foot_gate(thetas, root_R, rest_joints)
+    canon = compute_canonical_joints_batch(thetas, rest_joints)  # (F, 24, 3)
+    fk_gate = _fk_lower_foot_gate_from_canon(canon, root_R)
     gated = hyst & fk_gate
 
-    # 6. Spans: min-length + pin-spread gates; quality inside accepted spans.
+    # Augment each ray-cast ANKLE position with the rigid ankle->toe
+    # offset implied by the current pose, so the per-span pin below
+    # estimates the (truly stationary-in-stance) TOE instead of the
+    # ankle. Only XY is augmented — the pin's z is forced to
+    # _PIN_TARGET_Z regardless (see _build_spans's force_pin_z), so the
+    # offset's z component would be discarded anyway; leaving w_s's own
+    # z (the ray-cast ankle-plane height) in the spread-gate input keeps
+    # that gate's z contribution consistent with what it measured.
+    ankle_to_toe = _ankle_to_toe_world_offset(canon, root_R)  # (F, 2, 3)
+    w_toe = w_s.copy()
+    w_toe[:, :, :2] = w_s[:, :, :2] + ankle_to_toe[:, :, :2]
+
+    # 6. Spans: min-length + pin-spread gates (over the TOE estimate);
+    #    quality inside accepted spans (still keyed on the raw ray-cast
+    #    speed signal, unaffected by the toe augmentation).
     in_contact = np.zeros((n, 2), dtype=bool)
     quality = np.zeros((n, 2), dtype=float)
     spans: list[ContactSpan] = []
     for side in (0, 1):
         accepted, side_spans = _build_spans(
-            gated[:, side], w_s[:, side, :], min_span_frames,
-            max_pin_spread_m, force_pin_z=_FOOT_PLANE_Z,
+            gated[:, side], w_toe[:, side, :], min_span_frames,
+            max_pin_spread_m, force_pin_z=_PIN_TARGET_Z,
         )
         in_contact[:, side] = accepted
         v_exit_safe = np.where(v_exit_eff[:, side] > 0, v_exit_eff[:, side], 1.0)

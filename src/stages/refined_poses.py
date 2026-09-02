@@ -1157,6 +1157,7 @@ def _apply_foot_lock_finale(
     max_residual_correction_m: float,
     edge_ease_frames: int,
     sole_clearance_m: float,
+    skip_pin_err_m: float,
 ) -> tuple[SmplWorldTrack, dict]:
     """Foot-lock IK + penetration-guard finale (plan Task 8, spec
     §2[D]). Meant to run on the FINAL smoothed track, per (shot,
@@ -1197,6 +1198,7 @@ def _apply_foot_lock_finale(
         max_residual_correction_m=max_residual_correction_m,
         edge_ease_frames=edge_ease_frames,
         rest_joints=rest_joints,
+        skip_pin_err_m=skip_pin_err_m,
     )
     root_t3, guard_stats = penetration_guard(
         thetas=thetas2,
@@ -1418,6 +1420,13 @@ class RefinedPosesStage(BaseStage):
             "edge_ease_frames": int(foot_lock_cfg_raw.get("edge_ease_frames", 3)),
             "sole_clearance_m": float(
                 foot_lock_cfg_raw.get("sole_clearance_m", 0.025)
+            ),
+            # Foot-landing tolerance (m) beyond which a clamped IK solve
+            # is rejected and the whole span is skipped rather than
+            # mangled — see src.utils.foot_lock.lock_feet_ik's
+            # skip_pin_err_m kwarg (default there mirrors this default).
+            "skip_pin_err_m": float(
+                foot_lock_cfg_raw.get("skip_pin_err_m", 0.04)
             ),
         }
         smoothing = {

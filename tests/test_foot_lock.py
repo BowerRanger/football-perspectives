@@ -49,8 +49,13 @@ def test_pinned_solve_zeroes_stance_skate_on_noisy_carrier() -> None:
         contacts=fc, fps=g.fps, rest_joints=_REST,
     )
     fw = compute_all_joint_worlds_batch(g.thetas, g.root_R, solved, _REST)
+    # solve_root_with_pins now implies the root from the FOOT/toe (10/11)
+    # offset, not the ankle (7/8) — see that function's docstring for why
+    # (only the toe is exactly stationary during real stance).
+    # contacts_from_truth's pin IS the foot/toe position (see its own
+    # docstring), so this checks the same joint the pin represents.
     for span in fc.spans:
-        j = 7 if span.side == 0 else 8
+        j = 10 if span.side == 0 else 11
         xy = fw[span.start:span.end, j, :2]
         assert np.linalg.norm(xy - span.pin[:2], axis=1).max() < 0.02
 
@@ -64,9 +69,9 @@ def test_delta_decays_to_carrier_outside_contacts() -> None:
     root_carrier[:, 0] = np.linspace(0.0, 10.0, n)
     root_R = np.tile(np.eye(3), (n, 1, 1))
     thetas = np.zeros((n, 24, 3), dtype=float)
-    ankle_idx = 7
+    foot_idx = 10  # foot/toe, not ankle — see solve_root_with_pins's docstring
 
-    pin = _REST[ankle_idx] + root_carrier[100] + np.array([0.1, 0.05, 0.0])
+    pin = _REST[foot_idx] + root_carrier[100] + np.array([0.1, 0.05, 0.0])
     span = ContactSpan(side=0, start=90, end=110, pin=pin)
     in_contact = np.zeros((n, 2), dtype=bool)
     in_contact[90:110, 0] = True
@@ -97,9 +102,9 @@ def test_delta_clamped() -> None:
     root_carrier[:, 0] = np.linspace(0.0, 10.0, n)
     root_R = np.tile(np.eye(3), (n, 1, 1))
     thetas = np.zeros((n, 24, 3), dtype=float)
-    ankle_idx = 7
+    foot_idx = 10  # foot/toe, not ankle — see solve_root_with_pins's docstring
 
-    pin_far = _REST[ankle_idx] + root_carrier[100] + np.array([2.0, 0.0, 0.0])
+    pin_far = _REST[foot_idx] + root_carrier[100] + np.array([2.0, 0.0, 0.0])
     span = ContactSpan(side=0, start=90, end=110, pin=pin_far)
     in_contact = np.zeros((n, 2), dtype=bool)
     in_contact[90:110, 0] = True
@@ -244,6 +249,35 @@ def test_lock_feet_ik_respects_joint_clamp() -> None:
     np.testing.assert_array_equal(
         th2[target_span.start:target_span.end], g.thetas[target_span.start:target_span.end],
     )
+
+
+def test_lock_feet_ik_skip_pin_err_m_is_configurable() -> None:
+    """``skip_pin_err_m`` controls the pin-landing tolerance beyond which
+    a clamped IK solve's span is skipped (default 4 cm, matching
+    ``config/default.yaml``'s commented ``refined_poses.foot_lock.
+    skip_pin_err_m``). A much larger tolerance should let the same
+    deliberately-hard span (see ``test_lock_feet_ik_respects_joint_clamp``)
+    through that the default rejects."""
+    g = make_walk(n_frames=120)
+    fc = contacts_from_truth(g)
+    bad_root = g.root_t.copy()
+    target_span = fc.spans[0]
+    rng = np.random.default_rng(7)
+    span_len = target_span.end - target_span.start
+    bad_root[target_span.start:target_span.end] += rng.normal(0, 0.5, (span_len, 3))
+
+    _, _, stats_default = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=bad_root, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST,
+    )
+    assert stats_default["spans_skipped"] >= 1
+
+    th_loose, rt_loose, stats_loose = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=bad_root, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST, skip_pin_err_m=10.0,
+    )
+    assert stats_loose["spans_skipped"] == 0
+    assert stats_loose["spans_locked"] == len(fc.spans)
 
 
 def test_lock_feet_ik_preserves_foot_global_orientation() -> None:

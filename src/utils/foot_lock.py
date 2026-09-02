@@ -63,8 +63,10 @@ _ROOT_CORR_KERNEL = _ROOT_CORR_KERNEL / _ROOT_CORR_KERNEL.sum()
 # (radius 1, weights 1-2-1 normalized).
 _PEN_GUARD_KERNEL = np.array([0.25, 0.5, 0.25])
 
-# Foot-landing tolerance beyond which a clamped IK solve is rejected and
-# the whole span is skipped rather than mangled (see lock_feet_ik).
+# Default foot-landing tolerance beyond which a clamped IK solve is
+# rejected and the whole span is skipped rather than mangled (see
+# lock_feet_ik). Overridable via lock_feet_ik's skip_pin_err_m kwarg,
+# wired from config as refined_poses.foot_lock.skip_pin_err_m.
 _IK_SKIP_TOLERANCE_M = 0.04
 
 
@@ -100,9 +102,17 @@ def solve_root_with_pins(
     """Stance-pin the root translation on top of a dense carrier path.
 
     Per constrained frame (one or both feet in a contact span), the pin
-    implies a root translation: ``implied = pin - root_R @ canon[ankle]``
+    implies a root translation: ``implied = pin - root_R @ canon[foot]``
+    — ``foot`` is the SMPL foot/toe joint (10/11), NOT the ankle (7/8)
     (multi-foot double support uses the quality-weighted mean of the two
-    implied roots). ``delta = implied - root_carrier`` is clamped to
+    implied roots). Pinning the FOOT/toe rather than the ankle is
+    deliberate: during real stance the ankle is not physically
+    stationary (the tibia rotates over the planted toe as the body
+    advances — heel lift), so an implied-root formula built on the ankle
+    forces the anatomically-stationary toe to sweep instead, which is
+    exactly the Wave-4 stance-skate root cause this function fixes (see
+    ``src.utils.foot_contact``'s ``_SMPL_FOOT_IDX`` docstring for the
+    full diagnosis). ``delta = implied - root_carrier`` is clamped to
     ``max_correction_m``, then interpolated (monotone-cubic, exact at
     constrained nodes) across every unconstrained frame between the
     first and last constrained frame, and linearly decayed to zero over
@@ -145,11 +155,13 @@ def solve_root_with_pins(
         return root_carrier.copy(), stats
 
     canon = compute_canonical_joints_batch(thetas, rest)  # (F, 24, 3)
-    # Per-side ankle offset from root, rotated into world orientation
-    # (not translated — this is the "if root_t were 0" ankle position).
+    # Per-side FOOT (toe) offset from root, rotated into world
+    # orientation (not translated — this is the "if root_t were 0" foot
+    # position). See this function's docstring for why the foot/toe
+    # (10/11), not the ankle (7/8), is the joint pinned here.
     off = np.empty((n, 2, 3), dtype=np.float64)
-    for side, ankle_idx in enumerate(_ANKLE_IDX):
-        off[:, side, :] = np.einsum("fba,fa->fb", root_R, canon[:, ankle_idx, :])
+    for side, foot_idx in enumerate(_FOOT_IDX):
+        off[:, side, :] = np.einsum("fba,fa->fb", root_R, canon[:, foot_idx, :])
 
     active_pin = np.full((n, 2, 3), np.nan, dtype=np.float64)
     active_quality = np.zeros((n, 2), dtype=np.float64)
@@ -536,6 +548,7 @@ def lock_feet_ik(
     max_residual_correction_m: float = 0.15,
     edge_ease_frames: int = 3,
     rest_joints: np.ndarray | None = None,
+    skip_pin_err_m: float = _IK_SKIP_TOLERANCE_M,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Foot-lock finale: re-pin each stance span to its own FK median and
     land the foot there via root micro-correction + two-bone leg IK.
@@ -559,10 +572,11 @@ def lock_feet_ik(
          ankle counter-rotation preserves that offset's world direction
          too) using the root-corrected track. Per-joint deltas are
          clamped to ``ik_max_joint_delta_deg``; if the CLAMPED solve
-         still leaves the foot more than 4 cm from ``pin`` anywhere in
-         the span, the whole span is skipped (thetas left untouched —
-         ``new_thetas`` starts as a copy of the input, so "restoring"
-         is simply not writing into it).
+         still leaves the foot more than ``skip_pin_err_m`` (default
+         4 cm) from ``pin`` anywhere in the span, the whole span is
+         skipped (thetas left untouched — ``new_thetas`` starts as a
+         copy of the input, so "restoring" is simply not writing into
+         it).
       5. Theta edits (hip/knee/ankle) are blended per frame by ``w(f)``.
 
     ``root_R`` is never modified.
@@ -666,7 +680,7 @@ def lock_feet_ik(
         else:
             max_err = 0.0
 
-        if max_err > _IK_SKIP_TOLERANCE_M:
+        if max_err > skip_pin_err_m:
             stats["spans_skipped"] += 1
             continue
 

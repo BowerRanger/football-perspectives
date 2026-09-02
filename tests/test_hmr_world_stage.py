@@ -1048,8 +1048,13 @@ def test_contact_mode_pins_stance_feet_on_synthetic_track() -> None:
     """End-to-end ``anchor_mode="contact"`` on the analytic walk fixture:
     ray-cast the TRUE FK ankle positions through a synthetic camera (so
     detect_contacts sees noise-free evidence), solve, and check that the
-    resulting FK ankle position barely moves (skate speed well under the
-    plan's 0.3 m/s target) during each detected stance span."""
+    resulting FK FOOT/TOE position barely moves (skate speed well under
+    the plan's 0.3 m/s target) during each detected stance span. The
+    solve pins the foot/toe (SMPL 10/11), not the ankle (7/8) — the
+    ankle is NOT expected to stay still even in genuine stance (tibia
+    rotation over the planted toe, "heel lift") — see
+    ``src.utils.foot_lock.solve_root_with_pins``'s docstring for the
+    Wave-4 root-cause diagnosis."""
     g = make_walk(n_frames=120)
     K, R, t = _lookat_camera(back=10.0, up=20.0)
     fw = compute_all_joint_worlds_batch(g.thetas, g.root_R, g.root_t)
@@ -1089,8 +1094,8 @@ def test_contact_mode_pins_stance_feet_on_synthetic_track() -> None:
     fw_solved = compute_all_joint_worlds_batch(g.thetas, g.root_R, root_t)
     checked_any = False
     for span in contacts.spans:
-        ankle_idx = 7 if span.side == 0 else 8
-        seg = fw_solved[span.start:span.end, ankle_idx, :]
+        foot_idx = 10 if span.side == 0 else 11
+        seg = fw_solved[span.start:span.end, foot_idx, :]
         if seg.shape[0] < 3:
             continue
         checked_any = True

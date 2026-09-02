@@ -229,14 +229,17 @@ def _kp2d_from_walk(
 
 
 def _true_pin_for_span(fw: np.ndarray, span: ContactSpan) -> np.ndarray:
-    """The true (noise-free) FK ankle XY at the midpoint of a detected
-    span — valid because the synthetic walk holds the stance ankle
-    exactly stationary for the whole true stance window, so any frame
-    inside it (and a >85%-agreeing detected span's midpoint should be)
-    gives the same answer."""
-    ankle_idx = 7 if span.side == 0 else 8
+    """The true (noise-free) FK foot/toe XY at the midpoint of a detected
+    span. ``detect_contacts``'s pin now estimates the TOE (SMPL 10/11),
+    not the ankle (7/8) — see ``src.utils.foot_contact``'s
+    ``_SMPL_FOOT_IDX`` docstring — and the toe, unlike the ankle, is
+    EXACTLY stationary for the whole true stance window by construction
+    of the synthetic walk fixture, so any frame inside it (and a
+    >85%-agreeing detected span's midpoint should be) gives the same
+    answer."""
+    foot_idx = 10 if span.side == 0 else 11
     mid = min(max((span.start + span.end) // 2, 0), fw.shape[0] - 1)
-    return fw[mid, ankle_idx, :2]
+    return fw[mid, foot_idx, :2]
 
 
 def test_detect_contacts_recovers_true_stance_spans() -> None:
@@ -263,8 +266,13 @@ def test_detect_contacts_recovers_true_stance_spans() -> None:
     assert len(fc.spans) > 0
     for span in fc.spans:
         true_xy = _true_pin_for_span(fw, span)
-        assert np.linalg.norm(span.pin[:2] - true_xy) < 0.08
-        assert span.pin[2] == pytest.approx(0.05)
+        # Tighter than the pre-fix ankle-vs-midpoint comparison (0.08 m):
+        # the toe reference is EXACTLY stationary across the whole span
+        # (not just approximately, the way the ankle was), so the only
+        # remaining error is the ray-cast's ground-plane-height bias —
+        # see _true_pin_for_span's docstring.
+        assert np.linalg.norm(span.pin[:2] - true_xy) < 0.07
+        assert span.pin[2] == pytest.approx(0.02)
 
 
 def test_detect_contacts_pixel_noise_no_false_stance_when_far() -> None:

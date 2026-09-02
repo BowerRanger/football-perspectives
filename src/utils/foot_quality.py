@@ -22,6 +22,13 @@ import numpy as np
 from src.utils.smpl_skeleton import SMPL_JOINT_NAMES, compute_all_joint_worlds_batch
 
 _SOLE_CLEARANCE_M = 0.025
+# Wave-4 gberch E2E finding (spec §6): penetration_guard's raise-only
+# pass clears real penetration to within floating-point rounding (a few
+# hundredths of a micrometre observed on gberch) on most frames, but a
+# literal "sole_z < 0" still flags those frames as penetrating even
+# though there is no measurable clipping. This epsilon treats anything
+# within 1 mm of the sole line as boundary noise, not a real defect.
+_PENETRATION_EPSILON_M = 0.001
 _FLIGHT_THRESHOLD_M = 0.05
 _LOW_FOOT_THRESHOLD_M = 0.10
 _ANKLE_CONF_MIN = 0.5
@@ -105,6 +112,7 @@ def foot_quality_metrics(
     cameras: dict | None = None,
     rest_joints: np.ndarray | None = None,
     sole_clearance_m: float = _SOLE_CLEARANCE_M,
+    penetration_epsilon_m: float = _PENETRATION_EPSILON_M,
 ) -> dict:
     """Compute foot-contact locomotion quality metrics for one track.
 
@@ -125,6 +133,14 @@ def foot_quality_metrics(
             (see ``src.utils.smpl_skeleton.beta_adjusted_rest_joints``).
         sole_clearance_m: sole-proxy offset below the foot joint used
             for the penetration metric (mesh sole sits below the joint).
+        penetration_epsilon_m: a frame only counts toward
+            ``pct_frames_sole_below_0`` when it is deeper than this many
+            metres below the sole line — sub-epsilon dips are floating-
+            point/rounding boundary noise (e.g. from
+            ``src.utils.foot_lock.penetration_guard``'s raise-only pass
+            landing a hair short of exactly zero), not real clipping.
+            Does not affect ``max_depth_cm``/``mean_depth_cm``, which
+            report the true (unfloored) depth regardless.
 
     Returns a dict with keys ``penetration``, ``lower_foot_z``, ``skate``,
     ``spans``, ``flight``, ``contact_ratio``, and (only when kp2d+cameras
@@ -155,7 +171,7 @@ def foot_quality_metrics(
 
     # --- penetration ------------------------------------------------
     sole_z = lower_foot_z - float(sole_clearance_m)
-    below = sole_z < 0.0
+    below = sole_z < -float(penetration_epsilon_m)
     depths_cm = np.clip(-sole_z, 0.0, None) * 100.0
     penetration = {
         "pct_frames_sole_below_0": float(100.0 * below.mean()),

@@ -74,6 +74,60 @@ def test_metrics_detect_injected_penetration() -> None:
     assert m["penetration"]["pct_frames_sole_below_0"] > 50.0
 
 
+def test_metrics_penetration_ignores_submillimetre_boundary_noise() -> None:
+    """Wave-4 gberch E2E finding: penetration_guard's raise-only pass
+    clears penetration to within floating-point rounding (observed:
+    max ~3e-8 m, i.e. hundredths of a micrometre) on most frames, but a
+    literal ``sole_z < 0.0`` still flags those frames as "penetrating"
+    even though the depth is unmeasurable rounding noise, not a real
+    clipping artifact. The default 1 mm epsilon (spec §6's documented
+    fix for a pct gate that trips ONLY on sub-millimetre frames) must
+    NOT count a 0.05 mm dip as penetration, while a real, larger dip
+    (well above 1 mm) still counts."""
+    g = make_walk(n_frames=100)
+    # The synthetic walk's stance foot sits ~5 mm clear of the sole
+    # line already (_STANCE_Z=0.03 minus the default sole_clearance_m
+    # 0.025), so a REAL sub-epsilon dip has to eat that margin first:
+    # subtract 5.5 mm to land ~0.5 mm INTO the sole line, deep enough to
+    # trip a literal "< 0" check but still within the 1 mm epsilon.
+    tiny_sunk = g.root_t.copy()
+    tiny_sunk[:, 2] -= 0.0055
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=tiny_sunk, fps=g.fps,
+    )
+    assert m["penetration"]["pct_frames_sole_below_0"] == 0.0
+
+    real_sunk = g.root_t.copy()
+    real_sunk[:, 2] -= 0.01  # 1 cm — well beyond the 1 mm epsilon
+    m2 = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=real_sunk, fps=g.fps,
+    )
+    assert m2["penetration"]["pct_frames_sole_below_0"] > 50.0
+
+
+def test_metrics_penetration_epsilon_is_configurable() -> None:
+    g = make_walk(n_frames=60)
+    # See test_metrics_penetration_ignores_submillimetre_boundary_noise
+    # for why this needs to eat the walk's ~5 mm built-in sole margin
+    # first: 5.5 mm sink lands ~0.5 mm into the sole line.
+    sunk = g.root_t.copy()
+    sunk[:, 2] -= 0.0055
+    default_eps = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=sunk, fps=g.fps,
+    )
+    assert default_eps["penetration"]["pct_frames_sole_below_0"] == 0.0
+
+    zero_eps = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=sunk, fps=g.fps,
+        penetration_epsilon_m=0.0,
+    )
+    assert zero_eps["penetration"]["pct_frames_sole_below_0"] > 50.0
+
+
 # --- coverage for the remaining documented keys -----------------------
 
 

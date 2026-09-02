@@ -37,7 +37,7 @@ from scipy.interpolate import PchipInterpolator
 from scipy.ndimage import maximum_filter1d
 from scipy.spatial.transform import Rotation
 
-from src.utils.foot_contact import FootContacts
+from src.utils.foot_contact import ContactSpan, FootContacts
 from src.utils.smpl_skeleton import (
     SMPL_JOINT_NAMES,
     axis_angle_to_matrix,
@@ -549,6 +549,8 @@ def lock_feet_ik(
     edge_ease_frames: int = 3,
     rest_joints: np.ndarray | None = None,
     skip_pin_err_m: float = _IK_SKIP_TOLERANCE_M,
+    resolved_pin_err_m: float | None = None,
+    resolved_max_step_m: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Foot-lock finale: re-pin each stance span to its own FK median and
     land the foot there via root micro-correction + two-bone leg IK.
@@ -578,29 +580,94 @@ def lock_feet_ik(
          copy of the input, so "restoring" is simply not writing into
          it).
       5. Theta edits (hip/knee/ankle) are blended per frame by ``w(f)``.
+      6. HONESTY CHECK (Wave 5 addition — see docs/superpowers/plans/
+         2026-09-02-foot-contact-locomotion.md's Wave 5 report): a span
+         that is clamp-FEASIBLE (survives step 4's ``skip_pin_err_m``
+         check) can still be a span the evidence can't actually support
+         as a stable stance — e.g. a noisy far/small player whose
+         underlying per-frame FK positions disagree with their own
+         span median by more than the IK's joint/root clamps can close.
+         ``resolved_pin_err_m`` is a SECOND, normally-tighter tolerance
+         on the same ``max_err`` step 4 already computes: a span whose
+         clamped solve still leaves ``max_err > resolved_pin_err_m``
+         (but <= ``skip_pin_err_m``, so step 4 didn't reject it) is
+         treated exactly like a skip for POSE-OUTPUT purposes — its
+         theta edits are discarded (``new_thetas`` keeps the input for
+         those frames, same "restoring is simply not writing into it"
+         mechanism as step 4) — but counted separately in
+         ``stats["spans_unresolved"]`` rather than
+         ``stats["spans_skipped"]``, so a caller can distinguish
+         "IK genuinely infeasible under clamp" from "IK geometrically
+         reached the pin but the result isn't trustworthy enough to
+         apply/report as a verified stance" (false pinning is worse
+         than honest free motion — the whole point of this check).
+         ``resolved_pin_err_m=None`` (the default) makes this a no-op:
+         internally treated as exactly ``skip_pin_err_m``, so every
+         span that passes step 4 also passes this check and
+         ``spans_unresolved`` stays 0 — existing callers that don't
+         pass this kwarg see byte-identical behaviour to before this
+         addition. When given, it is clamped to
+         ``min(resolved_pin_err_m, skip_pin_err_m)`` so it can only ever
+         tighten (never loosen) the effective bar, regardless of what a
+         caller passes.
+
+         ``max_err`` alone (worst absolute distance from the pin, over
+         all frames in the span) misses one failure mode: a span can
+         have EVERY frame within ``resolved_pin_err_m`` of the pin and
+         still contain a single outlier frame — typically the first or
+         last, still mid-transition into/out of stance — that sits far
+         enough from its immediate NEIGHBOURS (not the pin) to register
+         as a large instantaneous foot velocity once measured frame-to-
+         frame, which is what ``scripts/eval_foot_quality.py``'s skate
+         metric actually computes. ``resolved_max_step_m``, when given
+         (``None`` disables it, matching ``resolved_pin_err_m``'s no-op
+         convention), additionally requires the largest CONSECUTIVE-
+         frame displacement within the span to be at or below this
+         bound; a span failing either check is unresolved.
+
+         ``stats["resolved_spans"]`` collects the ``ContactSpan``s
+         (fresh pin, same side/start/end as the input span) that passed
+         ALL checks — the "verified/effective contact set" downstream
+         stages persist as the ``{pid}_resolved_contacts.json`` sidecar
+         (see ``src.stages.refined_poses``) and prefer over the raw
+         detection-time contacts for reporting/evaluation.
 
     ``root_R`` is never modified.
 
     Returns:
         ``(thetas', root_t', stats)`` — ``stats`` has keys
-        ``spans_locked``, ``spans_skipped``, ``mean_pin_err_m_before``,
-        ``mean_pin_err_m_after``, ``max_root_corr_m``,
-        ``max_joint_delta_deg``.
+        ``spans_locked`` (spans that were BOTH clamp-feasible AND
+        verified — the only ones whose theta edits were actually
+        applied), ``spans_skipped`` (clamp-infeasible, step 4),
+        ``spans_unresolved`` (clamp-feasible but not verified, step 6 —
+        theta edits discarded same as a skip), ``mean_pin_err_m_before``,
+        ``mean_pin_err_m_after`` (both computed across every
+        non-clamp-skipped span, i.e. locked + unresolved, unchanged
+        meaning from before this addition), ``max_root_corr_m``,
+        ``max_joint_delta_deg``, and ``resolved_spans`` (a tuple of
+        ``ContactSpan`` — the verified/effective contact set, see
+        step 6 above).
     """
     thetas_in = np.asarray(thetas, dtype=np.float64)
     root_R = np.asarray(root_R, dtype=np.float64)
     root_t_in = np.asarray(root_t, dtype=np.float64)
     n = int(thetas_in.shape[0])
     rest = _resolve_rest_joints(betas, rest_joints)
+    resolved_pin_err_eff = (
+        float(skip_pin_err_m) if resolved_pin_err_m is None
+        else min(float(resolved_pin_err_m), float(skip_pin_err_m))
+    )
 
     stats = {
         "spans_locked": 0,
         "spans_skipped": 0,
+        "spans_unresolved": 0,
         "mean_pin_err_m_before": 0.0,
         "mean_pin_err_m_after": 0.0,
         "max_root_corr_m": 0.0,
         "max_joint_delta_deg": 0.0,
     }
+    stats["resolved_spans"] = ()
     if n == 0 or not contacts.spans:
         return thetas_in.copy(), root_t_in.copy(), stats
 
@@ -648,9 +715,10 @@ def lock_feet_ik(
 
     fw_corr = compute_all_joint_worlds_batch(thetas_in, root_R, root_t_corr, rest)
 
-    # --- 4/5. per-span two-bone IK + blend ------------------------------
+    # --- 4/5/6. per-span two-bone IK + blend + honesty check ------------
     new_thetas = thetas_in.copy()
     max_delta_deg = 0.0
+    resolved_spans: list[ContactSpan] = []
 
     for pin, span, w in zip(pins, contacts.spans, span_weights):
         side = span.side
@@ -677,14 +745,44 @@ def lock_feet_ik(
             max_err = max(
                 float(np.linalg.norm(s.foot_world - pin)) for s in frame_solves
             )
+            max_step = max(
+                (
+                    float(np.linalg.norm(
+                        frame_solves[k + 1].foot_world - frame_solves[k].foot_world
+                    ))
+                    for k in range(len(frame_solves) - 1)
+                ),
+                default=0.0,
+            )
         else:
             max_err = 0.0
+            max_step = 0.0
 
         if max_err > skip_pin_err_m:
             stats["spans_skipped"] += 1
             continue
+        step_ok = resolved_max_step_m is None or max_step <= float(resolved_max_step_m)
+        if max_err > resolved_pin_err_eff or not step_ok:
+            # Clamp-feasible (would have locked under the old, single-
+            # threshold logic) but not trustworthy enough to verify —
+            # see step 6 in this function's docstring. The step check
+            # catches a case max_err alone misses: a span can have every
+            # frame within resolved_pin_err_eff of the PIN yet still
+            # contain one outlier frame (typically the first/last, still
+            # mid-transition into/out of stance) that sits far enough
+            # from its NEIGHBOURS to read as a large instantaneous skate
+            # spike once measured frame-to-frame — the actual quantity
+            # scripts/eval_foot_quality.py's skate metric computes.
+            # Treated exactly like a skip for pose output (thetas left
+            # untouched), but counted separately so callers can tell the
+            # two cases apart.
+            stats["spans_unresolved"] += 1
+            continue
 
         stats["spans_locked"] += 1
+        resolved_spans.append(
+            ContactSpan(side=side, start=int(span.start), end=int(span.end), pin=pin.copy())
+        )
         for k, f in enumerate(range(span.start, span.end)):
             solve = frame_solves[k]
             wf = float(w[k])
@@ -729,6 +827,7 @@ def lock_feet_ik(
     stats["mean_pin_err_m_before"] = float(np.mean(errs_before)) if errs_before else 0.0
     stats["mean_pin_err_m_after"] = float(np.mean(errs_after)) if errs_after else 0.0
     stats["max_joint_delta_deg"] = float(max_delta_deg)
+    stats["resolved_spans"] = tuple(resolved_spans)
 
     return new_thetas, root_t_corr, stats
 

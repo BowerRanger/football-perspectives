@@ -320,6 +320,145 @@ def test_lock_feet_ik_empty_contacts_returns_input_exactly() -> None:
 
 
 # ---------------------------------------------------------------------
+# resolved_pin_err_m / honest unresolved-span handling (Wave 5)
+# ---------------------------------------------------------------------
+
+
+def test_resolved_pin_err_m_defaults_to_skip_pin_err_m_when_omitted() -> None:
+    """Not passing resolved_pin_err_m must be a complete no-op: every
+    span that locks under the OLD single-threshold logic is reported as
+    resolved, spans_unresolved stays 0, and resolved_spans exactly
+    matches the locked-span positions -- byte-identical behaviour to
+    before this kwarg existed."""
+    g = make_walk(n_frames=120)
+    noisy = g.root_t + np.random.default_rng(5).normal(0, 0.03, g.root_t.shape)
+    fc = contacts_from_truth(g)
+    _, _, stats = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=noisy, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST,
+    )
+    assert stats["spans_unresolved"] == 0
+    assert len(stats["resolved_spans"]) == stats["spans_locked"]
+    assert stats["spans_locked"] > 0
+    locked_positions = {
+        (s.side, s.start, s.end) for s in stats["resolved_spans"]
+    }
+    # Every resolved span position is one of the fixture's true spans
+    # (side/start/end pulled straight from contacts.spans).
+    true_positions = {(s.side, s.start, s.end) for s in fc.spans}
+    assert locked_positions <= true_positions
+
+
+def test_lock_feet_ik_marks_span_unresolved_when_residual_exceeds_tighter_threshold() -> None:
+    """A span whose clamped IK solve lands within the (loose)
+    skip_pin_err_m tolerance but NOT within a tighter resolved_pin_err_m
+    is reported as unresolved: its theta edits are discarded (matches
+    the input exactly, same mechanism as a skip) and it is excluded
+    from resolved_spans, while OTHER (clean) spans still resolve
+    normally."""
+    g = make_walk(n_frames=120)
+    fc = contacts_from_truth(g)
+    bad_root = g.root_t.copy()
+    target_span = fc.spans[0]
+    rng = np.random.default_rng(9)
+    span_len = target_span.end - target_span.start
+    # Small enough noise that the loosened skip_pin_err_m below still
+    # lets the clamped IK land within tolerance, but large enough that
+    # a tight resolved_pin_err_m rejects it.
+    bad_root[target_span.start:target_span.end] += rng.normal(0, 0.08, (span_len, 3))
+
+    th2, rt2, stats = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=bad_root, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST,
+        skip_pin_err_m=0.5, resolved_pin_err_m=0.01,
+    )
+    assert stats["spans_skipped"] == 0, "sanity: the loose skip tolerance still locks it"
+    assert stats["spans_unresolved"] >= 1
+    assert stats["spans_locked"] == len(fc.spans) - stats["spans_unresolved"]
+    np.testing.assert_array_equal(
+        th2[target_span.start:target_span.end], g.thetas[target_span.start:target_span.end],
+    )
+    resolved_positions = {(s.side, s.start, s.end) for s in stats["resolved_spans"]}
+    assert (target_span.side, target_span.start, target_span.end) not in resolved_positions
+
+
+def test_resolved_pin_err_m_cannot_loosen_past_skip_pin_err_m() -> None:
+    """Passing a resolved_pin_err_m LOOSER than skip_pin_err_m is
+    clamped to skip_pin_err_m internally -- it can only ever tighten
+    the effective bar, never loosen it below what step 4 already
+    enforces."""
+    g = make_walk(n_frames=120)
+    noisy = g.root_t + np.random.default_rng(5).normal(0, 0.03, g.root_t.shape)
+    fc = contacts_from_truth(g)
+    _, _, stats = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=noisy, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST,
+        skip_pin_err_m=0.04, resolved_pin_err_m=10.0,
+    )
+    assert stats["spans_unresolved"] == 0
+    assert len(stats["resolved_spans"]) == stats["spans_locked"]
+
+
+def test_lock_feet_ik_marks_span_unresolved_on_large_consecutive_step() -> None:
+    """A span whose worst-frame error from the PIN stays under
+    resolved_pin_err_m can still fail the honesty check via
+    resolved_max_step_m: a big-enough single-frame root_t perturbation
+    (mid-span, not at a span edge -- edge_ease_frames=0 here so every
+    frame is fully weighted, but the point still generalises) hits the
+    IK's joint-angle clamp, landing that one frame CLOSE to the pin
+    (within resolved_pin_err_m) but not close enough to its now-clean
+    neighbours to avoid a real consecutive-frame jump -- exactly the
+    "clamped-but-not-quite-converged frame reads as a skate spike"
+    failure mode resolved_max_step_m exists to catch. This is the same
+    mechanism that produced gberch P019's real p95 skate regression
+    during Wave 5 tuning (see the plan's Wave 5 report)."""
+    g = make_walk(n_frames=120, stride_s=1.2)  # longer spans, room for a mid-span outlier
+    fc = contacts_from_truth(g)
+    target_span = next(s for s in fc.spans if s.end - s.start >= 6)
+    noisy_root = g.root_t.copy()
+    noisy_root[target_span.start + 2] += np.array([0.15, 0.0, 0.0])
+
+    th2, rt2, stats = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=noisy_root, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST, edge_ease_frames=0,
+        skip_pin_err_m=0.5, resolved_pin_err_m=0.06, resolved_max_step_m=None,
+    )
+    resolved_without_step_check = {
+        (s.side, s.start, s.end) for s in stats["resolved_spans"]
+    }
+    assert (target_span.side, target_span.start, target_span.end) in resolved_without_step_check, (
+        "sanity: max_err alone lets this span through"
+    )
+
+    th3, rt3, stats2 = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=noisy_root, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST, edge_ease_frames=0,
+        skip_pin_err_m=0.5, resolved_pin_err_m=0.06, resolved_max_step_m=0.02,
+    )
+    resolved_with_step_check = {
+        (s.side, s.start, s.end) for s in stats2["resolved_spans"]
+    }
+    assert (target_span.side, target_span.start, target_span.end) not in resolved_with_step_check
+    assert stats2["spans_unresolved"] >= 1
+
+
+def test_lock_feet_ik_empty_contacts_has_empty_resolved_spans() -> None:
+    g = make_walk(n_frames=40)
+    fc = FootContacts(
+        n_frames=len(g.frames),
+        in_contact=np.zeros((len(g.frames), 2), dtype=bool),
+        quality=np.zeros((len(g.frames), 2), dtype=float),
+        spans=(),
+    )
+    _, _, stats = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=g.root_t, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST,
+    )
+    assert stats["resolved_spans"] == ()
+    assert stats["spans_unresolved"] == 0
+
+
+# ---------------------------------------------------------------------
 # penetration_guard (Task 7)
 # ---------------------------------------------------------------------
 

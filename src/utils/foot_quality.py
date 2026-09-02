@@ -1,11 +1,14 @@
 """Foot-contact locomotion quality metrics — the eval harness [A] of
 docs/superpowers/specs/2026-09-02-foot-contact-locomotion-design.md.
 
-Quantifies penetration, flight preservation, stance-foot skate, and
-(optionally) image fidelity so every later change (contact-aware
-anchoring in hmr_world, the foot-lock finale in refined_poses) can be
-measured before/after on the same yardstick. numpy/scipy only — no
-torch, so this runs on the Mac dev box without the GPU box.
+Quantifies penetration, flight preservation, stance-foot skate,
+locomotion smoothness (root acceleration, unconstrained foot speed —
+tracks the "isolated super-physical root-translation pop" regression
+class), and (optionally) image fidelity so every later change
+(contact-aware anchoring in hmr_world, the foot-lock finale and
+acceleration limiter in refined_poses) can be measured before/after on
+the same yardstick. numpy/scipy only — no torch, so this runs on the
+Mac dev box without the GPU box.
 
 Skate is measured only from WITHIN a stance span/run (consecutive
 frame pairs both inside the same contiguous stance run), never across
@@ -91,6 +94,45 @@ def _stat_block(values: np.ndarray) -> dict:
     }
 
 
+def _root_accel_stats(root_t: np.ndarray, fps: float) -> tuple[float, float]:
+    """``(p99, max)`` magnitude of ``root_t``'s second finite difference,
+    converted from metres/frame² to metres/second² via ``fps**2``.
+
+    This is the raw ``|Δ²root_t|`` signature isolated super-physical
+    root-translation pops show up as (upstream ``hmr_world`` anchor/kp2d
+    noise frames) — the regression class the
+    ``refined_poses.cleanup.a_max_m_s2`` XY acceleration limiter targets.
+    Measured on the full 3-D ``root_t`` (not XY-only) since that's the
+    quantity the pops were originally diagnosed against; ``z`` is
+    independently governed by the ground-snap/foot-lock/penetration-guard
+    passes, so a healthy track keeps this low regardless of which axis a
+    residual spike would show up on.
+    """
+    n = int(np.asarray(root_t).shape[0])
+    if n < 3 or fps <= 0:
+        return 0.0, 0.0
+    pos = np.asarray(root_t, dtype=float)
+    accel = (pos[2:] - 2.0 * pos[1:-1] + pos[:-2]) * (float(fps) ** 2)
+    mags = np.linalg.norm(accel, axis=1)
+    return float(np.percentile(mags, 99)), float(mags.max())
+
+
+def _foot_speed_max(feet_pos: np.ndarray, fps: float) -> float:
+    """Max unconstrained FK foot-joint speed (m/s) across both feet and
+    every consecutive frame pair -- deliberately NOT gated to stance/
+    swing state (unlike ``skate``, which is measured only within contact
+    spans). A super-physical root pop corrupts the WHOLE body including
+    the feet, so this is the harness's raw kinematic-plausibility check:
+    a real human foot never needs to move at 23 m/s, in stance or not.
+    """
+    n = int(feet_pos.shape[0])
+    if n < 2 or fps <= 0:
+        return 0.0
+    d = np.diff(feet_pos, axis=0)  # (F-1, 2, 3)
+    speeds = np.linalg.norm(d, axis=2) * float(fps)  # (F-1, 2)
+    return float(speeds.max()) if speeds.size else 0.0
+
+
 def _project_pinhole(K: np.ndarray, R: np.ndarray, t: np.ndarray, pts: np.ndarray) -> np.ndarray:
     """Pinhole-only world->image projection (no distortion). v1 assumes
     the caller has already undistorted kp2d, per the design doc."""
@@ -143,8 +185,12 @@ def foot_quality_metrics(
             report the true (unfloored) depth regardless.
 
     Returns a dict with keys ``penetration``, ``lower_foot_z``, ``skate``,
-    ``spans``, ``flight``, ``contact_ratio``, and (only when kp2d+cameras
-    are both given) ``ankle_reproj_px``.
+    ``spans``, ``flight``, ``contact_ratio``, ``smoothness``
+    (``root_acc_p99_m_s2``/``root_acc_max_m_s2`` — the second finite
+    difference of ``root_t``, i.e. the isolated super-physical
+    root-translation-pop signature; ``foot_speed_max_mps`` — the max
+    unconstrained FK foot-joint speed, in or out of stance), and (only
+    when kp2d+cameras are both given) ``ankle_reproj_px``.
     """
     n = int(np.asarray(frames).shape[0])
     if n == 0:
@@ -162,6 +208,11 @@ def foot_quality_metrics(
             "spans": {"count": 0, "mean_m": 0.0, "max_m": 0.0},
             "flight": {"pct_frames_both_up": 0.0},
             "contact_ratio": 0.0,
+            "smoothness": {
+                "root_acc_p99_m_s2": 0.0,
+                "root_acc_max_m_s2": 0.0,
+                "foot_speed_max_mps": 0.0,
+            },
         }
 
     fw = compute_all_joint_worlds_batch(thetas, root_R, root_t, rest_joints)
@@ -217,6 +268,14 @@ def foot_quality_metrics(
 
     flight = {"pct_frames_both_up": float(100.0 * both_up.mean())}
 
+    # --- smoothness (super-physical pop regression tracking) -----------
+    root_acc_p99, root_acc_max = _root_accel_stats(root_t, fps)
+    smoothness = {
+        "root_acc_p99_m_s2": root_acc_p99,
+        "root_acc_max_m_s2": root_acc_max,
+        "foot_speed_max_mps": _foot_speed_max(feet_pos, fps),
+    }
+
     out: dict = {
         "penetration": penetration,
         "lower_foot_z": lower_foot_z_stats,
@@ -224,6 +283,7 @@ def foot_quality_metrics(
         "spans": spans,
         "flight": flight,
         "contact_ratio": contact_ratio,
+        "smoothness": smoothness,
     }
 
     # --- optional ankle reprojection error -----------------------------

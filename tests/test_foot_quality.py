@@ -138,7 +138,10 @@ def test_metrics_return_all_documented_keys() -> None:
         root_R=g.root_R, root_t=g.root_t, fps=g.fps,
         contacts=g.contacts_true,
     )
-    for key in ("penetration", "lower_foot_z", "skate", "spans", "flight", "contact_ratio"):
+    for key in (
+        "penetration", "lower_foot_z", "skate", "spans", "flight",
+        "contact_ratio", "smoothness",
+    ):
         assert key in m
     for side in ("L", "R"):
         assert side in m["skate"]
@@ -150,6 +153,8 @@ def test_metrics_return_all_documented_keys() -> None:
         assert stat in m["lower_foot_z"]
     for stat in ("count", "mean_m", "max_m"):
         assert stat in m["spans"]
+    for stat in ("root_acc_p99_m_s2", "root_acc_max_m_s2", "foot_speed_max_mps"):
+        assert stat in m["smoothness"]
     assert "pct_frames_both_up" in m["flight"] or "pct" in m["flight"]
 
 
@@ -296,6 +301,85 @@ def test_metrics_ankle_reproj_px_skips_low_confidence_frames() -> None:
         contacts=g.contacts_true, kp2d=kp2d, cameras=cameras,
     )
     assert m["ankle_reproj_px"]["mean_px"] < 1e-6
+
+
+# --- smoothness (root acceleration, foot speed) -----------------------
+# Regression tracking for isolated super-physical root-translation pops
+# (see docs/superpowers/plans/2026-09-02-foot-contact-locomotion.md's
+# follow-up polish task): pops coincide with upstream hmr_world anchor/
+# kp2d noise frames, not contact-span boundaries, and are diagnosed via
+# the second finite difference of root_t plus unconstrained FK foot
+# speed rather than the (contact-gated) skate metric above.
+
+
+def test_smoothness_root_acc_low_on_clean_walk() -> None:
+    """The synthetic walk's pelvis moves at constant velocity (straight
+    line, constant height) -- essentially zero acceleration -- so a
+    healthy track's smoothness numbers should read near zero."""
+    g = make_walk(n_frames=100)
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=g.root_t, fps=g.fps,
+        contacts=g.contacts_true,
+    )
+    assert m["smoothness"]["root_acc_max_m_s2"] < 0.5
+    assert m["smoothness"]["root_acc_p99_m_s2"] < 0.5
+
+
+def test_smoothness_detects_injected_root_pop() -> None:
+    """A single-frame 0.4 m out-and-back pop (the class of artifact
+    refined_poses.cleanup.a_max_m_s2 targets) registers as several
+    hundred m/s^2 -- the metric must surface it clearly above any
+    genuine-motion noise floor."""
+    g = make_walk(n_frames=100)
+    popped = g.root_t.copy()
+    popped[50, 0] += 0.4
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=popped, fps=g.fps,
+        contacts=g.contacts_true,
+    )
+    assert m["smoothness"]["root_acc_max_m_s2"] > 200.0
+
+
+def test_smoothness_foot_speed_is_finite_and_positive_on_clean_walk() -> None:
+    """foot_speed_max_mps is the UNCONSTRAINED max FK foot-joint speed
+    (unlike ``skate``, not gated to contact spans) -- on a clean walk it
+    should reflect ordinary swing-phase motion, not blow up."""
+    g = make_walk(n_frames=100)
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=g.root_t, fps=g.fps,
+        contacts=g.contacts_true,
+    )
+    assert 0.5 < m["smoothness"]["foot_speed_max_mps"] < 10.0
+
+
+def test_smoothness_foot_speed_detects_injected_root_pop() -> None:
+    """A root pop drags the whole body -- including the feet -- so
+    foot_speed_max_mps must also spike, independent of contact state."""
+    g = make_walk(n_frames=100)
+    popped = g.root_t.copy()
+    popped[50, 0] += 0.4
+    m = foot_quality_metrics(
+        frames=g.frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=popped, fps=g.fps,
+        contacts=g.contacts_true,
+    )
+    assert m["smoothness"]["foot_speed_max_mps"] > 5.0
+
+
+def test_smoothness_zero_on_empty_track() -> None:
+    m = foot_quality_metrics(
+        frames=np.zeros(0, dtype=np.int64), betas=np.zeros(10),
+        thetas=np.zeros((0, 24, 3)), root_R=np.zeros((0, 3, 3)),
+        root_t=np.zeros((0, 3)), fps=25.0,
+    )
+    assert m["smoothness"] == {
+        "root_acc_p99_m_s2": 0.0,
+        "root_acc_max_m_s2": 0.0,
+        "foot_speed_max_mps": 0.0,
+    }
 
 
 # --- scripts/eval_foot_quality.py CLI --------------------------------

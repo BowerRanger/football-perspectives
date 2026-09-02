@@ -669,6 +669,19 @@ ball:
     max_ball_gap_frames: 6   # longest ball-pixel gap we interpolate across
     min_fk_conf: 0.3         # min bone FK confidence to consider
     kin_window: 2            # +/- frames to find the kinematic peak
+    # Tried lowering 8.0->6.0 (2026-09-02, foot-contact-locomotion
+    # regression investigation): theory was that the new contact-aware
+    # foot-lock IK damps stance-phase foot jitter enough that genuine
+    # soft/close-control touches now read a lower peak pixel speed than
+    # the old, jitterier FK did (gberch f192/f343 peak 7.13/6.46 px/frame,
+    # both well inside the 30cm contact_gap_m gate). REVERTED: validated
+    # against the gberch touch-recall harness, 6.0 recovered zero of the
+    # 8 manual touches (f192 and f343 are each blocked by a separate,
+    # independent gate downstream — see
+    # docs/superpowers/notes/ball-accuracy/ or the ball-camera IC's
+    # 2026-09-02 diagnosis) while adding ~10 new false-positive candidates
+    # in an unrelated close-control passage, measurably hurting precision
+    # for no recall gain. Left at 8.0 pending a more targeted fix.
     kin_min_foot_speed: 8.0  # min foot pixel-speed (px/frame) for a kick
     kin_min_head_speed_m: 0.05  # min head 3-D speed (m/frame) for a header
     confirm_window: 3        # +/- frames to look for a ball-pixel break

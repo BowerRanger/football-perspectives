@@ -602,3 +602,29 @@ class TestFlightGateAndBurstNMS:
         # 2-frame gap is a genuine micro-touch and must survive — but
         # here 30/32 are both adjacent to 31, so only 31 remains.
         assert [a.frame for a in touches] == [31]
+
+    def test_adjacent_frame_different_bone_both_survive(self):
+        """Burst NMS is keyed by (player, bone), not player alone: two
+        DIFFERENT bones proposed on ADJACENT frames (both feet near the
+        ball during close control — a genuine attribution ambiguity, not
+        FK-jitter duplication of one physical touch on the SAME bone)
+        must both survive, even when one outscores the other. A
+        player-only key silently discards whichever label the operator
+        actually clicked (gberch f192: l_foot gap 0.102m barely loses to
+        a faster-moving r_foot at gap 0.111m one frame apart) — the exact
+        FK-jitter case this NMS targets stays collapsed (same bone,
+        `test_same_player_touch_burst_collapses_to_strongest` above)."""
+        worlds, pixels, steps = _rolling_scene()
+        ctx = FakePlayerContext({
+            30: [_joint("P005", "r_foot", worlds[30], pixels[30])],
+            31: [_joint("P005", "l_foot", worlds[31], pixels[31])],
+        })
+        events = (
+            BallEvent(frame=30, kind="touch", score=0.9,
+                      player_id="P005", bone="r_foot"),
+            BallEvent(frame=31, kind="touch", score=0.7,
+                      player_id="P005", bone="l_foot"),
+        )
+        anchors = self._gen(events, steps, ctx)
+        touches = [a for a in anchors if a.state == "player_touch"]
+        assert sorted(a.bone for a in touches) == ["l_foot", "r_foot"]

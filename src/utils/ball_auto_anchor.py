@@ -139,13 +139,26 @@ def _outbound_speed_px(
 
 
 def _burst_nms(candidates: list[_Candidate], window: int) -> list[_Candidate]:
-    """Collapse same-player touch runs within ``window`` frames to the
-    strongest; non-touch candidates pass through untouched."""
+    """Collapse same-player-AND-bone touch runs within ``window`` frames to
+    the strongest; non-touch candidates pass through untouched.
+
+    Keyed by ``(player_id, bone)``, not player alone: a player-only key
+    also collapses genuinely AMBIGUOUS same-instant candidates on
+    DIFFERENT bones (both feet near the ball during close control — the
+    kinematic proposer legitimately proposes both when gaps are
+    comparable), silently discarding whichever bone scored lower even
+    when it is the operator's correct label. Keying on bone too still
+    collapses the FK-jitter case this was built for (the same bone
+    firing on adjacent frames for one physical touch — gberch f43/45/49
+    stay 2+ frames apart and are unaffected) without discarding a
+    legitimate alternate-bone candidate at the same instant.
+    """
     touches = [c for c in candidates if c.anchor.state == "player_touch"]
     others = [c for c in candidates if c.anchor.state != "player_touch"]
     kept: list[_Candidate] = []
     for c in sorted(touches, key=lambda c: -c.score):
         if any(k.anchor.player_id == c.anchor.player_id
+               and k.anchor.bone == c.anchor.bone
                and abs(k.anchor.frame - c.anchor.frame) <= window
                for k in kept):
             continue

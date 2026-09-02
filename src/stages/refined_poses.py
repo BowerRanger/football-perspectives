@@ -35,7 +35,7 @@ from pathlib import Path
 import numpy as np
 
 from src.pipeline.base import BaseStage
-from src.schemas.foot_contacts import load_foot_contacts
+from src.schemas.foot_contacts import load_foot_contacts, save_foot_contacts
 from src.schemas.refined_pose import (
     RefinedPose,
     RefinedPoseDiagnostics,
@@ -1565,7 +1565,9 @@ def _apply_foot_lock_finale(
     edge_ease_frames: int,
     sole_clearance_m: float,
     skip_pin_err_m: float,
-) -> tuple[SmplWorldTrack, dict]:
+    resolved_pin_err_m: float | None = None,
+    resolved_max_step_m: float | None = None,
+) -> tuple[SmplWorldTrack, dict, _GlobalFootContacts]:
     """Foot-lock IK + penetration-guard finale (plan Task 8, spec
     §2[D]). Meant to run on the FINAL smoothed track, per (shot,
     player), after every other cleanup/smoothing pass and before
@@ -1578,10 +1580,21 @@ def _apply_foot_lock_finale(
     ``penetration_guard`` runs unconditionally (even when ``contacts``
     is ``None``/empty — it is a raise-only safety net independent of
     contact spans). ``root_R`` is never modified by either pass.
+
+    Returns ``(new_tr, stats, resolved_contacts)`` — ``resolved_contacts``
+    is ``lock_feet_ik``'s ``resolved_spans`` (the verified/effective
+    contact set: spans that were BOTH clamp-feasible and passed the
+    ``resolved_pin_err_m`` honesty check — see that function's
+    docstring) converted to the GLOBAL-frame-keyed representation via
+    :func:`_contacts_to_global`, so it survives whatever this track goes
+    through next (assembly/sync-offset remapping) the same way the raw
+    detection-time contacts do. ``run()`` persists it as the
+    ``{pid}_resolved_contacts.json`` sidecar.
     """
     stats = {
         "spans_locked": 0,
         "spans_skipped": 0,
+        "spans_unresolved": 0,
         "mean_pin_err_m_before": 0.0,
         "mean_pin_err_m_after": 0.0,
         "max_root_corr_m": 0.0,
@@ -1590,7 +1603,7 @@ def _apply_foot_lock_finale(
     }
     n = int(len(tr.frames))
     if n == 0:
-        return tr, stats
+        return tr, stats, _GlobalFootContacts(spans=())
 
     track_contacts = _contacts_for_track(contacts, tr.frames)
     thetas2, root_t2, ik_stats = lock_feet_ik(
@@ -1606,6 +1619,8 @@ def _apply_foot_lock_finale(
         edge_ease_frames=edge_ease_frames,
         rest_joints=rest_joints,
         skip_pin_err_m=skip_pin_err_m,
+        resolved_pin_err_m=resolved_pin_err_m,
+        resolved_max_step_m=resolved_max_step_m,
     )
     root_t3, guard_stats = penetration_guard(
         thetas=thetas2,
@@ -1618,6 +1633,7 @@ def _apply_foot_lock_finale(
 
     stats["spans_locked"] = int(ik_stats["spans_locked"])
     stats["spans_skipped"] = int(ik_stats["spans_skipped"])
+    stats["spans_unresolved"] = int(ik_stats["spans_unresolved"])
     stats["mean_pin_err_m_before"] = float(ik_stats["mean_pin_err_m_before"])
     stats["mean_pin_err_m_after"] = float(ik_stats["mean_pin_err_m_after"])
     stats["max_root_corr_m"] = float(ik_stats["max_root_corr_m"])
@@ -1634,7 +1650,27 @@ def _apply_foot_lock_finale(
         confidence=tr.confidence,
         shot_id=tr.shot_id,
     )
-    return new_tr, stats
+    resolved_fc = FootContacts(
+        n_frames=n,
+        in_contact=_mask_from_spans(n, ik_stats["resolved_spans"]),
+        quality=_mask_from_spans(n, ik_stats["resolved_spans"]).astype(np.float64),
+        spans=tuple(ik_stats["resolved_spans"]),
+    )
+    resolved_global = _contacts_to_global(resolved_fc, tr.frames)
+    return new_tr, stats, resolved_global
+
+
+def _mask_from_spans(n: int, spans) -> np.ndarray:
+    """``(n, 2)`` bool ``[L, R]`` mask with every span's
+    ``[start, end)`` range (array positions) set True — the same
+    convention :func:`_GlobalFootContacts.in_contact_for` produces, just
+    at array positions instead of global frame numbers (used for
+    building the ``FootContacts`` :func:`_apply_foot_lock_finale` feeds
+    to :func:`_contacts_to_global`)."""
+    mask = np.zeros((n, 2), dtype=bool)
+    for s in spans:
+        mask[int(s.start):int(s.end), int(s.side)] = True
+    return mask
 
 
 def _load_clip_fps(output_dir: Path) -> float:
@@ -1835,6 +1871,27 @@ class RefinedPosesStage(BaseStage):
             # skip_pin_err_m kwarg (default there mirrors this default).
             "skip_pin_err_m": float(
                 foot_lock_cfg_raw.get("skip_pin_err_m", 0.04)
+            ),
+            # Wave 5 honesty check: a SECOND, normally-tighter tolerance
+            # on the same landed-pin residual skip_pin_err_m gates —
+            # see src.utils.foot_lock.lock_feet_ik's resolved_pin_err_m
+            # kwarg. None (absent, the default) is a no-op: internally
+            # treated as skip_pin_err_m, so every locked span is also
+            # "resolved" — byte-identical to before this key existed.
+            "resolved_pin_err_m": (
+                float(foot_lock_cfg_raw["resolved_pin_err_m"])
+                if "resolved_pin_err_m" in foot_lock_cfg_raw else None
+            ),
+            # Wave 5 honesty check, part 2: max_err (distance from the
+            # PIN) alone misses a span that has every frame close to the
+            # pin yet still contains one clamp-limited outlier frame
+            # that's far enough from its NEIGHBOURS to read as a skate
+            # spike — see src.utils.foot_lock.lock_feet_ik's
+            # resolved_max_step_m kwarg. None (absent, the default) is a
+            # no-op, same convention as resolved_pin_err_m above.
+            "resolved_max_step_m": (
+                float(foot_lock_cfg_raw["resolved_max_step_m"])
+                if "resolved_max_step_m" in foot_lock_cfg_raw else None
             ),
         }
         smoothing = {
@@ -2070,6 +2127,7 @@ class RefinedPosesStage(BaseStage):
             "enabled": foot_lock_enabled,
             "spans_locked": 0,
             "spans_skipped": 0,
+            "spans_unresolved": 0,
             "mean_pin_err_m_before": 0.0,
             "mean_pin_err_m_after": 0.0,
             "max_root_corr_m": 0.0,
@@ -2077,6 +2135,15 @@ class RefinedPosesStage(BaseStage):
             "max_raise_cm": 0.0,
         }
         foot_lock_by_pid: dict[str, dict] = {}
+        # Verified/effective contact set per player (Wave 5 "honest
+        # unlockable-span handling") — only populated for players the
+        # finale actually ran on (single-shot, non-empty). Persisted
+        # after assembly as the {pid}_resolved_contacts.json sidecar so
+        # scripts/eval_foot_quality.py can measure skate/contact_ratio
+        # against what the pipeline could actually VERIFY as a stable
+        # stance, not every span it merely attempted.
+        resolved_contacts_by_pid: dict[str, _GlobalFootContacts] = {}
+        resolved_shot_by_pid: dict[str, str] = {}
         if foot_lock_enabled:
             err_before_wsum = 0.0
             err_after_wsum = 0.0
@@ -2088,7 +2155,7 @@ class RefinedPosesStage(BaseStage):
                 if int(len(tr.frames)) == 0:
                     continue
                 rest_joints = _beta_adjusted_rest_joints(tr.betas, smpl_model)
-                new_tr, fl_stats = _apply_foot_lock_finale(
+                new_tr, fl_stats, resolved_global = _apply_foot_lock_finale(
                     tr,
                     contacts_by_key.get((shot_id, pid)),
                     fps=fps,
@@ -2097,8 +2164,11 @@ class RefinedPosesStage(BaseStage):
                 )
                 prepared_per_player[pid] = [(shot_id, new_tr)]
                 foot_lock_by_pid[pid] = fl_stats
+                resolved_contacts_by_pid[pid] = resolved_global
+                resolved_shot_by_pid[pid] = shot_id
                 foot_lock_summary["spans_locked"] += fl_stats["spans_locked"]
                 foot_lock_summary["spans_skipped"] += fl_stats["spans_skipped"]
+                foot_lock_summary["spans_unresolved"] += fl_stats["spans_unresolved"]
                 foot_lock_summary["frames_raised"] += fl_stats["frames_raised"]
                 foot_lock_summary["max_root_corr_m"] = max(
                     foot_lock_summary["max_root_corr_m"], fl_stats["max_root_corr_m"],
@@ -2164,6 +2234,27 @@ class RefinedPosesStage(BaseStage):
                 )
             refined.save(out_dir / f"{pid}_refined.npz")
             diag.save(out_dir / f"{pid}_diagnostics.json")
+            if pid in resolved_contacts_by_pid:
+                # Resolve the verified/effective contact set (computed
+                # against the pre-assembly track's own frame numbers) to
+                # THIS assembled track's frame array, positionally — the
+                # same pattern _apply_foot_lock_finale's caller already
+                # relies on for sidecar/global-frame alignment (see
+                # _GlobalFootContacts's module docstring). Single-shot
+                # assembly is a documented pass-through, so this is
+                # normally just a relabelling, but resolving through
+                # frame NUMBER (not assuming positional identity) keeps
+                # this correct even if that ever changes.
+                resolved_positional = _contacts_for_track(
+                    resolved_contacts_by_pid[pid], refined.frames,
+                )
+                save_foot_contacts(
+                    out_dir / f"{pid}_resolved_contacts.json",
+                    resolved_positional,
+                    shot_id=resolved_shot_by_pid[pid],
+                    player_id=pid,
+                    anchor_mode="resolved",
+                )
             summary["players_refined"] += 1
             if len(distinct_shots) <= 1:
                 summary["single_shot_players"] += 1

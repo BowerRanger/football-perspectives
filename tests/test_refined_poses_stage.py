@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 from src.schemas.camera_track import CameraTrack
-from src.schemas.foot_contacts import save_foot_contacts
+from src.schemas.foot_contacts import load_foot_contacts, save_foot_contacts
 from src.schemas.refined_pose import RefinedPose, RefinedPoseDiagnostics
 from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.sync_map import Alignment, GroupSync, SyncMap
@@ -1299,6 +1299,7 @@ def test_stage_foot_lock_disabled_matches_previous_pipeline(tmp_path: Path) -> N
         "enabled": False,
         "spans_locked": 0,
         "spans_skipped": 0,
+        "spans_unresolved": 0,
         "mean_pin_err_m_before": 0.0,
         "mean_pin_err_m_after": 0.0,
         "max_root_corr_m": 0.0,
@@ -1309,3 +1310,103 @@ def test_stage_foot_lock_disabled_matches_previous_pipeline(tmp_path: Path) -> N
         tmp_path / "refined_poses" / f"{fixture.player_id}_diagnostics.json"
     )
     assert "foot_lock" not in diag.summary
+
+
+# ── Wave 5: resolved-contacts sidecar (honest unlockable-span handling) ──
+
+
+@pytest.mark.integration
+def test_stage_writes_resolved_contacts_sidecar_when_foot_lock_enabled(
+    tmp_path: Path,
+) -> None:
+    """With the finale enabled, the stage persists a
+    ``{pid}_resolved_contacts.json`` sidecar (anchor_mode="resolved")
+    positionally aligned 1:1 with the saved refined track — the
+    verified/effective contact set eval_foot_quality.py prefers over
+    the raw hmr_world detection-time contacts."""
+    fixture = write_synthetic_hmr_world_fixture(tmp_path)
+    RefinedPosesStage(
+        output_dir=tmp_path,
+        config={
+            "refined_poses": {
+                "foot_lock": {"enabled": True},
+                "smooth_thetas_window": 1,
+            },
+        },
+    ).run()
+
+    rp = RefinedPose.load(
+        tmp_path / "refined_poses" / f"{fixture.player_id}_refined.npz"
+    )
+    sidecar = tmp_path / "refined_poses" / f"{fixture.player_id}_resolved_contacts.json"
+    assert sidecar.exists()
+    fc, meta = load_foot_contacts(sidecar)
+    assert meta["anchor_mode"] == "resolved"
+    assert fc.n_frames == len(rp.frames)
+    # Everything the clean fixture's finale locked should also be
+    # reported as resolved (default resolved_pin_err_m is a no-op).
+    assert fc.in_contact.any()
+
+
+@pytest.mark.integration
+def test_stage_disabled_foot_lock_does_not_write_resolved_contacts(
+    tmp_path: Path,
+) -> None:
+    fixture = write_synthetic_hmr_world_fixture(tmp_path)
+    RefinedPosesStage(
+        output_dir=tmp_path,
+        config={"refined_poses": {"foot_lock": {"enabled": False}}},
+    ).run()
+    sidecar = tmp_path / "refined_poses" / f"{fixture.player_id}_resolved_contacts.json"
+    assert not sidecar.exists()
+
+
+@pytest.mark.integration
+def test_stage_resolved_contacts_excludes_unresolved_spans(tmp_path: Path) -> None:
+    """A deliberately-noisy span (large per-frame carrier noise) that
+    still lands within a loosened skip_pin_err_m but fails a tight
+    resolved_pin_err_m is EXCLUDED from the resolved-contacts sidecar,
+    even though the diagnostics show the finale attempted (and
+    "locked", pre-Wave-5 terminology) it — the honesty check runs at
+    the src.utils.foot_lock layer this stage just wires through."""
+    fixture = write_synthetic_hmr_world_fixture(
+        tmp_path, n_frames=200, stride_s=1.2, noise_scale=0.10, seed=3,
+    )
+    RefinedPosesStage(
+        output_dir=tmp_path,
+        config={
+            "refined_poses": {
+                "foot_lock": {
+                    "enabled": True,
+                    "ik_max_joint_delta_deg": 25.0,
+                    "max_residual_correction_m": 0.4,
+                    "skip_pin_err_m": 0.5,
+                    "resolved_pin_err_m": 0.01,
+                },
+                "smooth_thetas_window": 1,
+                "cleanup": {"enabled": False},
+                "jitter": {"enabled": False},
+            },
+        },
+    ).run()
+
+    rp = RefinedPose.load(
+        tmp_path / "refined_poses" / f"{fixture.player_id}_refined.npz"
+    )
+    diag = RefinedPoseDiagnostics.load(
+        tmp_path / "refined_poses" / f"{fixture.player_id}_diagnostics.json"
+    )
+    fl = diag.summary["foot_lock"]
+    assert fl["spans_skipped"] == 0, "sanity: the loose skip tolerance locks everything"
+    assert fl["spans_unresolved"] >= 1, "sanity: the tight resolved threshold flags spans"
+
+    sidecar = tmp_path / "refined_poses" / f"{fixture.player_id}_resolved_contacts.json"
+    fc, _meta = load_foot_contacts(sidecar)
+    assert fc.n_frames == len(rp.frames)
+    resolved_frame_count = int(fc.in_contact.sum())
+    # The 0.10 m/axis noise fixture attempts (locks or flags-unresolved)
+    # every true stance span; strictly fewer frames survive into the
+    # resolved set than were attempted, proving the exclusion actually
+    # happened rather than resolved == attempted.
+    attempted_frame_count = int(fixture.gait.contacts_true.sum())
+    assert 0 < resolved_frame_count < attempted_frame_count

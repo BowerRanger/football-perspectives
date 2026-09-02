@@ -59,7 +59,7 @@ python recon.py serve --output ./output/ --port 8001
 
 Known failures on `main` as of 2026-07-05 (pre-existing — do not attribute to your change; remove this note when fixed): `test_ball_stage.py::test_aerial_arc_promotes_grounded_run_to_flight` (linear trajectory wrongly promoted to flight) and `test_blender_export_smpl_skeleton.py::test_player_fbx_has_24_bones_and_full_keyframes` (Blender snapshot not written on this Mac).
 
-Markers (`pyproject.toml`): `unit`, `integration`, `e2e` (real fixtures/GPU, skipped by default), `fbx` (needs Blender on PATH). Tests follow `tests/test_<module>.py` naming — when you change `src/utils/foo.py`, run `tests/test_foo*.py` plus any `test_<stage>_stage*.py` that wires it in. GPU-dependent stage runs (GVHMR, real WASB detector) cannot be validated on this Mac — flag them for a GPU-box run instead of claiming them verified.
+Markers (`pyproject.toml`): `unit`, `integration`, `e2e` (real fixtures/GPU, skipped by default), `fbx` (needs Blender on PATH). Tests follow `tests/test_<module>.py` naming — when you change `src/utils/foo.py`, run `tests/test_foo*.py` plus any `test_<stage>_stage*.py` that wires it in. Heavy ML stages (GVHMR, real WASB detector) RUN LOCALLY on this Mac (CPU/MPS hybrid — hmr_world is ~35-60 min for a full shot, see `hmr_world.extractor_device`); there is no separate GPU box. Validate them locally; just budget the wall-clock and run them in the background.
 
 ## Repo Map
 
@@ -74,7 +74,7 @@ Markers (`pyproject.toml`): `unit`, `integration`, `e2e` (real fixtures/GPU, ski
 
 Evaluation output dirs live at the repo root, one per clip: `output/` (**gberch** — the primary ball/touch validation shot), `output-origi`/`output-origi-global` (Origi vs Barcelona), `output-japan`, `output-kroupi`. Source media is in `test-media/` (with `ground_truth/`). `output/CROSS_CLIP_EVALUATION.md` records cross-clip results. `ball_pre_*`/`ball_phase*` subdirs are frozen before/after snapshots — don't delete them.
 
-- **Touch recall** (ball stage): `scripts/run_touch_recall_validation.py --output <dir> --shot <shot>` (GPU box for the stage runs; `--report-only` reprints from snapshots locally). Manual anchors are the pseudo-ground-truth.
+- **Touch recall** (ball stage): `scripts/run_touch_recall_validation.py --output <dir> --shot <shot>` (stage runs execute locally — budget wall-clock; `--report-only` reprints from snapshots). Manual anchors are the pseudo-ground-truth.
 - **Ball anchor accuracy without a detector**: `tests/test_ball_anchor_accuracy.py` — the no-op-detector harness; a no-op detector opts out of second-pass redetection.
 - **Camera quality**: judge by anchor-click reprojection (`scripts/eval_anchor_clicks.py`), not by eyeballing a single run — PnLCalib on MPS is nondeterministic across runs.
 

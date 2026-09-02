@@ -79,6 +79,17 @@ _LIMB_CAPSULE_RADIUS_M = 0.055
 _SPINE_CAPSULE_RADIUS_M = 0.10
 _HEAD_SPHERE_RADIUS_M = 0.09
 _MIN_CAPSULE_BONE_LEN_M = 0.02
+# Every armature EDIT bone gets this fixed +Y rest tail (uniform
+# direction, zero roll) — see the bone-space-bug note above
+# ``_bone_rest_endpoints`` and ``blender_export_fbx.py:215-217``, whose
+# comment this mirrors verbatim ("Direction is irrelevant for FBX export
+# of pose-bone rotations"). Because every bone's rest orientation is then
+# identical (== the armature/canonical frame), pose-bone
+# ``rotation_quaternion`` values (SMPL thetas, expressed in that same
+# canonical frame) apply correctly. Also used to cancel the same fixed
+# offset when bone-parenting capsule geometry (Blender's BONE parent
+# type anchors children at the bone's TAIL, not its head).
+_ARMATURE_BONE_TAIL_M = 0.05
 # Unclassified players (no tracks/*_tracks.json team label) still need a
 # renderable kit — mirrors render_look.resolve_player_colors' own internal
 # fallback so a missing team classification never crashes the build.
@@ -583,12 +594,18 @@ def main(argv: list[str]) -> int:
         return children
 
     def _bone_rest_endpoints(rest_joints, children: dict) -> list:
-        """(head, tail) per bone in canonical rest space.
+        """(head, tail) per bone in canonical rest space — the GEOMETRY
+        table for capsule-body placement (direction, length, midpoint).
 
         Internal bones (with children) get a tail at the mean of their
         children's rest positions; leaf bones (hands, feet, head) get a
-        fixed +0.05 z tail so they stay visible. Same table drives both
-        the armature's edit bones and the capsule-fallback geometry.
+        fixed +0.05 z tail so they stay visible. NOT used for the
+        armature's own edit-bone tails (see ``_ARMATURE_BONE_TAIL_M`):
+        Blender interprets a pose-bone's ``rotation_quaternion`` in that
+        bone's own LOCAL REST frame, which only matches SMPL's canonical
+        joint-rotation convention when every bone's rest orientation is
+        identical (a uniform-direction, zero-roll tail) — a per-bone
+        direction here would rotate the SMPL thetas about the wrong axes.
         """
         endpoints = []
         for j in range(24):
@@ -688,22 +705,34 @@ def main(argv: list[str]) -> int:
             poly.material_index = slot_index[majority]
         return [obj]
 
-    def _parent_to_bone(obj: object, arm: object, bone_name: str) -> None:
-        """Bone-parent ``obj`` to ``bone_name`` while preserving its
-        current world transform (the scripted equivalent of Ctrl-P > Bone,
-        Keep Transform). Must run while the armature is still at rest
-        (identity object transform, identity pose) — capsule bodies are
-        built before any per-frame posing in ``_build_players``.
+    def _parent_to_bone(obj: object, arm: object, bone_name: str,
+                         local_offset, local_rotation: object) -> None:
+        """Bone-parent ``obj`` to ``bone_name`` with an explicit LOCAL
+        transform, given relative to the bone's HEAD in canonical rest
+        space (``local_rotation`` likewise canonical — a rotation from a
+        primitive's default axis to a direction expressed in that same
+        space).
+
+        Every armature bone's rest tail is now a fixed
+        ``_ARMATURE_BONE_TAIL_M`` along local +Y from its head (uniform
+        direction, zero roll — see the edit-bone loop above), which makes
+        bone-local space identical to canonical rest space for every
+        bone. Blender's BONE parent type anchors the child at the bone's
+        TAIL, not its head, so that fixed offset is cancelled out of
+        ``local_offset``'s Y component here — a plain constant
+        subtraction, unlike the old Keep-Transform snapshot this
+        replaced (which queried the CURRENT pose-bone matrix and so
+        needed the armature to be at an identity pose to be correct).
         """
         obj.parent = arm
         obj.parent_type = "BONE"
         obj.parent_bone = bone_name
-        pbone = arm.pose.bones[bone_name]
-        bone_len = arm.data.bones[bone_name].length
-        tail_mat = (
-            arm.matrix_world @ pbone.matrix @ Matrix.Translation((0.0, bone_len, 0.0))
+        obj.location = (
+            float(local_offset[0]),
+            float(local_offset[1] - _ARMATURE_BONE_TAIL_M),
+            float(local_offset[2]),
         )
-        obj.matrix_parent_inverse = tail_mat.inverted()
+        obj.rotation_quaternion = local_rotation
 
     def _add_capsule_body(arm: object, pid: str, endpoints: list, colors: dict,
                            materials_cache: dict, ramp_steps: int) -> list:
@@ -741,11 +770,12 @@ def main(argv: list[str]) -> int:
             obj = bpy.context.active_object
             obj.name = f"{pid}_{jname}_capsule"
             obj.rotation_mode = "QUATERNION"
-            obj.location = (float(mid[0]), float(mid[1]), float(mid[2]))
-            obj.rotation_quaternion = quat
             obj.data.materials.append(mat)
 
-            _parent_to_bone(obj, arm, jname)
+            # (mid - head): capsule centre relative to the bone's HEAD in
+            # canonical rest space — the local offset _parent_to_bone
+            # expects (see its docstring for the tail-cancellation math).
+            _parent_to_bone(obj, arm, jname, mid - head, quat)
             objs.append(obj)
         return objs
 
@@ -786,9 +816,12 @@ def main(argv: list[str]) -> int:
             bones = []
             for j, jname in enumerate(SMPL_JOINT_NAMES):
                 eb = edit_bones.new(jname)
-                head, tail = endpoints[j]
+                head, _geom_tail = endpoints[j]
                 eb.head = (float(head[0]), float(head[1]), float(head[2]))
-                eb.tail = (float(tail[0]), float(tail[1]), float(tail[2]))
+                # Uniform +Y tail, zero roll (never the GEOMETRY table's
+                # per-bone tail) — see _ARMATURE_BONE_TAIL_M.
+                eb.tail = (float(head[0]), float(head[1] + _ARMATURE_BONE_TAIL_M),
+                           float(head[2]))
                 if SMPL_PARENTS[j] != -1:
                     eb.parent = bones[SMPL_PARENTS[j]]
                     eb.use_connect = False

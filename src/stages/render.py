@@ -326,4 +326,20 @@ class RenderStage(BaseStage):
                              shot_id, result.stderr[-4000:])
         out = self.output_dir / "render"
         out.mkdir(parents=True, exist_ok=True)
-        (out / "render_timings.json").write_text(json.dumps(timings, indent=2))
+        timings_path = out / "render_timings.json"
+        # Merge, don't overwrite: a shot skipped this run (already
+        # complete) must keep its previously recorded timing rather than
+        # losing it just because this run never touched it.
+        existing: dict = {}
+        if timings_path.exists():
+            try:
+                loaded = json.loads(timings_path.read_text())
+                if not isinstance(loaded, dict):
+                    raise ValueError("render_timings.json root must be an object")
+                existing = loaded
+            except (json.JSONDecodeError, ValueError, OSError) as exc:
+                logger.warning(
+                    "render: malformed existing render_timings.json (%s); "
+                    "starting fresh", exc)
+        existing.update(timings)
+        timings_path.write_text(json.dumps(existing, indent=2))

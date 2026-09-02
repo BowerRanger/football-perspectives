@@ -496,3 +496,51 @@ def test_run_uses_sidecar_cameras_end_to_end(tmp_path):
     assert "--cameras" in calls[0] and "broadcast" in calls[0]
     assert "drone" not in calls[0].split("--cameras")[1].split("--")[0]
     assert "--vertical" in calls[0].split()
+
+
+# ── render_timings.json merges across runs (does not overwrite) ────────
+# A shot skipped this run because it's already complete must keep its
+# previously recorded timing entry; shots actually rendered this run
+# update/insert their own entries into the same file.
+
+@pytest.mark.integration
+def test_run_merges_timings_keeping_skipped_shots_old_entry(tmp_path):
+    _two_shot_manifest(tmp_path)
+    stub = tmp_path / "fake_blender"
+    log = tmp_path / "calls.jsonl"
+    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    shot01_dir = tmp_path / "render" / "shot01"
+    shot01_dir.mkdir(parents=True)
+    (shot01_dir / "broadcast.mp4").write_bytes(b"x")
+    render_dir = tmp_path / "render"
+    (render_dir / "render_timings.json").write_text(
+        json.dumps({"shot01": 99.9})
+    )
+    cfg = _cfg(blender_path=str(stub), cameras=["broadcast"],
+                vertical_variant=False)
+    stage = RenderStage(cfg, tmp_path)
+    stage.run()
+    timings = json.loads((render_dir / "render_timings.json").read_text())
+    assert timings["shot01"] == 99.9  # preserved, not dropped/overwritten
+    assert "shot02" in timings         # newly rendered this run
+
+
+@pytest.mark.integration
+def test_run_malformed_existing_timings_file_still_succeeds(tmp_path, caplog):
+    caplog.set_level(logging.WARNING)
+    _write_min_fixture(tmp_path)
+    stub = tmp_path / "fake_blender"
+    log = tmp_path / "calls.jsonl"
+    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    render_dir = tmp_path / "render"
+    render_dir.mkdir(parents=True)
+    (render_dir / "render_timings.json").write_text("{not valid json")
+    cfg = _cfg(blender_path=str(stub), cameras=["broadcast"],
+                vertical_variant=False)
+    stage = RenderStage(cfg, tmp_path)
+    stage.run()  # must not raise
+    timings = json.loads((render_dir / "render_timings.json").read_text())
+    assert "clip" in timings
+    assert any("timings" in r.message.lower() for r in caplog.records)

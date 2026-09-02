@@ -987,6 +987,133 @@ def _hampel_outlier_mask(
     return mask
 
 
+def _biphasic_pop_mask(
+    xy: np.ndarray,
+    *,
+    window: int,
+    k: float,
+    floor_m_per_frame: float,
+    max_reversal_frames: int,
+) -> np.ndarray:
+    """Boolean mask (``True`` = pop) over a 2-D path via a biphasic
+    (out-and-back) velocity-spike test.
+
+    :func:`_hampel_outlier_mask` flags a frame whose *position* stands
+    out from the local median position — the right test for a
+    single-frame teleport whose displaced position itself is far from
+    the trend. It is blind to a smaller pop whose displaced position
+    doesn't clear the position floor. This function instead flags a
+    frame whose frame-to-frame *velocity* deviates sharply from the
+    local median velocity (magnitude test, same MAD construction as
+    the Hampel test but one derivative order up) **and** whose raw
+    velocity direction reverses within ``max_reversal_frames`` frames
+    (dot product of the two raw velocity vectors is strongly negative
+    — i.e. the path snaps out then immediately snaps back). Only the
+    ENTERING leg of the pair must independently clear the magnitude
+    gate; the EXITING/returning leg only needs to clear the absolute
+    floor (see the leave-out-window note below for why the exiting leg
+    is held to a looser bar).
+
+    The reversal test — on the raw velocities, not on their deviations
+    from the local median — is the discriminator that makes this safe
+    to run unconditionally. A sustained one-directional change
+    (footstrike deceleration, a sprint start, a direction cut) only
+    changes velocity *magnitude* along a roughly constant direction:
+    consecutive raw velocity vectors stay near-parallel (cosine near
+    +1), so it is never flagged no matter how large the magnitude
+    deviation is. Only a genuine out-and-back excursion — where the
+    entering and exiting velocities point in substantially opposite
+    directions (cosine below -0.5, i.e. more than ~120° apart) — trips
+    both gates at once.
+
+    Returns a mask over *positions* (same length as ``xy``): when a
+    reversal is found between velocity index ``i`` (the frame-to-frame
+    step ending at position ``i + 1``) and velocity index ``j`` (the
+    step ending at position ``j + 1``), the intervening positions
+    ``i + 1 .. j`` are flagged — these are the displaced positions the
+    pop pushed off the trend; the positions on either side (``i`` and
+    ``j + 1``) are the trusted anchors the pop departed from and
+    returned to.
+
+    The local median/MAD used for the magnitude test is a **leave-out**
+    statistic: it excludes the velocity sample under test and its
+    immediate neighbours (``±1``) from the window before taking the
+    median. On real (not synthetically clean) tracking data, a pop's
+    own 1-3 anomalous velocity samples sit INSIDE the same small window
+    used to judge them; a plain windowed MAD is dragged toward the pop
+    itself (median/MAD "self-masking"), inflating the threshold enough
+    to swallow exactly the pop it should be measuring against. Leaving
+    the candidate and its immediate neighbours out of the statistic
+    keeps the local scale representative of the surrounding trend
+    instead of the anomaly.
+
+    Even with the leave-out window, requiring BOTH legs of a reversal
+    to independently clear their own local threshold turns out to be
+    too strict on real data: the exiting/returning leg's neighbourhood
+    is often itself mildly elevated (ordinary human-motion variability
+    a few frames later), inflating ITS local MAD enough to mask a
+    genuine, large, reversing return leg even though the entering leg
+    was an unambiguous anomaly. So only the entering leg must clear the
+    magnitude gate; the exiting leg only needs to clear the absolute
+    floor. The reversal test itself (cosine below -0.5, computed on raw
+    velocities either way) is what actually keeps this safe — dropping
+    the second independent magnitude gate does not weaken it, since a
+    sustained one-directional change still never produces a reversing
+    pair regardless of either leg's magnitude.
+    """
+    arr = np.asarray(xy, dtype=float)
+    n = arr.shape[0]
+    mask = np.zeros(n, dtype=bool)
+    if n < 3 or max_reversal_frames < 1:
+        return mask
+
+    v = np.diff(arr, axis=0)  # (n-1, 2) per-frame velocity
+    m = v.shape[0]
+    half = max(1, int(window) // 2)
+    exclude_radius = 1
+
+    dev_mag = np.empty(m)
+    thresh = np.empty(m)
+    for i in range(m):
+        lo = max(0, i - half)
+        hi = min(m, i + half + 1)
+        keep = [j for j in range(lo, hi) if abs(j - i) > exclude_radius]
+        win = v[keep] if len(keep) >= 3 else v[lo:hi]
+        med = np.median(win, axis=0)
+        dev_mag[i] = float(np.linalg.norm(v[i] - med))
+        dists = np.linalg.norm(win - med, axis=1)
+        mad = float(np.median(dists))
+        thresh[i] = max(k * 1.4826 * mad, floor_m_per_frame)
+
+    spike = dev_mag > thresh
+    vmag = np.linalg.norm(v, axis=1)
+
+    # The entering leg of a reversal must independently clear the
+    # magnitude gate (anchors the whole test to a genuine local
+    # anomaly). The exiting/returning leg only needs to clear the
+    # absolute floor, not also independently out-MAD its OWN local
+    # window: on real (not synthetically clean) tracking data the
+    # exiting velocity's neighbourhood is often itself mildly elevated
+    # (ordinary human-motion variability nearby), which inflates ITS
+    # local MAD enough to mask a genuine, large, reversing return leg.
+    # Requiring symmetry there let real out-and-back pops through
+    # undetected; the reversal test (cos < -0.5) — not a second
+    # independent magnitude gate — remains the actual safety net.
+    for i in np.where(spike)[0]:
+        for j in range(int(i) + 1, min(m, int(i) + max_reversal_frames + 1)):
+            if not (spike[j] or vmag[j] > floor_m_per_frame):
+                continue
+            denom = vmag[i] * vmag[j]
+            if denom <= 1e-12:
+                continue
+            cos = float(np.dot(v[i], v[j])) / denom
+            if cos < -0.5:  # raw velocity direction reverses (> ~120°)
+                mask[int(i) + 1 : j + 1] = True
+                break
+
+    return mask
+
+
 def _slerp_fill(
     src_frames: np.ndarray, src_R: np.ndarray, dense_frames: np.ndarray,
 ) -> np.ndarray:
@@ -1017,13 +1144,16 @@ def _clean_player_translation(
     hampel_window_s: float = 0.4,
     hampel_k: float = 3.0,
     hampel_floor_m: float = 0.6,
+    pop_k: float = 3.0,
+    pop_floor_m_per_frame: float = 0.12,
+    pop_max_reversal_frames: int = 2,
     v_max_m_s: float = 12.0,
     a_max_m_s2: float = 75.0,
 ) -> tuple[SmplWorldTrack, dict]:
     """Per-player robust translation cleanup, run before the cross-player
     consensus and the final smoother.
 
-    Four things, all in physical units so the same config generalises
+    Five things, all in physical units so the same config generalises
     across clips and frame rates:
 
       1. **Gap fill.** The anchored span is resampled onto a uniform
@@ -1036,10 +1166,20 @@ def _clean_player_translation(
          single-frame teleports / large excursions among the originally
          present frames; flagged positions are re-interpolated from
          trusted neighbours. (Artifact #2, spikes.)
-      3. **Velocity limit.** A physical speed cap (``v_max_m_s``) bounds
+      3. **Biphasic pop rejection.** :func:`_biphasic_pop_mask` flags a
+         frame-to-frame velocity spike that reverses direction within
+         ``pop_max_reversal_frames`` frames — an out-and-back excursion
+         too small to trip the Hampel position floor but with a
+         signature (entering/exiting velocities point opposite ways)
+         that a sustained one-directional change (footstrike
+         deceleration, sprint start, direction cut) never produces.
+         Flagged positions are re-interpolated from trusted neighbours,
+         same mechanism as step 2. Runs before the velocity/acceleration
+         limiters below so a pop is *repaired*, not merely capped.
+      4. **Velocity limit.** A physical speed cap (``v_max_m_s``) bounds
          any residual high-frequency depth wobble without flattening a
          genuine sprint. (Artifact #2, wobble.)
-      4. **Acceleration limit.** A physical XY acceleration cap
+      5. **Acceleration limit.** A physical XY acceleration cap
          (``a_max_m_s2``) bounds isolated super-physical root-translation
          pops that survive the above — single-to-few-frame excursions
          (0.3-0.5 m) too small to trip the Hampel floor and too brief to
@@ -1063,6 +1203,7 @@ def _clean_player_translation(
     stats = {
         "filled_frames": 0,
         "rejected_frames": 0,
+        "pop_rejected_frames": 0,
         "clamped_frames": 0,
         "accel_clamped_frames": 0,
     }
@@ -1135,6 +1276,29 @@ def _clean_player_translation(
         trusted = present & ~outliers
         if outliers.any() and int(trusted.sum()) >= 2:
             ti = np.where(trusted)[0]
+            grid = np.arange(len(dense_f))
+            for ax in range(2):
+                xy[:, ax] = np.interp(grid, ti, xy[ti, ax])
+
+        # Biphasic ("out-and-back") velocity-spike rejection — catches
+        # an isolated pop too small to trip the Hampel position floor
+        # above but with a reversing-velocity signature no sustained
+        # one-directional change (footstrike, sprint start, direction
+        # cut) produces. See _biphasic_pop_mask. Runs on the
+        # Hampel-corrected path, before the velocity/acceleration
+        # limiters, so a pop is repaired via re-interpolation rather
+        # than merely capped.
+        pop_mask = _biphasic_pop_mask(
+            xy,
+            window=hwin,
+            k=pop_k,
+            floor_m_per_frame=pop_floor_m_per_frame,
+            max_reversal_frames=pop_max_reversal_frames,
+        ) & present
+        stats["pop_rejected_frames"] += int(pop_mask.sum())
+        pop_trusted = present & ~pop_mask
+        if pop_mask.any() and int(pop_trusted.sum()) >= 2:
+            ti = np.where(pop_trusted)[0]
             grid = np.arange(len(dense_f))
             for ax in range(2):
                 xy[:, ax] = np.interp(grid, ti, xy[ti, ax])
@@ -1391,8 +1555,8 @@ def _clean_single_track(
     confidence = np.asarray(track.confidence)
 
     empty_cleanup_stats = {
-        "filled_frames": 0, "rejected_frames": 0, "clamped_frames": 0,
-        "accel_clamped_frames": 0,
+        "filled_frames": 0, "rejected_frames": 0, "pop_rejected_frames": 0,
+        "clamped_frames": 0, "accel_clamped_frames": 0,
     }
     anchored = confidence >= _FRESH_ANCHOR_CONF
     if not anchored.any():
@@ -1547,6 +1711,13 @@ class RefinedPosesStage(BaseStage):
             "hampel_window_s": float(cleanup_cfg.get("hampel_window_s", 0.4)),
             "hampel_k": float(cleanup_cfg.get("hampel_k", 3.0)),
             "hampel_floor_m": float(cleanup_cfg.get("hampel_floor_m", 0.6)),
+            "pop_k": float(cleanup_cfg.get("pop_k", 3.0)),
+            "pop_floor_m_per_frame": float(
+                cleanup_cfg.get("pop_floor_m_per_frame", 0.12)
+            ),
+            "pop_max_reversal_frames": int(
+                cleanup_cfg.get("pop_max_reversal_frames", 2)
+            ),
             "v_max_m_s": float(cleanup_cfg.get("v_max_m_s", 12.0)),
             "a_max_m_s2": float(cleanup_cfg.get("a_max_m_s2", 75.0)),
         }
@@ -1573,9 +1744,11 @@ class RefinedPosesStage(BaseStage):
             "enabled": cleanup_kwargs["enabled"],
             "filled_frames": 0,
             "rejected_frames": 0,
+            "pop_rejected_frames": 0,
             "clamped_frames": 0,
             "accel_clamped_frames": 0,
             "assembly_rejected_frames": 0,
+            "assembly_pop_rejected_frames": 0,
             "assembly_clamped_frames": 0,
             "assembly_accel_clamped_frames": 0,
         }
@@ -1607,6 +1780,9 @@ class RefinedPosesStage(BaseStage):
                 )
                 cleanup_summary["filled_frames"] += int(c_stats["filled_frames"])
                 cleanup_summary["rejected_frames"] += int(c_stats["rejected_frames"])
+                cleanup_summary["pop_rejected_frames"] += int(
+                    c_stats["pop_rejected_frames"]
+                )
                 cleanup_summary["clamped_frames"] += int(c_stats["clamped_frames"])
                 cleanup_summary["accel_clamped_frames"] += int(
                     c_stats["accel_clamped_frames"]
@@ -1799,6 +1975,9 @@ class RefinedPosesStage(BaseStage):
                 cleanup_summary["assembly_rejected_frames"] += int(
                     a_stats["rejected_frames"]
                 )
+                cleanup_summary["assembly_pop_rejected_frames"] += int(
+                    a_stats["pop_rejected_frames"]
+                )
                 cleanup_summary["assembly_clamped_frames"] += int(
                     a_stats["clamped_frames"]
                 )
@@ -1819,11 +1998,13 @@ class RefinedPosesStage(BaseStage):
         )
         logger.info(
             "[refined_poses] %d player(s) refined, %d frame(s) total, "
-            "cleanup[%d filled / %d rejected / %d clamped / %d accel-clamped], "
+            "cleanup[%d filled / %d rejected / %d pop-rejected / %d clamped / "
+            "%d accel-clamped], "
             "%d Δ-jitter / %d residual-consensus frame(s) corrected",
             summary["players_refined"], summary["total_frames"],
             cleanup_summary["filled_frames"],
             cleanup_summary["rejected_frames"],
+            cleanup_summary["pop_rejected_frames"],
             cleanup_summary["clamped_frames"],
             cleanup_summary["accel_clamped_frames"],
             jitter_summary["corrected_frames"],

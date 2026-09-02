@@ -844,6 +844,33 @@ refined_poses:
     hampel_window_s: 0.4
     hampel_k: 3.0
     hampel_floor_m: 0.6
+    # Biphasic ("out-and-back") velocity-spike rejection. Catches an
+    # isolated root-translation pop too small in absolute displacement
+    # to trip the Hampel position floor above, but whose frame-to-frame
+    # velocity reverses direction within pop_max_reversal_frames frames
+    # — the out-and-back signature of upstream hmr_world anchor/kp2d
+    # noise. A frame's XY velocity is flagged (the "entering" leg) when
+    # it deviates from the local median velocity (same ±hampel_window_s/2
+    # window as the Hampel test, one derivative order up, computed
+    # leave-out so the pop's own samples can't inflate the threshold
+    # that judges them) by more than max(pop_k · 1.4826 · MAD,
+    # pop_floor_m_per_frame) AND a later velocity (within
+    # pop_max_reversal_frames, the "exiting" leg — which only needs to
+    # clear the absolute floor, not independently out-MAD its own local
+    # neighbourhood too) points substantially opposite (raw-velocity dot
+    # product strongly negative). The reversal test — on raw velocity
+    # direction, not on deviation from the local median — is what keeps
+    # this safe: a sustained one-directional change (footstrike
+    # deceleration, sprint start, direction cut) only changes velocity
+    # MAGNITUDE along a roughly constant direction, so consecutive raw
+    # velocities stay near-parallel and are never flagged, however large
+    # the deviation from the local median. Flagged positions are
+    # re-interpolated from trusted neighbours, same mechanism as the
+    # Hampel test, and run before the velocity/acceleration limiters
+    # below so a pop is repaired rather than merely capped.
+    pop_k: 3.0
+    pop_floor_m_per_frame: 0.12
+    pop_max_reversal_frames: 2
     # Physical speed cap. Frame-to-frame displacement is limited to
     # v_max_m_s / fps metres (forward/backward, no lag). 12 m/s sits
     # safely above an elite sprint (~10 m/s) so genuine fast motion is

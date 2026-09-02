@@ -949,6 +949,38 @@ refined_poses:
     # so 2 passes typically push residual error below the per-
     # player HMR noise floor. >3 buys little.
     residual_iterations: 2
+    # Wave-4c fix: the FINAL cumulative offset (after all iterations
+    # above) is only defined at the frames whose per-iteration gate
+    # happened to fire — a comb, not a continuous signal. Subtracting
+    # that comb from every player's root_t injects a real fps²-scaled
+    # acceleration spike into EVERY one of them, including players
+    # whose own track had no artifact at that moment (measured on
+    # gberch: this pass alone took P002/P003's root_acc_max from
+    # ~100/136 to ~500/500 m/s² before the fix below). These three
+    # knobs densify/smooth/bound the offset SIGNAL — not the
+    # detection gates above, which are untouched — before it is ever
+    # applied. See _smooth_offset_signal in src/stages/refined_poses.py.
+    # Savgol window (seconds) for the applied offset signal. Short
+    # relative to residual_savgol_window_s above (which shapes the
+    # per-player baseline) — this only needs to remove single-frame
+    # comb noise from the sparse trigger gate, not track slow drift.
+    residual_offset_smooth_window_s: 0.2
+    # Hard clamp (m/s²) on the OFFSET SIGNAL's own frame-to-frame
+    # acceleration (via the same _accel_limit_xy used for per-player
+    # cleanup). By the triangle inequality this bounds how much
+    # root_acc this pass can ever ADD to any player, however
+    # discontinuous that player's own track is. 60 sits comfortably
+    # above the ~35 m/s² a genuine few-Hz camera wobble needs (so the
+    # correction still tracks real wobble — see
+    # test_residual_consensus_cancels_sinusoidal_wobble_with_running_players)
+    # while leaving real headroom under the root_acc_max target (150,
+    # stretch 100).
+    residual_max_offset_accel_m_s2: 60.0
+    # Frames of linear ease-to-zero at each end of the corrected span
+    # (by real frame number) so entering/leaving the corrected region
+    # doesn't itself step from "no evidence" straight into a live
+    # correction.
+    residual_edge_ease_frames: 5
   # Foot-lock finale: runs last, after all smoothing above, so nothing
   # degrades foot placement afterward. Re-pins each stance span to its
   # contact-detected median position with two-bone leg IK, then a

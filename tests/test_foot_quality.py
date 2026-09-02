@@ -382,6 +382,78 @@ def test_smoothness_zero_on_empty_track() -> None:
     }
 
 
+def test_root_accel_stats_ignores_boundary_across_a_real_frame_gap() -> None:
+    """Wave-4c diagnosis: ``refined_poses.cleanup`` densifies gaps up to
+    ``max_gap_fill_frames`` but deliberately leaves wider ones unfilled
+    (a real, un-fabricated occlusion hold) -- so two adjacent ARRAY rows
+    of ``root_t`` can be dozens of real VIDEO frames apart. Scoring the
+    central difference across that boundary as if it were 1/fps seconds
+    reports a huge fictitious acceleration for what is, over the real
+    elapsed time, ordinary motion (here: 2 m over a real 40-frame gap
+    at 30 fps, ~1.5 m/s). ``frames`` lets the metric skip that boundary,
+    the same way ``skate`` above is never scored across a stance/swing
+    run boundary."""
+    from src.utils.foot_quality import _root_accel_stats
+
+    fps = 30.0
+    n1, n2 = 10, 10
+    frames = np.concatenate([
+        np.arange(0, n1, dtype=np.int64),
+        np.arange(0, n2, dtype=np.int64) + 40,
+    ])
+    root_t = np.concatenate([
+        np.tile([0.0, 0.0, 0.95], (n1, 1)),
+        np.tile([2.0, 0.0, 0.95], (n2, 1)),
+    ])
+    p99, mx = _root_accel_stats(root_t, fps, frames=frames)
+    assert mx < 1.0
+    assert p99 < 1.0
+    # Without frame numbers (old behaviour / callers that don't have
+    # them) the same data reads as an enormous spurious spike -- proves
+    # the assertion above is actually exercising the gap-aware path,
+    # not just a coincidentally-small number.
+    _p99_naive, mx_naive = _root_accel_stats(root_t, fps)
+    assert mx_naive > 500.0
+
+
+def test_foot_speed_max_ignores_boundary_across_a_real_frame_gap() -> None:
+    """Same class of bug as ``_root_accel_stats`` above, one derivative
+    order down: a real un-fabricated occlusion gap must not be scored
+    as an instantaneous foot teleport."""
+    from src.utils.foot_quality import _foot_speed_max
+
+    fps = 30.0
+    n1, n2 = 10, 10
+    frames = np.concatenate([
+        np.arange(0, n1, dtype=np.int64),
+        np.arange(0, n2, dtype=np.int64) + 40,
+    ])
+    feet_pos = np.zeros((n1 + n2, 2, 3))
+    feet_pos[n1:, :, 0] = 2.0  # real 2 m shift over the real 30-frame gap
+    speed = _foot_speed_max(feet_pos, fps, frames=frames)
+    assert speed < 1.0
+    speed_naive = _foot_speed_max(feet_pos, fps)
+    assert speed_naive > 50.0
+
+
+def test_foot_quality_metrics_smoothness_ignores_real_frame_gap() -> None:
+    """Same scenario as above, through the full ``foot_quality_metrics``
+    entry point (which already receives ``frames`` for the kp2d
+    reprojection lookup) on a real walk fixture with a spliced-in
+    occlusion gap and a genuine displacement across it."""
+    g = make_walk(n_frames=40)
+    frames = g.frames.copy()
+    frames[20:] += 30  # real, un-fabricated 30-frame occlusion hold
+    root_t = g.root_t.copy()
+    root_t[20:, 0] += 2.0  # real displacement over that untracked span
+    m = foot_quality_metrics(
+        frames=frames, betas=g.betas, thetas=g.thetas,
+        root_R=g.root_R, root_t=root_t, fps=g.fps,
+        contacts=g.contacts_true,
+    )
+    assert m["smoothness"]["root_acc_max_m_s2"] < 10.0
+
+
 # --- scripts/eval_foot_quality.py CLI --------------------------------
 
 import json as _json

@@ -482,6 +482,48 @@ def test_smooth_track_preserves_frames_and_metadata() -> None:
     assert smoothed.shot_id == track.shot_id
 
 
+@pytest.mark.unit
+def test_smooth_track_does_not_blend_across_a_real_frame_gap() -> None:
+    """Wave-4c diagnosis: ``_clean_player_translation`` densifies gaps
+    up to ``max_gap_fill_frames`` but deliberately leaves wider ones
+    unfilled (a real, un-fabricated occlusion hold), so a track's
+    ``frames`` array can jump by dozens between two adjacent ARRAY
+    rows. A window-based smoother that ignores this and blends across
+    the boundary injects spurious curvature right at the seam — this
+    is a two-segment track, each segment PERFECTLY FLAT/constant
+    internally, so a correct (per-run) Savgol fit reproduces each
+    segment exactly; any deviation proves the window pulled in samples
+    from the other segment 10 m away."""
+    n1, n2 = 10, 10
+    frames = np.concatenate([
+        np.arange(0, n1, dtype=np.int64),
+        np.arange(0, n2, dtype=np.int64) + 50,  # real gap: frame 9 -> 50
+    ])
+    rt = np.concatenate([
+        np.tile([0.0, 0.0, 0.95], (n1, 1)),
+        np.tile([10.0, 0.0, 0.95], (n2, 1)),
+    ])
+    track = SmplWorldTrack(
+        player_id="P001",
+        frames=frames,
+        betas=np.zeros(10),
+        thetas=np.zeros((n1 + n2, 24, 3)),
+        root_R=np.tile(np.eye(3), (n1 + n2, 1, 1)),
+        root_t=rt,
+        confidence=np.ones(n1 + n2),
+        shot_id="play",
+    )
+    smoothed = _smooth_track(
+        track,
+        root_R_slerp_window=7,
+        root_t_savgol_window=7,
+        root_t_savgol_order=2,
+        thetas_savgol_window=1,
+    )
+    np.testing.assert_allclose(smoothed.root_t[:n1], rt[:n1], atol=1e-9)
+    np.testing.assert_allclose(smoothed.root_t[n1:], rt[n1:], atol=1e-9)
+
+
 # ── Stage-level integration tests ───────────────────────────────────
 
 

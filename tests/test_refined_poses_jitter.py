@@ -31,6 +31,7 @@ from src.stages.refined_poses import (
     RefinedPosesStage,
     _apply_jitter_correction,
     _apply_residual_consensus_correction,
+    _smooth_offset_signal,
 )
 
 
@@ -533,6 +534,145 @@ def test_residual_consensus_preserves_individual_motion() -> None:
             fixed.root_t[interior, :2] - truth_i[interior, :2], axis=1,
         )
         assert float(np.max(delta)) < 0.02
+
+
+# ── Offset-signal smoothing (Wave-4c root-acceleration fix) ─────────
+#
+# Diagnosis (docs/superpowers/specs/2026-09-02-foot-contact-locomotion-
+# design.md follow-up): the residual-consensus pass's cumulative offset
+# was only defined at the frames whose per-iteration gate happened to
+# fire -- a comb, not a continuous signal. Subtracting that comb from
+# every player's root_t injected a real fps²-scaled acceleration spike
+# into EVERY player, including ones whose own track had no artifact at
+# that moment (measured on gberch: P002/P003 root_acc_max rose from
+# ~100/136 to ~500/500 m/s² after this pass alone). _smooth_offset_signal
+# densifies/smooths/bounds the offset BEFORE it is applied.
+
+
+@pytest.mark.unit
+def test_smooth_offset_signal_bounds_step_acceleration() -> None:
+    """A literal step in the sparse trigger dict (0 held, then jumping
+    straight to 0.5 and holding again, each plateau well longer than
+    the ease/smoothing windows) must not survive into the applied
+    signal as a discontinuity: the offset's OWN frame-to-frame |Δ²|,
+    scaled to m/s², must stay under max_offset_accel_m_s2 (with a small
+    numerical margin for the forward/backward limiter), and the
+    plateau's interior (away from the ease-to-zero domain edges) must
+    still carry the correction at close to full strength -- this is a
+    smoothness fix, not a strength cut."""
+    fps = 25.0
+    cumulative: dict[int, np.ndarray] = {}
+    for f in range(0, 30):
+        cumulative[f] = np.array([0.0, 0.0])
+    for f in range(30, 90):
+        cumulative[f] = np.array([0.5, 0.0])  # instantaneous step, held well past the ease window
+
+    applied = _smooth_offset_signal(
+        cumulative,
+        fps=fps,
+        smooth_window_s=0.2,
+        max_offset_accel_m_s2=60.0,
+        edge_ease_frames=5,
+    )
+    frames = sorted(applied.keys())
+    vals = np.stack([applied[f] for f in frames])
+    accel = (vals[2:] - 2.0 * vals[1:-1] + vals[:-2]) * (fps ** 2)
+    mags = np.linalg.norm(accel, axis=1)
+    assert mags.max() < 60.0 * 1.25, (
+        f"offset signal's own acceleration ({mags.max():.1f} m/s^2) "
+        f"was not bounded near the configured cap"
+    )
+    # Well inside the plateau (away from both domain edges, which
+    # legitimately ease toward zero) the correction is still present at
+    # close to full strength.
+    assert float(np.linalg.norm(applied[60])) > 0.3
+
+
+@pytest.mark.unit
+def test_smooth_offset_signal_empty_and_single_key() -> None:
+    assert _smooth_offset_signal(
+        {}, fps=25.0, smooth_window_s=0.2, max_offset_accel_m_s2=60.0,
+        edge_ease_frames=5,
+    ) == {}
+    single = _smooth_offset_signal(
+        {7: np.array([0.3, -0.1])}, fps=25.0, smooth_window_s=0.2,
+        max_offset_accel_m_s2=60.0, edge_ease_frames=5,
+    )
+    assert set(single.keys()) == {7}
+    np.testing.assert_allclose(single[7], [0.3, -0.1])
+
+
+@pytest.mark.unit
+def test_residual_consensus_correction_bounds_root_acceleration() -> None:
+    """The real Wave-4c failure mode: a SMOOTH common-mode wobble (a
+    real camera never teleports) detected through UNEVEN per-frame
+    trigger coverage, because players occasionally drop below the
+    fresh-anchor confidence floor at scattered frames (occlusion
+    flicker) -- so the sparse per-iteration ``cumulative`` dict this
+    pass used to apply directly was a comb (defined at some frames,
+    silently absent at their immediate neighbours). Subtracting that
+    comb from every player's root_t injected a real fps²-scaled
+    acceleration spike into all of them (measured on gberch:
+    P002/P003 root_acc_max rose from ~100/136 to ~500/500 m/s² from
+    this pass alone). After the fix, no player's corrected root_t
+    should show a spike far above max_offset_accel_m_s2."""
+    fps = 25.0
+    n = 120
+    rng = np.random.default_rng(7)
+    velocities = [
+        (0.20, 0.00), (-0.18, 0.05), (0.10, 0.15),
+        (0.05, -0.20), (-0.12, -0.08), (0.00, 0.18),
+    ]
+    starts = [
+        (10.0, 30.0), (60.0, 25.0), (40.0, 45.0),
+        (20.0, 10.0), (75.0, 50.0), (35.0, 60.0),
+    ]
+    t = np.arange(n) / fps
+    wobble = np.column_stack([
+        0.10 * np.sin(2 * np.pi * 3.0 * t),
+        0.10 * np.cos(2 * np.pi * 3.0 * t),
+        np.zeros(n),
+    ])
+    tracks = []
+    for i, (s, v) in enumerate(zip(starts, velocities)):
+        truth = np.column_stack([
+            s[0] + np.arange(n) * v[0], s[1] + np.arange(n) * v[1],
+            np.full(n, 0.95),
+        ])
+        rt = truth + wobble
+        conf = np.full(n, 1.0)
+        # Scattered occlusion flicker: ~35% of this player's frames
+        # drop below the fresh-anchor floor, independently per player,
+        # so any given frame's contributor count is unpredictable --
+        # exactly the "some frames trigger, immediate neighbours
+        # don't" comb pattern.
+        drop = rng.random(n) < 0.35
+        conf[drop] = 0.1
+        tracks.append(_make_track(
+            player_id=f"P{i + 1:03d}", shot_id="play", root_t=rt,
+            confidence=conf,
+        ))
+
+    corrected, stats = _apply_residual_consensus_correction(
+        tracks,
+        fps=fps,
+        enabled=True,
+        savgol_window_s=1.2,
+        savgol_poly=2,
+        min_players=3,
+        min_offset_m=0.0,
+    )
+    assert stats["corrected_frames"] > 0
+
+    max_dv_allowed = 60.0  # default residual_max_offset_accel_m_s2
+    for fixed in corrected:
+        pos = np.asarray(fixed.root_t, dtype=float)
+        accel = (pos[2:] - 2.0 * pos[1:-1] + pos[:-2]) * (fps ** 2)
+        mags = np.linalg.norm(accel, axis=1)
+        assert mags.max() < max_dv_allowed * 2.5, (
+            f"corrected track still shows a {mags.max():.1f} m/s^2 "
+            f"spike from the offset signal"
+        )
 
 
 # ── Stage-level integration test ────────────────────────────────────

@@ -94,7 +94,9 @@ def _stat_block(values: np.ndarray) -> dict:
     }
 
 
-def _root_accel_stats(root_t: np.ndarray, fps: float) -> tuple[float, float]:
+def _root_accel_stats(
+    root_t: np.ndarray, fps: float, frames: np.ndarray | None = None,
+) -> tuple[float, float]:
     """``(p99, max)`` magnitude of ``root_t``'s second finite difference,
     converted from metres/frame² to metres/second² via ``fps**2``.
 
@@ -107,6 +109,21 @@ def _root_accel_stats(root_t: np.ndarray, fps: float) -> tuple[float, float]:
     independently governed by the ground-snap/foot-lock/penetration-guard
     passes, so a healthy track keeps this low regardless of which axis a
     residual spike would show up on.
+
+    ``frames``, when given, is the real VIDEO frame number for each
+    ``root_t`` row. ``refined_poses.cleanup`` densifies gaps up to
+    ``max_gap_fill_frames`` but deliberately leaves wider ones unfilled
+    (a multi-second occlusion hole becomes a keyframe hold, not a
+    fabricated glide), so two adjacent ARRAY rows can legitimately be
+    dozens of real frames apart. A central difference computed across
+    that boundary and scaled by ``fps**2`` (which assumes every row is
+    exactly ``1/fps`` seconds from its neighbours) reports a fictitious
+    "acceleration" for what is, over the real elapsed time, ordinary
+    motion — the same reason ``skate`` above is measured only WITHIN a
+    contiguous run and never across a run boundary. Any 3-row window
+    that isn't fully consecutive in ``frames`` is skipped rather than
+    scored. ``frames=None`` keeps the old whole-track behaviour (assumes
+    uniform 1/fps spacing throughout), for callers without frame numbers.
     """
     n = int(np.asarray(root_t).shape[0])
     if n < 3 or fps <= 0:
@@ -114,22 +131,42 @@ def _root_accel_stats(root_t: np.ndarray, fps: float) -> tuple[float, float]:
     pos = np.asarray(root_t, dtype=float)
     accel = (pos[2:] - 2.0 * pos[1:-1] + pos[:-2]) * (float(fps) ** 2)
     mags = np.linalg.norm(accel, axis=1)
+    if frames is not None:
+        f = np.asarray(frames, dtype=np.int64)
+        contiguous = (np.diff(f) == 1)
+        # accel[i] uses rows (i, i+1, i+2) -> needs diffs[i] and diffs[i+1].
+        valid = contiguous[:-1] & contiguous[1:]
+        mags = mags[valid]
+        if mags.size == 0:
+            return 0.0, 0.0
     return float(np.percentile(mags, 99)), float(mags.max())
 
 
-def _foot_speed_max(feet_pos: np.ndarray, fps: float) -> float:
+def _foot_speed_max(
+    feet_pos: np.ndarray, fps: float, frames: np.ndarray | None = None,
+) -> float:
     """Max unconstrained FK foot-joint speed (m/s) across both feet and
     every consecutive frame pair -- deliberately NOT gated to stance/
     swing state (unlike ``skate``, which is measured only within contact
     spans). A super-physical root pop corrupts the WHOLE body including
     the feet, so this is the harness's raw kinematic-plausibility check:
     a real human foot never needs to move at 23 m/s, in stance or not.
+
+    ``frames``, when given, excludes the one gap between consecutive
+    ARRAY rows that are not actually adjacent VIDEO frames -- see
+    ``_root_accel_stats``'s docstring for why (a real, un-fabricated
+    occlusion hold left by ``refined_poses.cleanup``, not a genuine
+    single-frame foot displacement).
     """
     n = int(feet_pos.shape[0])
     if n < 2 or fps <= 0:
         return 0.0
     d = np.diff(feet_pos, axis=0)  # (F-1, 2, 3)
     speeds = np.linalg.norm(d, axis=2) * float(fps)  # (F-1, 2)
+    if frames is not None:
+        f = np.asarray(frames, dtype=np.int64)
+        contiguous = (np.diff(f) == 1)
+        speeds = speeds[contiguous]
     return float(speeds.max()) if speeds.size else 0.0
 
 
@@ -269,11 +306,11 @@ def foot_quality_metrics(
     flight = {"pct_frames_both_up": float(100.0 * both_up.mean())}
 
     # --- smoothness (super-physical pop regression tracking) -----------
-    root_acc_p99, root_acc_max = _root_accel_stats(root_t, fps)
+    root_acc_p99, root_acc_max = _root_accel_stats(root_t, fps, frames=frames)
     smoothness = {
         "root_acc_p99_m_s2": root_acc_p99,
         "root_acc_max_m_s2": root_acc_max,
-        "foot_speed_max_mps": _foot_speed_max(feet_pos, fps),
+        "foot_speed_max_mps": _foot_speed_max(feet_pos, fps, frames=frames),
     }
 
     out: dict = {

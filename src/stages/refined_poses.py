@@ -517,6 +517,38 @@ def _load_track_contacts(
     return _contacts_to_global(contacts, raw_frames)
 
 
+def _frame_run_bounds(frames: np.ndarray) -> list[tuple[int, int]]:
+    """Contiguous ``[start, end)`` index ranges where consecutive FRAME
+    NUMBERS advance by exactly 1.
+
+    ``_clean_player_translation`` densifies gaps up to
+    ``max_gap_fill_frames`` but deliberately leaves wider ones unfilled
+    (a multi-second occlusion hole becomes a keyframe hold, not a
+    fabricated glide) — so a track's ``frames`` array can legitimately
+    jump by dozens of frames between two adjacent ARRAY positions. Any
+    window-based filter that treats array position as if it were
+    uniformly-spaced time (Savgol, SLERP-window) will blend samples
+    across that real gap as though they were one frame apart, injecting
+    spurious curvature right at the seam — this is what the real
+    frame-number gap looks like when a downstream metric or smoother
+    ignores it. Splitting into per-run segments here and smoothing each
+    independently keeps every filter window inside genuinely
+    contiguous, uniformly-sampled data.
+    """
+    n = int(frames.shape[0])
+    if n == 0:
+        return []
+    diffs = np.diff(frames)
+    splits = np.where(diffs != 1)[0] + 1
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for s in splits:
+        bounds.append((start, int(s)))
+        start = int(s)
+    bounds.append((start, n))
+    return bounds
+
+
 def _smooth_track(
     track: SmplWorldTrack,
     *,
@@ -538,31 +570,41 @@ def _smooth_track(
     the edge taps never reach zero-padded un-anchored frames. Each
     window can be set to ``<= 1`` to disable that specific smoother
     (e.g. for tests or to leave a particular signal raw).
+
+    Applied PER CONTIGUOUS FRAME RUN (see ``_frame_run_bounds``) so a
+    window never spans a real, wider-than-``max_gap_fill_frames``
+    occlusion gap left unfilled by ``_clean_player_translation`` — on a
+    track with no such gap (the common case, and every existing
+    fixture/test here) this is a single run covering the whole track
+    and behaves exactly as before.
     """
     n = int(len(track.frames))
     if n == 0:
         return track
 
-    root_R = np.asarray(track.root_R)
-    root_t = np.asarray(track.root_t)
-    thetas = np.asarray(track.thetas)
+    root_R = np.asarray(track.root_R).copy()
+    root_t = np.asarray(track.root_t).copy()
+    thetas = np.asarray(track.thetas).copy()
+    frames_arr = np.asarray(track.frames, dtype=np.int64)
 
-    if root_R_slerp_window > 1 and n >= 3:
-        root_R = slerp_window(root_R, window=root_R_slerp_window)
-    if root_t_savgol_window > 1 and n >= root_t_savgol_window:
-        root_t = savgol_axis(
-            root_t,
-            window=root_t_savgol_window,
-            order=root_t_savgol_order,
-            axis=0,
-        )
-    if thetas_savgol_window > 1 and n >= thetas_savgol_window:
-        thetas = savgol_axis(
-            thetas,
-            window=thetas_savgol_window,
-            order=thetas_savgol_order,
-            axis=0,
-        )
+    for a, b in _frame_run_bounds(frames_arr):
+        m = b - a
+        if root_R_slerp_window > 1 and m >= 3:
+            root_R[a:b] = slerp_window(root_R[a:b], window=root_R_slerp_window)
+        if root_t_savgol_window > 1 and m >= root_t_savgol_window:
+            root_t[a:b] = savgol_axis(
+                root_t[a:b],
+                window=root_t_savgol_window,
+                order=root_t_savgol_order,
+                axis=0,
+            )
+        if thetas_savgol_window > 1 and m >= thetas_savgol_window:
+            thetas[a:b] = savgol_axis(
+                thetas[a:b],
+                window=thetas_savgol_window,
+                order=thetas_savgol_order,
+                axis=0,
+            )
 
     return SmplWorldTrack(
         player_id=track.player_id,
@@ -610,6 +652,23 @@ def _apply_jitter_correction(
 
     XY only — ``z`` is owned by the per-player ground-snap pass and
     is not touched here.
+
+    NOT offset-smoothed (unlike ``_apply_residual_consensus_correction``
+    below, see ``_smooth_offset_signal``) — deliberately. This pass's
+    detected offset is, by construction, a single- or few-frame
+    IMPULSE/step that exactly cancels an equally sharp shared artifact:
+    ``test_jitter_correction_cancels_transient_camera_shift`` requires
+    the correction to land within 1 cm of ground truth AT the spike
+    frame itself and be EXACTLY zero one frame before/after. Any
+    generic smoothing or offset-acceleration bound tight enough to
+    matter (< ~600 m/s² at 25 fps, given the tests' 0.5 m single-frame
+    swings) directly conflicts with that exact-correction contract, and
+    a bound loose enough not to conflict is loose enough to be a no-op
+    on any offset this pass would ever produce. On the validated gberch
+    dataset this pass never fires at all (only 3 players, below
+    ``min_players: 4``), so it wasn't part of the measured Wave-4c
+    root-acceleration regression — see the design doc's Wave-4c
+    follow-up note for the full analysis.
     """
     stats: dict = {
         "corrected_frames": 0,
@@ -743,6 +802,9 @@ def _apply_residual_consensus_correction(
     min_offset_m: float = 0.02,
     max_offset_m: float = 2.0,
     iterations: int = 2,
+    offset_smooth_window_s: float = 0.2,
+    max_offset_accel_m_s2: float = 60.0,
+    offset_edge_ease_frames: int = 5,
 ) -> tuple[list[SmplWorldTrack], dict]:
     """Subtract a per-frame XY common-mode offset from every player's
     ``root_t``. The offset at frame ``f`` is the cross-player median of
@@ -791,6 +853,14 @@ def _apply_residual_consensus_correction(
         of the remainder, a third another ~36 %). Two passes are
         usually enough to push residual error below the per-player
         HMR noise floor.
+    offset_smooth_window_s / max_offset_accel_m_s2 / offset_edge_ease_frames:
+        Applied to the FINAL cumulative offset (after all iterations),
+        before it is subtracted from any player — see
+        :func:`_smooth_offset_signal`. The per-frame trigger gate above
+        is untouched (detection stays bit-identical); only the signal
+        that gets applied is densified/smoothed/bounded, so a comb of
+        sparsely-triggered frames can no longer inject a fps²-scaled
+        acceleration spike into every player's root_t.
     """
     stats: dict = {
         "corrected_frames": 0,
@@ -857,11 +927,23 @@ def _apply_residual_consensus_correction(
     if not cumulative:
         return list(tracks), stats
 
+    # Densify + smooth + acceleration-bound the trigger dict before it
+    # ever touches a player's root_t (see _smooth_offset_signal) — the
+    # detection/gating above (which frames trigger, by how much) is
+    # unchanged; only the applied signal differs.
+    applied = _smooth_offset_signal(
+        cumulative,
+        fps=fps,
+        smooth_window_s=offset_smooth_window_s,
+        max_offset_accel_m_s2=max_offset_accel_m_s2,
+        edge_ease_frames=offset_edge_ease_frames,
+    )
+
     new_tracks: list[SmplWorldTrack] = []
     for tr, frames in zip(tracks, frames_lst):
         rt = np.asarray(tr.root_t, dtype=np.float32).copy()
         for i, f in enumerate(frames):
-            off = cumulative.get(int(f))
+            off = applied.get(int(f))
             if off is None:
                 continue
             rt[i, 0] -= float(off[0])
@@ -877,10 +959,10 @@ def _apply_residual_consensus_correction(
             shot_id=tr.shot_id,
         ))
 
-    applied_mags = [float(np.linalg.norm(v)) for v in cumulative.values()]
-    stats["corrected_frames"] = len(cumulative)
-    stats["max_offset_m"] = float(max(applied_mags))
-    stats["mean_offset_m"] = float(np.mean(applied_mags))
+    applied_mags = [float(np.linalg.norm(v)) for v in applied.values() if np.any(v)]
+    stats["corrected_frames"] = len(applied)
+    stats["max_offset_m"] = float(max(applied_mags)) if applied_mags else 0.0
+    stats["mean_offset_m"] = float(np.mean(applied_mags)) if applied_mags else 0.0
     return new_tracks, stats
 
 
@@ -954,6 +1036,93 @@ def _accel_limit_xy(xy: np.ndarray, max_dv: float) -> np.ndarray:
     fwd = _limit(arr)
     bwd = _limit(arr[::-1])[::-1]
     return 0.5 * (fwd + bwd)
+
+
+def _edge_ease_weights(length: int, ease_frames: int) -> np.ndarray:
+    """Per-signal ease weight: 1 in the interior, linear 0->1 (and 1->0)
+    over ``ease_frames`` samples at each end. Mirrors
+    ``src.utils.foot_lock._ease_weights`` (kept as a tiny local copy
+    rather than a cross-module import of a private helper)."""
+    w = np.ones(length, dtype=np.float64)
+    e = max(int(ease_frames), 0)
+    if e <= 0 or length == 0:
+        return w
+    ramp = min(e, length)
+    for k in range(ramp):
+        w[k] = min(w[k], k / e)
+        idx = length - 1 - k
+        w[idx] = min(w[idx], k / e)
+    return w
+
+
+def _smooth_offset_signal(
+    cumulative: dict[int, np.ndarray],
+    *,
+    fps: float,
+    smooth_window_s: float,
+    max_offset_accel_m_s2: float,
+    edge_ease_frames: int,
+) -> dict[int, np.ndarray]:
+    """Turn a sparse per-frame trigger-offset dict into a dense, smooth,
+    acceleration-bounded correction signal.
+
+    Wave-4c diagnosis (docs/superpowers/specs/2026-09-02-foot-contact-
+    locomotion-design.md): a per-frame cumulative offset that is only
+    defined at the frames whose consensus gate happened to fire is
+    effectively a comb — some frames get the full correction, immediate
+    neighbours get none — and subtracting THAT from every player's
+    ``root_t`` injects a real (fps²-scaled) acceleration spike into
+    every one of them, including players whose own track had no
+    artifact at that moment. This turns the trigger dict into a signal
+    that cannot do that:
+
+      1. Linearly interpolate BY REAL FRAME NUMBER (``np.interp`` uses
+         the key values directly, so this is exact even across a gap in
+         the trigger frame numbers — unlike an array-position filter).
+      2. Ease to exactly zero over ``edge_ease_frames`` at both ends, so
+         entering/leaving the corrected span is itself smooth instead of
+         stepping from "no evidence" straight to a live correction.
+      3. Savgol low-pass over ``smooth_window_s`` to remove any residual
+         per-frame comb energy from the sparse trigger gate.
+      4. Hard-clamp the OFFSET SIGNAL'S OWN frame-to-frame acceleration
+         to ``max_offset_accel_m_s2`` via :func:`_accel_limit_xy`. This
+         is a bound on the correction itself, not on the corrected
+         track — by the triangle inequality, subtracting it can add at
+         most this much |accel| to any player's own root_acc, however
+         large or discontinuous that player's UNcorrected motion is.
+
+    Returns a dense dict covering every integer frame in
+    ``[min(cumulative), max(cumulative)]`` — frames outside that range
+    keep getting no correction, same as before (no evidence beyond the
+    outermost trigger, no offset).
+    """
+    if not cumulative:
+        return {}
+    keys = sorted(cumulative.keys())
+    if len(keys) == 1:
+        return dict(cumulative)
+    vals = np.stack([cumulative[k] for k in keys]).astype(np.float64)
+
+    f0, f1 = keys[0], keys[-1]
+    dense_frames = np.arange(f0, f1 + 1, dtype=np.int64)
+    dense = np.empty((dense_frames.shape[0], 2), dtype=np.float64)
+    for ax in range(2):
+        dense[:, ax] = np.interp(dense_frames, keys, vals[:, ax])
+
+    ease = _edge_ease_weights(dense.shape[0], edge_ease_frames)
+    dense = dense * ease[:, None]
+
+    window = max(3, int(round(smooth_window_s * fps)))
+    if window % 2 == 0:
+        window += 1
+    dense = savgol_axis(dense, window=window, order=2, axis=0)
+
+    max_dv = (
+        float(max_offset_accel_m_s2) / (float(fps) ** 2) if fps > 0 else float("inf")
+    )
+    dense = _accel_limit_xy(dense, max_dv)
+
+    return {int(f): dense[i] for i, f in enumerate(dense_frames)}
 
 
 def _hampel_outlier_mask(
@@ -1692,6 +1861,15 @@ class RefinedPosesStage(BaseStage):
             "min_offset_m": float(jitter_cfg.get("residual_min_offset_m", 0.02)),
             "max_offset_m": float(jitter_cfg.get("residual_max_offset_m", 2.0)),
             "iterations": int(jitter_cfg.get("residual_iterations", 2)),
+            "offset_smooth_window_s": float(
+                jitter_cfg.get("residual_offset_smooth_window_s", 0.2)
+            ),
+            "max_offset_accel_m_s2": float(
+                jitter_cfg.get("residual_max_offset_accel_m_s2", 60.0)
+            ),
+            "offset_edge_ease_frames": int(
+                jitter_cfg.get("residual_edge_ease_frames", 5)
+            ),
         }
 
         # fps drives the physical-unit cleanup + jitter passes; load it

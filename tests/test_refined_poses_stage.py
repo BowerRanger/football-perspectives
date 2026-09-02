@@ -13,24 +13,37 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from src.schemas.camera_track import CameraTrack
+from src.schemas.foot_contacts import save_foot_contacts
 from src.schemas.refined_pose import RefinedPose, RefinedPoseDiagnostics
 from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.sync_map import Alignment, GroupSync, SyncMap
 from src.stages.refined_poses import (
     RefinedPosesStage,
     _ANKLE_IN_ROOT,
+    _GlobalFootContacts,
     _beta_adjusted_rest_joints,
+    _clean_single_track,
+    _contacts_for_track,
+    _contacts_to_global,
     _foot_world_zs,
     _ground_snap,
+    _load_clip_fps,
     _load_smpl_neutral_model,
+    _load_track_contacts,
     _reduce_root_lean,
     _reject_root_R_outliers,
     _smooth_track,
 )
+from src.utils.foot_contact import ContactSpan, FootContacts
+from src.utils.foot_quality import foot_quality_metrics
+from src.utils.smpl_skeleton import compute_all_joint_worlds_batch
+from tests.helpers.synthetic_gait import contacts_from_truth, make_walk
 
 
 def _default_config() -> dict:
@@ -716,7 +729,18 @@ def test_refined_poses_ground_snap_reaches_saved_track(tmp_path: Path) -> None:
 
     Verification FK uses the same beta-adjusted rest joints the stage
     applied internally — so the snap target is checked against the
-    player's actual leg geometry, not mean-betas canonical."""
+    player's actual leg geometry, not mean-betas canonical.
+
+    A ``foot_contacts`` sidecar marks every frame in contact (both
+    feet) — the contact-aware ``_ground_snap`` (plan Task 6) only
+    snaps in-contact frames, and this fixture's body is static (no
+    velocity evidence an FK-derived fallback could use), so an explicit
+    sidecar is how a "planted the whole time" track is expressed here.
+    ``foot_lock`` is disabled to isolate ground-snap behavior from the
+    Task 8 finale (which has its own dedicated tests and — since its
+    ``sole_clearance_m`` default differs from ``ground_snap_target_z``
+    — would nudge the final z by a few mm beyond what this test means
+    to check)."""
     output_dir = tmp_path
     (output_dir / "hmr_world").mkdir()
     _write_sync_map(output_dir, ref="play", offsets={"play": 0})
@@ -737,11 +761,26 @@ def test_refined_poses_ground_snap_reaches_saved_track(tmp_path: Path) -> None:
         confidence=np.ones(n, dtype=np.float32),
         shot_id="play",
     ).save(output_dir / "hmr_world" / "play__P001_smpl_world.npz")
+    save_foot_contacts(
+        output_dir / "hmr_world" / "play__P001_foot_contacts.json",
+        FootContacts(
+            n_frames=n,
+            in_contact=np.ones((n, 2), dtype=bool),
+            quality=np.ones((n, 2)),
+            spans=(
+                ContactSpan(side=0, start=0, end=n, pin=np.array([10.0, 5.0, 0.02])),
+                ContactSpan(side=1, start=0, end=n, pin=np.array([10.0, 5.0, 0.02])),
+            ),
+        ),
+        shot_id="play", player_id="P001", anchor_mode="contact",
+    )
 
     # Use the stage's default ground-snap settings (target_z = 0.02 m,
-    # max_snap_distance = 0.30 m).
+    # max_snap_distance = 0.30 m); foot_lock finale disabled (see
+    # docstring above).
     RefinedPosesStage(
-        config={"refined_poses": {}}, output_dir=output_dir,
+        config={"refined_poses": {"foot_lock": {"enabled": False}}},
+        output_dir=output_dir,
     ).run()
     refined = RefinedPose.load(output_dir / "refined_poses" / "P001_refined.npz")
 
@@ -778,3 +817,453 @@ def test_refined_poses_diagnostics_round_trip(tmp_path: Path) -> None:
     assert diag.player_id == "P001"
     assert diag.contributing_shots == ("A",)
     assert diag.summary["total_frames"] == 5
+
+
+# ── Contact-aware ground-snap unit tests (plan Task 6) ──────────────
+
+
+@pytest.mark.unit
+def test_ground_snap_with_contacts_preserves_flight() -> None:
+    """A body floating uniformly 8 cm above its true stance height is
+    snapped ONLY during true-stance frames (per the synthetic walk's
+    ground truth); frames where neither foot is in contact are left
+    completely untouched — flight is preserved, not flattened."""
+    g = make_walk(n_frames=120)
+    lifted = g.root_t.copy()
+    lifted[:, 2] += 0.08
+    fc = contacts_from_truth(g)
+    snapped = _ground_snap(
+        g.root_R, lifted, g.thetas,
+        target_foot_z=0.02, max_snap_distance=0.30, rest_joints=None,
+        contacts=fc.in_contact,
+    )
+    fw = compute_all_joint_worlds_batch(g.thetas, g.root_R, snapped)
+    stance_z = fw[g.contacts_true[:, 0], 10, 2]
+    assert np.percentile(np.abs(stance_z - 0.02), 95) < 0.03
+
+    both_air = ~g.contacts_true.any(axis=1)
+    if both_air.any():
+        np.testing.assert_allclose(snapped[both_air], lifted[both_air])
+
+
+@pytest.mark.unit
+def test_ground_snap_without_contacts_is_legacy() -> None:
+    """``contacts=None`` (the default) reproduces the exact pre-existing
+    blanket behavior — identical whether the kwarg is passed explicitly
+    or omitted, and identical to the pre-Task-6 always-lower-foot snap."""
+    R = _tilted_root_R(0.0, 0.0)
+    n = 5
+    pelvis_z = 0.15 + 0.939
+    t = np.tile([10.0, 5.0, pelvis_z], (n, 1))
+    thetas = np.zeros((n, 24, 3))
+    root_R = np.tile(R, (n, 1, 1))
+
+    kwargs = dict(target_foot_z=0.02, max_snap_distance=0.30, rest_joints=None)
+    explicit_none = _ground_snap(root_R, t, thetas, contacts=None, **kwargs)
+    omitted = _ground_snap(root_R, t, thetas, **kwargs)
+    np.testing.assert_array_equal(explicit_none, omitted)
+
+    l_z, r_z = _foot_world_zs(thetas[0], root_R[0], explicit_none[0])
+    assert min(l_z, r_z) == pytest.approx(0.02, abs=1e-3)
+
+
+# ── Global-frame-keyed contacts unit tests (plan Task 6+8 alignment) ─
+
+
+@pytest.mark.unit
+def test_global_contacts_in_contact_for_range_semantics() -> None:
+    """A densified frame NUMBER that was never part of the original
+    array-position span (e.g. a gap-filled frame between two truly
+    observed neighbours) still resolves as in-contact when it falls
+    inside the span's GLOBAL frame-number range — this is the core
+    guarantee that lets contact state survive
+    ``_clean_player_translation`` densification."""
+    # Raw track has frames [10, 11, 14, 15] (a gap at 12, 13) and a
+    # detected span spanning every ARRAY POSITION [0, 4) for side 0.
+    raw_frames = np.array([10, 11, 14, 15], dtype=np.int64)
+    fc = FootContacts(
+        n_frames=4,
+        in_contact=np.array([[True, False]] * 4),
+        quality=np.ones((4, 2)),
+        spans=(ContactSpan(side=0, start=0, end=4, pin=np.zeros(3)),),
+    )
+    gc = _contacts_to_global(fc, raw_frames)
+    assert gc.spans == ((0, 10, 16),)  # raw_frames[0]=10 .. raw_frames[3]+1=16
+
+    # A densified frame grid covering the gap: 10..15 inclusive,
+    # INCLUDING 12 and 13, which never appeared in the raw array.
+    dense_frames = np.arange(10, 16)
+    in_contact = gc.in_contact_for(dense_frames)
+    np.testing.assert_array_equal(in_contact[:, 0], [True] * 6)
+    np.testing.assert_array_equal(in_contact[:, 1], [False] * 6)
+
+
+@pytest.mark.unit
+def test_global_contacts_survive_trim_reindexing() -> None:
+    """After a leading/trailing trim removes array positions, the SAME
+    global-frame contacts still resolve correctly against the trimmed
+    frames array — no separate re-basing/shift step needed, which is
+    the whole point of frame-NUMBER (rather than array-position)
+    keying."""
+    raw_frames = np.arange(0, 10, dtype=np.int64)
+    fc = FootContacts(
+        n_frames=10,
+        in_contact=np.zeros((10, 2), dtype=bool),
+        quality=np.zeros((10, 2)),
+        spans=(ContactSpan(side=1, start=3, end=7, pin=np.zeros(3)),),
+    )
+    gc = _contacts_to_global(fc, raw_frames)
+    assert gc.spans == ((1, 3, 7),)
+
+    trimmed_frames = raw_frames[2:9]  # frames [2..8]
+    in_contact = gc.in_contact_for(trimmed_frames)
+    expected = (trimmed_frames >= 3) & (trimmed_frames < 7)
+    np.testing.assert_array_equal(in_contact[:, 1], expected)
+    assert not in_contact[:, 0].any()
+
+    # _contacts_for_track rebuilds valid ARRAY-position spans against
+    # the trimmed frames (the convention src.utils.foot_lock.lock_feet_ik
+    # still expects).
+    track_fc = _contacts_for_track(gc, trimmed_frames)
+    assert len(track_fc.spans) == 1
+    span = track_fc.spans[0]
+    assert span.side == 1
+    np.testing.assert_array_equal(
+        trimmed_frames[span.start:span.end], np.array([3, 4, 5, 6]),
+    )
+
+
+@pytest.mark.unit
+def test_contacts_for_track_empty_when_no_contacts() -> None:
+    """``_contacts_for_track(None, frames)`` returns a valid empty
+    FootContacts rather than raising — the finale's ``lock_feet_ik``
+    call must be safe even when no contacts were ever found."""
+    frames = np.arange(5, dtype=np.int64)
+    fc = _contacts_for_track(None, frames)
+    assert fc.n_frames == 5
+    assert fc.spans == ()
+    assert not fc.in_contact.any()
+
+
+# ── Stage wiring: sidecar priority + trim survival (plan Task 6) ────
+
+
+@pytest.mark.integration
+def test_stage_prefers_sidecar_over_fk_fallback(tmp_path: Path) -> None:
+    """When a foot_contacts sidecar exists, it drives the contact-aware
+    ground-snap verbatim — even on a fixture where the FK-derived
+    fallback (driven purely by speed + height) would find ZERO contact
+    (the body slides horizontally fast enough that
+    ``derive_contacts_from_fk``'s hysteresis never enters stance)."""
+    output_dir = tmp_path
+    (output_dir / "hmr_world").mkdir()
+    _write_sync_map(output_dir, ref="play", offsets={"play": 0})
+
+    R = _tilted_root_R(0.0, 0.0)
+    n = 10
+    initial_foot_z = 0.15
+    pelvis_z = initial_foot_z + 0.939
+    frames = np.arange(n, dtype=np.int64)
+    # 25 m/s horizontal slide (1.0 m/frame @ 25 fps default) — far
+    # above derive_contacts_from_fk's default speed_exit_m_s=1.2, so
+    # the FK fallback alone would never register stance here.
+    root_t = np.column_stack([
+        10.0 + frames.astype(float) * 1.0,
+        np.full(n, 5.0),
+        np.full(n, pelvis_z),
+    ])
+    SmplWorldTrack(
+        player_id="P001", frames=frames, betas=np.zeros(10, dtype=np.float32),
+        thetas=np.zeros((n, 24, 3)), root_R=np.tile(R, (n, 1, 1)),
+        root_t=root_t, confidence=np.ones(n, dtype=np.float32), shot_id="play",
+    ).save(output_dir / "hmr_world" / "play__P001_smpl_world.npz")
+    save_foot_contacts(
+        output_dir / "hmr_world" / "play__P001_foot_contacts.json",
+        FootContacts(
+            n_frames=n,
+            in_contact=np.ones((n, 2), dtype=bool),
+            quality=np.ones((n, 2)),
+            spans=(
+                ContactSpan(side=0, start=0, end=n, pin=np.zeros(3)),
+                ContactSpan(side=1, start=0, end=n, pin=np.zeros(3)),
+            ),
+        ),
+        shot_id="play", player_id="P001", anchor_mode="contact",
+    )
+
+    RefinedPosesStage(
+        config={"refined_poses": {"foot_lock": {"enabled": False}}},
+        output_dir=output_dir,
+    ).run()
+    refined = RefinedPose.load(output_dir / "refined_poses" / "P001_refined.npz")
+
+    rest = _beta_adjusted_rest_joints(
+        np.zeros(10, dtype=np.float32), _load_smpl_neutral_model(),
+    )
+    l_z, r_z = _foot_world_zs(
+        refined.thetas[0], refined.root_R[0], refined.root_t[0], rest_joints=rest,
+    )
+    assert min(l_z, r_z) == pytest.approx(0.02, abs=2e-3)
+
+
+@pytest.mark.integration
+def test_contact_indices_survive_trim(tmp_path: Path) -> None:
+    """A foot_contacts sidecar covering the FULL pre-trim track still
+    drives the contact-aware ground-snap correctly on the TRIMMED span
+    — Task 6's global-frame-number keying means the leading/trailing
+    trim inside ``_clean_single_track`` needs no separate re-basing
+    step for the contacts to stay valid."""
+    output_dir = tmp_path
+    (output_dir / "hmr_world").mkdir()
+    _write_sync_map(output_dir, ref="play", offsets={"play": 0})
+
+    n = 20
+    leading, trailing = 4, 3
+    anchored_n = n - leading - trailing
+    confidence = np.array(
+        [0.1] * leading + [0.9] * anchored_n + [0.1] * trailing, dtype=np.float32,
+    )
+    R = _tilted_root_R(0.0, 0.0)
+    initial_foot_z = 0.15
+    pelvis_z = initial_foot_z + 0.939
+    frames = np.arange(n, dtype=np.int64)
+    SmplWorldTrack(
+        player_id="P001", frames=frames, betas=np.zeros(10, dtype=np.float32),
+        thetas=np.zeros((n, 24, 3)), root_R=np.tile(R, (n, 1, 1)),
+        root_t=np.tile([10.0, 5.0, pelvis_z], (n, 1)),
+        confidence=confidence, shot_id="play",
+    ).save(output_dir / "hmr_world" / "play__P001_smpl_world.npz")
+    save_foot_contacts(
+        output_dir / "hmr_world" / "play__P001_foot_contacts.json",
+        FootContacts(
+            n_frames=n,
+            in_contact=np.ones((n, 2), dtype=bool),
+            quality=np.ones((n, 2)),
+            spans=(
+                ContactSpan(side=0, start=0, end=n, pin=np.zeros(3)),
+                ContactSpan(side=1, start=0, end=n, pin=np.zeros(3)),
+            ),
+        ),
+        shot_id="play", player_id="P001", anchor_mode="contact",
+    )
+
+    RefinedPosesStage(
+        config={"refined_poses": {"foot_lock": {"enabled": False}}},
+        output_dir=output_dir,
+    ).run()
+    refined = RefinedPose.load(output_dir / "refined_poses" / "P001_refined.npz")
+    assert len(refined.frames) == anchored_n
+    assert int(refined.frames[0]) == leading
+
+    rest = _beta_adjusted_rest_joints(
+        np.zeros(10, dtype=np.float32), _load_smpl_neutral_model(),
+    )
+    for i in range(anchored_n):
+        l_z, r_z = _foot_world_zs(
+            refined.thetas[i], refined.root_R[i], refined.root_t[i], rest_joints=rest,
+        )
+        assert min(l_z, r_z) == pytest.approx(0.02, abs=2e-3)
+
+
+# ── Foot-lock finale (plan Task 8) ───────────────────────────────────
+
+
+def write_synthetic_hmr_world_fixture(
+    tmp_path: Path,
+    *,
+    shot_id: str = "play",
+    player_id: str = "P001",
+    n_frames: int = 150,
+    fps: float = 25.0,
+    speed: float = 1.2,
+    stride_s: float = 1.0,
+    noise_scale: float = 0.03,
+    seed: int = 0,
+) -> SimpleNamespace:
+    """Write a synthetic hmr_world track (analytic walk + a noisy
+    carrier root standing in for imperfect upstream extraction), its
+    foot_contacts sidecar (ground truth, via
+    ``tests.helpers.synthetic_gait.contacts_from_truth``), a sync_map,
+    and a minimal camera_track.json (for fps) — everything
+    ``RefinedPosesStage.run()`` needs to exercise the full contact-aware
+    snap + foot-lock finale pipeline on a single-shot, single-player
+    fixture. Returns the fixture's identifying fields for assertions.
+    """
+    g = make_walk(n_frames=n_frames, fps=fps, speed=speed, stride_s=stride_s)
+    rng = np.random.default_rng(seed)
+    noisy_root_t = g.root_t + rng.normal(0.0, noise_scale, g.root_t.shape)
+
+    (tmp_path / "hmr_world").mkdir(parents=True, exist_ok=True)
+    SmplWorldTrack(
+        player_id=player_id,
+        frames=g.frames,
+        betas=g.betas.astype(np.float32),
+        thetas=g.thetas.astype(np.float32),
+        root_R=g.root_R.astype(np.float32),
+        root_t=noisy_root_t.astype(np.float32),
+        confidence=np.ones(n_frames, dtype=np.float32),
+        shot_id=shot_id,
+    ).save(tmp_path / "hmr_world" / f"{shot_id}__{player_id}_smpl_world.npz")
+
+    fc = contacts_from_truth(g)
+    save_foot_contacts(
+        tmp_path / "hmr_world" / f"{shot_id}__{player_id}_foot_contacts.json",
+        fc, shot_id=shot_id, player_id=player_id, anchor_mode="contact",
+    )
+
+    _write_sync_map(tmp_path, ref=shot_id, offsets={shot_id: 0})
+
+    CameraTrack(
+        clip_id=shot_id, fps=fps, image_size=(1920, 1080),
+        t_world=[0.0, 0.0, 0.0], frames=(),
+    ).save(tmp_path / "camera" / "camera_track.json")
+
+    return SimpleNamespace(shot_id=shot_id, player_id=player_id, fps=fps, gait=g)
+
+
+@pytest.mark.integration
+def test_stage_foot_lock_reduces_skate_and_clears_penetration(tmp_path: Path) -> None:
+    """Plan Task 8's acceptance test: a synthetic walk with a noisy
+    carrier root, run through the full stage with the foot-lock finale
+    enabled, comes back with stance-foot skate and sole penetration
+    both within the design's acceptance bounds (spec §6), and the
+    summary/diagnostics record real finale work.
+
+    ``smooth_thetas_window: 1`` disables the (unrelated) per-frame
+    thetas Savgol pass: ``make_walk``'s 2-link sagittal IK legitimately
+    produces an axis-angle magnitude that unwraps past +-pi once per
+    gait cycle (e.g. hip theta -7.0 -> -0.8 rad between two adjacent
+    frames — the SAME rotation, ~-0.8 mod 2pi, but a huge jump in the
+    raw numeric vector). A plain per-element Savgol filter isn't
+    rotation-aware and produces garbage output straddling that jump.
+    That is a property of the fixture's IK construction interacting
+    with an orthogonal smoothing pass this test isn't exercising — this
+    fixture only injects noise into ``root_t`` (the "noisy carrier
+    root" the plan describes), so disabling theta smoothing keeps the
+    test focused on what contact-aware snap + foot-lock are meant to
+    fix without tripping over it."""
+    fixture = write_synthetic_hmr_world_fixture(tmp_path)
+    RefinedPosesStage(
+        output_dir=tmp_path,
+        config={
+            "refined_poses": {
+                "foot_lock": {"enabled": True},
+                "smooth_thetas_window": 1,
+            },
+        },
+    ).run()
+
+    rp = RefinedPose.load(
+        tmp_path / "refined_poses" / f"{fixture.player_id}_refined.npz"
+    )
+    # No trim/sync-offset/cleanup-densification happened for this
+    # single-shot, single-player, offset=0 fixture, so rp.frames is
+    # exactly the gait's own frame array — the ground-truth contact
+    # mask lines up 1:1. Measuring skate against the TRUE stance spans
+    # (rather than foot_quality_metrics' z<0.10 fallback proxy) avoids
+    # diluting the measurement with genuine high-speed swing frames
+    # that also dip below 10cm near touchdown/liftoff.
+    np.testing.assert_array_equal(rp.frames, fixture.gait.frames)
+    # Measure penetration against the SAME beta-adjusted rest joints the
+    # stage's penetration_guard enforced internally (data/models/
+    # smpl_neutral.npz's per-joint offsets from the SMPL_REST_JOINTS_YUP
+    # constant reach ~1-2cm at the ankle/foot even at betas=0) — a
+    # mismatched rest table would compare the guard's guarantee against
+    # a geometry it was never enforcing.
+    rest = _beta_adjusted_rest_joints(rp.betas, _load_smpl_neutral_model())
+    m = foot_quality_metrics(
+        frames=rp.frames, betas=rp.betas, thetas=rp.thetas,
+        root_R=rp.root_R, root_t=rp.root_t, fps=fixture.fps,
+        contacts=fixture.gait.contacts_true, rest_joints=rest,
+    )
+    assert m["skate"]["L"]["mean_mps"] < 0.3
+    assert m["skate"]["R"]["mean_mps"] < 0.3
+    # penetration_guard's raise-only guarantee holds to float64
+    # precision internally, but the saved track round-trips through
+    # float32 (~1e-7 relative precision at these pitch-metre
+    # magnitudes) — max_depth_cm is the physically meaningful check
+    # (spec's "max < 1cm" bound, cleared here by six orders of
+    # magnitude) and pct_frames_sole_below_0 is dominated by frames
+    # sitting within float32 rounding noise of the exact zero-deficit
+    # boundary rather than genuine penetration.
+    assert m["penetration"]["max_depth_cm"] < 0.01
+    assert m["penetration"]["pct_frames_sole_below_0"] < 20.0
+
+    summary = json.loads(
+        (tmp_path / "refined_poses" / "refined_poses_summary.json").read_text()
+    )
+    assert summary["foot_lock"]["enabled"] is True
+    assert summary["foot_lock"]["spans_locked"] > 0
+
+    diag = RefinedPoseDiagnostics.load(
+        tmp_path / "refined_poses" / f"{fixture.player_id}_diagnostics.json"
+    )
+    assert "foot_lock" in diag.summary
+    assert diag.summary["foot_lock"]["spans_locked"] > 0
+
+
+@pytest.mark.integration
+def test_stage_foot_lock_disabled_matches_previous_pipeline(tmp_path: Path) -> None:
+    """``foot_lock.enabled: false`` skips the finale entirely — the
+    saved track exactly matches independently replaying the SAME
+    pre-finale pipeline steps (clean + smooth, using the SAME loaded
+    contacts) the stage itself runs internally, and the
+    summary/diagnostics record nothing was locked."""
+    fixture = write_synthetic_hmr_world_fixture(tmp_path)
+    refined_cfg = {
+        "lean_correction_factor": 0.0,
+        "lean_max_correction_deg": 0.0,
+        "ground_snap_target_z": 0.02,
+        "ground_snap_max_distance": 0.30,
+        "cleanup": {"enabled": False},
+        "jitter": {"enabled": False},
+        "foot_lock": {"enabled": False},
+    }
+    RefinedPosesStage(
+        config={"refined_poses": refined_cfg}, output_dir=tmp_path,
+    ).run()
+    refined = RefinedPose.load(
+        tmp_path / "refined_poses" / f"{fixture.player_id}_refined.npz"
+    )
+
+    raw = SmplWorldTrack.load(
+        tmp_path / "hmr_world"
+        / f"{fixture.shot_id}__{fixture.player_id}_smpl_world.npz"
+    )
+    fps = _load_clip_fps(tmp_path)
+    gc = _load_track_contacts(
+        tmp_path / "hmr_world", fixture.shot_id, fixture.player_id, raw, fps,
+    )
+    cleaned, _ = _clean_single_track(
+        raw,
+        lean_correction_factor=0.0,
+        lean_max_correction_deg=0.0,
+        ground_snap_target_z=0.02,
+        ground_snap_max_distance=0.30,
+        smpl_model=_load_smpl_neutral_model(),
+        smoothing=None,
+        cleanup={"enabled": False},
+        contacts=gc,
+    )
+    cleaned = _smooth_track(cleaned)
+
+    np.testing.assert_allclose(refined.root_t, cleaned.root_t, atol=1e-6)
+    np.testing.assert_allclose(refined.thetas, cleaned.thetas, atol=1e-6)
+
+    summary = json.loads(
+        (tmp_path / "refined_poses" / "refined_poses_summary.json").read_text()
+    )
+    assert summary["foot_lock"] == {
+        "enabled": False,
+        "spans_locked": 0,
+        "spans_skipped": 0,
+        "mean_pin_err_m_before": 0.0,
+        "mean_pin_err_m_after": 0.0,
+        "max_root_corr_m": 0.0,
+        "frames_raised": 0,
+        "max_raise_cm": 0.0,
+    }
+    diag = RefinedPoseDiagnostics.load(
+        tmp_path / "refined_poses" / f"{fixture.player_id}_diagnostics.json"
+    )
+    assert "foot_lock" not in diag.summary

@@ -29,17 +29,21 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 
 from src.pipeline.base import BaseStage
+from src.schemas.foot_contacts import load_foot_contacts
 from src.schemas.refined_pose import (
     RefinedPose,
     RefinedPoseDiagnostics,
 )
 from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.sync_map import SyncMap
+from src.utils.foot_contact import ContactSpan, FootContacts, derive_contacts_from_fk
+from src.utils.foot_lock import lock_feet_ik, penetration_guard
 from src.utils.pose_fusion import so3_chordal_mean, so3_geodesic_distance
 from src.utils.smpl_skeleton import (
     SMPL_JOINT_NAMES,
@@ -294,9 +298,10 @@ def _ground_snap(
     target_foot_z: float = 0.02,
     max_snap_distance: float = 0.30,
     rest_joints: np.ndarray | None = None,
+    contacts: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Shift each frame's ``root_t.z`` so the lower foot joint sits at
-    ``target_foot_z`` above the pitch.
+    """Shift each frame's ``root_t.z`` so the lower (or in-contact) foot
+    joint sits at ``target_foot_z`` above the pitch.
 
     The upstream foot anchor in ``hmr_world`` places the body so its
     **canonical-rest-pose** mid-ankle midpoint lands at z = 0.05. But
@@ -310,25 +315,206 @@ def _ground_snap(
     positive offset ``target_foot_z`` (a few cm above z = 0 because
     the SMPL foot *joint* sits above the sole of the mesh).
 
-    Frames where the lower foot is more than ``max_snap_distance``
-    above the pitch are assumed airborne (jump, header) and skipped —
-    yanking those down would mangle the motion. ``root_R`` and
-    ``thetas`` are unchanged; only translation moves.
+    Frames where the lower (or in-contact) foot is more than
+    ``max_snap_distance`` above the pitch are assumed airborne (jump,
+    header) and skipped — yanking those down would mangle the motion.
+    ``root_R`` and ``thetas`` are unchanged; only translation moves.
+
+    Args:
+        contacts: optional ``(F, 2)`` bool ``[L, R]`` per-frame
+            in-contact mask (e.g. ``FootContacts.in_contact``, or the
+            frame-number-resolved equivalent this stage builds from a
+            ``{shot}__{pid}_foot_contacts.json`` sidecar / FK-derived
+            fallback — see ``_GlobalFootContacts.in_contact_for``).
+            When given, ONLY frames where at least one foot is flagged
+            in-contact are snapped, and the target is the lowest of
+            just the in-contact foot/feet (not the blanket lower foot)
+            — frames with neither foot in contact are left completely
+            untouched, preserving genuine flight phases. ``contacts is
+            None`` (the default) reproduces the original blanket
+            behavior EXACTLY, unchanged from before this parameter
+            existed — every existing caller that doesn't pass
+            ``contacts`` keeps its prior byte-identical output.
     """
     n = root_R.shape[0]
     if n == 0 or max_snap_distance <= 0.0:
         return root_t.copy()
+    contacts_arr = None if contacts is None else np.asarray(contacts, dtype=bool)
     out_t = np.asarray(root_t, dtype=float).copy()
     for i in range(n):
         l_z, r_z = _foot_world_zs(
             thetas[i], root_R[i], out_t[i], rest_joints=rest_joints,
         )
-        lowest = min(l_z, r_z)
+        if contacts_arr is None:
+            lowest = min(l_z, r_z)
+        else:
+            active_l, active_r = bool(contacts_arr[i, 0]), bool(contacts_arr[i, 1])
+            if not active_l and not active_r:
+                continue  # neither foot in contact — flight, leave alone
+            candidates = [z for z, on in ((l_z, active_l), (r_z, active_r)) if on]
+            lowest = min(candidates)
         if lowest > max_snap_distance:
             continue  # airborne — leave alone
         delta = float(target_foot_z) - lowest
         out_t[i, 2] += delta
     return out_t
+
+
+# ---------------------------------------------------------------------
+# Global-frame-keyed contacts.
+#
+# The ``{shot}__{pid}_foot_contacts.json`` sidecar (and a fresh
+# ``derive_contacts_from_fk`` fallback result) both express spans as
+# ARRAY POSITIONS into the SPECIFIC hmr_world track they were computed
+# from (see ``src.utils.foot_contact.ContactSpan``'s docstring). This
+# stage reindexes/densifies that track repeatedly on its way to the
+# saved RefinedPose — leading/trailing trim in ``_clean_single_track``,
+# gap-fill densification in ``_clean_player_translation``, sync-offset
+# remapping in ``_assemble_player`` — so a span expressed as array
+# positions goes stale the moment any of those run.
+#
+# ``_contacts_to_global`` converts ONCE, immediately after loading/
+# deriving, to a GLOBAL FRAME NUMBER half-open range per span
+# (``raw_frames[start]`` .. ``raw_frames[end - 1] + 1``). From then on,
+# every downstream pass resolves contact state by frame NUMBER via
+# :meth:`_GlobalFootContacts.in_contact_for`, which works against ANY
+# array of frame numbers — trimmed, gap-fill-densified, or otherwise —
+# with no positional bookkeeping required. A gap-fill-densified frame
+# that was never physically observed still correctly inherits contact
+# when it falls inside a span's numeric range: a linearly-interpolated
+# frame between two truly-planted neighbours is itself part of the
+# same stance.
+# ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _GlobalFootContacts:
+    """Per-foot contact spans keyed by GLOBAL FRAME NUMBER (not
+    hmr_world track-array position) — see the section docstring above.
+    """
+
+    spans: tuple[tuple[int, int, int], ...]  # (side, start_frame, end_frame), half-open
+
+    def in_contact_for(self, frames: np.ndarray) -> np.ndarray:
+        """``(len(frames), 2)`` bool ``[L, R]`` — True wherever the
+        global frame NUMBER at that position falls inside some span's
+        ``[start_frame, end_frame)`` range."""
+        frames_arr = np.asarray(frames, dtype=np.int64)
+        out = np.zeros((frames_arr.shape[0], 2), dtype=bool)
+        for side, start_f, end_f in self.spans:
+            out[(frames_arr >= start_f) & (frames_arr < end_f), side] = True
+        return out
+
+
+def _contacts_to_global(
+    contacts: FootContacts, raw_frames: np.ndarray,
+) -> _GlobalFootContacts:
+    """Convert a track-array-position ``FootContacts`` (a freshly
+    loaded sidecar, or a fresh ``derive_contacts_from_fk`` result) into
+    the global-frame-keyed representation, using ``raw_frames`` — the
+    SAME track's own ``frames`` array the contacts were computed
+    against — to translate each span's array positions into frame
+    numbers."""
+    raw = np.asarray(raw_frames, dtype=np.int64)
+    n = int(raw.shape[0])
+    spans: list[tuple[int, int, int]] = []
+    for span in contacts.spans:
+        s, e = max(0, int(span.start)), min(n, int(span.end))
+        if e <= s:
+            continue
+        spans.append((int(span.side), int(raw[s]), int(raw[e - 1]) + 1))
+    return _GlobalFootContacts(spans=tuple(spans))
+
+
+def _contacts_for_track(
+    contacts: _GlobalFootContacts | None, frames: np.ndarray,
+) -> FootContacts:
+    """Rebuild a ``FootContacts`` at the CURRENT track's array
+    positions from the global-frame representation, for consumers
+    (``src.utils.foot_lock.lock_feet_ik``) that still expect the
+    original array-position ``ContactSpan`` convention.
+
+    Each span's array-position range is located via ``searchsorted`` of
+    its global frame-number range into ``frames`` — correct regardless
+    of internal gaps, since it finds the position of the first/last
+    frame NUMBER inside the range rather than assuming a 1:1
+    index<->frame-number correspondence.
+
+    ``pin`` is a placeholder (zeros): ``lock_feet_ik`` re-derives its
+    own pin fresh from the CURRENT track's FK (median foot-joint XY
+    over the span) and ignores ``ContactSpan.pin`` entirely — see its
+    docstring. ``in_contact``/``quality`` are populated from the same
+    range membership for completeness/debuggability, though
+    ``lock_feet_ik`` does not read them.
+    """
+    frames_arr = np.asarray(frames, dtype=np.int64)
+    n = int(frames_arr.shape[0])
+    if contacts is None or n == 0:
+        return FootContacts(
+            n_frames=n, in_contact=np.zeros((n, 2), dtype=bool),
+            quality=np.zeros((n, 2)), spans=(),
+        )
+    in_contact = contacts.in_contact_for(frames_arr)
+    quality = np.where(in_contact, 1.0, 0.0)
+    spans: list[ContactSpan] = []
+    for side, start_f, end_f in contacts.spans:
+        start_pos = int(np.searchsorted(frames_arr, start_f, side="left"))
+        end_pos = int(np.searchsorted(frames_arr, end_f, side="left"))
+        if end_pos <= start_pos:
+            continue  # span doesn't overlap this track's frame range
+        spans.append(ContactSpan(
+            side=side, start=start_pos, end=end_pos, pin=np.zeros(3),
+        ))
+    spans.sort(key=lambda s: (s.start, s.side))
+    return FootContacts(
+        n_frames=n, in_contact=in_contact, quality=quality, spans=tuple(spans),
+    )
+
+
+def _load_track_contacts(
+    hmr_dir: Path,
+    shot_id: str,
+    player_id: str,
+    track: SmplWorldTrack,
+    fps: float,
+) -> _GlobalFootContacts | None:
+    """Load the ``{shot}__{pid}_foot_contacts.json`` sidecar written by
+    ``hmr_world`` for this RAW (pre-clean) track, falling back to
+    :func:`src.utils.foot_contact.derive_contacts_from_fk` when no
+    sidecar exists (legacy npz predating the sidecar) or the sidecar
+    fails to parse (corrupt/foreign file — tolerated with a warning,
+    same as absence, rather than aborting the stage). Returns ``None``
+    only for an empty track (nothing to derive contacts from).
+    """
+    sidecar = hmr_dir / f"{shot_id}__{player_id}_foot_contacts.json"
+    contacts: FootContacts | None = None
+    if sidecar.exists():
+        try:
+            contacts, _meta = load_foot_contacts(sidecar)
+        except ValueError as exc:
+            logger.warning(
+                "[refined_poses] %s: foot_contacts sidecar unreadable "
+                "(%s) — falling back to FK-derived contacts",
+                sidecar.name, exc,
+            )
+    else:
+        logger.debug(
+            "[refined_poses] no foot_contacts sidecar for %s/%s — "
+            "falling back to FK-derived contacts", shot_id, player_id,
+        )
+
+    raw_frames = np.asarray(track.frames, dtype=np.int64)
+    if contacts is None:
+        if raw_frames.shape[0] == 0:
+            return None
+        contacts = derive_contacts_from_fk(
+            thetas=np.asarray(track.thetas, dtype=float),
+            root_R=np.asarray(track.root_R, dtype=float),
+            root_t=np.asarray(track.root_t, dtype=float),
+            betas=np.asarray(track.betas, dtype=float),
+            fps=fps,
+        )
+    return _contacts_to_global(contacts, raw_frames)
 
 
 def _smooth_track(
@@ -960,6 +1146,88 @@ def _clean_refined_translation(
     return out, stats
 
 
+def _apply_foot_lock_finale(
+    tr: SmplWorldTrack,
+    contacts: _GlobalFootContacts | None,
+    *,
+    fps: float,
+    rest_joints: np.ndarray,
+    target_foot_z: float,
+    ik_max_joint_delta_deg: float,
+    max_residual_correction_m: float,
+    edge_ease_frames: int,
+    sole_clearance_m: float,
+) -> tuple[SmplWorldTrack, dict]:
+    """Foot-lock IK + penetration-guard finale (plan Task 8, spec
+    §2[D]). Meant to run on the FINAL smoothed track, per (shot,
+    player), after every other cleanup/smoothing pass and before
+    ``_assemble_player`` — nothing may modify thetas/root_t afterward.
+
+    Re-pins each stance span — ``contacts`` resolved to THIS track's
+    own frame positions via :func:`_contacts_for_track` — via
+    ``src.utils.foot_lock.lock_feet_ik``, then guarantees zero sole
+    penetration via ``src.utils.foot_lock.penetration_guard``.
+    ``penetration_guard`` runs unconditionally (even when ``contacts``
+    is ``None``/empty — it is a raise-only safety net independent of
+    contact spans). ``root_R`` is never modified by either pass.
+    """
+    stats = {
+        "spans_locked": 0,
+        "spans_skipped": 0,
+        "mean_pin_err_m_before": 0.0,
+        "mean_pin_err_m_after": 0.0,
+        "max_root_corr_m": 0.0,
+        "frames_raised": 0,
+        "max_raise_cm": 0.0,
+    }
+    n = int(len(tr.frames))
+    if n == 0:
+        return tr, stats
+
+    track_contacts = _contacts_for_track(contacts, tr.frames)
+    thetas2, root_t2, ik_stats = lock_feet_ik(
+        thetas=np.asarray(tr.thetas, dtype=np.float64),
+        root_R=np.asarray(tr.root_R, dtype=np.float64),
+        root_t=np.asarray(tr.root_t, dtype=np.float64),
+        betas=np.asarray(tr.betas, dtype=np.float64),
+        contacts=track_contacts,
+        fps=fps,
+        target_foot_z=target_foot_z,
+        ik_max_joint_delta_deg=ik_max_joint_delta_deg,
+        max_residual_correction_m=max_residual_correction_m,
+        edge_ease_frames=edge_ease_frames,
+        rest_joints=rest_joints,
+    )
+    root_t3, guard_stats = penetration_guard(
+        thetas=thetas2,
+        root_R=np.asarray(tr.root_R, dtype=np.float64),
+        root_t=root_t2,
+        betas=np.asarray(tr.betas, dtype=np.float64),
+        sole_clearance_m=sole_clearance_m,
+        rest_joints=rest_joints,
+    )
+
+    stats["spans_locked"] = int(ik_stats["spans_locked"])
+    stats["spans_skipped"] = int(ik_stats["spans_skipped"])
+    stats["mean_pin_err_m_before"] = float(ik_stats["mean_pin_err_m_before"])
+    stats["mean_pin_err_m_after"] = float(ik_stats["mean_pin_err_m_after"])
+    stats["max_root_corr_m"] = float(ik_stats["max_root_corr_m"])
+    stats["frames_raised"] = int(guard_stats["frames_raised"])
+    stats["max_raise_cm"] = float(guard_stats["max_raise_cm"])
+
+    new_tr = SmplWorldTrack(
+        player_id=tr.player_id,
+        frames=tr.frames,
+        betas=tr.betas,
+        thetas=thetas2.astype(np.float32),
+        root_R=tr.root_R,
+        root_t=root_t3.astype(np.float32),
+        confidence=tr.confidence,
+        shot_id=tr.shot_id,
+    )
+    return new_tr, stats
+
+
 def _load_clip_fps(output_dir: Path) -> float:
     """Return the clip FPS from any available camera_track JSON, or
     25.0 when none has been written yet (e.g. unit-test fixtures)."""
@@ -986,6 +1254,7 @@ def _clean_single_track(
     smpl_model: dict | None = None,
     smoothing: dict | None = None,
     cleanup: dict | None = None,
+    contacts: _GlobalFootContacts | None = None,
 ) -> tuple[SmplWorldTrack, dict]:
     """Apply outlier rejection + lean reduction + leading/trailing trim.
 
@@ -999,6 +1268,12 @@ def _clean_single_track(
     Lean reduction is applied **before** the trim so all output frames
     carry the corrected orientation. ``lean_correction_factor=0`` (or
     ``lean_max_correction_deg=0``) effectively disables it.
+
+    ``contacts``, when given, is resolved against ``track.frames``
+    (this function's PRE-trim frame-number array — ground-snap runs
+    before the trim below) and passed to ``_ground_snap`` so the snap
+    is contact-gated rather than blanket; ``contacts=None`` keeps
+    ``_ground_snap``'s legacy blanket behavior.
     """
     root_R = np.asarray(track.root_R, dtype=float)
     root_R_fixed = _reject_root_R_outliers(root_R)
@@ -1016,11 +1291,16 @@ def _clean_single_track(
     # length, not mean-betas canonical (which is 8-10 cm too long for
     # typical players and leaves feet floating above the pitch).
     rest_joints = _beta_adjusted_rest_joints(track.betas, smpl_model)
+    contacts_bool = (
+        None if contacts is None
+        else contacts.in_contact_for(np.asarray(track.frames, dtype=np.int64))
+    )
     # Ground-snap: the hmr_world foot anchor uses the canonical
     # mid-ankle (which assumes both legs straight). For running /
     # walking players that midpoint sits halfway between the planted
     # and raised feet, so the planted foot floats off the pitch. Slide
-    # root_t.z per frame so the lower foot lands at ground level.
+    # root_t.z per frame so the lower (or in-contact) foot lands at
+    # ground level.
     root_t = _ground_snap(
         root_R_fixed,
         root_t,
@@ -1028,6 +1308,7 @@ def _clean_single_track(
         target_foot_z=ground_snap_target_z,
         max_snap_distance=ground_snap_max_distance,
         rest_joints=rest_joints,
+        contacts=contacts_bool,
     )
 
     frames = np.asarray(track.frames, dtype=np.int64)
@@ -1119,6 +1400,26 @@ class RefinedPosesStage(BaseStage):
         lean_max_deg = float(cfg.get("lean_max_correction_deg", 30.0))
         ground_target = float(cfg.get("ground_snap_target_z", 0.02))
         ground_max_dist = float(cfg.get("ground_snap_max_distance", 0.30))
+        # Foot-lock finale (plan Task 8): runs LAST, after all cleanup/
+        # smoothing, per single-shot (shot, player) track — see the
+        # "5b. FOOT-LOCK finale" block below. ``target_foot_z`` shares
+        # ground_snap_target_z so the finale's pin and the contact-aware
+        # snap agree on where a planted foot should sit.
+        foot_lock_cfg_raw = (cfg.get("foot_lock") or {})
+        foot_lock_enabled = bool(foot_lock_cfg_raw.get("enabled", True))
+        foot_lock_kwargs = {
+            "target_foot_z": ground_target,
+            "ik_max_joint_delta_deg": float(
+                foot_lock_cfg_raw.get("ik_max_joint_delta_deg", 10.0)
+            ),
+            "max_residual_correction_m": float(
+                foot_lock_cfg_raw.get("max_residual_correction_m", 0.15)
+            ),
+            "edge_ease_frames": int(foot_lock_cfg_raw.get("edge_ease_frames", 3)),
+            "sole_clearance_m": float(
+                foot_lock_cfg_raw.get("sole_clearance_m", 0.025)
+            ),
+        }
         smoothing = {
             "root_R_slerp_window": int(cfg.get("smooth_root_R_window", 7)),
             "root_t_savgol_window": int(cfg.get("smooth_root_t_window", 7)),
@@ -1191,9 +1492,21 @@ class RefinedPosesStage(BaseStage):
             "assembly_rejected_frames": 0,
             "assembly_clamped_frames": 0,
         }
+        # Per-(shot, player) foot contacts (Task 6+8's global-frame-keyed
+        # representation — see ``_GlobalFootContacts``), loaded from the
+        # hmr_world sidecar or FK-derived as a fallback, on the RAW
+        # (pre-clean) track. Stored by (shot_id, pid) so both the
+        # contact-gated ground-snap below AND the foot-lock finale
+        # after assembly-prep can resolve contact state against
+        # whatever frame-number array their own stage of the track
+        # holds (survives trim + gap-fill densification unchanged).
+        contacts_by_key: dict[tuple[str, str], _GlobalFootContacts | None] = {}
         cleaned_by_shot: dict[str, list[tuple[str, SmplWorldTrack]]] = {}
         for pid, contribs in per_player.items():
             for shot_id, track in contribs:
+                contacts_by_key[(shot_id, pid)] = _load_track_contacts(
+                    hmr_dir, shot_id, pid, track, fps,
+                )
                 cleaned, c_stats = _clean_single_track(
                     track,
                     lean_correction_factor=lean_factor,
@@ -1203,6 +1516,7 @@ class RefinedPosesStage(BaseStage):
                     smpl_model=smpl_model,
                     smoothing=None,
                     cleanup=cleanup_kwargs,
+                    contacts=contacts_by_key[(shot_id, pid)],
                 )
                 cleanup_summary["filled_frames"] += int(c_stats["filled_frames"])
                 cleanup_summary["rejected_frames"] += int(c_stats["rejected_frames"])
@@ -1301,6 +1615,65 @@ class RefinedPosesStage(BaseStage):
                     tr = _smooth_track(tr, **smoothing)
                 prepared_per_player.setdefault(pid, []).append((shot_id, tr))
 
+        # 5b. FOOT-LOCK finale (plan Task 8) — immediately after smoothing,
+        # before assembly, per (shot, player). Only SINGLE-shot players
+        # run it: multi-shot merged players skip the finale entirely
+        # (documented limitation — the cross-shot fusion redesign is a
+        # separate concern; their track continues through the pre-Task-8
+        # pipeline unchanged). Nothing downstream may touch thetas/root_t
+        # after this — single-shot ``_assemble_player`` is pass-through.
+        foot_lock_summary = {
+            "enabled": foot_lock_enabled,
+            "spans_locked": 0,
+            "spans_skipped": 0,
+            "mean_pin_err_m_before": 0.0,
+            "mean_pin_err_m_after": 0.0,
+            "max_root_corr_m": 0.0,
+            "frames_raised": 0,
+            "max_raise_cm": 0.0,
+        }
+        foot_lock_by_pid: dict[str, dict] = {}
+        if foot_lock_enabled:
+            err_before_wsum = 0.0
+            err_after_wsum = 0.0
+            err_weight = 0
+            for pid, items in prepared_per_player.items():
+                if len(items) != 1:
+                    continue  # multi-shot: finale skipped (documented limitation)
+                shot_id, tr = items[0]
+                if int(len(tr.frames)) == 0:
+                    continue
+                rest_joints = _beta_adjusted_rest_joints(tr.betas, smpl_model)
+                new_tr, fl_stats = _apply_foot_lock_finale(
+                    tr,
+                    contacts_by_key.get((shot_id, pid)),
+                    fps=fps,
+                    rest_joints=rest_joints,
+                    **foot_lock_kwargs,
+                )
+                prepared_per_player[pid] = [(shot_id, new_tr)]
+                foot_lock_by_pid[pid] = fl_stats
+                foot_lock_summary["spans_locked"] += fl_stats["spans_locked"]
+                foot_lock_summary["spans_skipped"] += fl_stats["spans_skipped"]
+                foot_lock_summary["frames_raised"] += fl_stats["frames_raised"]
+                foot_lock_summary["max_root_corr_m"] = max(
+                    foot_lock_summary["max_root_corr_m"], fl_stats["max_root_corr_m"],
+                )
+                foot_lock_summary["max_raise_cm"] = max(
+                    foot_lock_summary["max_raise_cm"], fl_stats["max_raise_cm"],
+                )
+                if fl_stats["spans_locked"] > 0:
+                    err_before_wsum += (
+                        fl_stats["mean_pin_err_m_before"] * fl_stats["spans_locked"]
+                    )
+                    err_after_wsum += (
+                        fl_stats["mean_pin_err_m_after"] * fl_stats["spans_locked"]
+                    )
+                    err_weight += fl_stats["spans_locked"]
+            if err_weight > 0:
+                foot_lock_summary["mean_pin_err_m_before"] = err_before_wsum / err_weight
+                foot_lock_summary["mean_pin_err_m_after"] = err_after_wsum / err_weight
+
         summary: dict = {
             "players_refined": 0,
             "single_shot_players": 0,
@@ -1309,12 +1682,17 @@ class RefinedPosesStage(BaseStage):
             "cleanup": cleanup_summary,
             "jitter": jitter_summary,
             "residual_consensus": residual_summary,
+            "foot_lock": foot_lock_summary,
         }
 
         # 5. Assemble each player on the reference timeline and save.
         for pid in sorted(prepared_per_player.keys()):
             contribs = prepared_per_player[pid]
             refined, diag = _assemble_player(pid, contribs, sync_map)
+            if pid in foot_lock_by_pid:
+                diag = replace(
+                    diag, summary={**diag.summary, "foot_lock": foot_lock_by_pid[pid]},
+                )
             distinct_shots = {sid for sid, _ in contribs}
             # Multi-shot assembly merges by per-frame highest-confidence
             # pick, which teleports a player between disagreeing camera

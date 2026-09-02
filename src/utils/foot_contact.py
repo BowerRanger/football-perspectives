@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
@@ -106,6 +107,8 @@ _FK_LOWER_FOOT_MARGIN_M = 0.05
 # (it exists precisely because that evidence is unavailable), so every
 # accepted frame gets the same fixed quality.
 _FK_FALLBACK_QUALITY = 1.0
+
+_EPS = 1e-9
 
 
 @dataclass(frozen=True)
@@ -304,12 +307,24 @@ def _build_spans(
     min_span_frames: int,
     max_pin_spread_m: float | None,
     force_pin_z: float | None,
+    extra_gate: Callable[[int, int, np.ndarray], bool] | None = None,
 ) -> tuple[np.ndarray, list[tuple[int, int, np.ndarray]]]:
     """Shared span-extraction step for one foot: contiguous ``gated``
     runs at least ``min_span_frames`` long become spans with a robust
     (nanmedian) pin over ``pos``, rejected if ``max_pin_spread_m`` is
     given and the p90 in-span spread around that pin exceeds it (the
     kick/false-stance defence).
+
+    ``extra_gate``, when given, is called as ``extra_gate(start, end,
+    pin)`` (``pin`` still carrying its raw ``pos``-derived z at this
+    point, before ``force_pin_z`` below) for every span that survives
+    the length/spread gates, and the span is rejected too when it
+    returns ``False``. This is the hook :func:`detect_contacts` uses
+    for its per-span confidence/quality/relative-noise gates
+    (:func:`_span_quality_ok`) — kept as an injected callback rather
+    than baked into this function's own parameter list so
+    :func:`derive_contacts_from_fk` (which has no ankle-confidence or
+    pixel-noise signal to gate on) is unaffected.
 
     Returns ``(accepted, spans)``: ``accepted`` is a fresh boolean mask
     with rejected/too-short runs zeroed out (the real per-frame
@@ -332,12 +347,84 @@ def _build_spans(
             spread = spread[np.isfinite(spread)]
             if spread.size and float(np.percentile(spread, 90)) > max_pin_spread_m:
                 continue
+        if extra_gate is not None and not extra_gate(start, end, pin):
+            continue
         if force_pin_z is not None:
             pin = pin.copy()
             pin[2] = force_pin_z
         accepted[start:end] = True
         spans.append((start, end, pin))
     return accepted, spans
+
+
+def _span_quality_ok(
+    start: int,
+    end: int,
+    pin: np.ndarray,
+    *,
+    ankle_conf_side: np.ndarray,
+    quality_side_raw: np.ndarray,
+    scale_side: np.ndarray,
+    pos_side: np.ndarray,
+    min_span_ankle_conf: float | None,
+    min_span_quality: float | None,
+    max_pin_spread_over_noise: float | None,
+    px_noise: float,
+) -> bool:
+    """Per-span quality floor gates for :func:`detect_contacts` — the
+    detection-side half of the two-sided false-pin fix (see
+    ``docs/superpowers/plans/2026-09-02-foot-contact-locomotion.md``'s
+    Wave 5 report). Marginal (far/small/occluded) players can produce
+    spans that pass the length + absolute-spread gates yet still carry
+    enough underlying ray-cast noise to leave several cm of residual
+    drift once ``solve_root_with_pins``/``lock_feet_ik`` try to pin
+    them — these three gates catch that BEFORE a span is ever pinned,
+    each independently disabled by passing ``None`` (matches this
+    module's ``None``-disables convention throughout):
+
+    - ``min_span_ankle_conf``: every frame in the span must have raw
+      COCO ankle confidence at least this high (a stricter floor than
+      the fixed ``_ANKLE_CONF_MIN`` frame-level ray-cast cutoff, which
+      only screens individual frames, not a whole span's reliability).
+    - ``min_span_quality``: the MEAN of the per-frame raw quality
+      signal (ankle confidence combined with speed-vs-exit-threshold
+      margin — the same formula the accepted-frame ``quality`` array
+      uses) over the span must clear this floor.
+    - ``max_pin_spread_over_noise``: the span's p90 XY ray-cast spread
+      around its own pin, RELATIVE to the local pixel-noise floor
+      (``px_noise * mean local metres-per-pixel scale`` — the same
+      scale :func:`_adaptive_speed_floors` converts into a speed
+      threshold), must not exceed this ratio. A span whose spread is
+      large only because it's a far player (large metres/px) survives
+      this gate (a genuinely stationary far player IS noisier in
+      absolute terms); a span whose spread is large relative to what
+      pure pixel jitter at that same distance would predict — evidence
+      of something beyond camera noise, e.g. an occlusion-corrupted
+      track or genuinely-still-moving limb — does not.
+    """
+    if min_span_ankle_conf is not None:
+        seg_conf = ankle_conf_side[start:end]
+        if seg_conf.size and float(seg_conf.min()) < min_span_ankle_conf:
+            return False
+    if min_span_quality is not None:
+        seg_q = quality_side_raw[start:end]
+        if seg_q.size and float(np.mean(seg_q)) < min_span_quality:
+            return False
+    if max_pin_spread_over_noise is not None:
+        seg_scale = scale_side[start:end]
+        finite_scale = seg_scale[np.isfinite(seg_scale)]
+        if finite_scale.size:
+            local_scale = float(np.mean(finite_scale))
+            noise_floor = px_noise * local_scale
+            if noise_floor > _EPS:
+                seg_xy = pos_side[start:end, :2]
+                spread_xy = np.linalg.norm(seg_xy - pin[:2], axis=1)
+                spread_xy = spread_xy[np.isfinite(spread_xy)]
+                if spread_xy.size:
+                    p90 = float(np.percentile(spread_xy, 90))
+                    if (p90 / noise_floor) > max_pin_spread_over_noise:
+                        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +618,11 @@ def detect_contacts(
             ``speed_exit_m_s``, ``min_span_frames``, ``max_pin_spread_m``,
             ``px_noise`` — see ``config/default.yaml``'s
             ``hmr_world.contact`` block, whose keys and defaults this
-            function's ``cfg.get`` calls mirror exactly.
+            function's ``cfg.get`` calls mirror exactly. Optionally also
+            ``min_span_ankle_conf``, ``min_span_quality``,
+            ``max_pin_spread_over_noise`` (all ``None``/absent by
+            default, i.e. disabled) — the per-span quality floors
+            :func:`_span_quality_ok` implements.
     """
     frame_indices = np.asarray(frame_indices)
     n = int(frame_indices.shape[0])
@@ -542,6 +633,17 @@ def detect_contacts(
     min_span_frames = int(cfg.get("min_span_frames", 4))
     max_pin_spread_m = float(cfg.get("max_pin_spread_m", 0.25))
     px_noise = float(cfg.get("px_noise", 2.0))
+    # Per-span quality floors (Wave 5) — None (absent/null, the default)
+    # disables each gate so a caller's existing cfg dict that predates
+    # these keys behaves identically to before.
+    _min_span_ankle_conf = cfg.get("min_span_ankle_conf")
+    min_span_ankle_conf = None if _min_span_ankle_conf is None else float(_min_span_ankle_conf)
+    _min_span_quality = cfg.get("min_span_quality")
+    min_span_quality = None if _min_span_quality is None else float(_min_span_quality)
+    _max_pin_spread_over_noise = cfg.get("max_pin_spread_over_noise")
+    max_pin_spread_over_noise = (
+        None if _max_pin_spread_over_noise is None else float(_max_pin_spread_over_noise)
+    )
 
     if n == 0:
         empty_bool = np.zeros((0, 2), dtype=bool)
@@ -602,14 +704,35 @@ def detect_contacts(
     quality = np.zeros((n, 2), dtype=float)
     spans: list[ContactSpan] = []
     for side in (0, 1):
+        v_exit_safe = np.where(v_exit_eff[:, side] > 0, v_exit_eff[:, side], 1.0)
+        q_raw = np.clip(
+            np.minimum(ankle_conf[:, side], 1.0 - v[:, side] / v_exit_safe), 0.0, 1.0,
+        )
+        ankle_conf_side = ankle_conf[:, side]
+        scale_side = scale[:, side]
+        pos_side = w_toe[:, side, :]
+
+        def _extra_gate(
+            start: int, end: int, pin: np.ndarray,
+            _conf: np.ndarray = ankle_conf_side, _q: np.ndarray = q_raw,
+            _scale: np.ndarray = scale_side, _pos: np.ndarray = pos_side,
+        ) -> bool:
+            return _span_quality_ok(
+                start, end, pin,
+                ankle_conf_side=_conf, quality_side_raw=_q,
+                scale_side=_scale, pos_side=_pos,
+                min_span_ankle_conf=min_span_ankle_conf,
+                min_span_quality=min_span_quality,
+                max_pin_spread_over_noise=max_pin_spread_over_noise,
+                px_noise=px_noise,
+            )
+
         accepted, side_spans = _build_spans(
             gated[:, side], w_toe[:, side, :], min_span_frames,
-            max_pin_spread_m, force_pin_z=_PIN_TARGET_Z,
+            max_pin_spread_m, force_pin_z=_PIN_TARGET_Z, extra_gate=_extra_gate,
         )
         in_contact[:, side] = accepted
-        v_exit_safe = np.where(v_exit_eff[:, side] > 0, v_exit_eff[:, side], 1.0)
-        q = np.minimum(ankle_conf[:, side], 1.0 - v[:, side] / v_exit_safe)
-        quality[:, side] = np.where(accepted, np.clip(q, 0.0, 1.0), 0.0)
+        quality[:, side] = np.where(accepted, q_raw, 0.0)
         for start, end, pin in side_spans:
             spans.append(ContactSpan(side=side, start=start, end=end, pin=pin))
 

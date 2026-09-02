@@ -442,6 +442,159 @@ def test_derive_contacts_from_fk_matches_truth_on_walk() -> None:
         assert np.linalg.norm(span.pin[:2] - true_xy) < 0.02
 
 
+# ===========================================================================
+# Wave 5: per-span quality floor gates (min_span_ankle_conf,
+# min_span_quality, max_pin_spread_over_noise)
+# ===========================================================================
+
+
+def test_min_span_ankle_conf_rejects_marginal_confidence_span() -> None:
+    """A span whose ankle confidence hovers just above the frame-level
+    ray-cast cutoff (_ANKLE_CONF_MIN=0.3) but below a stricter
+    min_span_ankle_conf survives with the gate off and is rejected with
+    it on — the rest of the walk (confidence 0.9) is unaffected either
+    way, so contact detection elsewhere in the track still fires."""
+    g = make_walk(n_frames=120)
+    K, R, t = _make_broadcast_camera()
+    fw = compute_all_joint_worlds_batch(g.thetas, g.root_R, g.root_t)
+    kp2d = _kp2d_from_walk(K, R, t, fw, conf=0.9)
+
+    # Depress confidence to 0.35 (above the 0.3 ray-cast floor, below a
+    # 0.5 span-level bar) for every frame of the FIRST true left-stance
+    # span only.
+    first_left = next(s for s in _true_spans(g.contacts_true[:, 0]))
+    mid = (first_left[0] + first_left[1]) // 2
+    kp2d[first_left[0]:first_left[1], 15, 2] = 0.35
+
+    cfg_off = _default_cfg()
+    fc_off = detect_contacts(
+        kp2d=kp2d, frame_indices=g.frames,
+        per_frame_K={int(f): K for f in g.frames},
+        per_frame_R={int(f): R for f in g.frames},
+        per_frame_t={int(f): t for f in g.frames},
+        distortion=(0.0, 0.0),
+        thetas=g.thetas, root_R=g.root_R, betas=g.betas, fps=g.fps,
+        cfg=cfg_off,
+    )
+    assert any(
+        s.side == 0 and s.start <= mid < s.end for s in fc_off.spans
+    ), "sanity: without the gate this span is detected"
+
+    cfg_on = {**_default_cfg(), "min_span_ankle_conf": 0.5}
+    fc_on = detect_contacts(
+        kp2d=kp2d, frame_indices=g.frames,
+        per_frame_K={int(f): K for f in g.frames},
+        per_frame_R={int(f): R for f in g.frames},
+        per_frame_t={int(f): t for f in g.frames},
+        distortion=(0.0, 0.0),
+        thetas=g.thetas, root_R=g.root_R, betas=g.betas, fps=g.fps,
+        cfg=cfg_on,
+    )
+    assert not any(
+        s.side == 0 and s.start <= mid < s.end for s in fc_on.spans
+    )
+
+
+def test_min_span_quality_rejects_low_quality_span() -> None:
+    """min_span_quality gates on the MEAN combined ankle-confidence /
+    speed-margin quality signal, not just raw confidence — depressing
+    confidence to a level that still passes min_span_ankle_conf but
+    drags the mean quality below the floor is enough to reject."""
+    g = make_walk(n_frames=120)
+    K, R, t = _make_broadcast_camera()
+    fw = compute_all_joint_worlds_batch(g.thetas, g.root_R, g.root_t)
+    kp2d = _kp2d_from_walk(K, R, t, fw, conf=0.9)
+
+    first_left = next(s for s in _true_spans(g.contacts_true[:, 0]))
+    mid = (first_left[0] + first_left[1]) // 2
+    kp2d[first_left[0]:first_left[1], 15, 2] = 0.4
+
+    cfg_on = {**_default_cfg(), "min_span_quality": 0.6}
+    fc_on = detect_contacts(
+        kp2d=kp2d, frame_indices=g.frames,
+        per_frame_K={int(f): K for f in g.frames},
+        per_frame_R={int(f): R for f in g.frames},
+        per_frame_t={int(f): t for f in g.frames},
+        distortion=(0.0, 0.0),
+        thetas=g.thetas, root_R=g.root_R, betas=g.betas, fps=g.fps,
+        cfg=cfg_on,
+    )
+    assert not any(
+        s.side == 0 and s.start <= mid < s.end for s in fc_on.spans
+    )
+
+
+def test_max_pin_spread_over_noise_rejects_relatively_noisy_far_span() -> None:
+    """On the far camera, injecting pixel noise produces surviving spans
+    (after the length/hysteresis/absolute-spread gates, the latter set
+    loose here) whose spread relative to the local pixel-noise floor is
+    still elevated (ratio ~0.9-1.1x — median-filtering upstream already
+    tames the raw ray-cast noise a lot, but not all the way back to a
+    genuinely-clean stance's near-zero ratio). A relative-spread gate
+    tight enough to catch that (well below 1x) rejects spans the
+    absolute gate alone would still accept; a loose one does not."""
+    g = make_walk(n_frames=120)
+    K, R, t = _make_far_camera()
+    fw = compute_all_joint_worlds_batch(g.thetas, g.root_R, g.root_t)
+    kp2d = _kp2d_from_walk(K, R, t, fw)
+
+    rng = np.random.default_rng(11)
+    kp2d[:, 15, :2] += rng.normal(0.0, 6.0, size=(120, 2))
+    kp2d[:, 16, :2] += rng.normal(0.0, 6.0, size=(120, 2))
+
+    cfg_loose_abs = {**_default_cfg(), "max_pin_spread_m": 5.0}
+    fc_off = detect_contacts(
+        kp2d=kp2d, frame_indices=g.frames,
+        per_frame_K={int(f): K for f in g.frames},
+        per_frame_R={int(f): R for f in g.frames},
+        per_frame_t={int(f): t for f in g.frames},
+        distortion=(0.0, 0.0),
+        thetas=g.thetas, root_R=g.root_R, betas=g.betas, fps=g.fps,
+        cfg=cfg_loose_abs,
+    )
+    assert len(fc_off.spans) > 0, "sanity: loose absolute gate lets spans through"
+
+    cfg_tight_rel = {**cfg_loose_abs, "max_pin_spread_over_noise": 0.5}
+    fc_tight = detect_contacts(
+        kp2d=kp2d, frame_indices=g.frames,
+        per_frame_K={int(f): K for f in g.frames},
+        per_frame_R={int(f): R for f in g.frames},
+        per_frame_t={int(f): t for f in g.frames},
+        distortion=(0.0, 0.0),
+        thetas=g.thetas, root_R=g.root_R, betas=g.betas, fps=g.fps,
+        cfg=cfg_tight_rel,
+    )
+    assert len(fc_tight.spans) < len(fc_off.spans)
+
+    cfg_loose_rel = {**cfg_loose_abs, "max_pin_spread_over_noise": 5.0}
+    fc_loose_rel = detect_contacts(
+        kp2d=kp2d, frame_indices=g.frames,
+        per_frame_K={int(f): K for f in g.frames},
+        per_frame_R={int(f): R for f in g.frames},
+        per_frame_t={int(f): t for f in g.frames},
+        distortion=(0.0, 0.0),
+        thetas=g.thetas, root_R=g.root_R, betas=g.betas, fps=g.fps,
+        cfg=cfg_loose_rel,
+    )
+    assert len(fc_loose_rel.spans) == len(fc_off.spans)
+
+
+def _true_spans(mask: np.ndarray) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    n = int(mask.shape[0])
+    i = 0
+    while i < n:
+        if mask[i]:
+            j = i
+            while j < n and mask[j]:
+                j += 1
+            runs.append((i, j))
+            i = j
+        else:
+            i += 1
+    return runs
+
+
 def test_derive_contacts_from_fk_empty_track() -> None:
     fc = derive_contacts_from_fk(
         thetas=np.zeros((0, 24, 3)), root_R=np.zeros((0, 3, 3)),

@@ -488,6 +488,60 @@ hmr_world:
     # toward the legacy carrier on long no-contact spans (flight,
     # occlusion) rather than holding a stale pin offset.
     decay_s: 0.6
+    # Per-span quality floors (Wave 5, fresh 22-player gberch
+    # extraction — docs/superpowers/plans/2026-09-02-foot-contact-
+    # locomotion.md's Wave 5 report). The Wave-4 gates above (min_span_
+    # frames, max_pin_spread_m) already filter obviously-bad spans; these
+    # three add per-span confidence/quality/relative-noise floors on top.
+    # None (absent/null) disables a gate.
+    #
+    # WAVE 5 EMPIRICAL FINDING (read before re-enabling min_span_ankle_conf
+    # / min_span_quality on this clip): swept both against every one of
+    # gberch's 173 raw candidate spans (scripts/reanchor_hmr_world.py +
+    # a direct detect_contacts sweep, see the Wave 5 report for the full
+    # table). Per-span min ankle-confidence and mean quality do NOT
+    # separate the 7 failing players (P004-P006/P016/P018/P019/P021) from
+    # the 15 passing ones on this clip — both groups span the same range
+    # (min confidence 0.30-0.85, mean quality 0.42-0.9+ throughout). Any
+    # threshold tight enough to bite at all (e.g. 0.4/0.45) cuts INTO the
+    # passing group instead: P001 dropped from 4 candidate spans to 1 and
+    # P017 (which only ever had ONE span) dropped to zero, while the
+    # worst offenders — P006, P019, P021 — were completely UNTOUCHED
+    # (their spans look statistically clean at the raw ray-cast level;
+    # the actual noise only shows up downstream, after refined_poses'
+    # cleanup/jitter/consensus passes touch the carrier — see
+    # foot_lock.resolved_pin_err_m below, which operates on exactly that
+    # post-processing signal and is what actually fixes gberch's seven
+    # failing players). Forcing either gate to a non-trivial value here
+    # would violate the "15 currently-passing players keep their spans"
+    # constraint for a gate that provides no compensating benefit on this
+    # data, so both are left disabled by default. The machinery is fully
+    # implemented and unit-tested (tests/test_foot_contact.py) for a
+    # clip where kp2d noise DOES correlate with span-level confidence/
+    # quality at the raw-detection stage — re-sweep per-clip before
+    # enabling, using the same before/after span-count comparison.
+    min_span_ankle_conf: null
+    # Minimum MEAN combined quality (ankle confidence x speed-margin,
+    # the same signal the accepted-frame quality array carries) across
+    # a candidate span. Same finding as min_span_ankle_conf above: the
+    # single worst-quality span on the entire clip (mean 0.424) belongs
+    # to a PASSING player (P009), a hair below the naive-looking 0.45
+    # default — any binding threshold here cuts a passer before it
+    # touches a failer. Left disabled for the same reason.
+    min_span_quality: null
+    # Maximum allowed ratio of a span's p90 XY ray-cast spread to its
+    # local pixel-noise floor (px_noise x local metres-per-pixel scale
+    # at that span, the same scale the adaptive speed floor above
+    # converts into a speed threshold). Unlike the two gates above, this
+    # one is NOT observed to be actively harmful on gberch: the highest
+    # ratio across all 173 real spans (both passing and failing players)
+    # is 1.56, so 3.5 never once fires here — it changes zero spans on
+    # this clip (verified) while remaining a real, tested ceiling for a
+    # clip whose far/small-player ray-cast noise is bad enough to
+    # actually approach it (occlusion-corrupted track, a limb that's
+    # still genuinely moving, etc — see max_pin_spread_over_noise's use
+    # in src/utils/foot_contact.py for the full rationale).
+    max_pin_spread_over_noise: 3.5
 
 ball:
   # Detector backend used by the in-stage detection pass. wasb is the
@@ -1036,6 +1090,54 @@ refined_poses:
     # for spans the clamps can't quite fully close rather than a value
     # actually being relied on frame to frame.
     skip_pin_err_m: 0.10
+    # Wave 5 "honest unlockable-span handling" — a SECOND, tighter
+    # tolerance on the same landed-pin residual skip_pin_err_m gates.
+    # A span whose clamped IK solve lands within skip_pin_err_m (so
+    # step 4 doesn't outright skip it) but NOT within this tighter bar
+    # is treated exactly like a skip for pose output (theta edits
+    # discarded) and — critically — EXCLUDED from the
+    # {pid}_resolved_contacts.json sidecar refined_poses persists, so
+    # scripts/eval_foot_quality.py's skate/contact_ratio metrics (which
+    # prefer that sidecar) never credit a span the pipeline couldn't
+    # actually verify as a stable stance. Rationale: false pinning is
+    # worse than honest free motion — see docs/superpowers/specs/
+    # 2026-09-02-foot-contact-locomotion-design.md's Wave 5 addendum.
+    # Must be <= skip_pin_err_m (clamped internally if not). Swept on
+    # gberch (0.05/0.06/0.07/0.08/0.10, see the Wave 5 report): this is
+    # the lever that actually resolves the seven originally-failing
+    # players — their per-span pin error only becomes visible AFTER
+    # refined_poses' cleanup/jitter/consensus passes touch the carrier
+    # (the raw hmr_world-level ray-cast statistics don't discriminate
+    # them at all, see min_span_ankle_conf's finding above), so this is
+    # a refined_poses-stage check, not a redundant restatement of the
+    # hmr_world gates. 0.06 is the tightest value that still resolves
+    # P001's single (and only) span — the one currently-passing player
+    # whose lone span's residual (max ~5.5 cm within an otherwise
+    # skip_pin_err_m=0.10-feasible solve) would otherwise be dropped to
+    # zero, which would violate the "15 passers keep their spans"
+    # constraint even though this is the honesty-check side of the fix
+    # (that constraint targets hmr_world's DETECTION gates specifically,
+    # but there is no reason to gratuitously fail a borderline passer
+    # here when a slightly looser bound both resolves it AND still
+    # excludes every one of the seven failing players' worst spans:
+    # their mean_pin_err_m_before ranges 0.055-0.106 m, all comfortably
+    # above 0.06). At 0.05 P001 dropped to zero resolved spans; values
+    # above 0.06 make no further difference until 0.08, where P019
+    # picks up one more span — 0.06 is the more conservative (tighter)
+    # of the two plateaus, so it's the setting checked in.
+    resolved_pin_err_m: 0.06
+    # Wave 5 honesty check, part 2: max_err (worst absolute distance
+    # from the pin) alone doesn't bound frame-to-frame VELOCITY within
+    # a span — a span can pass resolved_pin_err_m yet still contain one
+    # clamp-limited frame whose landed position sits far enough from
+    # its immediate neighbours to register as a skate spike (this is
+    # literally what happened to gberch P019 during the Wave 5 sweep:
+    # p95 skate spiked to ~1.2 m/s from a single mid-span frame ~5cm
+    # off its neighbours, comfortably inside the 0.06 resolved_pin_err_m
+    # bound above). Bounds the largest consecutive-frame displacement
+    # within a span directly. See src.utils.foot_lock.lock_feet_ik's
+    # resolved_max_step_m kwarg.
+    resolved_max_step_m: 0.02
 
 export:
   gltf_enabled: true

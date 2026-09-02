@@ -40,7 +40,12 @@ from typing import NamedTuple
 
 import numpy as np
 
-from src.utils.smpl_skeleton import SMPL_PARENTS, SMPL_REST_JOINTS_YUP
+from src.utils.foot_contact import ContactSpan, FootContacts
+from src.utils.smpl_skeleton import (
+    SMPL_PARENTS,
+    SMPL_REST_JOINTS_YUP,
+    compute_all_joint_worlds_batch,
+)
 
 # SMPL joint indices used by the leg chain (see CLAUDE.md: hips 1/2, knees
 # 4/5, ankles 7/8, feet(toes) 10/11).
@@ -252,4 +257,60 @@ def make_walk(
         betas=np.zeros(10, dtype=np.float64),
         contacts_true=contacts_true,
         fps=float(fps),
+    )
+
+
+def contacts_from_truth(gait: GaitTrack) -> FootContacts:
+    """Build an exact ``FootContacts`` from a :func:`make_walk` track's
+    ``contacts_true`` ground truth — the oracle fixture Task 4/7 tests
+    (``tests/test_foot_lock.py``) use in place of running the real
+    detector (``src.utils.foot_contact.detect_contacts``, a different
+    task's concern).
+
+    Spans are exactly the contiguous ``True`` runs of ``contacts_true``
+    per side. Each span's pin is the FOOT (toe, SMPL joint 10/11 — NOT
+    the ankle) world position, which module docstring establishes is
+    EXACTLY stationary during the analytic stance window by
+    construction (the sagittal 2-link IK solves for it every frame), so
+    the median over the span is bit-exact rather than an approximation
+    — hence "exact pins". This deliberately mirrors what
+    ``lock_feet_ik`` itself re-derives (median FK foot-joint XY per
+    span) rather than the ankle-plane convention
+    ``detect_contacts``/``solve_root_with_pins`` use, because the one
+    test that depends on this fixture's pin VALUE being independently
+    meaningful (``test_lock_feet_ik_lands_feet_on_pins``) compares
+    against the foot/toe joint, not the ankle. ``solve_root_with_pins``'s
+    own tests hold algebraically regardless of which joint the pin
+    numerically represents (the implied-root formula forces the ANKLE
+    to land exactly on whatever ``pin`` is, by construction), so reusing
+    the same foot-based pin here does not weaken those.
+
+    ``quality`` is 1.0 inside a span, 0.0 outside — this is ground
+    truth, there is no detection uncertainty to encode.
+    """
+    fw = compute_all_joint_worlds_batch(gait.thetas, gait.root_R, gait.root_t)
+    n = int(gait.frames.shape[0])
+    in_contact = np.asarray(gait.contacts_true, dtype=bool).copy()
+    quality = np.where(in_contact, 1.0, 0.0).astype(np.float64)
+
+    spans: list[ContactSpan] = []
+    for side in (0, 1):
+        mask = in_contact[:, side]
+        i = 0
+        while i < n:
+            if not mask[i]:
+                i += 1
+                continue
+            j = i
+            while j < n and mask[j]:
+                j += 1
+            foot_idx = _FOOT[side]
+            seg = fw[i:j, foot_idx, :]
+            pin = np.median(seg, axis=0)
+            spans.append(ContactSpan(side=side, start=i, end=j, pin=pin))
+            i = j
+
+    spans.sort(key=lambda s: (s.start, s.side))
+    return FootContacts(
+        n_frames=n, in_contact=in_contact, quality=quality, spans=tuple(spans),
     )

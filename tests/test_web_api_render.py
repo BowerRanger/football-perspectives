@@ -303,3 +303,29 @@ def test_render_stage_complete_requires_every_active_shot(client) -> None:
     beta_dir.mkdir(parents=True)
     (beta_dir / "broadcast.mp4").write_bytes(b"x")
     assert stage_complete() is True
+
+
+@pytest.mark.unit
+def test_render_stage_complete_respects_sidecar_camera_request(client) -> None:
+    """The dashboard's empty-config RenderStage() still resolves the
+    RenderSelection sidecar (operator input always wins), so requesting
+    an extra camera keeps the stage incomplete until that camera is
+    rendered too — camera-granularity completeness, not just "some mp4
+    exists"."""
+    c, out = client
+    from src.schemas.render_selection import RenderSelection
+    RenderSelection(shot_id="", cameras=("broadcast", "drone")).save(
+        out / "render" / "clip_render_selection.json"
+    )
+
+    def stage_complete():
+        body = c.get("/api/stages").json()
+        return next(s for s in body if s["name"] == "render")["complete"]
+
+    clip_dir = out / "render" / "clip"
+    clip_dir.mkdir(parents=True)
+    (clip_dir / "broadcast.mp4").write_bytes(b"x")
+    assert stage_complete() is False  # drone still requested but missing
+
+    (clip_dir / "drone.mp4").write_bytes(b"x")
+    assert stage_complete() is True

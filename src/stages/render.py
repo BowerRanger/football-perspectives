@@ -35,22 +35,15 @@ class RenderStage(BaseStage):
         # Mirrors ExportStage.is_complete (src/stages/export.py:218-227):
         # every active shot must have rendered output, not just SOME shot
         # anywhere under output/render — otherwise a multi-shot manifest
-        # with one rendered + one failed shot cache-skips forever. A
-        # shot "completed" here means its render dir
-        # (output/render/<shot.id>/, or output/render/clip/ for the
-        # legacy no-manifest single-shot layout) has at least one
-        # top-level mp4; per-requested-camera checking is not required.
-        render_dir = self.output_dir / "render"
+        # with one rendered + one failed shot cache-skips forever.
+        # Completeness is checked at CAMERA granularity via
+        # _missing_cameras: a shot missing any of its REQUESTED camera
+        # outputs (sidecar-aware) is incomplete, not just "has some mp4".
         manifest_path = self.output_dir / "shots" / "shots_manifest.json"
         if not manifest_path.exists():
-            legacy_dir = render_dir / "clip"
-            return legacy_dir.exists() and any(legacy_dir.glob("*.mp4"))
+            return not self._missing_cameras("")
         manifest = ShotsManifest.load(manifest_path)
-        return all(
-            (render_dir / shot.id).exists()
-            and any((render_dir / shot.id).glob("*.mp4"))
-            for shot in manifest.active_shots()
-        )
+        return all(not self._missing_cameras(shot.id) for shot in manifest.active_shots())
 
     def _render_cfg(self) -> dict:
         return self.config.get("render", {})
@@ -265,6 +258,39 @@ class RenderStage(BaseStage):
             return cfg_cameras, None
         return list(selection.cameras), selection.vertical_variant
 
+    def _missing_cameras(self, shot_id: str) -> list[str]:
+        """Camera-granularity completeness for one shot: resolve the same
+        request ``run()`` would use (sidecar-aware), then report which of
+        those camera ids are missing at least one expected output file
+        — the base mp4, plus the ``_9x16`` vertical variant when
+        ``vertical_variant`` applies and the camera isn't ``broadcast``.
+        An empty request (e.g. an operator-authored sidecar with zero
+        cameras) is trivially complete.
+
+        To force a full re-render of a shot that's already complete,
+        use ``--clean`` or delete ``output/render/<shot>/`` (the
+        dashboard's per-stage delete endpoint) first — this method only
+        ever reports gaps, matching the pipeline's resume/continue
+        convention (e.g. ``--from-stage``) rather than re-doing work.
+        """
+        cameras, vertical_override = self._resolve_camera_request(shot_id)
+        if not cameras:
+            return []
+        vertical = (
+            self._render_cfg().get("vertical_variant")
+            if vertical_override is None else vertical_override
+        )
+        shot_dir = self.output_dir / "render" / (shot_id or "clip")
+        missing = []
+        for cam in cameras:
+            safe_id = cam.replace(":", "_")
+            expected = [shot_dir / f"{safe_id}.mp4"]
+            if vertical and cam != "broadcast":
+                expected.append(shot_dir / f"{safe_id}_9x16.mp4")
+            if not all(p.exists() for p in expected):
+                missing.append(cam)
+        return missing
+
     def run(self) -> None:
         if not self._render_cfg().get("enabled", True):
             logger.info("render: disabled via config; skipping")
@@ -277,9 +303,16 @@ class RenderStage(BaseStage):
             return
         timings: dict[str, float] = {}
         for shot_id in self._active_shot_ids():
+            missing = self._missing_cameras(shot_id)
+            if not missing:
+                logger.info(
+                    "render: shot %s complete (all requested cameras "
+                    "rendered); skipping", shot_id or "<legacy>")
+                continue
             requested, vertical_override = self._resolve_camera_request(shot_id)
-            broadcast_ids = [c for c in requested if c == "broadcast"]
-            virtual_ids = [c for c in requested if c != "broadcast"]
+            missing_set = set(missing)
+            broadcast_ids = [c for c in requested if c == "broadcast" and c in missing_set]
+            virtual_ids = [c for c in requested if c != "broadcast" and c in missing_set]
             satisfied = set(self._write_virtual_camera_tracks(shot_id, virtual_ids))
             cameras = broadcast_ids + [c for c in virtual_ids if c in satisfied]
             args = self._blender_args(

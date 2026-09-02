@@ -4,6 +4,7 @@ and per-active-shot subprocess invocation against a stub Blender."""
 from __future__ import annotations
 
 import json
+import logging
 import stat
 
 import pytest
@@ -48,7 +49,9 @@ def test_is_complete_requires_every_active_shot(tmp_path):
     """A multi-shot manifest with one rendered + one un-rendered shot must
     not report complete — the pre-fix ``any(render_dir.rglob("*.mp4"))``
     check considered the stage done the moment ANY shot rendered
-    anywhere, so a failed second shot cache-skipped forever."""
+    anywhere, so a failed second shot cache-skipped forever. Single
+    requested camera (broadcast) here, isolating "every shot" totality
+    from the camera-granularity checks covered separately below."""
     (tmp_path / "shots").mkdir()
     ShotsManifest(
         source_file="x", fps=25.0, total_frames=10,
@@ -59,7 +62,7 @@ def test_is_complete_requires_every_active_shot(tmp_path):
                  end_time=0.333, clip_file="shots/shot02.mp4"),
         ],
     ).save(tmp_path / "shots" / "shots_manifest.json")
-    stage = RenderStage(_cfg(), tmp_path)
+    stage = RenderStage(_cfg(cameras=["broadcast"]), tmp_path)
     assert stage.is_complete() is False
 
     shot01_dir = tmp_path / "render" / "shot01"
@@ -312,6 +315,164 @@ def test_resolve_camera_request_per_shot_paths_are_independent(tmp_path):
     cameras02, _ = stage._resolve_camera_request("shot02")
     assert cameras01 == ["drone"]
     assert cameras02 == ["broadcast"]  # no sidecar for shot02 -> config
+
+
+# ── Camera-granularity resume/completeness (_missing_cameras) ──────────
+# "Render stage should only skip if ALL shots selected have been
+# rendered already; otherwise it should render the missing shots" —
+# refined to camera granularity: a shot missing any REQUESTED camera
+# output is incomplete, and run() renders only the missing cameras.
+
+def _two_shot_manifest(tmp_path):
+    (tmp_path / "shots").mkdir()
+    ShotsManifest(
+        source_file="x", fps=25.0, total_frames=10,
+        shots=[
+            Shot(id="shot01", start_frame=0, end_frame=4, start_time=0.0,
+                 end_time=0.166, clip_file="shots/shot01.mp4"),
+            Shot(id="shot02", start_frame=5, end_frame=9, start_time=0.166,
+                 end_time=0.333, clip_file="shots/shot02.mp4"),
+        ],
+    ).save(tmp_path / "shots" / "shots_manifest.json")
+
+
+@pytest.mark.unit
+def test_missing_cameras_partial_coverage(tmp_path):
+    cfg = _cfg(cameras=["broadcast", "drone"], vertical_variant=False)
+    stage = RenderStage(cfg, tmp_path)
+    shot_dir = tmp_path / "render" / "clip"
+    shot_dir.mkdir(parents=True)
+    (shot_dir / "broadcast.mp4").write_bytes(b"x")
+    assert stage._missing_cameras("") == ["drone"]
+
+
+@pytest.mark.unit
+def test_missing_cameras_vertical_variant_missing(tmp_path):
+    """drone.mp4 present but drone_9x16.mp4 absent still counts as
+    missing when vertical_variant is on; broadcast never needs a 9x16
+    counterpart."""
+    cfg = _cfg(cameras=["broadcast", "drone"], vertical_variant=True)
+    stage = RenderStage(cfg, tmp_path)
+    shot_dir = tmp_path / "render" / "clip"
+    shot_dir.mkdir(parents=True)
+    (shot_dir / "broadcast.mp4").write_bytes(b"x")
+    (shot_dir / "drone.mp4").write_bytes(b"x")
+    assert stage._missing_cameras("") == ["drone"]
+
+
+@pytest.mark.unit
+def test_missing_cameras_vertical_variant_satisfied(tmp_path):
+    cfg = _cfg(cameras=["broadcast", "drone"], vertical_variant=True)
+    stage = RenderStage(cfg, tmp_path)
+    shot_dir = tmp_path / "render" / "clip"
+    shot_dir.mkdir(parents=True)
+    (shot_dir / "broadcast.mp4").write_bytes(b"x")
+    (shot_dir / "drone.mp4").write_bytes(b"x")
+    (shot_dir / "drone_9x16.mp4").write_bytes(b"x")
+    assert stage._missing_cameras("") == []
+
+
+@pytest.mark.unit
+def test_missing_cameras_empty_request_is_trivially_complete(tmp_path):
+    RenderSelection(shot_id="", cameras=()).save(
+        tmp_path / "render" / "clip_render_selection.json"
+    )
+    cfg = _cfg(cameras=["broadcast", "drone"])
+    stage = RenderStage(cfg, tmp_path)
+    assert stage._missing_cameras("") == []
+    assert stage.is_complete() is True
+
+
+@pytest.mark.unit
+def test_is_complete_false_when_one_of_two_shots_partially_rendered(tmp_path):
+    _two_shot_manifest(tmp_path)
+    cfg = _cfg(cameras=["broadcast"], vertical_variant=False)
+    stage = RenderStage(cfg, tmp_path)
+    shot01_dir = tmp_path / "render" / "shot01"
+    shot01_dir.mkdir(parents=True)
+    (shot01_dir / "broadcast.mp4").write_bytes(b"x")
+    assert stage.is_complete() is False  # shot02 has nothing at all
+
+
+@pytest.mark.unit
+def test_is_complete_true_when_both_shots_fully_rendered(tmp_path):
+    _two_shot_manifest(tmp_path)
+    cfg = _cfg(cameras=["broadcast"], vertical_variant=False)
+    stage = RenderStage(cfg, tmp_path)
+    for sid in ("shot01", "shot02"):
+        d = tmp_path / "render" / sid
+        d.mkdir(parents=True)
+        (d / "broadcast.mp4").write_bytes(b"x")
+    assert stage.is_complete() is True
+
+
+@pytest.mark.integration
+def test_run_skips_fully_rendered_shot_and_renders_only_missing_shot(
+    tmp_path, caplog
+):
+    caplog.set_level(logging.INFO)
+    _two_shot_manifest(tmp_path)
+    stub = tmp_path / "fake_blender"
+    log = tmp_path / "calls.jsonl"
+    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    shot01_dir = tmp_path / "render" / "shot01"
+    shot01_dir.mkdir(parents=True)
+    (shot01_dir / "broadcast.mp4").write_bytes(b"x")
+    cfg = _cfg(blender_path=str(stub), cameras=["broadcast"],
+                vertical_variant=False)
+    stage = RenderStage(cfg, tmp_path)
+    assert stage.is_complete() is False
+    stage.run()
+    calls = log.read_text().strip().splitlines()
+    assert len(calls) == 1  # shot01 skipped, only shot02 rendered
+    assert "--shot shot02" in calls[0]
+    assert any(
+        "shot01" in r.message and "complete" in r.message.lower()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.integration
+def test_run_invokes_stub_zero_times_when_all_shots_complete(tmp_path):
+    _two_shot_manifest(tmp_path)
+    stub = tmp_path / "fake_blender"
+    log = tmp_path / "calls.jsonl"
+    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    for sid in ("shot01", "shot02"):
+        d = tmp_path / "render" / sid
+        d.mkdir(parents=True)
+        (d / "broadcast.mp4").write_bytes(b"x")
+    cfg = _cfg(blender_path=str(stub), cameras=["broadcast"],
+                vertical_variant=False)
+    stage = RenderStage(cfg, tmp_path)
+    assert stage.is_complete() is True
+    stage.run()
+    assert not log.exists()
+
+
+@pytest.mark.integration
+def test_run_renders_only_missing_camera_for_partial_shot(tmp_path):
+    """shot01 has broadcast.mp4 but the request also includes drone ->
+    run() must pass --cameras drone only, never re-rendering broadcast."""
+    _write_min_fixture(tmp_path)  # legacy "" shot, writes camera_track.json
+    _add_player_fixture(tmp_path)  # so build_drone_track has a non-empty track
+    stub = tmp_path / "fake_blender"
+    log = tmp_path / "calls.jsonl"
+    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    shot_dir = tmp_path / "render" / "clip"
+    shot_dir.mkdir(parents=True)
+    (shot_dir / "broadcast.mp4").write_bytes(b"x")
+    cfg = _cfg(blender_path=str(stub), cameras=["broadcast", "drone"],
+                vertical_variant=False)
+    stage = RenderStage(cfg, tmp_path)
+    stage.run()
+    calls = log.read_text().strip().splitlines()
+    assert len(calls) == 1
+    cams_arg = calls[0].split("--cameras ")[1].split(" ")[0]
+    assert cams_arg == "drone"
 
 
 @pytest.mark.integration

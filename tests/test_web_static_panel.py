@@ -32,3 +32,18 @@ def test_index_no_longer_defines_moved_functions(client) -> None:
     index = client.get("/").text
     assert "async function renderPrepareShots" not in index
     assert "function _buildSyncTimeline" not in index
+
+
+@pytest.mark.integration
+def test_render_panel_script_served_and_referenced(client) -> None:
+    res = client.get("/static/js/render_panel.js")
+    assert res.status_code == 200
+    assert "renderRender" in res.text
+    assert "/api/render/outputs" in res.text
+    assert "/api/render/selection" in res.text
+    assert "/api/render/video/" in res.text
+
+    index = client.get("/").text
+    assert "/static/js/render_panel.js" in index
+    assert 'case "render"' in index
+    assert "async function renderRender" not in index

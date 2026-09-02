@@ -231,6 +231,36 @@
     padding: 12px 0;
     font-style: italic;
   }
+
+  /* ── Render panel ─────────────────────────────────────────────── */
+  .render-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 14px;
+    padding: 14px 16px;
+  }
+  .render-card {
+    background: #12141c;
+    border: 1px solid #2d3148;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .render-card.vertical { max-width: 200px; }
+  .render-card video { width: 100%; display: block; background: #000; }
+  .render-card-body { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .render-card-title { font-size: 12px; font-weight: 600; color: #cbd5e1; }
+
+  .chip {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: #1e293b;
+    color: #94a3b8;
+    margin-right: 6px;
+  }
+  .chip-aov { background: #312e81; color: #c7d2fe; }
 </style>
 <script type="importmap">
 {
@@ -280,6 +310,7 @@
 </div>
 
 <script src="/static/js/prepare_shots_panel.js"></script>
+<script src="/static/js/render_panel.js"></script>
 <script>
 "use strict";
 
@@ -310,6 +341,10 @@ const STAGE_DEPS = {
   // anchors when available (falls back to raw hmr_world otherwise).
   ball:          ["camera", "refined_poses"],
   export:        ["camera"],
+  // Render shells to Blender per shot using the broadcast camera track
+  // plus (soft) refined_poses/hmr_world + ball data — same soft-
+  // dependency posture as export.
+  render:        ["camera"],
 };
 
 // ── Initialise ───────────────────────────────────────────────────────
@@ -693,6 +728,9 @@ async function loadOutput(stageName) {
     case "export":
       await renderExport(panel);
       break;
+    case "render":
+      await renderRender(panel);
+      break;
     default:
       panel.innerHTML = `<div class="empty-note">Unknown stage: ${stageName}</div>`;
   }
@@ -758,6 +796,7 @@ function humanizeStageName(name) {
     ball:          "Ball",
     refined_poses: "Refined Poses",
     export:        "Export",
+    render:        "Render",
   };
   return map[name] || name;
 }

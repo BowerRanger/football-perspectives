@@ -1595,6 +1595,8 @@ def _apply_foot_lock_finale(
         "spans_locked": 0,
         "spans_skipped": 0,
         "spans_unresolved": 0,
+        "spans_unresolved_pass1": 0,
+        "spans_flipped_pass2": 0,
         "mean_pin_err_m_before": 0.0,
         "mean_pin_err_m_after": 0.0,
         "max_root_corr_m": 0.0,
@@ -1634,6 +1636,8 @@ def _apply_foot_lock_finale(
     stats["spans_locked"] = int(ik_stats["spans_locked"])
     stats["spans_skipped"] = int(ik_stats["spans_skipped"])
     stats["spans_unresolved"] = int(ik_stats["spans_unresolved"])
+    stats["spans_unresolved_pass1"] = int(ik_stats["spans_unresolved_pass1"])
+    stats["spans_flipped_pass2"] = int(ik_stats["spans_flipped_pass2"])
     stats["mean_pin_err_m_before"] = float(ik_stats["mean_pin_err_m_before"])
     stats["mean_pin_err_m_after"] = float(ik_stats["mean_pin_err_m_after"])
     stats["max_root_corr_m"] = float(ik_stats["max_root_corr_m"])
@@ -2128,6 +2132,8 @@ class RefinedPosesStage(BaseStage):
             "spans_locked": 0,
             "spans_skipped": 0,
             "spans_unresolved": 0,
+            "spans_unresolved_pass1": 0,
+            "spans_flipped_pass2": 0,
             "mean_pin_err_m_before": 0.0,
             "mean_pin_err_m_after": 0.0,
             "max_root_corr_m": 0.0,
@@ -2169,6 +2175,8 @@ class RefinedPosesStage(BaseStage):
                 foot_lock_summary["spans_locked"] += fl_stats["spans_locked"]
                 foot_lock_summary["spans_skipped"] += fl_stats["spans_skipped"]
                 foot_lock_summary["spans_unresolved"] += fl_stats["spans_unresolved"]
+                foot_lock_summary["spans_unresolved_pass1"] += fl_stats["spans_unresolved_pass1"]
+                foot_lock_summary["spans_flipped_pass2"] += fl_stats["spans_flipped_pass2"]
                 foot_lock_summary["frames_raised"] += fl_stats["frames_raised"]
                 foot_lock_summary["max_root_corr_m"] = max(
                     foot_lock_summary["max_root_corr_m"], fl_stats["max_root_corr_m"],

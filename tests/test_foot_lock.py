@@ -301,6 +301,114 @@ def test_lock_feet_ik_preserves_foot_global_orientation() -> None:
     assert max_angle_deg <= 2.0
 
 
+def test_unresolved_span_does_not_contaminate_root_correction() -> None:
+    """The bug this test guards against: the shared root micro-
+    correction used to be built from EVERY attempted span before the
+    resolution logic decided which ones were trustworthy, so a garbage
+    span (huge, unreachable per-frame offset) still pulled the root even
+    though its own theta edits were never applied. With the fix, pass 2
+    rebuilds the correction from ONLY the spans that resolved in pass 1
+    — since pin computation and the per-frame FK track (``fw0``) are
+    both independent of which OTHER spans exist, this must produce a
+    root_t that is bit-identical to running lock_feet_ik with the
+    garbage span simply absent from the FootContacts (same root_t
+    input either way)."""
+    g = make_walk(n_frames=120)
+    fc_all = contacts_from_truth(g)
+    assert len(fc_all.spans) >= 2, "fixture sanity: need at least one other span"
+    garbage_span = fc_all.spans[0]
+    garbage_key = (garbage_span.side, garbage_span.start, garbage_span.end)
+
+    # Same per-frame-noise recipe as the already-proven
+    # test_lock_feet_ik_respects_joint_clamp (seed 7, std 0.5 m, same
+    # target span fc.spans[0]): a CONSTANT per-span root offset is not
+    # enough to break resolution here, because the pin is the median FK
+    # position over the span itself (computed from the perturbed track),
+    # so a uniform shift is self-consistent and still "resolves" (just
+    # to the wrong place). Per-frame noise breaks that self-consistency:
+    # individual frames disagree with their own span's median by more
+    # than the IK's joint/root clamps can close.
+    rng = np.random.default_rng(7)
+    bad_root = g.root_t.copy()
+    span_len = garbage_span.end - garbage_span.start
+    bad_root[garbage_span.start:garbage_span.end] += rng.normal(0, 0.5, (span_len, 3))
+
+    th_with, rt_with, stats_with = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=bad_root, betas=g.betas,
+        contacts=fc_all, fps=g.fps, rest_joints=_REST,
+    )
+    resolved_keys_with = {(s.side, s.start, s.end) for s in stats_with["resolved_spans"]}
+    assert garbage_key not in resolved_keys_with, "garbage span must not resolve"
+    assert stats_with["spans_locked"] >= 1, "other (clean) spans must still lock"
+    assert stats_with["spans_unresolved_pass1"] >= 1
+
+    # Same root_t, but the garbage span is simply absent from contacts.
+    fc_good_only = FootContacts(
+        n_frames=fc_all.n_frames,
+        in_contact=fc_all.in_contact.copy(),
+        quality=fc_all.quality.copy(),
+        spans=tuple(s for s in fc_all.spans if s is not garbage_span),
+    )
+    th_absent, rt_absent, stats_absent = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=bad_root, betas=g.betas,
+        contacts=fc_good_only, fps=g.fps, rest_joints=_REST,
+    )
+
+    np.testing.assert_allclose(rt_with, rt_absent, atol=1e-9)
+    np.testing.assert_allclose(
+        th_with[: garbage_span.start], th_absent[: garbage_span.start], atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        th_with[garbage_span.end:], th_absent[garbage_span.end:], atol=1e-9,
+    )
+
+    # The historical symptom: near the garbage span, the fixed root_t's
+    # discrete acceleration must be no worse than the "garbage absent
+    # entirely" reference — not just "improved over the old contaminated
+    # single-pass behaviour".
+    def accel(x: np.ndarray) -> np.ndarray:
+        return np.linalg.norm(np.diff(x, n=2, axis=0), axis=1)
+
+    lo = max(0, garbage_span.start - 5)
+    hi = min(len(g.frames), garbage_span.end + 5)
+    acc_with = accel(rt_with[lo:hi])
+    acc_absent = accel(rt_absent[lo:hi])
+    assert acc_with.max() <= acc_absent.max() + 1e-9
+
+
+def test_all_spans_unresolved_leaves_root_t_bit_identical() -> None:
+    """A player whose spans ALL fail resolution must end with ZERO root
+    micro-correction from lock_feet_ik: root_t bit-identical to the
+    input (and thetas untouched, since nothing locked)."""
+    g = make_walk(n_frames=120)
+    fc = contacts_from_truth(g)
+    assert len(fc.spans) >= 1
+
+    # Per-frame noise (as in test_unresolved_span_does_not_contaminate_
+    # root_correction above) PLUS a large constant shift, applied
+    # independently to every span, so every single one is both
+    # self-inconsistent (noise) and geometrically unreachable (shift) —
+    # belt and braces against any one span accidentally resolving.
+    bad_root = g.root_t.copy()
+    for i, span in enumerate(fc.spans):
+        rng = np.random.default_rng(1000 + i)
+        span_len = span.end - span.start
+        bad_root[span.start:span.end] += np.array([1.5, 0.0, 0.0]) + rng.normal(
+            0, 0.5, (span_len, 3),
+        )
+
+    th2, rt2, stats = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=bad_root, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST,
+    )
+    assert stats["spans_locked"] == 0
+    assert stats["resolved_spans"] == ()
+    assert stats["spans_unresolved_pass1"] == len(fc.spans)
+    assert stats["spans_flipped_pass2"] == 0
+    np.testing.assert_array_equal(rt2, bad_root)
+    np.testing.assert_array_equal(th2, g.thetas)
+
+
 def test_lock_feet_ik_empty_contacts_returns_input_exactly() -> None:
     g = make_walk(n_frames=40)
     fc = FootContacts(

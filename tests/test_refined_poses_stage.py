@@ -1300,6 +1300,8 @@ def test_stage_foot_lock_disabled_matches_previous_pipeline(tmp_path: Path) -> N
         "spans_locked": 0,
         "spans_skipped": 0,
         "spans_unresolved": 0,
+        "spans_unresolved_pass1": 0,
+        "spans_flipped_pass2": 0,
         "mean_pin_err_m_before": 0.0,
         "mean_pin_err_m_after": 0.0,
         "max_root_corr_m": 0.0,

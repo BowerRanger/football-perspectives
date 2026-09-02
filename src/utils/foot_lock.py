@@ -535,6 +535,135 @@ def _ease_weights(length: int, edge_ease_frames: int) -> np.ndarray:
     return w
 
 
+def _root_micro_correction(
+    n: int,
+    pins: list[np.ndarray],
+    spans: list[ContactSpan],
+    fw: np.ndarray,
+    edge_ease_frames: int,
+    max_residual_correction_m: float,
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    """The low-passed per-frame root micro-correction (``lock_feet_ik``
+    steps 2/3), driven ONLY by the given ``(pin, span)`` pairs, measured
+    against the (unedited) FK track ``fw``.
+
+    Returns ``(smooth_corr (n, 3), span_weights)`` — ``span_weights[i]``
+    is ``_ease_weights(len(spans[i]), edge_ease_frames)``, aligned with
+    ``spans``.
+
+    An empty ``spans`` list produces an EXACT all-zero correction — a
+    span this function was never given cannot pull the root. This is
+    the mechanism ``lock_feet_ik``'s two-pass structure relies on: pass
+    2 calls this with only the spans that resolved in pass 1, so a
+    player whose spans ALL fail pass 1 gets ``spans=[]`` here and
+    ``root_t`` comes back bit-identical to the input (see
+    ``lock_feet_ik``'s docstring).
+    """
+    span_weights: list[np.ndarray] = []
+    raw_corr = np.zeros((n, 3), dtype=np.float64)
+    corr_count = np.zeros(n, dtype=np.float64)
+    for pin, span in zip(pins, spans):
+        length = int(span.end - span.start)
+        w = _ease_weights(length, edge_ease_frames)
+        span_weights.append(w)
+        foot_idx = _FOOT_IDX[span.side]
+        seg_foot = fw[span.start:span.end, foot_idx, :]
+        raw_corr[span.start:span.end] += (pin[None, :] - seg_foot) * w[:, None]
+        corr_count[span.start:span.end] += 1.0
+
+    active = corr_count > 0
+    mean_corr = np.zeros((n, 3), dtype=np.float64)
+    mean_corr[active] = raw_corr[active] / corr_count[active, None]
+
+    padded = np.pad(mean_corr, ((2, 2), (0, 0)), mode="edge")
+    smooth_corr = np.zeros((n, 3), dtype=np.float64)
+    for k, wgt in enumerate(_ROOT_CORR_KERNEL):
+        smooth_corr += wgt * padded[k:k + n]
+
+    corr_norms = np.linalg.norm(smooth_corr, axis=1)
+    over = corr_norms > max_residual_correction_m
+    if np.any(over):
+        scale = np.ones(n, dtype=np.float64)
+        scale[over] = max_residual_correction_m / corr_norms[over]
+        smooth_corr = smooth_corr * scale[:, None]
+
+    return smooth_corr, span_weights
+
+
+def _ik_solve_span(
+    pin: np.ndarray,
+    span: ContactSpan,
+    root_R: np.ndarray,
+    root_t_corr: np.ndarray,
+    thetas_in: np.ndarray,
+    rest: np.ndarray,
+    fw_corr: np.ndarray,
+    ik_max_joint_delta_deg: float,
+) -> tuple[list[_LegSolve], float, float]:
+    """Per-frame two-bone IK solve for one span against a given
+    corrected root/FK (``root_t_corr``/``fw_corr``). Returns
+    ``(frame_solves, max_err, max_step)`` — ``max_err`` is the worst
+    absolute distance from ``pin`` over the span, ``max_step`` is the
+    largest consecutive-frame foot displacement (the two quantities
+    ``_classify_span`` grades). A pure query — never touches
+    ``thetas``/``root_t`` — called once per span per pass by
+    ``lock_feet_ik``."""
+    side = span.side
+    hip, knee, ankle, foot = (
+        _HIP_IDX[side], _KNEE_IDX[side], _ANKLE_IDX[side], _FOOT_IDX[side],
+    )
+    frame_solves: list[_LegSolve] = []
+    for f in range(span.start, span.end):
+        ankle_fk = fw_corr[f, ankle]
+        foot_fk = fw_corr[f, foot]
+        target_ankle_world = pin + (ankle_fk - foot_fk)
+        solve = _solve_leg_frame(
+            target_ankle_world=target_ankle_world,
+            root_R_f=root_R[f],
+            root_t_f=root_t_corr[f],
+            theta_row=thetas_in[f],
+            rest=rest,
+            hip=hip, knee=knee, ankle=ankle, foot=foot,
+            ik_max_joint_delta_deg=ik_max_joint_delta_deg,
+        )
+        frame_solves.append(solve)
+
+    if frame_solves:
+        max_err = max(float(np.linalg.norm(s.foot_world - pin)) for s in frame_solves)
+        max_step = max(
+            (
+                float(np.linalg.norm(
+                    frame_solves[k + 1].foot_world - frame_solves[k].foot_world
+                ))
+                for k in range(len(frame_solves) - 1)
+            ),
+            default=0.0,
+        )
+    else:
+        max_err = 0.0
+        max_step = 0.0
+    return frame_solves, max_err, max_step
+
+
+def _classify_span(
+    max_err: float,
+    max_step: float,
+    skip_pin_err_m: float,
+    resolved_pin_err_eff: float,
+    resolved_max_step_m: float | None,
+) -> str:
+    """``"skipped"`` (clamp-infeasible), ``"unresolved"`` (clamp-
+    feasible but fails the tighter honesty check), or ``"locked"``
+    (passes both) — see ``lock_feet_ik``'s docstring for what each
+    means for the caller."""
+    if max_err > skip_pin_err_m:
+        return "skipped"
+    step_ok = resolved_max_step_m is None or max_step <= float(resolved_max_step_m)
+    if max_err > resolved_pin_err_eff or not step_ok:
+        return "unresolved"
+    return "locked"
+
+
 def lock_feet_ik(
     *,
     thetas: np.ndarray,
@@ -567,7 +696,9 @@ def lock_feet_ik(
       3. Root micro-correction: per frame, the mean over active spans of
          ``(pin - foot_fk) * w(f)``, low-passed with a 5-frame
          triangular kernel, clamped to ``max_residual_correction_m``,
-         added to ``root_t`` (all three axes).
+         added to ``root_t`` (all three axes). RESOLUTION-AWARE (see
+         "Two-pass root correction" below) — only spans that end up
+         verified feed this.
       4. Two-bone hip/knee IK (see ``_solve_leg_frame``) lands the ANKLE
          at ``pin + (ankle_fk - foot_fk)`` (preserving the current
          ankle->foot offset, so the foot lands on ``pin`` once the
@@ -632,18 +763,68 @@ def lock_feet_ik(
          (see ``src.stages.refined_poses``) and prefer over the raw
          detection-time contacts for reporting/evaluation.
 
+    TWO-PASS ROOT CORRECTION (bug fix — see docs/superpowers/plans/
+    2026-09-02-foot-contact-locomotion.md's follow-up report): step 3's
+    shared low-passed root micro-correction used to be computed ONCE,
+    from EVERY attempted span, BEFORE step 6's resolution logic decided
+    which spans were trustworthy. A span later found unresolved or
+    skipped — often a noisy far-side player whose per-frame FK disagrees
+    wildly with its own span median — still contributed its (large,
+    noise-driven) pull to the root correction that EVERY frame's output
+    ``root_t`` rides on, injecting spurious acceleration even into
+    frames far from that span. This is why unresolved-heavy players
+    (far-side, most spans dropped) showed much higher root acceleration
+    than resolved ones despite their bad spans never being "locked".
+
+    Fixed by splitting the correction into two passes, both calling the
+    shared :func:`_root_micro_correction` helper:
+
+      - **Pass 1** builds the correction from ALL attempted spans
+        (bit-identical to the old single-pass behaviour) and uses it
+        ONLY to classify every span (:func:`_classify_span`) as
+        ``"locked"``, ``"unresolved"``, or ``"skipped"`` — no thetas or
+        ``root_t`` are written yet. Spans that fail here — pass1_class
+        != ``"locked"`` — are counted in ``stats["spans_unresolved_pass1"]``
+        and take no further part in this function.
+      - **Pass 2** rebuilds the correction from SCRATCH using ONLY the
+        spans that resolved in pass 1 (empty list -> exact all-zero
+        correction, see :func:`_root_micro_correction`'s docstring),
+        producing a clean ``root_t``. Each pass-1-resolved span is then
+        RE-classified against this clean root; a span that resolved in
+        pass 1 should almost always still resolve in pass 2 (removing
+        OTHER spans' contamination can only help), but if one flips
+        (locked -> skipped/unresolved) it is dropped — its theta edits
+        are discarded, exactly like a normal skip/unresolved — and
+        counted in ``stats["spans_flipped_pass2"]`` rather than being
+        silently re-included. This is a single bounded, deterministic
+        second look — no further iteration.
+
+    A player whose spans ALL fail pass 1 therefore calls pass 2 with an
+    empty span list: the correction is exact zero and ``root_t`` comes
+    back bit-identical to the input (verified in
+    ``tests/test_foot_lock.py``) — the far-side "most spans dropped"
+    case gets ZERO injected root acceleration from this pass instead of
+    inheriting the pull of spans it never trusted enough to lock.
+
     ``root_R`` is never modified.
 
     Returns:
         ``(thetas', root_t', stats)`` — ``stats`` has keys
         ``spans_locked`` (spans that were BOTH clamp-feasible AND
-        verified — the only ones whose theta edits were actually
-        applied), ``spans_skipped`` (clamp-infeasible, step 4),
-        ``spans_unresolved`` (clamp-feasible but not verified, step 6 —
-        theta edits discarded same as a skip), ``mean_pin_err_m_before``,
-        ``mean_pin_err_m_after`` (both computed across every
-        non-clamp-skipped span, i.e. locked + unresolved, unchanged
-        meaning from before this addition), ``max_root_corr_m``,
+        verified in BOTH passes — the only ones whose theta edits were
+        actually applied), ``spans_skipped`` (clamp-infeasible, step 4,
+        final classification after both passes), ``spans_unresolved``
+        (clamp-feasible but not verified, step 6, final classification
+        after both passes — theta edits discarded same as a skip),
+        ``spans_unresolved_pass1`` (spans that already failed pass 1 —
+        i.e. would have failed even before this fix; a subset of the
+        final ``spans_skipped + spans_unresolved`` count, informational),
+        ``spans_flipped_pass2`` (spans that resolved in pass 1 but not
+        in pass 2, once contamination from other spans was removed —
+        informational, should normally be 0), ``mean_pin_err_m_before``,
+        ``mean_pin_err_m_after`` (both computed across every original
+        span, measured against the pass-2 corrected root — the root
+        every frame actually ends up with), ``max_root_corr_m``,
         ``max_joint_delta_deg``, and ``resolved_spans`` (a tuple of
         ``ContactSpan`` — the verified/effective contact set, see
         step 6 above).
@@ -662,124 +843,95 @@ def lock_feet_ik(
         "spans_locked": 0,
         "spans_skipped": 0,
         "spans_unresolved": 0,
+        "spans_unresolved_pass1": 0,
+        "spans_flipped_pass2": 0,
         "mean_pin_err_m_before": 0.0,
         "mean_pin_err_m_after": 0.0,
         "max_root_corr_m": 0.0,
         "max_joint_delta_deg": 0.0,
+        "resolved_spans": (),
     }
-    stats["resolved_spans"] = ()
     if n == 0 or not contacts.spans:
         return thetas_in.copy(), root_t_in.copy(), stats
 
     fw0 = compute_all_joint_worlds_batch(thetas_in, root_R, root_t_in, rest)
 
     # --- 1. pins (median FK foot-joint XY over each span) --------------
+    # Computed once, from the UNCORRECTED track — independent of which
+    # other spans exist or how they classify, so a span's pin is
+    # identical whether evaluated alongside contaminating neighbours or
+    # alone (this is what makes the two-pass equivalence below exact).
+    all_spans = list(contacts.spans)
     pins: list[np.ndarray] = []
-    for span in contacts.spans:
+    for span in all_spans:
         foot_idx = _FOOT_IDX[span.side]
         seg = fw0[span.start:span.end, foot_idx, :2]
         xy = np.median(seg, axis=0) if seg.shape[0] else np.zeros(2)
         pins.append(np.array([xy[0], xy[1], float(target_foot_z)], dtype=np.float64))
 
-    # --- 2/3. ease weights + root micro-correction ----------------------
-    span_weights: list[np.ndarray] = []
-    raw_corr = np.zeros((n, 3), dtype=np.float64)
-    corr_count = np.zeros(n, dtype=np.float64)
-    for pin, span in zip(pins, contacts.spans):
-        length = int(span.end - span.start)
-        w = _ease_weights(length, edge_ease_frames)
-        span_weights.append(w)
-        foot_idx = _FOOT_IDX[span.side]
-        seg_foot = fw0[span.start:span.end, foot_idx, :]
-        raw_corr[span.start:span.end] += (pin[None, :] - seg_foot) * w[:, None]
-        corr_count[span.start:span.end] += 1.0
+    # --- PASS 1: classify every span using a correction built from ALL
+    # attempted spans (reproduces the pre-fix single-pass behaviour) —
+    # this pass NEVER writes thetas/root_t, it only decides which spans
+    # are trustworthy enough to drive pass 2's correction.
+    smooth_corr1, _pass1_weights = _root_micro_correction(
+        n, pins, all_spans, fw0, edge_ease_frames, max_residual_correction_m,
+    )
+    root_t_corr1 = root_t_in + smooth_corr1
+    fw_corr1 = compute_all_joint_worlds_batch(thetas_in, root_R, root_t_corr1, rest)
 
-    active = corr_count > 0
-    mean_corr = np.zeros((n, 3), dtype=np.float64)
-    mean_corr[active] = raw_corr[active] / corr_count[active, None]
+    pass1_class: list[str] = []
+    for pin, span in zip(pins, all_spans):
+        _, max_err1, max_step1 = _ik_solve_span(
+            pin, span, root_R, root_t_corr1, thetas_in, rest, fw_corr1,
+            ik_max_joint_delta_deg,
+        )
+        pass1_class.append(
+            _classify_span(max_err1, max_step1, skip_pin_err_m, resolved_pin_err_eff, resolved_max_step_m)
+        )
+    stats["spans_unresolved_pass1"] = sum(1 for c in pass1_class if c != "locked")
+    final_class = list(pass1_class)
 
-    padded = np.pad(mean_corr, ((2, 2), (0, 0)), mode="edge")
-    smooth_corr = np.zeros((n, 3), dtype=np.float64)
-    for k, wgt in enumerate(_ROOT_CORR_KERNEL):
-        smooth_corr += wgt * padded[k:k + n]
+    # --- PASS 2: rebuild the correction from ONLY the spans that
+    # resolved in pass 1 — a span this pipeline never trusted can no
+    # longer pull the root. kept_* == [] (every span failed pass 1)
+    # makes _root_micro_correction return an exact all-zero correction,
+    # so root_t_corr2 == root_t_in bit-for-bit for that player.
+    kept_index = [i for i, c in enumerate(pass1_class) if c == "locked"]
+    kept_pins = [pins[i] for i in kept_index]
+    kept_spans = [all_spans[i] for i in kept_index]
 
-    corr_norms = np.linalg.norm(smooth_corr, axis=1)
-    over = corr_norms > max_residual_correction_m
-    if np.any(over):
-        scale = np.ones(n, dtype=np.float64)
-        scale[over] = max_residual_correction_m / corr_norms[over]
-        smooth_corr = smooth_corr * scale[:, None]
+    smooth_corr2, span_weights2 = _root_micro_correction(
+        n, kept_pins, kept_spans, fw0, edge_ease_frames, max_residual_correction_m,
+    )
+    root_t_corr2 = root_t_in + smooth_corr2
+    stats["max_root_corr_m"] = float(np.linalg.norm(smooth_corr2, axis=1).max()) if n else 0.0
+    fw_corr2 = compute_all_joint_worlds_batch(thetas_in, root_R, root_t_corr2, rest)
 
-    root_t_corr = root_t_in + smooth_corr
-    stats["max_root_corr_m"] = float(np.linalg.norm(smooth_corr, axis=1).max()) if n else 0.0
-
-    fw_corr = compute_all_joint_worlds_batch(thetas_in, root_R, root_t_corr, rest)
-
-    # --- 4/5/6. per-span two-bone IK + blend + honesty check ------------
+    # --- 4/5/6. per-span two-bone IK + blend + honesty check, re-run
+    # against the CLEAN pass-2 root, for pass-1-resolved spans only ----
     new_thetas = thetas_in.copy()
     max_delta_deg = 0.0
     resolved_spans: list[ContactSpan] = []
 
-    for pin, span, w in zip(pins, contacts.spans, span_weights):
+    for i, pin, span, w in zip(kept_index, kept_pins, kept_spans, span_weights2):
+        frame_solves, max_err, max_step = _ik_solve_span(
+            pin, span, root_R, root_t_corr2, thetas_in, rest, fw_corr2,
+            ik_max_joint_delta_deg,
+        )
+        cls2 = _classify_span(max_err, max_step, skip_pin_err_m, resolved_pin_err_eff, resolved_max_step_m)
+        if cls2 != "locked":
+            # Resolved under the contaminated pass-1 root but not under
+            # the clean pass-2 one — drop it (thetas untouched, same as
+            # a normal skip/unresolved) and note the flip separately.
+            stats["spans_flipped_pass2"] += 1
+            final_class[i] = cls2
+            continue
+
+        final_class[i] = "locked"
         side = span.side
         hip, knee, ankle, foot = (
             _HIP_IDX[side], _KNEE_IDX[side], _ANKLE_IDX[side], _FOOT_IDX[side],
         )
-        frame_solves: list[_LegSolve] = []
-        for f in range(span.start, span.end):
-            ankle_fk = fw_corr[f, ankle]
-            foot_fk = fw_corr[f, foot]
-            target_ankle_world = pin + (ankle_fk - foot_fk)
-            solve = _solve_leg_frame(
-                target_ankle_world=target_ankle_world,
-                root_R_f=root_R[f],
-                root_t_f=root_t_corr[f],
-                theta_row=thetas_in[f],
-                rest=rest,
-                hip=hip, knee=knee, ankle=ankle, foot=foot,
-                ik_max_joint_delta_deg=ik_max_joint_delta_deg,
-            )
-            frame_solves.append(solve)
-
-        if frame_solves:
-            max_err = max(
-                float(np.linalg.norm(s.foot_world - pin)) for s in frame_solves
-            )
-            max_step = max(
-                (
-                    float(np.linalg.norm(
-                        frame_solves[k + 1].foot_world - frame_solves[k].foot_world
-                    ))
-                    for k in range(len(frame_solves) - 1)
-                ),
-                default=0.0,
-            )
-        else:
-            max_err = 0.0
-            max_step = 0.0
-
-        if max_err > skip_pin_err_m:
-            stats["spans_skipped"] += 1
-            continue
-        step_ok = resolved_max_step_m is None or max_step <= float(resolved_max_step_m)
-        if max_err > resolved_pin_err_eff or not step_ok:
-            # Clamp-feasible (would have locked under the old, single-
-            # threshold logic) but not trustworthy enough to verify —
-            # see step 6 in this function's docstring. The step check
-            # catches a case max_err alone misses: a span can have every
-            # frame within resolved_pin_err_eff of the PIN yet still
-            # contain one outlier frame (typically the first/last, still
-            # mid-transition into/out of stance) that sits far enough
-            # from its NEIGHBOURS to read as a large instantaneous skate
-            # spike once measured frame-to-frame — the actual quantity
-            # scripts/eval_foot_quality.py's skate metric computes.
-            # Treated exactly like a skip for pose output (thetas left
-            # untouched), but counted separately so callers can tell the
-            # two cases apart.
-            stats["spans_unresolved"] += 1
-            continue
-
-        stats["spans_locked"] += 1
         resolved_spans.append(
             ContactSpan(side=side, start=int(span.start), end=int(span.end), pin=pin.copy())
         )
@@ -813,13 +965,20 @@ def lock_feet_ik(
                 math.degrees(solve.knee_delta_rad),
             )
 
-    # --- stats: pin error before/after, over every span/frame -----------
-    fw_final = compute_all_joint_worlds_batch(new_thetas, root_R, root_t_corr, rest)
+    stats["spans_locked"] = sum(1 for c in final_class if c == "locked")
+    stats["spans_skipped"] = sum(1 for c in final_class if c == "skipped")
+    stats["spans_unresolved"] = sum(1 for c in final_class if c == "unresolved")
+
+    # --- stats: pin error before/after, over every original span,
+    # measured against the pass-2 root (root_t_corr2) — the single root
+    # every frame in the actual output ends up with, whether or not
+    # that particular span's edits were applied. ------------------------
+    fw_final = compute_all_joint_worlds_batch(new_thetas, root_R, root_t_corr2, rest)
     errs_before: list[float] = []
     errs_after: list[float] = []
-    for pin, span in zip(pins, contacts.spans):
+    for pin, span in zip(pins, all_spans):
         foot_idx = _FOOT_IDX[span.side]
-        seg_before = fw_corr[span.start:span.end, foot_idx, :]
+        seg_before = fw_corr2[span.start:span.end, foot_idx, :]
         seg_after = fw_final[span.start:span.end, foot_idx, :]
         errs_before.extend(np.linalg.norm(seg_before - pin, axis=1).tolist())
         errs_after.extend(np.linalg.norm(seg_after - pin, axis=1).tolist())
@@ -829,7 +988,7 @@ def lock_feet_ik(
     stats["max_joint_delta_deg"] = float(max_delta_deg)
     stats["resolved_spans"] = tuple(resolved_spans)
 
-    return new_thetas, root_t_corr, stats
+    return new_thetas, root_t_corr2, stats
 
 
 # ---------------------------------------------------------------------

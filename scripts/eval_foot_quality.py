@@ -251,6 +251,44 @@ def eval_hmr_player(
     )
 
 
+def _load_resolved_contacts(
+    output_dir: Path, pid: str, frames: np.ndarray,
+) -> np.ndarray | None:
+    """Load ``refined_poses/{pid}_resolved_contacts.json`` when present
+    — the refined_poses stage's own verified/effective contact set
+    (spans that survived BOTH the detection-side quality gates in
+    ``src.utils.foot_contact.detect_contacts`` and the foot-lock
+    finale's landing-quality "honesty check" —
+    ``src.utils.foot_lock.lock_feet_ik``'s ``resolved_pin_err_m``; see
+    docs/superpowers/specs/2026-09-02-foot-contact-locomotion-design.md's
+    Wave 5 report). Preferred over the raw hmr_world detection-time
+    sidecar for refined-stage evaluation: a span the pipeline could not
+    verify as a stable stance must not be measured as one (false
+    pinning is worse than honest free motion — the same rationale the
+    stage's own honesty check documents).
+
+    Written positionally aligned 1:1 with THIS EXACT refined track's own
+    ``frames`` array (see ``src.stages.refined_poses.run``), so — unlike
+    the raw hmr_world sidecar, which ``_load_contacts_sidecar`` remaps
+    through global frame numbers — no remapping is needed here; an
+    ``n_frames`` mismatch (stale sidecar from a different run) is
+    treated as absence rather than guessed at.
+    """
+    path = output_dir / "refined_poses" / f"{pid}_resolved_contacts.json"
+    if not path.exists():
+        return None
+    try:
+        fc, meta = load_foot_contacts(path)
+    except Exception:
+        return None
+    if meta.get("anchor_mode") != "resolved":
+        return None
+    frames_arr = np.asarray(frames)
+    if fc.n_frames != len(frames_arr):
+        return None
+    return fc.in_contact
+
+
 def eval_refined_player(
     output_dir: Path, pid: str, smpl_model: dict | None,
 ) -> dict | None:
@@ -271,10 +309,17 @@ def eval_refined_player(
     shot_id = refined.contributing_shots[0] if refined.contributing_shots else ""
     cam_track = _load_camera_track(output_dir / "camera", shot_id) if shot_id else None
     fps = float(cam_track.fps) if cam_track is not None else _DEFAULT_FPS
-    contacts = (
-        _load_contacts_sidecar(output_dir / "hmr_world", shot_id, pid, refined.frames)
-        if shot_id else None
-    )
+    # Prefer the stage's own verified/effective contact set; fall back
+    # to the raw hmr_world detection-time sidecar, then (contacts=None)
+    # to foot_quality_metrics' FK z<0.10 proxy — same graceful-
+    # degradation contract as before, just with a new, preferred first
+    # rung on the ladder.
+    contacts = _load_resolved_contacts(output_dir, pid, refined.frames)
+    if contacts is None:
+        contacts = (
+            _load_contacts_sidecar(output_dir / "hmr_world", shot_id, pid, refined.frames)
+            if shot_id else None
+        )
     rest_joints = beta_adjusted_rest_joints(refined.betas, smpl_model)
 
     return foot_quality_metrics(

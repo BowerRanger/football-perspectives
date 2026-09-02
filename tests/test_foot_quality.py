@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.utils.foot_contact import FootContacts
 from src.utils.foot_quality import foot_quality_metrics
 from tests.helpers.synthetic_gait import make_walk
 
@@ -578,6 +579,70 @@ def test_load_contacts_sidecar_falls_back_to_positional_when_hmr_npz_missing(tmp
     assert cli._load_contacts_sidecar(hmr_dir, "shotA", "P001", g.frames[:10]) is None
 
 
+def test_load_resolved_contacts_returns_none_when_missing(tmp_path) -> None:
+    cli = _import_cli()
+    (tmp_path / "refined_poses").mkdir(parents=True)
+    assert cli._load_resolved_contacts(tmp_path, "P001", np.arange(10)) is None
+
+
+def test_load_resolved_contacts_loads_when_present(tmp_path) -> None:
+    from src.schemas.foot_contacts import save_foot_contacts
+
+    cli = _import_cli()
+    (tmp_path / "refined_poses").mkdir(parents=True)
+    n = 10
+    in_contact = np.zeros((n, 2), dtype=bool)
+    in_contact[2:6, 0] = True
+    fc = FootContacts(
+        n_frames=n, in_contact=in_contact, quality=in_contact.astype(float), spans=(),
+    )
+    save_foot_contacts(
+        tmp_path / "refined_poses" / "P001_resolved_contacts.json", fc,
+        shot_id="shotA", player_id="P001", anchor_mode="resolved",
+    )
+    out = cli._load_resolved_contacts(tmp_path, "P001", np.arange(n))
+    assert out is not None
+    np.testing.assert_array_equal(out, in_contact)
+
+
+def test_load_resolved_contacts_rejects_wrong_anchor_mode(tmp_path) -> None:
+    """A file present but not tagged anchor_mode="resolved" (e.g. a
+    stray raw-contact sidecar someone copied into refined_poses/) is
+    NOT trusted as the verified set — the caller falls back instead of
+    silently misinterpreting it."""
+    from src.schemas.foot_contacts import save_foot_contacts
+
+    cli = _import_cli()
+    (tmp_path / "refined_poses").mkdir(parents=True)
+    n = 10
+    fc = FootContacts(
+        n_frames=n, in_contact=np.ones((n, 2), dtype=bool),
+        quality=np.ones((n, 2)), spans=(),
+    )
+    save_foot_contacts(
+        tmp_path / "refined_poses" / "P001_resolved_contacts.json", fc,
+        shot_id="shotA", player_id="P001", anchor_mode="contact",
+    )
+    assert cli._load_resolved_contacts(tmp_path, "P001", np.arange(n)) is None
+
+
+def test_load_resolved_contacts_returns_none_on_length_mismatch(tmp_path) -> None:
+    from src.schemas.foot_contacts import save_foot_contacts
+
+    cli = _import_cli()
+    (tmp_path / "refined_poses").mkdir(parents=True)
+    n = 10
+    fc = FootContacts(
+        n_frames=n, in_contact=np.ones((n, 2), dtype=bool),
+        quality=np.ones((n, 2)), spans=(),
+    )
+    save_foot_contacts(
+        tmp_path / "refined_poses" / "P001_resolved_contacts.json", fc,
+        shot_id="shotA", player_id="P001", anchor_mode="resolved",
+    )
+    assert cli._load_resolved_contacts(tmp_path, "P001", np.arange(3)) is None
+
+
 def _write_fixture(tmp_path) -> "_Path":
     from src.schemas.camera_track import CameraFrame, CameraTrack
     from src.schemas.refined_pose import RefinedPose
@@ -669,6 +734,61 @@ def test_eval_refined_player_returns_metrics(tmp_path) -> None:
     assert m is not None
     assert "skate" in m
     assert "penetration" in m
+
+
+def test_eval_refined_player_prefers_resolved_contacts_over_hmr_sidecar(tmp_path) -> None:
+    """When BOTH a raw hmr_world foot_contacts sidecar (says: in contact
+    the whole track) and a refined_poses resolved_contacts sidecar (says:
+    never in contact) are present, eval_refined_player's contact_ratio
+    reflects the RESOLVED one — the honest, verified set wins over the
+    raw detection-time one."""
+    from src.schemas.foot_contacts import save_foot_contacts
+
+    cli = _import_cli()
+    out = _write_fixture(tmp_path)
+    n = 30  # matches _write_fixture's make_walk(n_frames=30)
+
+    hmr_fc = FootContacts(
+        n_frames=n, in_contact=np.ones((n, 2), dtype=bool),
+        quality=np.ones((n, 2)), spans=(),
+    )
+    save_foot_contacts(
+        out / "hmr_world" / "shotA__P001_foot_contacts.json", hmr_fc,
+        shot_id="shotA", player_id="P001", anchor_mode="contact",
+    )
+    resolved_fc = FootContacts(
+        n_frames=n, in_contact=np.zeros((n, 2), dtype=bool),
+        quality=np.zeros((n, 2)), spans=(),
+    )
+    save_foot_contacts(
+        out / "refined_poses" / "P001_resolved_contacts.json", resolved_fc,
+        shot_id="shotA", player_id="P001", anchor_mode="resolved",
+    )
+
+    m = cli.eval_refined_player(out, "P001", None)
+    assert m is not None
+    assert m["contact_ratio"] == 0.0
+
+
+def test_eval_refined_player_falls_back_to_hmr_sidecar_without_resolved(tmp_path) -> None:
+    from src.schemas.foot_contacts import save_foot_contacts
+
+    cli = _import_cli()
+    out = _write_fixture(tmp_path)
+    n = 30
+
+    hmr_fc = FootContacts(
+        n_frames=n, in_contact=np.ones((n, 2), dtype=bool),
+        quality=np.ones((n, 2)), spans=(),
+    )
+    save_foot_contacts(
+        out / "hmr_world" / "shotA__P001_foot_contacts.json", hmr_fc,
+        shot_id="shotA", player_id="P001", anchor_mode="contact",
+    )
+
+    m = cli.eval_refined_player(out, "P001", None)
+    assert m is not None
+    assert m["contact_ratio"] == 1.0
 
 
 def test_eval_refined_player_returns_none_for_missing_npz(tmp_path) -> None:

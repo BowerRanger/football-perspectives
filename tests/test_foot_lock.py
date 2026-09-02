@@ -1,7 +1,7 @@
-"""Tests for the foot-lock solver library (plan Task 4):
+"""Tests for the foot-lock solver library (plan Tasks 4 + 7):
 ``src.utils.foot_lock.solve_root_with_pins`` (component [C], stance-pinned
-root solve). Task 7's ``lock_feet_ik`` / ``penetration_guard`` tests
-(component [D]) land in a follow-up append to this module.
+root solve) and ``lock_feet_ik`` / ``penetration_guard`` (component [D],
+the foot-lock IK finale + penetration guard).
 
 numpy/scipy only — no torch, runs on the Mac dev box (see
 docs/superpowers/plans/2026-09-02-foot-contact-locomotion.md's global
@@ -15,10 +15,20 @@ analytic geometry against.
 from __future__ import annotations
 
 import numpy as np
+import pytest
+from scipy.spatial.transform import Rotation
 
 from src.utils.foot_contact import ContactSpan, FootContacts
-from src.utils.foot_lock import solve_root_with_pins
-from src.utils.smpl_skeleton import SMPL_REST_JOINTS_YUP, compute_all_joint_worlds_batch
+from src.utils.foot_lock import (
+    lock_feet_ik,
+    penetration_guard,
+    solve_root_with_pins,
+)
+from src.utils.smpl_skeleton import (
+    SMPL_REST_JOINTS_YUP,
+    compute_all_joint_worlds_batch,
+    compute_joint_world_pose,
+)
 from tests.helpers.synthetic_gait import contacts_from_truth, make_walk
 
 _REST = SMPL_REST_JOINTS_YUP
@@ -143,3 +153,172 @@ def test_solve_root_with_pins_empty_contacts_returns_carrier_exactly() -> None:
     np.testing.assert_array_equal(solved, g.root_t)
     assert stats["constrained_frames"] == 0
     assert stats["clamped_frames"] == 0
+
+
+# ---------------------------------------------------------------------
+# lock_feet_ik (Task 7)
+# ---------------------------------------------------------------------
+
+
+def test_lock_feet_ik_lands_feet_on_pins() -> None:
+    g = make_walk(n_frames=120)
+    noisy = g.root_t + np.random.default_rng(5).normal(0, 0.03, g.root_t.shape)
+    fc = contacts_from_truth(g)
+    th2, rt2, stats = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=noisy, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST,
+    )
+    fw = compute_all_joint_worlds_batch(th2, g.root_R, rt2, _REST)
+    for span in fc.spans:
+        j = 10 if span.side == 0 else 11
+        core = slice(span.start + 3, max(span.start + 3, span.end - 3))
+        err = np.linalg.norm(fw[core, j, :2] - span.pin[:2], axis=1)
+        if err.size:
+            assert err.max() < 0.03
+
+
+def test_lock_feet_ik_lands_feet_on_pins_with_long_stance_spans() -> None:
+    """Same scenario as above but with a slower stride so each stance
+    span is long enough to have a non-trivial edge-eased "core" (the
+    default-parameter plan test's 6-frame spans collapse the core to an
+    empty slice with edge_ease_frames=3) — this is the meaningful check
+    that the IK genuinely converges once the ease ramp has finished.
+
+    A span whose thetas end up bit-identical to the input was skipped
+    (joint-clamp overflow — the separate, deliberate scenario
+    ``test_lock_feet_ik_respects_joint_clamp`` covers that path) and is
+    excluded from the tight-tolerance check here: with 3 cm/axis noise
+    over a long (~12-frame) span, an unlucky single-frame noise draw can
+    legitimately need more correction than ik_max_joint_delta_deg allows
+    and get skipped-and-restored by design, not by bug."""
+    g = make_walk(n_frames=200, stride_s=1.2)
+    noisy = g.root_t + np.random.default_rng(5).normal(0, 0.03, g.root_t.shape)
+    fc = contacts_from_truth(g)
+    th2, rt2, stats = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=noisy, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST,
+    )
+    assert stats["spans_locked"] > 0
+    fw = compute_all_joint_worlds_batch(th2, g.root_R, rt2, _REST)
+    max_core_err = 0.0
+    n_core_frames = 0
+    n_locked_spans_checked = 0
+    for span in fc.spans:
+        was_skipped = np.array_equal(
+            th2[span.start:span.end], g.thetas[span.start:span.end],
+        )
+        if was_skipped:
+            continue
+        n_locked_spans_checked += 1
+        j = 10 if span.side == 0 else 11
+        core = slice(span.start + 3, max(span.start + 3, span.end - 3))
+        err = np.linalg.norm(fw[core, j, :2] - span.pin[:2], axis=1)
+        if err.size:
+            n_core_frames += err.size
+            max_core_err = max(max_core_err, float(err.max()))
+    assert n_locked_spans_checked >= len(fc.spans) - 1, "expected at most the one deliberately-hard span skipped"
+    assert n_core_frames > 0, "expected at least one locked span with a non-empty core"
+    assert max_core_err < 0.03
+
+
+def test_lock_feet_ik_respects_joint_clamp() -> None:
+    """Injecting 0.5 m-scale per-frame noise into just ONE span's root
+    translation forces a correction beyond ik_max_joint_delta_deg's
+    reach; the clamped solve should still leave the foot > 4 cm off, so
+    that span is skipped and its thetas are restored bit-exactly, while
+    the OTHER (clean) spans still lock normally."""
+    g = make_walk(n_frames=120)
+    fc = contacts_from_truth(g)
+    bad_root = g.root_t.copy()
+    target_span = fc.spans[0]
+    rng = np.random.default_rng(7)
+    span_len = target_span.end - target_span.start
+    bad_root[target_span.start:target_span.end] += rng.normal(0, 0.5, (span_len, 3))
+
+    th2, rt2, stats = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=bad_root, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST,
+    )
+    assert stats["spans_skipped"] >= 1
+    assert stats["spans_locked"] >= 1
+    np.testing.assert_array_equal(
+        th2[target_span.start:target_span.end], g.thetas[target_span.start:target_span.end],
+    )
+
+
+def test_lock_feet_ik_preserves_foot_global_orientation() -> None:
+    g = make_walk(n_frames=120)
+    noisy = g.root_t + np.random.default_rng(5).normal(0, 0.03, g.root_t.shape)
+    fc = contacts_from_truth(g)
+    th2, rt2, stats = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=noisy, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST,
+    )
+    assert stats["spans_locked"] > 0
+
+    max_angle_deg = 0.0
+    for span in fc.spans:
+        foot_idx = 10 if span.side == 0 else 11
+        for f in range(span.start, span.end):
+            _, R_old = compute_joint_world_pose(g.thetas[f], g.root_R[f], noisy[f], foot_idx, _REST)
+            _, R_new = compute_joint_world_pose(th2[f], g.root_R[f], rt2[f], foot_idx, _REST)
+            angle = Rotation.from_matrix(R_old.T @ R_new).magnitude()
+            max_angle_deg = max(max_angle_deg, float(np.degrees(angle)))
+    assert max_angle_deg <= 2.0
+
+
+def test_lock_feet_ik_empty_contacts_returns_input_exactly() -> None:
+    g = make_walk(n_frames=40)
+    fc = FootContacts(
+        n_frames=len(g.frames),
+        in_contact=np.zeros((len(g.frames), 2), dtype=bool),
+        quality=np.zeros((len(g.frames), 2), dtype=float),
+        spans=(),
+    )
+    th2, rt2, stats = lock_feet_ik(
+        thetas=g.thetas, root_R=g.root_R, root_t=g.root_t, betas=g.betas,
+        contacts=fc, fps=g.fps, rest_joints=_REST,
+    )
+    np.testing.assert_array_equal(th2, g.thetas)
+    np.testing.assert_array_equal(rt2, g.root_t)
+    assert stats["spans_locked"] == 0
+    assert stats["spans_skipped"] == 0
+
+
+# ---------------------------------------------------------------------
+# penetration_guard (Task 7)
+# ---------------------------------------------------------------------
+
+
+def test_penetration_guard_raises_only_and_clears_ground() -> None:
+    g = make_walk(n_frames=60)
+    sunk = g.root_t.copy()
+    sunk[:, 2] -= 0.05
+    rt2, stats = penetration_guard(
+        thetas=g.thetas, root_R=g.root_R, root_t=sunk, betas=g.betas, rest_joints=_REST,
+    )
+    fw = compute_all_joint_worlds_batch(g.thetas, g.root_R, rt2, _REST)
+    assert fw[:, [10, 11], 2].min() >= 0.025 - 1e-6
+    assert (rt2[:, 2] >= sunk[:, 2] - 1e-9).all()
+    assert stats["frames_raised"] > 0
+    assert stats["max_raise_cm"] > 0.0
+
+
+def test_penetration_guard_noop_when_clear() -> None:
+    g = make_walk(n_frames=60)
+    rt2, stats = penetration_guard(
+        thetas=g.thetas, root_R=g.root_R, root_t=g.root_t, betas=g.betas, rest_joints=_REST,
+    )
+    np.testing.assert_array_equal(rt2, g.root_t)
+    assert stats["frames_raised"] == 0
+    assert stats["max_raise_cm"] == 0.0
+
+
+def test_penetration_guard_empty_track_is_a_no_op() -> None:
+    empty = np.zeros((0, 3), dtype=float)
+    rt2, stats = penetration_guard(
+        thetas=np.zeros((0, 24, 3)), root_R=np.zeros((0, 3, 3)), root_t=empty,
+        betas=np.zeros(10), rest_joints=_REST,
+    )
+    assert rt2.shape == (0, 3)
+    assert stats == {"frames_raised": 0, "max_raise_cm": 0.0}

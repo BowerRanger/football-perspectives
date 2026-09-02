@@ -91,6 +91,7 @@ STAGE_ORDER: list[str] = [
     "refined_poses",
     "ball",
     "export",
+    "render",
 ]
 
 def _active_manifest_shot_ids(output_dir: Path) -> list[str]:
@@ -241,6 +242,16 @@ def _refined_poses_complete(output_dir: Path) -> bool:
     return all((refined / f"{pid}_refined.npz").exists() for pid in expected)
 
 
+def _render_complete(output_dir: Path) -> bool:
+    """Delegates to ``RenderStage.is_complete`` (src/stages/render.py)
+    rather than re-deriving the per-active-shot mp4 check here — that
+    method only ever reads ``self.output_dir``, so an empty config
+    satisfies the constructor without needing any ``render.*`` settings."""
+    from src.stages.render import RenderStage
+
+    return RenderStage({}, output_dir).is_complete()
+
+
 # A valid output-directory basename: letters, digits, dash, underscore. No
 # path separators or dots, so it can never escape the parent directory.
 _OUTPUT_DIR_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -267,6 +278,7 @@ _STAGE_COMPLETE = {
     "ball": lambda d: (d / "ball" / "ball_track.json").exists(),
     "refined_poses": _refined_poses_complete,
     "export": lambda d: (d / "export" / "gltf" / "scene.glb").exists(),
+    "render": _render_complete,
 }
 
 # Per-stage outputs that should be wiped on a "re-run" or "clear" action.
@@ -1056,6 +1068,135 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         if unknown:
             raise HTTPException(status_code=400, detail=f"unknown players: {unknown}")
         selection.save(_selection_path(shot))
+        return selection.to_dict()
+
+    # ------------------------------------------------------------------
+    # Render stage (#8) — read-only output inventory + video streaming,
+    # plus the RenderSelection operator sidecar (mirrors the
+    # export/camera-selection group directly above: same shot-id regex
+    # guard, same "unknown player" 400, same "operator input always
+    # wins" contract). RenderStage itself lives in src/stages/render.py;
+    # nothing here writes render output — only the sidecar the stage
+    # reads back on its next run.
+    # ------------------------------------------------------------------
+
+    def _render_selection_path(shot: str | None) -> Path:
+        # Same "" -> "clip" legacy naming as RenderStage._selection_path
+        # (src/stages/render.py) and its _active_shot_ids' "" sentinel —
+        # deliberately NOT the export/camera-selection convention (empty
+        # prefix) since RenderStage's own on-disk layout already uses a
+        # literal "clip" directory/key for the no-manifest case.
+        return output_dir / "render" / f"{shot or 'clip'}_render_selection.json"
+
+    @app.get("/api/render/outputs")
+    def get_render_outputs():
+        """Inventory of rendered camera videos per shot, for the Render
+        panel's camera-card grid.
+
+        Walks ``output/render/*/`` — each shot subdirectory's top-level
+        ``*.mp4`` files only, so the ``cameras/`` (virtual-camera track
+        JSON) and ``aov/`` (EXR passes) subdirs are never mistaken for
+        cameras. ``_9x16`` stems report ``vertical: true`` under their
+        base camera id (``drone_9x16.mp4`` -> id ``drone``), so a
+        landscape/portrait pair shares one id with different variants.
+        """
+        render_dir = output_dir / "render"
+        if not render_dir.exists():
+            return {"shots": {}}
+        timings: dict = {}
+        timings_path = render_dir / "render_timings.json"
+        if timings_path.exists():
+            try:
+                timings = json.loads(timings_path.read_text())
+            except Exception:
+                timings = {}
+        shots: dict[str, dict] = {}
+        for shot_dir in sorted(p for p in render_dir.iterdir() if p.is_dir()):
+            shot_id = shot_dir.name
+            cameras = []
+            for mp4 in sorted(shot_dir.glob("*.mp4")):
+                stem = mp4.stem
+                vertical = stem.endswith("_9x16")
+                cam_id = stem[: -len("_9x16")] if vertical else stem
+                st = mp4.stat()
+                cameras.append({
+                    "id": cam_id,
+                    "file": mp4.name,
+                    "size_bytes": st.st_size,
+                    "mtime": st.st_mtime,
+                    "vertical": vertical,
+                })
+            render_seconds = timings.get(shot_id, timings.get("clip"))
+            aov_dir = shot_dir / "aov"
+            aov = aov_dir.exists() and any(p.is_file() for p in aov_dir.rglob("*"))
+            shots[shot_id] = {
+                "cameras": cameras,
+                "render_seconds": render_seconds,
+                "aov": aov,
+            }
+        return {"shots": shots}
+
+    @app.get("/api/render/video/{shot_id}/{camera}")
+    def get_render_video(shot_id: str, camera: str, request: Request):
+        """Stream one rendered camera's mp4 (range-request aware, same
+        idiom as ``/api/video/{shot_id}``). ``camera`` arrives
+        pre-sanitised by the panel (``broadcast``, ``pov_P001``,
+        ``drone_9x16``) — it's the exact ``*.mp4`` stem under
+        ``render/<shot>/``, not a raw camera id (no ``:`` survives)."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", shot_id):
+            raise HTTPException(status_code=400, detail="Invalid shot ID")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", camera):
+            raise HTTPException(status_code=400, detail="Invalid camera ID")
+        candidate = (output_dir / "render" / shot_id / f"{camera}.mp4").resolve()
+        if not candidate.is_relative_to((output_dir / "render").resolve()):
+            raise HTTPException(status_code=400, detail="Invalid shot ID")
+        if candidate.exists():
+            return _range_response(candidate, request)
+        raise HTTPException(
+            status_code=404, detail=f"Video not found: {shot_id}/{camera}")
+
+    @app.get("/api/render/selection")
+    def get_render_selection(shot: str | None = None):
+        """Return the saved render camera selection for a shot, or an
+        empty default when no sidecar has been saved yet."""
+        from src.schemas.render_selection import RenderSelection
+
+        if shot and not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
+            raise HTTPException(status_code=400, detail="Invalid shot id")
+        path = _render_selection_path(shot)
+        if not path.exists():
+            return {"shot_id": shot or "", "cameras": [], "vertical_variant": None}
+        return RenderSelection.load(path).to_dict()
+
+    @app.put("/api/render/selection")
+    def put_render_selection(payload: dict, shot: str | None = None):
+        """Persist the render camera selection for a shot after
+        validating that every ``pov:``/``ots:`` entry names a known
+        player (``broadcast``/``drone`` need no such lookup)."""
+        from src.schemas.render_selection import RenderSelection, RenderSelectionError
+        from src.schemas.smpl_world import SmplWorldTrack
+
+        if shot and not re.fullmatch(r"[A-Za-z0-9_-]+", shot):
+            raise HTTPException(status_code=400, detail="Invalid shot id")
+        try:
+            selection = RenderSelection.from_dict(payload)
+        except RenderSelectionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        hmr_dir = output_dir / "hmr_world"
+        valid_ids: set[str] = set()
+        if hmr_dir.exists():
+            for npz in hmr_dir.glob("*_smpl_world.npz"):
+                t = SmplWorldTrack.load(npz)
+                if not shot or (getattr(t, "shot_id", "") or "") in (shot, ""):
+                    valid_ids.add(t.player_id)
+        unknown = []
+        for cam in selection.cameras:
+            rig, _, pid = cam.partition(":")
+            if rig in ("pov", "ots") and pid not in valid_ids:
+                unknown.append(cam)
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"unknown players: {unknown}")
+        selection.save(_render_selection_path(shot))
         return selection.to_dict()
 
     # ------------------------------------------------------------------

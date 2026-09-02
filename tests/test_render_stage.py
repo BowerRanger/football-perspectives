@@ -9,6 +9,7 @@ import stat
 import pytest
 
 from src.pipeline.runner import _stage_class, resolve_stages
+from src.schemas.render_selection import RenderSelection
 from src.schemas.shots import Shot, ShotsManifest
 from src.stages.render import RenderStage
 from tests.conftest import _add_player_fixture, _write_min_fixture
@@ -206,3 +207,131 @@ def test_run_writes_satisfied_virtual_cameras_and_filters_unsatisfied(tmp_path):
     assert (cams_dir / "drone_camera_track.json").exists()
     assert (cams_dir / "pov_P001_camera_track.json").exists()
     assert not (cams_dir / "pov_P999_camera_track.json").exists()
+
+
+# ── RenderSelection sidecar merge (operator input always wins) ─────────
+# The sidecar lives at output/render/{shot_id or "clip"}_render_selection
+# .json — same "" -> "clip" legacy naming _write_virtual_camera_tracks
+# already uses for output/render/<shot|clip>/cameras/.
+#
+# _resolve_camera_request is tested directly (fast, precise — no shell
+# round-trip through a stub Blender's argv) since run()'s per-shot
+# --cameras string can't distinguish "empty list" from "no cameras arg"
+# once it's gone through `"$@"` echoing. One full run() test below
+# still proves the override actually reaches _blender_args end-to-end.
+
+@pytest.mark.unit
+def test_resolve_camera_request_sidecar_overrides_cameras(tmp_path):
+    RenderSelection(shot_id="", cameras=("broadcast",)).save(
+        tmp_path / "render" / "clip_render_selection.json"
+    )
+    cfg = _cfg(cameras=["broadcast", "drone"])
+    stage = RenderStage(cfg, tmp_path)
+    cameras, vertical = stage._resolve_camera_request("")
+    assert cameras == ["broadcast"]
+    assert vertical is None
+
+
+@pytest.mark.unit
+def test_resolve_camera_request_sidecar_overrides_to_empty_list(tmp_path):
+    """The operator can explicitly disable every camera for a shot —
+    an empty ``cameras`` sidecar list is a real override, not treated
+    the same as "sidecar absent"."""
+    RenderSelection(shot_id="", cameras=()).save(
+        tmp_path / "render" / "clip_render_selection.json"
+    )
+    cfg = _cfg(cameras=["broadcast", "drone"])
+    stage = RenderStage(cfg, tmp_path)
+    cameras, _ = stage._resolve_camera_request("")
+    assert cameras == []
+
+
+@pytest.mark.unit
+def test_resolve_camera_request_sidecar_overrides_vertical_variant(tmp_path):
+    RenderSelection(
+        shot_id="", cameras=("broadcast",), vertical_variant=True
+    ).save(tmp_path / "render" / "clip_render_selection.json")
+    cfg = _cfg(cameras=["broadcast"], vertical_variant=False)
+    stage = RenderStage(cfg, tmp_path)
+    _, vertical = stage._resolve_camera_request("")
+    assert vertical is True
+
+
+@pytest.mark.unit
+def test_resolve_camera_request_absent_sidecar_returns_config_unchanged(tmp_path):
+    cfg = _cfg(cameras=["broadcast", "drone"])
+    stage = RenderStage(cfg, tmp_path)
+    assert not (tmp_path / "render" / "clip_render_selection.json").exists()
+    cameras, vertical = stage._resolve_camera_request("")
+    assert cameras == ["broadcast", "drone"]
+    assert vertical is None
+
+
+@pytest.mark.unit
+def test_resolve_camera_request_malformed_sidecar_warns_and_falls_back(
+    tmp_path, caplog
+):
+    render_dir = tmp_path / "render"
+    render_dir.mkdir()
+    (render_dir / "clip_render_selection.json").write_text("{not valid json")
+    cfg = _cfg(cameras=["broadcast", "drone"])
+    stage = RenderStage(cfg, tmp_path)
+    cameras, vertical = stage._resolve_camera_request("")  # must not raise
+    assert cameras == ["broadcast", "drone"]
+    assert vertical is None
+    assert any(
+        "render" in r.message.lower() and "selection" in r.message.lower()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.unit
+def test_resolve_camera_request_bad_camera_id_in_sidecar_warns_and_falls_back(
+    tmp_path, caplog
+):
+    render_dir = tmp_path / "render"
+    render_dir.mkdir()
+    (render_dir / "clip_render_selection.json").write_text(
+        '{"shot_id": "", "cameras": ["dolly"]}'
+    )
+    cfg = _cfg(cameras=["broadcast"])
+    stage = RenderStage(cfg, tmp_path)
+    cameras, _ = stage._resolve_camera_request("")  # must not raise
+    assert cameras == ["broadcast"]
+    assert any("selection" in r.message.lower() for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_resolve_camera_request_per_shot_paths_are_independent(tmp_path):
+    RenderSelection(shot_id="shot01", cameras=("drone",)).save(
+        tmp_path / "render" / "shot01_render_selection.json"
+    )
+    cfg = _cfg(cameras=["broadcast"])
+    stage = RenderStage(cfg, tmp_path)
+    cameras01, _ = stage._resolve_camera_request("shot01")
+    cameras02, _ = stage._resolve_camera_request("shot02")
+    assert cameras01 == ["drone"]
+    assert cameras02 == ["broadcast"]  # no sidecar for shot02 -> config
+
+
+@pytest.mark.integration
+def test_run_uses_sidecar_cameras_end_to_end(tmp_path):
+    """Full run() wiring: the sidecar's cameras (not config's) reach the
+    Blender subprocess argv."""
+    _write_min_fixture(tmp_path)
+    stub = tmp_path / "fake_blender"
+    log = tmp_path / "calls.jsonl"
+    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    RenderSelection(shot_id="", cameras=("broadcast",), vertical_variant=True).save(
+        tmp_path / "render" / "clip_render_selection.json"
+    )
+    cfg = _cfg(blender_path=str(stub), cameras=["broadcast", "drone"],
+               vertical_variant=False)
+    stage = RenderStage(cfg, tmp_path)
+    stage.run()
+    calls = log.read_text().strip().splitlines()
+    assert len(calls) == 1
+    assert "--cameras" in calls[0] and "broadcast" in calls[0]
+    assert "drone" not in calls[0].split("--cameras")[1].split("--")[0]
+    assert "--vertical" in calls[0].split()

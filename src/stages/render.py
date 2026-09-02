@@ -17,6 +17,7 @@ from pathlib import Path
 from src.pipeline.base import BaseStage
 from src.schemas.ball_track import BallTrack
 from src.schemas.camera_track import CameraTrack
+from src.schemas.render_selection import RenderSelection, RenderSelectionError
 from src.schemas.shots import ShotsManifest
 from src.schemas.smpl_world import SmplWorldTrack
 from src.stages.export import _per_shot_smpl_tracks
@@ -65,7 +66,12 @@ class RenderStage(BaseStage):
             return path if Path(path).exists() else None
         return shutil.which(path)
 
-    def _blender_args(self, shot_id: str, cameras: list[str] | None = None) -> list[str]:
+    def _blender_args(
+        self,
+        shot_id: str,
+        cameras: list[str] | None = None,
+        vertical_override: bool | None = None,
+    ) -> list[str]:
         cfg = self._render_cfg()
         w, h = cfg.get("resolution", [1920, 1080])
         blender = self._resolve_blender() or "blender"
@@ -80,7 +86,10 @@ class RenderStage(BaseStage):
             "--style-json", json.dumps(
                 {**cfg.get("style", {}), "teams": cfg.get("teams", {})}),
         ]
-        if cfg.get("vertical_variant"):
+        # A per-shot RenderSelection sidecar's vertical_variant (when not
+        # None) overrides the config default — operator input always wins.
+        vertical = cfg.get("vertical_variant") if vertical_override is None else vertical_override
+        if vertical:
             args.append("--vertical")
         if cfg.get("aov_passes"):
             args.append("--aov")
@@ -219,6 +228,43 @@ class RenderStage(BaseStage):
             if shot_filter is None or s.id == shot_filter
         ]
 
+    def _selection_path(self, shot_id: str) -> Path:
+        # Same "" -> "clip" legacy naming _write_virtual_camera_tracks
+        # already uses for output/render/<shot|clip>/cameras/, and the
+        # web dashboard's GET/PUT /api/render/selection endpoints (whose
+        # ``shot`` query param defaults the same way).
+        return self.output_dir / "render" / f"{shot_id or 'clip'}_render_selection.json"
+
+    def _resolve_camera_request(self, shot_id: str) -> tuple[list[str], bool | None]:
+        """Merge the operator's RenderSelection sidecar (if any) over the
+        config's ``render.cameras`` / ``render.vertical_variant`` for one
+        shot — operator input always wins, matching the anchor /
+        sync-map / ball-anchor conventions elsewhere in the pipeline.
+
+        Returns ``(cameras, vertical_variant)``: an absent sidecar leaves
+        config untouched (``vertical_variant`` is ``None``, i.e. "use
+        config"); a malformed sidecar (bad JSON or an invalid camera id)
+        warns and falls back to config exactly as if it were absent —
+        a bad file must never crash the stage. A *present* sidecar's
+        ``cameras`` list fully replaces the config list, even when
+        empty — the operator can explicitly render zero cameras for a
+        shot.
+        """
+        cfg_cameras = list(self._render_cfg().get("cameras", ["broadcast"]))
+        path = self._selection_path(shot_id)
+        if not path.exists():
+            return cfg_cameras, None
+        try:
+            selection = RenderSelection.load(path)
+        except (RenderSelectionError, OSError, ValueError) as exc:
+            logger.warning(
+                "render: malformed render selection at %s (%s); falling "
+                "back to config cameras for shot %s",
+                path, exc, shot_id or "<legacy>",
+            )
+            return cfg_cameras, None
+        return list(selection.cameras), selection.vertical_variant
+
     def run(self) -> None:
         if not self._render_cfg().get("enabled", True):
             logger.info("render: disabled via config; skipping")
@@ -230,13 +276,14 @@ class RenderStage(BaseStage):
                 ">= 3.6 or set the config path.")
             return
         timings: dict[str, float] = {}
-        requested = list(self._render_cfg().get("cameras", ["broadcast"]))
-        broadcast_ids = [c for c in requested if c == "broadcast"]
-        virtual_ids = [c for c in requested if c != "broadcast"]
         for shot_id in self._active_shot_ids():
+            requested, vertical_override = self._resolve_camera_request(shot_id)
+            broadcast_ids = [c for c in requested if c == "broadcast"]
+            virtual_ids = [c for c in requested if c != "broadcast"]
             satisfied = set(self._write_virtual_camera_tracks(shot_id, virtual_ids))
             cameras = broadcast_ids + [c for c in virtual_ids if c in satisfied]
-            args = self._blender_args(shot_id, cameras=cameras)
+            args = self._blender_args(
+                shot_id, cameras=cameras, vertical_override=vertical_override)
             logger.info("render: shot=%s -> %s", shot_id or "<legacy>", args)
             t0 = time.time()
             result = subprocess.run(args, capture_output=True, text=True)

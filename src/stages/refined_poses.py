@@ -46,6 +46,8 @@ from src.utils.smpl_skeleton import (
     SMPL_PARENTS,
     SMPL_REST_JOINTS_YUP,
     axis_angle_to_matrix,
+    beta_adjusted_rest_joints as _beta_adjusted_rest_joints,
+    load_smpl_neutral_model as _load_smpl_neutral_model,
 )
 from src.utils.temporal_smoothing import savgol_axis, slerp_window
 
@@ -71,57 +73,6 @@ _ANKLE_IN_ROOT[0] = 0.0
 # the ground-snap pass to find the lower foot per frame.
 _L_FOOT_IDX = SMPL_JOINT_NAMES.index("l_foot")
 _R_FOOT_IDX = SMPL_JOINT_NAMES.index("r_foot")
-
-
-def _load_smpl_neutral_model() -> dict | None:
-    """Load the SMPL neutral shape data so we can beta-adjust the rest
-    joint table per player. Returns ``None`` when the file is absent
-    (e.g. CI without ``data/models/smpl_neutral.npz``) — callers must
-    fall back to the constant ``SMPL_REST_JOINTS_YUP`` in that case.
-    """
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "data" / "models" / "smpl_neutral.npz"
-    )
-    if not path.exists():
-        return None
-    try:
-        z = np.load(path, allow_pickle=False)
-    except Exception:
-        return None
-    out: dict = {"joint_positions": np.asarray(z["joint_positions"])}
-    if "joint_shapedirs" in z.files:
-        out["joint_shapedirs"] = np.asarray(z["joint_shapedirs"])
-    return out
-
-
-def _beta_adjusted_rest_joints(
-    betas: np.ndarray | None, smpl_model: dict | None,
-) -> np.ndarray:
-    """Build a (24, 3) pelvis-relative rest joint table for one player.
-
-    Without ``smpl_model`` (file missing), returns the constant
-    ``SMPL_REST_JOINTS_YUP`` so callers still get something usable.
-
-    With ``smpl_model`` and ``betas``, applies the per-shape
-    ``joint_shapedirs`` delta on top of the neutral joint positions,
-    then shifts the whole table so the pelvis joint sits at the
-    origin. This matches the canonical convention used by the FK
-    routines and yields the player's actual leg length, fixing the
-    ~8-10 cm gap between mean-betas canonical feet and beta-shaped
-    mesh feet that left players floating above the pitch.
-    """
-    if smpl_model is None:
-        return np.asarray(SMPL_REST_JOINTS_YUP, dtype=float)
-    jp = np.asarray(smpl_model["joint_positions"], dtype=float).copy()
-    jsd = smpl_model.get("joint_shapedirs")
-    if jsd is not None and betas is not None:
-        betas = np.asarray(betas, dtype=float).reshape(-1)
-        K = min(jsd.shape[2], len(betas))
-        if K > 0:
-            jp = jp + jsd[:, :, :K] @ betas[:K]
-    # Shift so pelvis is at origin (matches src table convention).
-    return jp - jp[0]
 
 
 def _reject_root_R_outliers(

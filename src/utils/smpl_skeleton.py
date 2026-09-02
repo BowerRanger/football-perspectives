@@ -11,6 +11,8 @@ at ``SMPL_J_REST``.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 SMPL_JOINT_NAMES: tuple[str, ...] = (
@@ -246,6 +248,62 @@ def _axis_angle_to_matrix_batch(aa: np.ndarray) -> np.ndarray:
     return out
 
 
+def compute_canonical_joints_batch(
+    thetas: np.ndarray,
+    rest_joints: np.ndarray | None = None,
+) -> np.ndarray:
+    """Batched FK: root-relative canonical (y-up) joint positions, before
+    the world transform. Shape (F, 24, 3), pelvis at the origin.
+
+    This is exactly the ``global_pos`` intermediate that
+    :func:`compute_all_joint_worlds_batch` computes internally before
+    applying ``root_R``/``root_t`` — extracted here so callers that need
+    the posed skeleton in the body's own frame (e.g. foot-contact
+    anchoring, which needs a per-frame root->ankle offset before it knows
+    the root translation) don't have to duplicate the FK chain walk.
+    ``compute_all_joint_worlds_batch`` calls this function and then
+    applies the world transform, so the two are provably identical for
+    the same ``thetas``/``rest_joints``.
+
+    Same conventions as the other batched FK helpers: ``thetas[:, 0]``
+    (per-frame global orient) is ignored — the canonical root is always
+    at the origin with identity rotation; only ``thetas[:, 1:]`` drive
+    the articulated pose.
+
+    Inputs:
+        thetas: (F, 24, 3) axis-angle, one row per frame per joint.
+        rest_joints: optional (24, 3) override of the rest-pose joint
+            table, as in the other FK helpers.
+    """
+    rest = (
+        np.asarray(rest_joints, dtype=np.float64)
+        if rest_joints is not None else SMPL_REST_JOINTS_YUP
+    )
+    thetas = np.asarray(thetas, dtype=np.float64)
+    if thetas.ndim != 3 or thetas.shape[1:] != (24, 3):
+        raise ValueError(f"thetas must have shape (F, 24, 3), got {thetas.shape}")
+    n_frames = thetas.shape[0]
+
+    local_rot = _axis_angle_to_matrix_batch(thetas.reshape(-1, 3)).reshape(
+        n_frames, 24, 3, 3
+    )
+
+    global_rot = np.empty((n_frames, 24, 3, 3), dtype=np.float64)
+    global_pos = np.empty((n_frames, 24, 3), dtype=np.float64)
+    global_rot[:, 0] = np.eye(3)
+    global_pos[:, 0] = rest[0]
+    for j in range(1, 24):
+        p = SMPL_PARENTS[j]
+        global_rot[:, j] = np.einsum(
+            "fik,fkl->fil", global_rot[:, p], local_rot[:, j]
+        )
+        offset = rest[j] - rest[p]
+        global_pos[:, j] = global_pos[:, p] + np.einsum(
+            "fik,k->fi", global_rot[:, p], offset
+        )
+    return global_pos
+
+
 def compute_all_joint_worlds_batch(
     thetas: np.ndarray,
     root_R: np.ndarray,
@@ -269,18 +327,17 @@ def compute_all_joint_worlds_batch(
         root_t: (F, 3) per-frame pelvis translation in pitch world (metres).
         rest_joints: optional (24, 3) override of the rest-pose joint
             table, as in the single-frame functions.
+
+    Implemented as :func:`compute_canonical_joints_batch` followed by the
+    world transform — the two are kept in lockstep by construction.
     """
-    rest = (
-        np.asarray(rest_joints, dtype=np.float64)
-        if rest_joints is not None else SMPL_REST_JOINTS_YUP
-    )
-    thetas = np.asarray(thetas, dtype=np.float64)
+    thetas_arr = np.asarray(thetas, dtype=np.float64)
     root_R = np.asarray(root_R, dtype=np.float64)
     root_t = np.asarray(root_t, dtype=np.float64)
 
-    if thetas.ndim != 3 or thetas.shape[1:] != (24, 3):
-        raise ValueError(f"thetas must have shape (F, 24, 3), got {thetas.shape}")
-    n_frames = thetas.shape[0]
+    if thetas_arr.ndim != 3 or thetas_arr.shape[1:] != (24, 3):
+        raise ValueError(f"thetas must have shape (F, 24, 3), got {thetas_arr.shape}")
+    n_frames = thetas_arr.shape[0]
     if root_R.shape != (n_frames, 3, 3):
         raise ValueError(
             f"root_R must have shape ({n_frames}, 3, 3), got {root_R.shape}"
@@ -290,27 +347,62 @@ def compute_all_joint_worlds_batch(
             f"root_t must have shape ({n_frames}, 3), got {root_t.shape}"
         )
 
-    local_rot = _axis_angle_to_matrix_batch(thetas.reshape(-1, 3)).reshape(
-        n_frames, 24, 3, 3
-    )
-
-    global_rot = np.empty((n_frames, 24, 3, 3), dtype=np.float64)
-    global_pos = np.empty((n_frames, 24, 3), dtype=np.float64)
-    global_rot[:, 0] = np.eye(3)
-    global_pos[:, 0] = rest[0]
-    for j in range(1, 24):
-        p = SMPL_PARENTS[j]
-        global_rot[:, j] = np.einsum(
-            "fik,fkl->fil", global_rot[:, p], local_rot[:, j]
-        )
-        offset = rest[j] - rest[p]
-        global_pos[:, j] = global_pos[:, p] + np.einsum(
-            "fik,k->fi", global_rot[:, p], offset
-        )
+    global_pos = compute_canonical_joints_batch(thetas_arr, rest_joints)
 
     # Canonical y-up -> pitch world, per frame: pos = root_R @ global_pos[j] + root_t.
     world_pos = np.einsum("fba,fja->fjb", root_R, global_pos) + root_t[:, np.newaxis, :]
     return world_pos
+
+
+def load_smpl_neutral_model() -> dict | None:
+    """Load the SMPL neutral shape data so callers can beta-adjust the
+    rest joint table per player. Returns ``None`` when the file is
+    absent (e.g. CI without ``data/models/smpl_neutral.npz``) — callers
+    must fall back to the constant ``SMPL_REST_JOINTS_YUP`` in that case.
+    """
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "data" / "models" / "smpl_neutral.npz"
+    )
+    if not path.exists():
+        return None
+    try:
+        z = np.load(path, allow_pickle=False)
+    except Exception:
+        return None
+    out: dict = {"joint_positions": np.asarray(z["joint_positions"])}
+    if "joint_shapedirs" in z.files:
+        out["joint_shapedirs"] = np.asarray(z["joint_shapedirs"])
+    return out
+
+
+def beta_adjusted_rest_joints(
+    betas: np.ndarray | None, smpl_model: dict | None,
+) -> np.ndarray:
+    """Build a (24, 3) pelvis-relative rest joint table for one player.
+
+    Without ``smpl_model`` (file missing), returns the constant
+    ``SMPL_REST_JOINTS_YUP`` so callers still get something usable.
+
+    With ``smpl_model`` and ``betas``, applies the per-shape
+    ``joint_shapedirs`` delta on top of the neutral joint positions,
+    then shifts the whole table so the pelvis joint sits at the
+    origin. This matches the canonical convention used by the FK
+    routines and yields the player's actual leg length, fixing the
+    ~8-10 cm gap between mean-betas canonical feet and beta-shaped
+    mesh feet that left players floating above the pitch.
+    """
+    if smpl_model is None:
+        return np.asarray(SMPL_REST_JOINTS_YUP, dtype=float)
+    jp = np.asarray(smpl_model["joint_positions"], dtype=float).copy()
+    jsd = smpl_model.get("joint_shapedirs")
+    if jsd is not None and betas is not None:
+        betas = np.asarray(betas, dtype=float).reshape(-1)
+        K = min(jsd.shape[2], len(betas))
+        if K > 0:
+            jp = jp + jsd[:, :, :K] @ betas[:K]
+    # Shift so pelvis is at origin (matches src table convention).
+    return jp - jp[0]
 
 
 def compute_joint_world(

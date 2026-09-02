@@ -5,16 +5,21 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from scipy.spatial.transform import Rotation
+
 from src.utils.smpl_skeleton import (
     SMPL_JOINT_NAMES,
     SMPL_PARENTS,
     SMPL_REST_JOINTS_YUP,
     axis_angle_to_matrix,
     axis_angle_to_quaternion,
+    beta_adjusted_rest_joints,
     compute_all_joint_worlds,
     compute_all_joint_worlds_batch,
+    compute_canonical_joints_batch,
     compute_joint_world,
     compute_joint_world_pose,
+    load_smpl_neutral_model,
     parent_relative_offsets_yup,
 )
 
@@ -288,3 +293,69 @@ def test_compute_all_joint_worlds_batch_does_not_mutate_single_frame_functions()
     result = compute_all_joint_worlds(thetas, root_R, root_t)
     assert result.shape == (24, 3)
     np.testing.assert_allclose(result[0], root_t, atol=1e-9)
+
+
+# --- compute_canonical_joints_batch --------------------------------------
+
+
+def test_canonical_joints_batch_matches_world_batch() -> None:
+    rng = np.random.default_rng(0)
+    thetas = rng.normal(0, 0.3, (5, 24, 3))
+    root_R = Rotation.random(5, random_state=1).as_matrix()
+    root_t = rng.normal(0, 2, (5, 3))
+    canon = compute_canonical_joints_batch(thetas)
+    world = compute_all_joint_worlds_batch(thetas, root_R, root_t)
+    rebuilt = np.einsum("fba,fja->fjb", root_R, canon) + root_t[:, None, :]
+    np.testing.assert_allclose(rebuilt, world, atol=1e-9)
+
+
+def test_canonical_joints_batch_pelvis_at_origin() -> None:
+    canon = compute_canonical_joints_batch(np.zeros((3, 24, 3)))
+    np.testing.assert_allclose(canon[:, 0], 0.0, atol=1e-12)
+
+
+def test_canonical_joints_batch_shape() -> None:
+    canon = compute_canonical_joints_batch(np.zeros((7, 24, 3)))
+    assert canon.shape == (7, 24, 3)
+
+
+def test_canonical_joints_batch_custom_rest_joints() -> None:
+    rest = SMPL_REST_JOINTS_YUP * 1.1
+    canon = compute_canonical_joints_batch(np.zeros((2, 24, 3)), rest_joints=rest)
+    np.testing.assert_allclose(canon[0], rest, atol=1e-9)
+    np.testing.assert_allclose(canon[1], rest, atol=1e-9)
+
+
+def test_canonical_joints_batch_ignores_theta0() -> None:
+    thetas = np.zeros((3, 24, 3))
+    thetas[:, 0] = np.array([0.0, 0.0, np.pi])
+    canon = compute_canonical_joints_batch(thetas)
+    head_idx = SMPL_JOINT_NAMES.index("head")
+    for f in range(3):
+        np.testing.assert_allclose(
+            canon[f, head_idx], SMPL_REST_JOINTS_YUP[head_idx], atol=1e-9
+        )
+
+
+# --- beta_adjusted_rest_joints / load_smpl_neutral_model (moved here) ----
+
+
+def test_load_smpl_neutral_model_returns_none_or_dict() -> None:
+    model = load_smpl_neutral_model()
+    assert model is None or isinstance(model, dict)
+
+
+def test_beta_adjusted_rest_joints_falls_back_without_model() -> None:
+    rest = beta_adjusted_rest_joints(None, None)
+    np.testing.assert_allclose(rest, SMPL_REST_JOINTS_YUP, atol=1e-9)
+
+
+def test_beta_adjusted_rest_joints_pelvis_at_origin_with_model() -> None:
+    model = load_smpl_neutral_model()
+    if model is None:
+        import pytest
+
+        pytest.skip("data/models/smpl_neutral.npz not present on this machine")
+    rest = beta_adjusted_rest_joints(np.zeros(10), model)
+    np.testing.assert_allclose(rest[0], 0.0, atol=1e-9)
+    assert rest.shape == (24, 3)

@@ -156,6 +156,39 @@ def test_resmooth_does_not_override_outlier_frames():
     assert steps[15].uv != (5000.0, 4000.0)
 
 
+@pytest.mark.unit
+def test_resmooth_anchor_frame_overrides_outlier_gate():
+    """A manual anchor is operator ground truth: unlike a wild detector
+    reading, it must pass through raw even when the IMM would otherwise
+    gate it as an outlier (gberch f49-65 cluster — a fast post-kick ball
+    exceeds the grounded-mode gate). ``_detect_loop`` already exempts
+    anchor frames from the outlier gate (and reseeds the tracker on
+    them); ``_resmooth_observations`` — called again after second-pass/
+    foot-guided merges — must apply the same exemption or a later pass
+    anywhere in the clip silently discards the click everywhere it was
+    gated, regressing the track back to the pre-fix stale-lock bug."""
+    n = 20
+    uv = {f: (100.0 + 5.0 * f, 400.0) for f in range(n)}
+    uv[15] = (5000.0, 4000.0)  # a real operator click on a fast ball
+    steps = _resmooth_observations(uv, n, cfg={}, anchor_frames=frozenset({15}))
+    assert steps[15].uv == (5000.0, 4000.0)
+    assert not steps[15].is_outlier
+    # Non-anchor outliers are unaffected (existing contract preserved).
+    assert steps[15].is_gap_fill is False
+
+
+@pytest.mark.unit
+def test_resmooth_anchor_frames_default_preserves_prior_behaviour():
+    """No ``anchor_frames`` given (the old call signature) must behave
+    exactly as before: wild non-anchor measurements still get gated."""
+    n = 20
+    uv = {f: (100.0 + 5.0 * f, 400.0) for f in range(n)}
+    uv[15] = (5000.0, 4000.0)
+    steps = _resmooth_observations(uv, n, cfg={})
+    assert steps[15].is_outlier
+    assert steps[15].uv != (5000.0, 4000.0)
+
+
 # ---------------------------------------------------------------------------
 # Integration tests for the second-pass loop in BallStage._run_shot.
 # ---------------------------------------------------------------------------

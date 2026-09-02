@@ -556,21 +556,35 @@ def _resmooth_observations(
     per_frame_uv: dict[int, tuple[float, float] | None],
     n_frames: int,
     cfg: dict,
+    anchor_frames: frozenset[int] = frozenset(),
 ) -> list[TrackerStep]:
     """Fresh IMM pass over a merged observation set (no video access).
 
     Applies the same raw-uv override rule as the streaming detect loop:
     fits must see raw measurements, the tracker only bridges misses.
+    ``anchor_frames`` mirrors ``_detect_loop``'s ``is_anchor_frame`` exemption
+    — an operator click is ground truth, not a noisy measurement, so it must
+    pass through raw (and reseed the tracker) even when the IMM gate would
+    otherwise reject it as an outlier. Without this, a resmooth triggered by
+    an unrelated second-pass/foot-guided correction ANYWHERE in the clip
+    silently discards every gated anchor's click and replaces it with the
+    tracker's stale prediction (the gberch f49-65 cluster regression:
+    verified as the mechanism behind touch-recall drops on fast post-kick
+    spans where the receiving player's track doesn't start until later).
     """
     tracker = _build_tracker(cfg)
     steps: list[TrackerStep] = []
     for f in range(n_frames):
         uv = per_frame_uv.get(f)
+        is_anchor = f in anchor_frames
         step = tracker.update(f, uv)
-        if uv is not None and not step.is_outlier:
+        if is_anchor and uv is not None and step.is_outlier:
+            tracker.reseed(uv)
+        if uv is not None and (is_anchor or not step.is_outlier):
             step = TrackerStep(
                 frame=step.frame, uv=uv, p_flight=step.p_flight,
-                is_outlier=step.is_outlier, is_gap_fill=step.is_gap_fill,
+                is_outlier=False if is_anchor else step.is_outlier,
+                is_gap_fill=False if is_anchor else step.is_gap_fill,
                 pos_cov=step.pos_cov,
             )
         steps.append(step)
@@ -1278,6 +1292,14 @@ class BallStage(BaseStage):
             clip_path, cfg, detector, manual_by_frame,
             prior=prior, prior_drop_below=prior_cfg.drop_below,
         )
+        # Snapshot BEFORE any downstream pass can relabel a frame's source
+        # (second-pass/foot-guided may overwrite `sources[f]`): every
+        # `_resmooth_observations` call below must keep exempting these
+        # frames from the outlier gate, or a correction anywhere else in
+        # the clip silently discards the operator's click here.
+        anchor_frames = frozenset(
+            f for f, s in sources.items() if s == "anchor"
+        )
         # W5s — operator truth extends into the observation stream: a
         # detection the bracketing clicks prove false (static lock at the
         # ball's old position between two nearby anchors) must not feed
@@ -1305,7 +1327,8 @@ class BallStage(BaseStage):
                 for f in vetoed:
                     raw_confidences.pop(f, None)
                     sources.pop(f, None)
-                steps = _resmooth_observations(cur_uv, len(steps), cfg)
+                steps = _resmooth_observations(
+                    cur_uv, len(steps), cfg, anchor_frames=anchor_frames)
         if not steps:
             logger.warning("ball stage: clip %s contained no frames", clip_path)
             return None
@@ -1372,7 +1395,8 @@ class BallStage(BaseStage):
                         sum(e - s + 1 for s, e in revisit_runs),
                         shot_id or "(legacy)",
                     )
-                    steps = _resmooth_observations(merged_uv, n_clip, cfg)
+                    steps = _resmooth_observations(
+                        merged_uv, n_clip, cfg, anchor_frames=anchor_frames)
 
         # --- 1c. Foot-guided pass: zoom around fast-moving player feet to
         # recover the ball where a touch is plausible. WASB's global hit at a
@@ -1419,7 +1443,8 @@ class BallStage(BaseStage):
                             raw_confidences[fr] = max(
                                 raw_confidences.get(fr, 0.0), score)
                             sources[fr] = "foot_guided"
-                        steps = _resmooth_observations(cur_uv, n_clip, cfg)
+                        steps = _resmooth_observations(
+                            cur_uv, n_clip, cfg, anchor_frames=anchor_frames)
                         foot_touches = tuple(
                             (fr, pid, bone) for fr, pid, bone, _, _ in kept)
                         logger.info(

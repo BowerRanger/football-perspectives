@@ -124,17 +124,62 @@ def _cameras_dict(track: CameraTrack) -> dict[int, tuple[np.ndarray, np.ndarray,
     return out
 
 
+def _hmr_npz_path(hmr_dir: Path, shot_id: str, pid: str) -> Path:
+    stem = f"{shot_id}__{pid}" if shot_id else pid
+    return hmr_dir / f"{stem}_smpl_world.npz"
+
+
+def _load_hmr_track_frames(hmr_dir: Path, shot_id: str, pid: str) -> np.ndarray | None:
+    """Global frame-number array of the hmr_world npz matching
+    ``(shot_id, pid)`` — the array whose ARRAY POSITIONS the
+    ``{shot}__{pid}_foot_contacts.json`` sidecar's dense/span indices
+    are aligned to (see ``src/schemas/foot_contacts.py``'s module
+    docstring: "Frame indices inside the payload are hmr_world
+    track-ARRAY positions ... not global frame numbers"). Returns
+    ``None`` when the npz is missing or fails to load."""
+    path = _hmr_npz_path(hmr_dir, shot_id, pid)
+    if not path.exists():
+        return None
+    try:
+        track = SmplWorldTrack.load(path)
+    except Exception:
+        return None
+    return np.asarray(track.frames)
+
+
 def _load_contacts_sidecar(
-    hmr_dir: Path, shot_id: str, pid: str, n_frames: int,
+    hmr_dir: Path, shot_id: str, pid: str, frames: np.ndarray,
 ) -> np.ndarray | None:
-    """Load ``{shot}__{pid}_foot_contacts.json`` when present and its
-    frame count matches the caller's track exactly. Returns ``None``
-    otherwise (absent file, parse failure, or a length mismatch —
-    contacts sidecars are written in hmr_world track-array-index space,
-    see docs/superpowers/plans/2026-09-02-foot-contact-locomotion.md
-    Task 5/6; a caller on a re-indexed track such as refined_poses after
-    a sync_map shift is not guaranteed to line up and must not silently
-    misapply someone else's per-frame flags)."""
+    """Load ``{shot}__{pid}_foot_contacts.json`` when present and map its
+    per-frame ``in_contact`` flags onto ``frames`` — the CALLER's own
+    track's frame numbers (GLOBAL frame indices, e.g. ``SmplWorldTrack.
+    frames`` or ``RefinedPose.frames``, not array positions).
+
+    The sidecar's dense arrays are aligned 1:1 by ARRAY POSITION with
+    the hmr_world track ``detect_contacts`` computed them from (see
+    ``src/schemas/foot_contacts.py``) — not with an arbitrary caller's
+    frame array. A ``refined_poses`` track has been densified/trimmed
+    relative to ``hmr_world`` (different length, and its ``frames``
+    array holds different — though overlapping — GLOBAL frame numbers),
+    so a naive positional read only ever worked when the two happened to
+    have identical length, silently falling back to the coarser z<0.10
+    proxy metric on every OTHER refined-track evaluation (which is most
+    of them — a refined track's length essentially never matches its
+    source hmr_world track's after trimming). This resolves the mapping
+    through GLOBAL FRAME NUMBER instead, via the matching hmr_world
+    npz's own ``frames`` array, so trimming/resampling no longer defeats
+    the sidecar: a caller frame absent from the hmr_world track is
+    conservatively treated as "not in contact" rather than raising or
+    forcing the whole track to the proxy.
+
+    Falls back to the previous exact-length positional interpretation
+    when the matching hmr_world npz can't be loaded (e.g. deleted after
+    the sidecar was written, or a caller — such as ``eval_hmr_player`` —
+    that IS the hmr_world track itself and so trivially aligns 1:1) —
+    same graceful-degradation contract as before, just no longer the
+    ONLY path. Returns ``None`` when neither path can resolve a mapping
+    (absent file, parse failure, or an unresolvable length mismatch).
+    """
     name = f"{shot_id}__{pid}_foot_contacts.json" if shot_id else f"{pid}_foot_contacts.json"
     path = hmr_dir / name
     if not path.exists():
@@ -149,9 +194,21 @@ def _load_contacts_sidecar(
             fc = FootContacts.from_json(json.loads(path.read_text()))
     except Exception:
         return None
-    if fc.n_frames != n_frames:
-        return None
-    return fc.in_contact
+
+    frames_arr = np.asarray(frames)
+    hmr_frames = _load_hmr_track_frames(hmr_dir, shot_id, pid)
+    if hmr_frames is None or len(hmr_frames) != fc.n_frames:
+        if fc.n_frames != len(frames_arr):
+            return None
+        return fc.in_contact
+
+    lut = {int(f): i for i, f in enumerate(hmr_frames)}
+    out = np.zeros((len(frames_arr), 2), dtype=bool)
+    for i, f in enumerate(frames_arr):
+        j = lut.get(int(f))
+        if j is not None:
+            out[i] = fc.in_contact[j]
+    return out
 
 
 def eval_hmr_player(
@@ -183,7 +240,7 @@ def eval_hmr_player(
         kp2d_arr = _align_kp2d_to_frames(np.asarray(track.frames), kp2d_frames, kp2d_raw)
         cameras = _cameras_dict(cam_track)
 
-    contacts = _load_contacts_sidecar(output_dir / "hmr_world", shot_id, pid, len(track.frames))
+    contacts = _load_contacts_sidecar(output_dir / "hmr_world", shot_id, pid, track.frames)
     rest_joints = beta_adjusted_rest_joints(track.betas, smpl_model)
 
     return foot_quality_metrics(
@@ -215,7 +272,7 @@ def eval_refined_player(
     cam_track = _load_camera_track(output_dir / "camera", shot_id) if shot_id else None
     fps = float(cam_track.fps) if cam_track is not None else _DEFAULT_FPS
     contacts = (
-        _load_contacts_sidecar(output_dir / "hmr_world", shot_id, pid, len(refined.frames))
+        _load_contacts_sidecar(output_dir / "hmr_world", shot_id, pid, refined.frames)
         if shot_id else None
     )
     rest_joints = beta_adjusted_rest_joints(refined.betas, smpl_model)

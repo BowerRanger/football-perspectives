@@ -289,7 +289,83 @@ def test_discover_hmr_entries_handles_legacy_no_shot_naming(tmp_path) -> None:
 
 def test_load_contacts_sidecar_returns_none_when_missing(tmp_path) -> None:
     cli = _import_cli()
-    assert cli._load_contacts_sidecar(tmp_path, "gberch", "P001", 10) is None
+    assert cli._load_contacts_sidecar(tmp_path, "gberch", "P001", np.arange(10)) is None
+
+
+def test_load_contacts_sidecar_maps_by_global_frame_for_trimmed_track(tmp_path) -> None:
+    """The real bug this fixes: a refined_poses track has been trimmed/
+    resampled relative to the hmr_world track the sidecar was computed
+    from, so its length (and frame membership) legitimately differs.
+    Mapping by GLOBAL FRAME NUMBER (via the matching hmr_world npz's own
+    ``frames`` array) must still recover the correct per-frame flags,
+    where the old exact-length positional read would have silently
+    returned ``None`` (forcing every such caller onto the coarser z<0.10
+    proxy) even though the sidecar had everything needed to answer
+    honestly."""
+    from src.schemas.foot_contacts import save_foot_contacts
+    from src.schemas.smpl_world import SmplWorldTrack
+
+    cli = _import_cli()
+    hmr_dir = tmp_path / "hmr_world"
+    hmr_dir.mkdir(parents=True)
+
+    g = make_walk(n_frames=30)
+    hmr_frames = (g.frames + 100).astype(np.int64)  # global frame numbers 100..129
+
+    track = SmplWorldTrack(
+        player_id="P001", frames=hmr_frames, betas=g.betas.astype("float32"),
+        thetas=g.thetas.astype("float32"), root_R=g.root_R.astype("float32"),
+        root_t=g.root_t.astype("float32"),
+        confidence=np.ones(len(hmr_frames), dtype="float32"), shot_id="shotA",
+    )
+    track.save(hmr_dir / "shotA__P001_smpl_world.npz")
+
+    from tests.helpers.synthetic_gait import contacts_from_truth
+
+    fc = contacts_from_truth(g)  # array positions 0..29, aligned with hmr_frames
+    save_foot_contacts(
+        hmr_dir / "shotA__P001_foot_contacts.json", fc,
+        shot_id="shotA", player_id="P001", anchor_mode="contact",
+    )
+
+    # A "refined" caller track: a TRIMMED, differently-lengthed subset of
+    # the same global frames (global 105..124, 20 frames — array
+    # positions 5:25 of the hmr_world track).
+    trimmed_global_frames = hmr_frames[5:25]
+    contacts = cli._load_contacts_sidecar(hmr_dir, "shotA", "P001", trimmed_global_frames)
+
+    assert contacts is not None
+    assert contacts.shape == (20, 2)
+    np.testing.assert_array_equal(contacts, fc.in_contact[5:25])
+
+
+def test_load_contacts_sidecar_falls_back_to_positional_when_hmr_npz_missing(tmp_path) -> None:
+    """Sidecar present but its source hmr_world npz is gone (e.g. wiped
+    after the sidecar was written): fall back to the old exact-length
+    positional interpretation rather than returning None unconditionally."""
+    from src.schemas.foot_contacts import save_foot_contacts
+
+    cli = _import_cli()
+    hmr_dir = tmp_path / "hmr_world"
+    hmr_dir.mkdir(parents=True)
+
+    g = make_walk(n_frames=20)
+    from tests.helpers.synthetic_gait import contacts_from_truth
+
+    fc = contacts_from_truth(g)
+    save_foot_contacts(
+        hmr_dir / "shotA__P001_foot_contacts.json", fc,
+        shot_id="shotA", player_id="P001", anchor_mode="contact",
+    )
+    # No shotA__P001_smpl_world.npz written.
+
+    contacts = cli._load_contacts_sidecar(hmr_dir, "shotA", "P001", g.frames)
+    assert contacts is not None
+    np.testing.assert_array_equal(contacts, fc.in_contact)
+
+    # A caller whose length doesn't match the sidecar's n_frames can't be
+    # resolved positionally either -> None, not a silent misalignment.
+    assert cli._load_contacts_sidecar(hmr_dir, "shotA", "P001", g.frames[:10]) is None
 
 
 def _write_fixture(tmp_path) -> "_Path":

@@ -18,6 +18,7 @@ Project-scoped subagents live in `.claude/agents/` (prefixed `fp-` to avoid coll
 | `fp-generalist` | Generalist IC — cross-cutting/small tasks (config, CLI wiring, runner plumbing, docs) |
 | `fp-ball-camera` | Specialist IC — `ball_*` family, ball/camera stages, calibration, ball-accuracy evals |
 | `fp-pipeline-3d` | Specialist IC — GVHMR/SMPL, foot anchoring, refined_poses, glTF/FBX export |
+| `fp-blender` | Specialist IC — headless Blender: render-stage toon renders, Blender scene building/scripts, FBX-in-Blender mechanics |
 | `fp-web` | Specialist IC — FastAPI dashboard + static JS panels + viewer |
 | `fp-ue5` | Specialist IC — UE5 editor Python, unreal-mcp bridge, crash recovery |
 | `fp-qa` | QA/eval IC — runs tests/evals, reports evidence, APPROVED/REJECTED verdict; never edits code |

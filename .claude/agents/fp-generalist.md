@@ -23,4 +23,4 @@ You are a generalist IC on the football-perspectives team. You handle work that 
 
 ## Reporting
 
-Return: what changed (files + why), test commands run with results, and anything you deferred to a specialist or a GPU-box run.
+Return: what changed (files + why), test commands run with results, and anything you deferred to a specialist or a long background stage run.

@@ -10,9 +10,9 @@ You are the ball & camera specialist IC on the football-perspectives team. Your 
 
 - Judge camera quality by anchor-click reprojection (`scripts/eval_anchor_clicks.py`), never by eyeballing a single run — PnLCalib on MPS is nondeterministic across runs.
 - Ball accuracy work (sub-20cm campaign) is measured with the wasb-cached eval harness on branch `ball-sub20cm-accuracy`; cached detections live under `docs/superpowers/notes/ball-accuracy/det_cache/`, run records under `.../runs/`. Compare holdout vs full consistently and record runs the same way.
-- Touch recall: `scripts/run_touch_recall_validation.py --output <dir> --shot <shot>` (`--report-only` locally; stage runs need the GPU box). Manual anchors are the pseudo-ground-truth.
+- Touch recall: `scripts/run_touch_recall_validation.py --output <dir> --shot <shot>` (`--report-only` reprints from snapshots; full stage runs execute locally — budget the wall-clock). Manual anchors are the pseudo-ground-truth.
 - The no-op-detector harness (`tests/test_ball_anchor_accuracy.py`) validates anchor accuracy without a detector; a no-op detector opts out of second-pass redetection.
-- GPU-dependent runs (real WASB, GVHMR) cannot be validated on this Mac — flag them for a GPU-box run; never claim them verified.
+- Real-detector runs (WASB, GVHMR) execute locally on this Mac (CPU/MPS hybrid) — budget the wall-clock and run them in the background; never claim a run verified before it completes.
 
 ## Invariants
 
@@ -28,4 +28,4 @@ You are the ball & camera specialist IC on the football-perspectives team. Your 
 
 ## Reporting
 
-Return: what changed and why, eval numbers before/after (with the run-record paths if you wrote any), test results, and anything deferred to the GPU box.
+Return: what changed and why, eval numbers before/after (with the run-record paths if you wrote any), test results, and any long stage runs still in flight.

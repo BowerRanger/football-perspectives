@@ -64,10 +64,10 @@ class KinematicTouchCfg:
     # ball ray; elsewhere kin_min_foot_speed alone still governs, so a
     # background candidate with a loose gap gets no benefit from a slow
     # foot. Calibrated on manual touches across gberch/kroupi01/s013/origi01:
-    # 7 of 13 speed-gate misses have gap3d_m <= 0.17 (gberch f310 gap=0.152
-    # peak=5.24; s013 f85 gap=0.149 peak=3.17; kroupi01 f87 gap=0.089
-    # peak=5.56; origi01 f7 gap=0.056 peak=3.96 among them) -- recovered by
-    # this corridor for +17 background local-minima candidates (pre score/
+    # 8 of 13 speed-gate misses have gap3d_m <= 0.17 (gberch f192/f209/f310,
+    # kroupi01 f87, s013 f42/f85, origi01 f7/f440; f310 gap=0.152 peak=5.24
+    # is the named gberch regression this recovers) -- recovered by this
+    # corridor for +19 background local-minima candidates (pre score/
     # NMS/event-evidence gates, so an upper bound on the real FP delta).
     kin_min_foot_speed_tight_gap_m: float = 0.17
     kin_min_foot_speed_relaxed: float = 3.0

@@ -681,34 +681,45 @@ ball:
     # recovered launch frame CAN support (not just decorate) anchor
     # minting elsewhere, once the corridor is trustworthy (see below).
     #
-    # DEFAULT OFF (2026-09-03 go/no-go smoke test, gberch f343 window,
-    # real fine-tuned-v1 WASB detector on MPS): the true ball IS visible
-    # at STANDARD resolution -- a plain full-frame low-threshold pass
-    # found a smooth, monotonic, rising-confidence (0.43->0.92) candidate
-    # track across f335-351 that lines up with the known-good f350/f351
-    # production values -- so upscaling was never the bottleneck here.
-    # The corridor predictor (straight-line interpolation between the
-    # last/first REAL-sourced pixel flanking the window) IS what failed:
-    # hand-verified it correctly picked flanking foot_guided knots at
-    # f334/f352, but a straight line between two points 18 frames apart
-    # badly undershoots a real strike's curve, drifting up to ~290px from
-    # the true ball by mid-window -- well outside even a widened
-    # crop_px=320 (0/17 accepted at the default crop_px=160 corridor_
-    # radius_px=60 recovered a verified-correct frame; widening to
-    # crop_px=320 corridor_radius_px=120 raised ACCEPT count to 17/17 but
-    # most accepts were a different, roughly-stationary decoy nearer the
-    # bad corridor centre than the true ball -- confidently WRONG, not a
-    # fix). Worse: shrinking window_radius_frames 8->3 made it FAIL
+    # DEFAULT OFF as of the 2026-09-03 go/no-go smoke test (gberch f343
+    # window, real fine-tuned-v1 WASB detector on MPS): the true ball IS
+    # visible at STANDARD resolution -- a plain full-frame low-threshold
+    # pass found a smooth, monotonic, rising-confidence (0.43->0.92)
+    # candidate track across f335-351 that lines up with the known-good
+    # f350/f351 production values -- so upscaling was never the
+    # bottleneck here. The corridor predictor (straight-line interpolation
+    # between the last/first REAL-sourced pixel flanking the window) IS
+    # what failed: hand-verified it correctly picked flanking foot_guided
+    # knots at f334/f352, but a straight line between two points 18 frames
+    # apart badly undershoots a real strike's curve, drifting up to ~290px
+    # from the true ball by mid-window -- well outside even a widened
+    # crop_px=320. Worse: shrinking window_radius_frames 8->3 made it FAIL
     # HARDER (0/7), because the post-window knot search landed exactly on
     # gberch's own f347 static-lock false positive (source="detector" is
     # trusted as "real" evidence even when the detection itself is wrong),
-    # dragging the whole interpolation off by >800px. Net: the module and
-    # its tests are sound (crop/upscale/coordinate-mapping/budget wiring
-    # all work as designed), but the corridor model is not yet trustworthy
-    # enough to drive it on real fast strikes. Left off pending a better
-    # corridor predictor in a future session (candidates: a ballistic/
-    # quadratic fit instead of a straight line, or excluding suspiciously
-    # static "real"-sourced frames from knot selection).
+    # dragging the whole interpolation off by >800px.
+    #
+    # W6 CONTINUATION (see ball_strike_window.py's module docstring for
+    # the full design): fixes both failure modes. (1) static_lock_* below
+    # controls find_static_lock_frames, which demotes a sub-pixel-frozen
+    # "real" evidence run (the f347 signature) from evidence status
+    # EVERYWHERE it is consulted -- corridor/chain knot selection and,
+    # via source relabelling, the solver/event evidence sets -- unless the
+    # run is genuinely a resting ball (no fast motion flanking it). (2)
+    # chain_* below controls select_kinematic_chain, which replaces the
+    # straight-line corridor's per-frame spatial gate with a temporal one:
+    # low-threshold candidates are gathered FULL-FRAME (no crop --
+    # matching the smoke test's own validated methodology, so
+    # crop_px/upscale_factor/corridor_radius_px/corridor_sigma below are
+    # now dead weight for the shipped path, kept only because
+    # predict_corridor_centers/map_upscaled_crop_candidates remain valid,
+    # independently-tested utilities a future corridor-crop consumer could
+    # still use) across the window, and a chain is accepted only if it
+    # bridges the break for >= chain_min_frames at a physically plausible
+    # (chain_speed_slack over the max of the window's own jump and the
+    # flanking knots' speed), non-collapsing-confidence
+    # (chain_trend_tolerance) pace. See the ball-accuracy notes for the
+    # gberch f343 re-run with this mechanism before flipping this flag.
     strike_window:
       enabled: false
       min_dspeed_px: 12.0
@@ -724,6 +735,15 @@ ball:
       candidate_min_score: 0.05
       top_k: 5
       velocity_lookback_frames: 5
+      static_lock_eps_px: 0.05
+      static_lock_min_run_frames: 2
+      static_lock_min_context_speed_px: 12.0
+      static_lock_lookback_frames: 5
+      chain_min_frames: 5
+      chain_max_gap_frames: 2
+      chain_speed_slack: 2.5
+      chain_min_avg_score: 0.15
+      chain_trend_tolerance: 0.25
   # Phase B: direction-change segmentation. Corners of a robust piecewise
   # fit of the ball track are the touch/bounce candidates (replaces fragile
   # local velocity-break windows). max_residual_px is the piecewise-linear

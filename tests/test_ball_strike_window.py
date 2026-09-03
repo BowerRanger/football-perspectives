@@ -11,9 +11,12 @@ from src.utils.ball_strike_window import (
     REAL_EVIDENCE_SOURCES,
     StrikeWindow,
     StrikeWindowCfg,
+    find_static_lock_frames,
     find_strike_triggers,
+    flanking_knots,
     map_upscaled_crop_candidates,
     predict_corridor_centers,
+    select_kinematic_chain,
     select_strike_windows,
 )
 
@@ -266,3 +269,300 @@ def test_cfg_is_gate_compatible_with_second_pass_gate():
     assert best is not None
     (u, v), combined = best
     assert (u, v) == (505.0, 302.0)
+
+
+# ---------------------------------------------------------------------------
+# Static-lock detection: a frozen, sub-pixel-repeated run of real-evidence
+# frames flanked by fast motion is a detector artifact, not evidence.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_find_static_lock_frames_flags_frozen_run_flanked_by_fast_motion():
+    # Fast roll (30 px/frame) up to f19, frozen at f20-25 at a DIFFERENT
+    # point (identical to the 1e-13 level, matching gberch's float-noise
+    # signature) than the roll would have reached, then a fast resumption
+    # far from the frozen point.
+    uvs = {f: (100.0 + 30.0 * f, 400.0) for f in range(20)}
+    frozen = (100.0 + 30.0 * 20, 400.0)
+    for f in range(20, 26):
+        uvs[f] = (frozen[0] + f * 1e-13, frozen[1])
+    for f in range(26, 40):
+        uvs[f] = (frozen[0] + 900.0 + 30.0 * (f - 26), 400.0)
+    sources = {f: "detector" for f in range(40)}
+    flagged = find_static_lock_frames(uvs, sources, n_frames=40, cfg=_cfg())
+    assert flagged == frozenset(range(20, 26))
+
+
+@pytest.mark.unit
+def test_find_static_lock_frames_reproduces_gberch_f347_signature():
+    """Literal reproduction of the observed gberch f344-349 static-lock
+    (source="detector", uv identical to ~1e-13, confidence rising
+    0.428->0.916) flanked by real fast motion at f343 and f350 — the exact
+    bug behind the corridor predictor's failure (see module docstring)."""
+    uvs = {
+        341: (1327.82, 578.97), 342: (1349.61, 575.70),
+        343: (1678.8491973876953, 761.5925636291504),
+        344: (1678.8491973876953, 761.5925636291503),
+        345: (1678.8491973876953, 761.5925636291502),
+        346: (1678.8491973876953, 761.5925636291500),
+        347: (1678.8491973876953, 761.5925636291499),
+        348: (1678.8491973876953, 761.5925636291498),
+        349: (1678.8491973876953, 761.5925636291497),
+        350: (1338.13, 556.57), 351: (1339.61, 554.55),
+    }
+    sources = {f: "detector" for f in uvs}
+    sources[343] = "foot_guided"
+    flagged = find_static_lock_frames(uvs, sources, n_frames=352, cfg=_cfg())
+    # 344-349 are the bug; 343 (the genuine foot_guided touch that seeded
+    # the frozen value) may or may not be swept in depending on run
+    # detection, but 347 specifically -- the frame that poisoned the
+    # narrowed-window knot search -- must always be excluded.
+    assert 347 in flagged
+    assert {344, 345, 346, 348, 349} <= flagged
+
+
+@pytest.mark.unit
+def test_find_static_lock_frames_ignores_genuinely_still_ball():
+    # A ball at rest (free-kick setup): identical position, but NO fast
+    # motion flanking it -- must not be flagged.
+    uvs = {f: (500.0, 400.0) for f in range(30)}
+    sources = {f: "detector" for f in range(30)}
+    flagged = find_static_lock_frames(uvs, sources, n_frames=30, cfg=_cfg())
+    assert flagged == frozenset()
+
+
+@pytest.mark.unit
+def test_find_static_lock_frames_requires_min_run_length():
+    uvs = {f: (100.0 + 30.0 * f, 400.0) for f in range(10)}
+    uvs[10] = uvs[9]  # a two-frame repeat, shorter than the required run
+    uvs.update({f: (uvs[9][0] + 900.0 + 30.0 * (f - 11), 400.0) for f in range(11, 20)})
+    sources = {f: "detector" for f in range(20)}
+    flagged = find_static_lock_frames(
+        uvs, sources, n_frames=20, cfg=_cfg(static_lock_min_run_frames=3),
+    )
+    assert flagged == frozenset()
+
+
+@pytest.mark.unit
+def test_find_static_lock_frames_ignores_non_real_evidence_sources():
+    uvs = {f: (100.0 + 30.0 * f, 400.0) for f in range(20)}
+    frozen = uvs[19]
+    for f in range(20, 26):
+        uvs[f] = (frozen[0] + f * 1e-13, frozen[1])
+    for f in range(26, 40):
+        uvs[f] = (frozen[0] + 900.0 + 30.0 * (f - 26), 400.0)
+    sources = {f: "detector" for f in range(40)}
+    for f in range(20, 26):
+        sources[f] = "bridge"  # synthetic gap-fill, not real evidence
+    flagged = find_static_lock_frames(uvs, sources, n_frames=40, cfg=_cfg())
+    assert flagged == frozenset()
+
+
+@pytest.mark.unit
+def test_find_static_lock_frames_empty_on_smooth_track():
+    uvs = {f: (100.0 + 5.0 * f, 400.0) for f in range(40)}
+    sources = {f: "detector" for f in range(40)}
+    assert find_static_lock_frames(uvs, sources, n_frames=40, cfg=_cfg()) == frozenset()
+
+
+@pytest.mark.unit
+def test_static_lock_relabelling_lets_corridor_reach_past_it():
+    """Downstream integration check: once a static-lock frame's source is
+    relabelled away from a REAL_EVIDENCE_SOURCES member (the ball.py
+    wiring's actual mechanism), predict_corridor_centers's flanking search
+    skips it and reaches the next genuine knot -- reproducing the fix for
+    the reported >800px corridor failure when a narrow window landed
+    exactly on the static-lock frame."""
+    uvs = {
+        330: (800.0, 400.0),
+        347: (1678.85, 761.59),  # the static-lock decoy
+        360: (900.0, 400.0),
+    }
+    sources = {330: "detector", 347: "detector", 360: "detector"}
+    # A narrowed window whose post-boundary search lands exactly on the
+    # static-lock frame 347 (reproducing the reported failure mode when
+    # window_radius_frames was narrowed).
+    window = StrikeWindow(trigger_frame=345, start=340, end=346, dspeed_px=50.0)
+    centers_before = predict_corridor_centers(uvs, sources, window, n_frames=361)
+    # The straight line is dragged sharply toward the wrong decoy near the
+    # window's end (far from the true ~800-900 trajectory band).
+    assert centers_before[346][0] > 1500.0
+
+    demoted_sources = dict(sources)
+    demoted_sources[347] = "static_lock"
+    centers_after = predict_corridor_centers(uvs, demoted_sources, window, n_frames=361)
+    # With 347 demoted, the post-window search skips it and reaches 360
+    # instead -- the corridor stays on the true ~800-900 trajectory band.
+    assert 700.0 < centers_after[346][0] < 1000.0
+
+
+# ---------------------------------------------------------------------------
+# flanking_knots: shared pre/post real-evidence lookup with local velocity.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_flanking_knots_returns_both_sides_with_velocity():
+    uvs = {f: (100.0 + 5.0 * f, 400.0) for f in range(10)}
+    uvs.update({f: (100.0 + 5.0 * f + 200.0, 400.0) for f in range(15, 25)})
+    sources = {f: "detector" for f in list(range(10)) + list(range(15, 25))}
+    window = StrikeWindow(trigger_frame=12, start=10, end=14, dspeed_px=50.0)
+    pre, post = flanking_knots(uvs, sources, window, n_frames=25, lookback=5)
+    assert pre is not None and post is not None
+    assert pre[0] == 9
+    assert post[0] == 15
+    assert pre[2][0] == pytest.approx(5.0, abs=1e-6)
+    assert post[2][0] == pytest.approx(5.0, abs=1e-6)
+
+
+@pytest.mark.unit
+def test_flanking_knots_none_when_no_real_evidence():
+    uvs = {5: (100.0, 400.0)}
+    sources = {5: "bridge"}
+    window = StrikeWindow(trigger_frame=5, start=3, end=7, dspeed_px=50.0)
+    pre, post = flanking_knots(uvs, sources, window, n_frames=10)
+    assert pre is None and post is None
+
+
+# ---------------------------------------------------------------------------
+# Kinematic chain search: the ACCEPTANCE gate replacing the straight-line
+# corridor. Candidates are pre-computed per frame (the stage's job); this
+# tests pure selection logic.
+# ---------------------------------------------------------------------------
+
+def _knot(frame: int, uv: tuple[float, float], v: tuple[float, float]) -> tuple:
+    return (frame, np.asarray(uv, dtype=float), np.asarray(v, dtype=float))
+
+
+@pytest.mark.unit
+def test_select_kinematic_chain_recovers_true_ball_over_decoy():
+    # True ball accelerates smoothly from pre to post through the window;
+    # a stationary decoy with higher per-frame score sits far away and
+    # cannot reconnect to either flank at a plausible speed.
+    window = StrikeWindow(trigger_frame=15, start=10, end=19, dspeed_px=40.0)
+    pre = _knot(9, (100.0, 400.0), (10.0, 0.0))
+    post = _knot(20, (600.0, 400.0), (60.0, 0.0))
+    candidates: dict[int, list[tuple[float, float, float]]] = {}
+    x = 100.0
+    for i, f in enumerate(range(10, 20)):
+        x += 50.0  # smooth ~50px/frame progression toward post
+        candidates[f] = [
+            (x, 400.0, 0.5 + 0.04 * i),          # true ball: rising confidence
+            (1200.0, 900.0, 0.9),                 # decoy: high score, unreachable
+        ]
+    pre_knot = pre
+    post_knot = post
+    chain = select_kinematic_chain(
+        candidates, pre_knot, post_knot, window,
+        cfg=_cfg(chain_min_frames=5, chain_speed_slack=3.0, chain_min_avg_score=0.1),
+    )
+    assert len(chain) == 10
+    frames = sorted(d.frame for d in chain)
+    assert frames == list(range(10, 20))
+    for d in chain:
+        assert d.uv[1] == pytest.approx(400.0, abs=1e-6)
+        assert d.uv[0] < 1000.0  # never picks the decoy
+
+
+@pytest.mark.unit
+def test_select_kinematic_chain_rejects_too_short_chain():
+    window = StrikeWindow(trigger_frame=15, start=10, end=19, dspeed_px=40.0)
+    pre = _knot(9, (100.0, 400.0), (10.0, 0.0))
+    post = _knot(20, (600.0, 400.0), (60.0, 0.0))
+    # Only two plausible, connectable frames -- below chain_min_frames.
+    candidates = {
+        10: [(150.0, 400.0, 0.6)],
+        11: [(200.0, 400.0, 0.6)],
+    }
+    chain = select_kinematic_chain(
+        candidates, pre, post, window,
+        cfg=_cfg(chain_min_frames=5, chain_speed_slack=3.0),
+    )
+    assert chain == []
+
+
+@pytest.mark.unit
+def test_select_kinematic_chain_rejects_implausible_speed_jumps():
+    window = StrikeWindow(trigger_frame=15, start=10, end=19, dspeed_px=10.0)
+    pre = _knot(9, (100.0, 400.0), (5.0, 0.0))
+    post = _knot(20, (200.0, 400.0), (5.0, 0.0))
+    # A single candidate per frame, but it teleports impossibly far --
+    # must never chain into an accepted result.
+    candidates = {
+        f: [(100.0 + (5000.0 if f % 2 else -5000.0), 400.0, 0.9)]
+        for f in range(10, 20)
+    }
+    chain = select_kinematic_chain(
+        candidates, pre, post, window,
+        cfg=_cfg(chain_min_frames=3, chain_speed_slack=3.0, chain_min_avg_score=0.1),
+    )
+    assert chain == []
+
+
+@pytest.mark.unit
+def test_select_kinematic_chain_bridges_missing_frames():
+    window = StrikeWindow(trigger_frame=15, start=10, end=19, dspeed_px=40.0)
+    pre = _knot(9, (100.0, 400.0), (50.0, 0.0))
+    post = _knot(20, (600.0, 400.0), (50.0, 0.0))
+    # Candidates only on every other frame -- must bridge via
+    # chain_max_gap_frames.
+    x = 100.0
+    candidates = {}
+    for f in range(10, 20):
+        x += 50.0
+        if f % 2 == 0:
+            candidates[f] = [(x, 400.0, 0.6)]
+    chain = select_kinematic_chain(
+        candidates, pre, post, window,
+        cfg=_cfg(
+            chain_min_frames=3, chain_max_gap_frames=2,
+            chain_speed_slack=3.0, chain_min_avg_score=0.1,
+        ),
+    )
+    assert len(chain) >= 3
+    assert all(f % 2 == 0 for f in (d.frame for d in chain))
+
+
+@pytest.mark.unit
+def test_select_kinematic_chain_empty_without_any_flanking_evidence():
+    window = StrikeWindow(trigger_frame=15, start=10, end=19, dspeed_px=40.0)
+    candidates = {f: [(100.0 + 10.0 * f, 400.0, 0.9)] for f in range(10, 20)}
+    chain = select_kinematic_chain(candidates, None, None, window, cfg=_cfg())
+    assert chain == []
+
+
+@pytest.mark.unit
+def test_select_kinematic_chain_single_sided_pre_only():
+    window = StrikeWindow(trigger_frame=15, start=10, end=19, dspeed_px=40.0)
+    pre = _knot(9, (100.0, 400.0), (50.0, 0.0))
+    x = 100.0
+    candidates = {}
+    for f in range(10, 20):
+        x += 50.0
+        candidates[f] = [(x, 400.0, 0.5)]
+    chain = select_kinematic_chain(
+        candidates, pre, None, window,
+        cfg=_cfg(chain_min_frames=5, chain_speed_slack=3.0, chain_min_avg_score=0.1),
+    )
+    assert len(chain) == 10
+
+
+@pytest.mark.unit
+def test_select_kinematic_chain_rejects_collapsing_confidence_trend():
+    window = StrikeWindow(trigger_frame=15, start=10, end=19, dspeed_px=40.0)
+    pre = _knot(9, (100.0, 400.0), (50.0, 0.0))
+    post = _knot(20, (600.0, 400.0), (50.0, 0.0))
+    x = 100.0
+    candidates = {}
+    for i, f in enumerate(range(10, 20)):
+        x += 50.0
+        # Confidence collapses from 0.9 to ~0.1 across the chain.
+        score = 0.9 - 0.08 * i
+        candidates[f] = [(x, 400.0, score)]
+    chain = select_kinematic_chain(
+        candidates, pre, post, window,
+        cfg=_cfg(
+            chain_min_frames=5, chain_speed_slack=3.0,
+            chain_min_avg_score=0.05, chain_trend_tolerance=0.25,
+        ),
+    )
+    assert chain == []

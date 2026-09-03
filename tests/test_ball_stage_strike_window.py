@@ -5,18 +5,20 @@ Module-private helpers are copied (not imported) from
 tests/test_ball_stage_second_pass.py per that file's own convention — the
 two suites stay independent.
 
-Test strategy: the scripted detector always answers with a candidate
-placed EXACTLY at the geometric centre of whatever crop it was given
-(upscaled-local coordinate ``(crop_px//2*upscale, crop_px//2*upscale)``).
-Since the crop is built by centring ``crop_px`` on the corridor
-prediction, this candidate maps back through the upscale+translate
-round-trip to EXACTLY that corridor centre, whatever it is — so the test
-verifies the mechanical wiring (config parsing, cv2 crop/upscale, the
-coordinate round-trip, gating, source tagging, budget/coverage counters,
-the no-anchor invariant, SUPPORTS_REDETECT gating) without needing to
-hand-predict the tracker/IMM's exact corridor math. Real detection
-QUALITY (does upscaling actually recover a genuinely blurred ball) is a
-separate question, answered by the gberch f343 smoke test, not this file.
+W6 continuation: the acceptance mechanism is now full-frame low-threshold
+candidate gathering (no crop/upscale — see ball_strike_window.py's module
+docstring for why) + a kinematic chain search
+(ball_strike_window.select_kinematic_chain), replacing the straight-line
+corridor gate. The scripted detector below answers detect_candidates()
+with a FIFO of full-frame candidate lists, one per call — the same
+pattern test_ball_stage_second_pass.py's ScriptedDetector already uses —
+aligned to the exact window the stage will select by calling
+select_strike_windows() directly in each test with the SAME cfg, so the
+script never has to guess frame/window boundaries by hand.
+
+Real detection QUALITY (does full-frame low-threshold + the chain search
+actually recover a genuinely blurred/fast-moving ball) is a separate
+question, answered by the gberch f343 smoke test, not this file.
 """
 
 from __future__ import annotations
@@ -30,7 +32,9 @@ import numpy as np
 import pytest
 
 from src.schemas.camera_track import CameraFrame, CameraTrack
+from src.stages.ball import _resmooth_observations, _strike_window_cfg
 from src.utils.ball_detector import FakeBallDetector
+from src.utils.ball_strike_window import select_strike_windows
 
 
 def _camera_pose() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -88,28 +92,39 @@ def _project(p: np.ndarray, K: np.ndarray, R: np.ndarray, t: np.ndarray) -> tupl
     return float(pix[0] / pix[2]), float(pix[1] / pix[2])
 
 
-class RedetectScriptedDetector(FakeBallDetector):
+class FullFrameScriptedDetector(FakeBallDetector):
     """SUPPORTS_REDETECT=True (WASB/YOLO-like): pass-1 detections cycle by
-    call order (via FakeBallDetector.detect); detect_candidates() serves
-    a fixed candidate FIFO — by default the same "crop centre" candidate
-    forever, so it never runs dry regardless of window sizing."""
+    call order (via FakeBallDetector.detect); detect_candidates() serves a
+    FIFO of full-frame candidate lists, one per call — the strike-window
+    pass visits frames in a deterministic order (prime frames first, then
+    the window, in a single pass per window since W6)."""
 
     SUPPORTS_REDETECT = True
     _frames_in = 3
 
-    def __init__(self, detections, crop_center_candidate=None):
+    def __init__(self, detections, chain_cands):
         super().__init__(detections)
-        self._crop_center_candidate = crop_center_candidate
+        self._chain = deque(chain_cands)
         self.candidate_calls = 0
 
     def detect_candidates(self, frame, min_score, top_k=5):
         self.candidate_calls += 1
-        if self._crop_center_candidate is None:
+        if not self._chain:
             return []
-        u, v, s = self._crop_center_candidate
-        if s < min_score:
-            return []
-        return [(u, v, s)]
+        cands = self._chain.popleft()
+        kept = [c for c in cands if c[2] >= min_score]
+        kept.sort(key=lambda c: -c[2])
+        return kept[:top_k]
+
+
+def _select_windows_for_cfg(pass1_uv: dict, n: int, ball_cfg: dict):
+    """Replicate the stage's own pre-strike-window cur_uv/window selection
+    so a test's scripted FIFO can be aligned exactly, without hand-deriving
+    trigger/window arithmetic."""
+    steps = _resmooth_observations(pass1_uv, n, cfg=ball_cfg)
+    cur_uv = {s.frame: s.uv for s in steps if s.uv is not None}
+    sw_cfg = _strike_window_cfg(ball_cfg)
+    return select_strike_windows(cur_uv, n, sw_cfg), sw_cfg
 
 
 @pytest.mark.integration
@@ -117,7 +132,7 @@ def test_strike_window_recovers_evidence_gap_at_a_fast_break(tmp_path: Path):
     """A genuine detection gap straddles a hard velocity break (slow roll
     -> a materially faster launch, e.g. Δv well above min_dspeed_px). With
     second_pass and foot_guided both disabled, any recovered evidence in
-    the gap must come from the strike-window pass.
+    the gap must come from the strike-window pass's kinematic chain.
 
     ``auto_anchors`` is disabled here so the no-anchor-minting check is
     unambiguous: a genuine break is exactly the scenario where strike-
@@ -152,30 +167,46 @@ def test_strike_window_recovers_evidence_gap_at_a_fast_break(tmp_path: Path):
         None if i in gap else (uv_truth[i][0], uv_truth[i][1], 0.9)
         for i in range(n)
     ]
+    pass1_uv = {
+        i: (None if i in gap else (uv_truth[i][0], uv_truth[i][1]))
+        for i in range(n)
+    }
 
-    crop_px, upscale = 160, 2.0  # StrikeWindowCfg defaults
-    center_local = (crop_px // 2) * upscale  # maps back to the corridor centre exactly
-    detector = RedetectScriptedDetector(
-        detections, crop_center_candidate=(center_local, center_local, 0.8),
-    )
+    ball_cfg = {
+        "detector": "fake",
+        "appearance_bridge": {"enabled": False},
+        "second_pass": {
+            "enabled": False,
+            "strike_window": {
+                "enabled": True,
+                "min_dspeed_px": 1.0,  # generous: any real break trips it
+                "window_radius_frames": 8,
+                "max_windows_per_shot": 3,
+                "accept_min": 0.1,
+                "chain_min_frames": 5,
+                "chain_max_gap_frames": 2,
+                "chain_speed_slack": 5.0,
+                "chain_min_avg_score": 0.1,
+                "chain_trend_tolerance": 1.0,
+            },
+        },
+        "foot_guided": {"enabled": False},
+        "auto_anchors": {"enabled": False},
+    }
+
+    windows, _sw_cfg = _select_windows_for_cfg(pass1_uv, n, ball_cfg)
+    assert windows, "test setup: expected a strike window to trigger"
+    win = windows[0]
+    prime_offset = FullFrameScriptedDetector._frames_in - 1
+    prime = max(0, win.start - prime_offset)
+    # Script the true ball's own pixel position at every requested frame —
+    # the chain search must recover this exact path.
+    chain_cands = [[(uv_truth[f][0], uv_truth[f][1], 0.6)] for f in range(prime, win.end + 1)]
+
+    detector = FullFrameScriptedDetector(detections, chain_cands)
 
     stage = BallStage(
-        config={"ball": {
-            "detector": "fake",
-            "appearance_bridge": {"enabled": False},
-            "second_pass": {
-                "enabled": False,
-                "strike_window": {
-                    "enabled": True,
-                    "min_dspeed_px": 1.0,  # generous: any real break trips it
-                    "window_radius_frames": 8,
-                    "max_windows_per_shot": 3,
-                    "accept_min": 0.1,
-                },
-            },
-            "foot_guided": {"enabled": False},
-            "auto_anchors": {"enabled": False},
-        }},
+        config={"ball": ball_cfg},
         output_dir=tmp_path,
         ball_detector=detector,
     )
@@ -192,6 +223,8 @@ def test_strike_window_recovers_evidence_gap_at_a_fast_break(tmp_path: Path):
     for f in sw_frames:
         assert by_frame[f]["confidence"] > 0.0
         assert by_frame[f]["uv"] is not None
+        # The chain recovered the TRUE ball path, not some other value.
+        assert by_frame[f]["uv"][0] == pytest.approx(uv_truth[f][0], abs=1.0)
 
     diag = json.loads((tmp_path / "ball" / "ball_diag.json").read_text())
     assert diag["detection_coverage"]["strike_window"] == len(sw_frames)
@@ -227,7 +260,7 @@ def test_strike_window_disabled_is_noop(tmp_path: Path):
             "foot_guided": {"enabled": False},
         }},
         output_dir=tmp_path,
-        ball_detector=RedetectScriptedDetector(detections),
+        ball_detector=FullFrameScriptedDetector(detections, []),
     )
     stage.run()
     diag = json.loads((tmp_path / "ball" / "ball_diag.json").read_text())
@@ -307,25 +340,29 @@ def test_strike_window_respects_max_windows_per_shot_budget(tmp_path: Path):
     }
     detections = [(uv_truth[i][0], uv_truth[i][1], 0.9) for i in range(n)]
 
-    detector = RedetectScriptedDetector(detections, crop_center_candidate=(160.0, 160.0, 0.8))
+    ball_cfg = {
+        "detector": "fake",
+        "appearance_bridge": {"enabled": False},
+        "second_pass": {
+            "enabled": False,
+            "strike_window": {
+                "enabled": True,
+                "min_dspeed_px": 1.0,
+                "window_radius_frames": 6,
+                "max_windows_per_shot": 2,
+                "max_crops_per_window": 13,
+                "accept_min": 0.1,
+                "chain_min_frames": 100,  # deliberately unreachable: no accepts needed
+            },
+        },
+        "foot_guided": {"enabled": False},
+    }
+    # No candidates scripted (empty FIFO -> [] every call): this test only
+    # verifies the CALL BUDGET (cost), not acceptance.
+    detector = FullFrameScriptedDetector(detections, [])
 
     stage = BallStage(
-        config={"ball": {
-            "detector": "fake",
-            "appearance_bridge": {"enabled": False},
-            "second_pass": {
-                "enabled": False,
-                "strike_window": {
-                    "enabled": True,
-                    "min_dspeed_px": 1.0,
-                    "window_radius_frames": 6,
-                    "max_windows_per_shot": 2,
-                    "max_crops_per_window": 13,
-                    "accept_min": 0.1,
-                },
-            },
-            "foot_guided": {"enabled": False},
-        }},
+        config={"ball": ball_cfg},
         output_dir=tmp_path,
         ball_detector=detector,
     )

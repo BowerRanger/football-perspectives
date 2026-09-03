@@ -127,8 +127,9 @@ from src.utils.ball_shot_chain import (
 from src.utils.ball_strike_window import (
     StrikeWindowCfg,
     StrikeWindowDetection,
-    map_upscaled_crop_candidates,
-    predict_corridor_centers,
+    find_static_lock_frames,
+    flanking_knots,
+    select_kinematic_chain,
     select_strike_windows,
 )
 from src.utils.ball_touch_attribution import (
@@ -447,9 +448,18 @@ def _write_observations_sidecar(
     steps: list[TrackerStep],
     confidences: dict[int, float],
     sources: dict[int, str],
+    vetoed_sources: dict[int, str] | None = None,
 ) -> None:
     """Persist the raw detection/tracking pass so re-solves and the
-    dashboard don't need to re-run the detector."""
+    dashboard don't need to re-run the detector.
+
+    ``vetoed_sources`` (frame -> original source) adds a
+    ``"vetoed_source"`` field to matching rows for transparency — same
+    idiom as W9's post-hoc ``flight_veto`` relabelling — when a pass
+    (e.g. the static-lock filter, W6 continuation) has already
+    overwritten that frame's ``sources[f]`` entry before this call.
+    """
+    vetoed_sources = vetoed_sources or {}
     payload = {
         "clip_id": clip_id,
         "fps": fps,
@@ -464,6 +474,10 @@ def _write_observations_sidecar(
                 "p_flight": float(s.p_flight),
                 "gap_fill": bool(s.is_gap_fill),
                 "source": sources.get(s.frame, "none"),
+                **(
+                    {"vetoed_source": vetoed_sources[s.frame]}
+                    if s.frame in vetoed_sources else {}
+                ),
             }
             for s in steps
         ],
@@ -647,6 +661,24 @@ def _strike_window_cfg(cfg: dict) -> StrikeWindowCfg:
         top_k=int(sw.get("top_k", base.top_k)),
         velocity_lookback_frames=int(sw.get(
             "velocity_lookback_frames", base.velocity_lookback_frames)),
+        static_lock_eps_px=float(sw.get(
+            "static_lock_eps_px", base.static_lock_eps_px)),
+        static_lock_min_run_frames=int(sw.get(
+            "static_lock_min_run_frames", base.static_lock_min_run_frames)),
+        static_lock_min_context_speed_px=float(sw.get(
+            "static_lock_min_context_speed_px",
+            base.static_lock_min_context_speed_px)),
+        static_lock_lookback_frames=int(sw.get(
+            "static_lock_lookback_frames", base.static_lock_lookback_frames)),
+        chain_min_frames=int(sw.get("chain_min_frames", base.chain_min_frames)),
+        chain_max_gap_frames=int(sw.get(
+            "chain_max_gap_frames", base.chain_max_gap_frames)),
+        chain_speed_slack=float(sw.get(
+            "chain_speed_slack", base.chain_speed_slack)),
+        chain_min_avg_score=float(sw.get(
+            "chain_min_avg_score", base.chain_min_avg_score)),
+        chain_trend_tolerance=float(sw.get(
+            "chain_trend_tolerance", base.chain_trend_tolerance)),
     )
 
 
@@ -1294,92 +1326,62 @@ class BallStage(BaseStage):
             detector.reset()
             cap.release()
 
-    def _strike_window_loop(
+    def _strike_window_candidates_loop(
         self,
         clip_path: Path,
-        windows: list,
-        corridor_centers: dict[int, tuple[float, float]],
+        window,
         detector: BallDetector,
         sw_cfg: StrikeWindowCfg,
         prior: "ContextPrior | None" = None,
         prior_drop_below: float = 0.0,
-    ) -> list[StrikeWindowDetection]:
-        """Re-decode each strike window at ``sw_cfg.upscale_factor``x
-        magnification on a tight corridor crop, gated against the
-        flanking-trajectory prediction (never the in-window track itself —
-        see ``ball_strike_window.predict_corridor_centers``).
+    ) -> dict[int, list[tuple[float, float, float]]]:
+        """Low-threshold FULL-FRAME candidate detections across one strike
+        window (W6 continuation).
 
-        Every frame the corridor could predict is re-detected — unlike
-        ``_zoom_detect``, which only zooms when the full-frame pass found
-        nothing; the fast-strike failure mode is often a confident WRONG
-        full-frame detection, not silence, so there is no full-frame gate
-        to fall back on here.
+        No crop, no upscale: the go/no-go smoke test proved a plain
+        full-frame low-threshold WASB pass already tracks a fast strike
+        with smooth, rising-confidence detections (gberch f335-351,
+        0.43->0.92) — resolution was never the bottleneck, so this
+        deliberately skips the corridor-crop machinery that a bad
+        straight-line prediction can crop the true ball out of entirely
+        (see the module docstring / config comment for the measured
+        drift). Acceptance is the kinematic chain search's job
+        (:func:`ball_strike_window.select_kinematic_chain`), not a
+        per-frame spatial gate here.
         """
-        accepted: list[StrikeWindowDetection] = []
-        cov = np.eye(2) * (sw_cfg.corridor_radius_px / 3.0) ** 2
-        half = sw_cfg.crop_px // 2
+        out: dict[int, list[tuple[float, float, float]]] = {}
         prime_offset = getattr(detector, "_frames_in", 3) - 1
+        prime = max(0, window.start - prime_offset)
         cap = cv2.VideoCapture(str(clip_path))
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open clip: {clip_path}")
         try:
-            for win in windows:
-                frames = [
-                    f for f in range(win.start, win.end + 1)
-                    if f in corridor_centers
-                ]
-                if not frames:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, prime)
+            detector.reset()
+            for f in range(prime, window.end + 1):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                # Prime the detector's temporal buffer even before the
+                # window starts (like _zoom_detect) so the first in-window
+                # frame isn't starved of context.
+                cands = detector.detect_candidates(
+                    frame, sw_cfg.candidate_min_score, sw_cfg.top_k,
+                )
+                if f < window.start:
                     continue
-                prime = max(0, frames[0] - prime_offset)
-                cap.set(cv2.CAP_PROP_POS_FRAMES, prime)
-                detector.reset()
-                for f in range(prime, win.end + 1):
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    # Prime the detector's temporal buffer on every frame
-                    # (like _zoom_detect) even before the window starts —
-                    # skipping straight to corridor_centers[f] would only
-                    # exist for f >= win.start, starving a 3-frame ring
-                    # buffer of real context on the window's first frame.
-                    cu, cv_ = corridor_centers.get(f, corridor_centers[frames[0]])
-                    h, w = frame.shape[:2]
-                    x0 = int(np.clip(cu - half, 0, max(0, w - sw_cfg.crop_px)))
-                    y0 = int(np.clip(cv_ - half, 0, max(0, h - sw_cfg.crop_px)))
-                    crop = frame[y0:y0 + sw_cfg.crop_px, x0:x0 + sw_cfg.crop_px]
-                    if crop.size == 0:
-                        continue
-                    upscaled = cv2.resize(
-                        crop, None,
-                        fx=sw_cfg.upscale_factor, fy=sw_cfg.upscale_factor,
-                        interpolation=cv2.INTER_CUBIC,
-                    )
-                    cands = detector.detect_candidates(
-                        upscaled, sw_cfg.candidate_min_score, sw_cfg.top_k,
-                    )
-                    if f not in corridor_centers:
-                        continue
-                    mapped = map_upscaled_crop_candidates(
-                        cands, x0, y0, sw_cfg.upscale_factor,
-                    )
-                    mapped = filter_in_bounds(mapped, w, h)
-                    if prior is not None:
-                        mapped = [
-                            (u, v, s) for (u, v, s) in mapped
-                            if prior.factor(f, (u, v)) > prior_drop_below
-                        ]
-                    mean = np.array([cu, cv_], dtype=float)
-                    best = best_gated_candidate(mapped, mean, cov, sw_cfg)
-                    if best is not None:
-                        accepted.append(StrikeWindowDetection(
-                            frame=f, uv=best[0], combined_score=best[1],
-                        ))
-                detector.reset()
+                if prior is not None:
+                    cands = [
+                        (u, v, s) for (u, v, s) in cands
+                        if prior.factor(f, (u, v)) > prior_drop_below
+                    ]
+                if cands:
+                    out[f] = cands
+            detector.reset()
         finally:
             detector.reset()
             cap.release()
-        accepted.sort(key=lambda d: d.frame)
-        return accepted
+        return out
 
     def _detect_shot(
         self,
@@ -1607,51 +1609,82 @@ class BallStage(BaseStage):
             except Exception as exc:  # noqa: BLE001 — foot-guided is enrichment
                 logger.warning("ball: foot-guided pass failed: %s", exc)
 
-        # --- 1d. Strike-window pass: re-decode fast, motion-blurred launch
-        # windows at upscaled-corridor resolution. Runs LAST (after
-        # second_pass/foot_guided) so its own corridor is built from
-        # whatever real evidence survived those passes, flanking the
-        # window — it never trusts anything inside the window itself,
-        # which is exactly what a fast strike can poison (see
-        # ball_strike_window module docstring).
+        # --- 1d. Strike-window pass: bridge fast, motion-blurred launch
+        # windows with a kinematic-chain-corroborated full-frame,
+        # low-threshold redetection (W6 continuation — see the
+        # ball_strike_window module docstring for the go/no-go smoke test
+        # that motivated this design). Runs LAST (after second_pass/
+        # foot_guided) so its own flanking knots are built from whatever
+        # real evidence survived those passes; it never trusts anything
+        # inside the window itself, evidenced or not, which is exactly
+        # what a fast strike can poison.
         sw_cfg = _strike_window_cfg(cfg)
         n_strike_window = 0
+        n_static_lock = 0
+        vetoed_sources: dict[int, str] = {}
         if sw_cfg.enabled and getattr(detector, "SUPPORTS_REDETECT", True):
             try:
                 cur_uv = {s.frame: s.uv for s in steps if s.uv is not None}
+                # Demote sub-pixel-frozen "real" evidence (a stuck
+                # detector artifact, e.g. gberch f344-349 — bit-identical
+                # to the 13th decimal while confidence climbs 0.43->0.92)
+                # BEFORE window/knot selection. Relabelling sources[f]
+                # here — rather than deleting the observation — means the
+                # SAME dict flows into every downstream evidence-set
+                # consumer (resolve_events / mint_anchors_from_events read
+                # `sources` off this same _DetectArtifacts), so one change
+                # demotes a static-lock frame from corridor-knot
+                # selection AND solver/event hard evidence together. The
+                # original source is preserved as `vetoed_source` in the
+                # observations sidecar for transparency (same idiom as
+                # W9's flight_veto).
+                static_lock = find_static_lock_frames(
+                    cur_uv, sources, n_clip, cfg=sw_cfg)
+                if static_lock:
+                    vetoed_sources = {
+                        f: sources[f] for f in static_lock if f in sources
+                    }
+                    for f in static_lock:
+                        sources[f] = "static_lock"
+                    n_static_lock = len(vetoed_sources)
+                    logger.info(
+                        "ball: static-lock filter demoted %d frame(s) %s "
+                        "for %s", n_static_lock, sorted(vetoed_sources),
+                        shot_id or "(legacy)",
+                    )
                 sw_windows = select_strike_windows(cur_uv, n_clip, sw_cfg)
-                if sw_windows:
-                    corridor_centers: dict[int, tuple[float, float]] = {}
-                    for win in sw_windows:
-                        corridor_centers.update(predict_corridor_centers(
-                            cur_uv, sources, win, n_clip,
-                            lookback=sw_cfg.velocity_lookback_frames,
-                        ))
-                    if corridor_centers:
-                        sw_dets = self._strike_window_loop(
-                            clip_path, sw_windows, corridor_centers, detector,
-                            sw_cfg, prior=prior,
-                            prior_drop_below=prior_cfg.drop_below,
-                        )
-                        accepted = 0
-                        for d in sw_dets:
-                            prev = raw_confidences.get(d.frame)
-                            if prev is not None and d.combined_score <= prev:
-                                continue
-                            cur_uv[d.frame] = d.uv
-                            raw_confidences[d.frame] = d.combined_score
-                            sources[d.frame] = "strike_window"
-                            accepted += 1
-                        n_strike_window = accepted
-                        if accepted:
-                            logger.info(
-                                "ball: strike-window pass accepted %d/%d "
-                                "window frames for %s",
-                                accepted, len(corridor_centers),
-                                shot_id or "(legacy)",
-                            )
-                            steps = _resmooth_observations(
-                                cur_uv, n_clip, cfg, anchor_frames=anchor_frames)
+                accepted = 0
+                for win in sw_windows:
+                    pre, post = flanking_knots(
+                        cur_uv, sources, win, n_clip,
+                        lookback=sw_cfg.velocity_lookback_frames,
+                    )
+                    if pre is None and post is None:
+                        continue
+                    cand_by_frame = self._strike_window_candidates_loop(
+                        clip_path, win, detector, sw_cfg,
+                        prior=prior, prior_drop_below=prior_cfg.drop_below,
+                    )
+                    chain = select_kinematic_chain(
+                        cand_by_frame, pre, post, win, sw_cfg,
+                    )
+                    for d in chain:
+                        prev = raw_confidences.get(d.frame)
+                        if prev is not None and d.combined_score <= prev:
+                            continue
+                        cur_uv[d.frame] = d.uv
+                        raw_confidences[d.frame] = d.combined_score
+                        sources[d.frame] = "strike_window"
+                        accepted += 1
+                n_strike_window = accepted
+                if accepted:
+                    logger.info(
+                        "ball: strike-window pass accepted %d window "
+                        "frame(s) across %d window(s) for %s",
+                        accepted, len(sw_windows), shot_id or "(legacy)",
+                    )
+                    steps = _resmooth_observations(
+                        cur_uv, n_clip, cfg, anchor_frames=anchor_frames)
             except Exception as exc:  # noqa: BLE001 — strike-window is enrichment
                 logger.warning("ball: strike-window pass failed: %s", exc)
 
@@ -1667,6 +1700,8 @@ class BallStage(BaseStage):
             "zoom_recoveries": n_zoom,
             # Count (not fraction): strike-window redetections accepted.
             "strike_window": n_strike_window,
+            # Count (not fraction): frames demoted by the static-lock filter.
+            "static_lock_demoted": n_static_lock,
         }
 
         try:
@@ -1674,6 +1709,7 @@ class BallStage(BaseStage):
                 ball_out_path.with_name(ball_out_path.name.replace(
                     "ball_track", "ball_observations")),
                 camera.clip_id, camera.fps, steps, raw_confidences, sources,
+                vetoed_sources=vetoed_sources,
             )
         except Exception as exc:  # noqa: BLE001 — sidecar is enrichment
             logger.warning("ball: failed to write observations sidecar: %s", exc)

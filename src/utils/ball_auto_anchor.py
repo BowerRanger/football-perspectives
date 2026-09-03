@@ -434,53 +434,49 @@ def _path_deviation_m(
     return float(np.linalg.norm(np.asarray(world, dtype=float) - ref))
 
 
-def _physics_consistency_term(
-    cand: _Candidate,
+def pixel_velocity_consistency_term(
     steps_by_frame: Mapping[int, tuple[float, float]],
-    player_ctx,
-    cfg: AutoAnchorCfg,
+    frame: int,
+    joint_uv: tuple[float, float] | None,
+    *,
+    window: int,
+    dir_weight: float,
+    kink_weight: float,
 ) -> float | None:
-    """[0, 1] consistency of a ``player_touch`` candidate with the ball's
-    own pixel-velocity change around the candidate's OWN frame.
+    """[0, 1] consistency of a joint pixel with the ball's own
+    pixel-velocity change around ``frame``.
 
-    Two terms (weighted, see :class:`AutoAnchorCfg`), both sampled from
-    the ball pixel track over +/- ``physics_tiebreak_velocity_window``
-    frames of ``cand.anchor.frame``:
+    Shared core of the physics-consistency tie-break (sub-20cm campaign
+    W2, `_physics_consistency_term` below) — pulled out standalone so
+    ``ball_touch_attribution``'s cross-player relabel guard can reuse the
+    exact same math without depending on ``_Candidate``/``AutoAnchorCfg``.
 
-    * ``direction_term`` — cosine similarity (rescaled to [0,1]) between
-      the ball's outgoing pixel-velocity direction and the direction from
-      the candidate's joint pixel to the ball's post-window pixel. High
-      when the ball moves away from the joint — the "an impulse pushes
-      the ball away from the striking limb" signature.
-    * ``kink_term`` — how much the ball's pixel-velocity direction
-      actually CHANGES across the candidate's frame (1 - cosine of
-      incoming vs. outgoing direction, rescaled to [0,1]). A bystander
-      whose local-minimum frame sits just before the true contact is
-      still on the smooth incoming glide (little to no direction
-      change); the real toucher's frame straddles the reversal.
+    Two terms (weighted), both sampled from the ball pixel track over
+    +/- ``window`` frames of ``frame``:
+
+    * direction — cosine similarity (rescaled to [0,1]) between the
+      ball's outgoing pixel-velocity direction and the direction from
+      ``joint_uv`` to the ball's post-window pixel. High when the ball
+      moves away from the joint — the "an impulse pushes the ball away
+      from the striking limb" signature.
+    * kink — how much the ball's pixel-velocity direction actually
+      CHANGES across ``frame`` (1 - cosine of incoming vs. outgoing
+      direction, rescaled to [0,1]). A bystander whose local-minimum
+      frame sits just before the true contact is still on the smooth
+      incoming glide (little to no direction change); the real
+      toucher's frame straddles the reversal.
 
     Empirically separates gberch's f55 (P019, bystander: direction 0.92,
     kink 0.03) from f56 (P020, real toucher: direction 0.99, kink 0.96).
 
-    Returns None when the ball pixel track or the candidate's joint pixel
-    aren't available in the window — callers must fall back to raw score
-    in that case (no discriminating signal).
+    Returns None when the ball pixel track or ``joint_uv`` aren't
+    available in the window — callers must fall back to raw score (no
+    discriminating signal) in that case.
     """
-    a = cand.anchor
-    if a.state != "player_touch" or not a.player_id or not a.bone:
-        return None
-    w = cfg.physics_tiebreak_velocity_window
-    v0 = _uv_at(steps_by_frame, a.frame - w)
-    b0 = _uv_at(steps_by_frame, a.frame)
-    v1 = _uv_at(steps_by_frame, a.frame + w)
-    if v0 is None or b0 is None or v1 is None:
-        return None
-    joint_uv = None
-    for s in player_ctx.joints_at(a.frame):
-        if s.player_id == a.player_id and s.bone == a.bone and s.uv is not None:
-            joint_uv = s.uv
-            break
-    if joint_uv is None:
+    v0 = _uv_at(steps_by_frame, frame - window)
+    b0 = _uv_at(steps_by_frame, frame)
+    v1 = _uv_at(steps_by_frame, frame + window)
+    if v0 is None or b0 is None or v1 is None or joint_uv is None:
         return None
 
     in_dir = np.array([b0[0] - v0[0], b0[1] - v0[1]])
@@ -502,9 +498,37 @@ def _physics_consistency_term(
         cos = float(np.dot(in_dir, out_dir) / (in_norm * out_norm))
         kink_term = max(0.0, min(1.0, (1.0 - cos) / 2.0))
 
-    return (
-        cfg.physics_tiebreak_dir_weight * direction_term
-        + cfg.physics_tiebreak_kink_weight * kink_term
+    return dir_weight * direction_term + kink_weight * kink_term
+
+
+def _physics_consistency_term(
+    cand: _Candidate,
+    steps_by_frame: Mapping[int, tuple[float, float]],
+    player_ctx,
+    cfg: AutoAnchorCfg,
+) -> float | None:
+    """[0, 1] consistency of a ``player_touch`` candidate with the ball's
+    own pixel-velocity change around the candidate's OWN frame — see
+    :func:`pixel_velocity_consistency_term` for the underlying math.
+    Returns None (no discriminating signal) when the candidate isn't a
+    ``player_touch``, or its joint pixel/the ball track aren't available
+    in the window; callers must fall back to raw score in that case.
+    """
+    a = cand.anchor
+    if a.state != "player_touch" or not a.player_id or not a.bone:
+        return None
+    joint_uv = None
+    for s in player_ctx.joints_at(a.frame):
+        if s.player_id == a.player_id and s.bone == a.bone and s.uv is not None:
+            joint_uv = s.uv
+            break
+    if joint_uv is None:
+        return None
+    return pixel_velocity_consistency_term(
+        steps_by_frame, a.frame, joint_uv,
+        window=cfg.physics_tiebreak_velocity_window,
+        dir_weight=cfg.physics_tiebreak_dir_weight,
+        kink_weight=cfg.physics_tiebreak_kink_weight,
     )
 
 

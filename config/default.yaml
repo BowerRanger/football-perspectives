@@ -861,6 +861,26 @@ ball:
     # world assumption. Only trusted when it beats the current label's
     # own minted gap (see ball_touch_attribution._corroborated_alternate).
     consider_ranked_candidates: true
+    # Cross-player physics guard (touch-gate calibration follow-up,
+    # 2026-09-03): both relabel paths above compare raw bone<->ball-ray
+    # gaps only, which is depth-blind AND kink-blind — a bystander whose
+    # torso/hand happens to sit nearer the ball's pixel ray than the true
+    # toucher's foot can win purely on geometry (gberch f343: production
+    # relabelled a correctly player-attributed touch from P006 to
+    # bystander P009). When the winning alternate belongs to a DIFFERENT
+    # player, require it to also be corroborated by the ball's own pixel-
+    # velocity signature (direction + kink) — the same term
+    # ball_auto_anchor's minting-time reachability tie-break already uses
+    # (ball.auto_anchors.physics_tiebreak_*). Same-player bone
+    # corrections are never gated. When either side's term can't be
+    # computed (ball track too sparse), there is no discriminating
+    # signal and the flip proceeds unguarded, matching the minting-time
+    # tie-break's own fallback.
+    cross_player_physics_guard: true
+    cross_player_physics_window: 3
+    cross_player_physics_dir_weight: 0.6
+    cross_player_physics_kink_weight: 0.4
+    cross_player_physics_slack: 0.0
   # Automatic anchoring (camera auto-anchor analogy): velocity breaks on
   # the pixel track are classified as player touches / bounces / goal
   # impacts using the players' FK contact joints and the goal geometry,

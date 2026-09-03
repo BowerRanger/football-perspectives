@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Collection, Mapping, Sequence
 
 import numpy as np
 
+from src.utils.ball_auto_anchor import pixel_velocity_consistency_term
 from src.utils.ball_kinematic_touch import point_to_pixel_ray_distance
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
@@ -51,6 +52,37 @@ class TouchAttributionCfg:
     # by the depth term's expected-world assumption. Only trusted when it
     # beats the current label's own minted gap.
     consider_ranked_candidates: bool = True
+    # Cross-player physics guard (touch-gate calibration follow-up,
+    # 2026-09-03): both relabel paths above compare raw bone<->ball-ray
+    # gaps only. That is depth-blind AND kink-blind — a bystander whose
+    # torso/hand happens to sit nearer the ball's pixel ray than the true
+    # toucher's (motion-blurred, FK-noisy) foot can win purely on
+    # geometry, and when the winner is a DIFFERENT PLAYER this silently
+    # reassigns the touch to the wrong person (gberch f343: production
+    # relabels a correctly-player-attributed-but-wrong-bone event from
+    # P006 to a bystander P009 sitting right on the ball's ray). The
+    # reachability tie-break at minting (ball_auto_anchor's
+    # `_reachability_winner`, sub-20cm campaign W2) already guards the
+    # analogous same-instant cross-player dispute with a pixel-velocity
+    # consistency term (does the ball's own trajectory actually kink
+    # around the candidate's frame, and move away from its joint?);
+    # this reuses the identical term (`pixel_velocity_consistency_term`)
+    # to guard attribution's cross-player flips the same way. Only
+    # engages when the winning alternate's player_id differs from the
+    # event's current player_id; same-player bone corrections (the
+    # common case) are never gated by it. When either side's term is
+    # unavailable (ball track/joint pixel missing in the velocity
+    # window) there is no discriminating signal, so the flip proceeds
+    # exactly as before (matches `_reachability_winner`'s fallback).
+    cross_player_physics_guard: bool = True
+    cross_player_physics_window: int = 3
+    cross_player_physics_dir_weight: float = 0.6
+    cross_player_physics_kink_weight: float = 0.4
+    # The alternate's term must clear the current label's term minus this
+    # slack — 0.0 means "at least as physically consistent", not
+    # "strictly better", so a genuine tie doesn't spuriously block a
+    # relabel the raw-gap gates already found convincing.
+    cross_player_physics_slack: float = 0.0
 
 
 def _best_gaps_in_window(
@@ -64,15 +96,18 @@ def _best_gaps_in_window(
     distortion: tuple[float, float],
     cfg: TouchAttributionCfg,
     expected_world_by_frame: dict | None = None,
-) -> dict[tuple[str, str], float]:
-    """Per-(player, bone) minimal score over the window around ``frame``.
+) -> dict[tuple[str, str], tuple[float, int]]:
+    """Per-(player, bone) minimal (score, frame) over the window around
+    ``frame`` — the frame is the specific sighting that achieved the
+    minimum, needed by the cross-player physics guard to sample the ball
+    track around that candidate's own best occurrence.
 
     Score = ray gap + ``depth_weight`` × along-ray depth mismatch against
     the expected ball world (when one exists at that frame).
     """
     from src.utils.camera_projection import pixel_ray
 
-    best: dict[tuple[str, str], float] = {}
+    best: dict[tuple[str, str], tuple[float, int]] = {}
     for f in range(frame - cfg.window, frame + cfg.window + 1):
         ball_uv = ball_uvs.get(f)
         K, R, t = per_frame_K.get(f), per_frame_R.get(f), per_frame_t.get(f)
@@ -96,15 +131,61 @@ def _best_gaps_in_window(
                 joint_depth = float(np.dot(joint - C, d_hat))
                 score += cfg.depth_weight * abs(joint_depth - exp_depth)
             key = (s.player_id, s.bone)
-            if score < best.get(key, float("inf")):
-                best[key] = score
+            if score < best.get(key, (float("inf"), f))[0]:
+                best[key] = (score, f)
     return best
+
+
+def _joint_uv_at(player_ctx, frame: int, player_id: str, bone: str):
+    """The pixel coordinate of ``(player_id, bone)`` at ``frame``, or None
+    when that joint isn't present there."""
+    for s in player_ctx.joints_at(frame):
+        if s.player_id == player_id and s.bone == bone and s.uv is not None:
+            return s.uv
+    return None
+
+
+def _cross_player_physics_ok(
+    *,
+    player_ctx,
+    ball_uvs: dict[int, np.ndarray],
+    cfg: TouchAttributionCfg,
+    cur_pid: str, cur_bone: str, cur_frame: int,
+    cand_pid: str, cand_bone: str, cand_frame: int,
+) -> bool:
+    """Whether a cross-player relabel from ``(cur_pid, cur_bone)`` to
+    ``(cand_pid, cand_bone)`` is corroborated by the ball's own
+    pixel-velocity signature — the same `direction`/`kink` terms
+    ``ball_auto_anchor``'s minting-time reachability tie-break uses (see
+    :data:`TouchAttributionCfg.cross_player_physics_guard`).
+
+    True (flip allowed) whenever either side's term can't be computed —
+    no discriminating signal, so the raw-gap gates decide alone, matching
+    ``_reachability_winner``'s fallback."""
+    steps_by_frame = {f: tuple(uv) for f, uv in ball_uvs.items()}
+    kw = dict(
+        window=cfg.cross_player_physics_window,
+        dir_weight=cfg.cross_player_physics_dir_weight,
+        kink_weight=cfg.cross_player_physics_kink_weight,
+    )
+    cur_term = pixel_velocity_consistency_term(
+        steps_by_frame, cur_frame,
+        _joint_uv_at(player_ctx, cur_frame, cur_pid, cur_bone), **kw)
+    cand_term = pixel_velocity_consistency_term(
+        steps_by_frame, cand_frame,
+        _joint_uv_at(player_ctx, cand_frame, cand_pid, cand_bone), **kw)
+    if cur_term is None or cand_term is None:
+        return True
+    return cand_term >= cur_term - cfg.cross_player_physics_slack
 
 
 def _corroborated_alternate(
     e: "BallEvent",
     ranked_candidates: Mapping[int, Sequence[Mapping]],
     cfg: TouchAttributionCfg,
+    *,
+    player_ctx=None,
+    ball_uvs: "dict[int, np.ndarray] | None" = None,
 ) -> tuple[str, str] | None:
     """A ranked touch-candidate alternate for ``e`` — an independent
     second opinion from generate_auto_anchors's minting-time candidate
@@ -121,11 +202,17 @@ def _corroborated_alternate(
     exact sighting at ``e.frame`` itself when one exists (the frame the
     event actually claims) over any off-frame sighting. None when no
     alternate qualifies.
+
+    When the winning alternate belongs to a DIFFERENT player and
+    ``player_ctx``/``ball_uvs`` are given, the cross-player physics guard
+    (:func:`_cross_player_physics_ok`) must also clear before it is
+    returned.
     """
     current_gap: float | None = None
     current_gap_own_frame: float | None = None
     best: tuple[str, str] | None = None
     best_gap = float("inf")
+    best_frame: int | None = None
     for f in range(e.frame - cfg.window, e.frame + cfg.window + 1):
         for c in ranked_candidates.get(f, ()):
             pid, bone, gap = c.get("player_id"), c.get("bone"), c.get("gap_m")
@@ -146,12 +233,24 @@ def _corroborated_alternate(
             if gap > cfg.max_gap_m:
                 continue
             if gap < best_gap:
-                best_gap, best = gap, (pid, bone)
+                best_gap, best, best_frame = gap, (pid, bone), f
     if current_gap_own_frame is not None:
         current_gap = current_gap_own_frame
     if best is None:
         return None
     if current_gap is not None and best_gap >= current_gap:
+        return None
+    if (
+        cfg.cross_player_physics_guard
+        and best[0] != e.player_id
+        and player_ctx is not None
+        and ball_uvs is not None
+        and not _cross_player_physics_ok(
+            player_ctx=player_ctx, ball_uvs=ball_uvs, cfg=cfg,
+            cur_pid=e.player_id, cur_bone=e.bone, cur_frame=e.frame,
+            cand_pid=best[0], cand_bone=best[1], cand_frame=best_frame,
+        )
+    ):
         return None
     return best
 
@@ -195,16 +294,30 @@ def refine_touch_attribution(
         best_pid = best_bone = None
         relabel = False
         if gaps:
-            (best_pid, best_bone), best_gap = min(
-                gaps.items(), key=lambda kv: (kv[1], kv[0]))
-            current_gap = gaps.get((e.player_id, e.bone))
+            (best_pid, best_bone), (best_gap, best_frame) = min(
+                gaps.items(), key=lambda kv: (kv[1][0], kv[0]))
+            current = gaps.get((e.player_id, e.bone))
+            current_gap, current_frame = (
+                current if current is not None else (None, e.frame))
             relabel = (
                 best_gap <= cfg.max_gap_m
                 and (best_pid, best_bone) != (e.player_id, e.bone)
                 and (current_gap is None or best_gap + cfg.margin_m < current_gap)
             )
+            if (relabel and cfg.cross_player_physics_guard
+                    and best_pid != e.player_id
+                    and not _cross_player_physics_ok(
+                        player_ctx=player_ctx, ball_uvs=ball_uvs, cfg=cfg,
+                        cur_pid=e.player_id, cur_bone=e.bone,
+                        cur_frame=current_frame,
+                        cand_pid=best_pid, cand_bone=best_bone,
+                        cand_frame=best_frame,
+                    )):
+                relabel = False
         if not relabel and cfg.consider_ranked_candidates and ranked_candidates:
-            alt = _corroborated_alternate(e, ranked_candidates, cfg)
+            alt = _corroborated_alternate(
+                e, ranked_candidates, cfg,
+                player_ctx=player_ctx, ball_uvs=ball_uvs)
             if alt is not None:
                 best_pid, best_bone = alt
                 relabel = True

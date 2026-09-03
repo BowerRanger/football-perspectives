@@ -790,7 +790,13 @@ async function loadScene() {
     if (ballFrames.length > 0) {
       totalFrames = Math.max(totalFrames, ballFrames[ballFrames.length - 1].frame + 1);
       const ballGeo = new THREE.SphereGeometry(ballRadius, 16, 16);
-      const ballMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+      // Shaded (not unlit) so the sphere picks up a terminator from the
+      // scene lights — pure MeshBasicMaterial reads as a glowing disc and
+      // makes the ball look larger than its true 0.11 m radius. Tone
+      // matches Blender's toon-render ball material (BALL_COLOR_HEX).
+      const ballMat = new THREE.MeshStandardMaterial({
+        color: 0xf2f2f2, roughness: 0.65, metalness: 0.0,
+      });
       ballMesh = new THREE.Mesh(ballGeo, ballMat);
       ballMesh.visible = false;
       scene.add(ballMesh);

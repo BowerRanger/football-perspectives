@@ -718,3 +718,98 @@ class TestPhysicsTiebreak:
             per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
             distortion=(0.0, 0.0), fps=FPS, pitch_cfg=PITCH_CFG, cfg=cfg,
         )
+
+
+class TestRankedTouchCandidates:
+    """W3 (foot-contact locomotion regression recovery): the full
+    per-frame player_touch candidate pool survives past the one-anchor-
+    per-frame collapse into an optional out-param, for downstream
+    attribution / UI re-pick (gberch f192 class: two different bones for
+    the SAME player at the SAME frame, the smaller-gap one losing the
+    frame purely on kin-strength score)."""
+
+    def _gen(self, events, steps, ctx, candidates_out, cfg=CFG):
+        Ks, Rs, ts = per_frame_cams(60)
+        return generate_auto_anchors(
+            events=events, steps=steps, confidences={}, player_ctx=ctx,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0), fps=FPS, pitch_cfg=PITCH_CFG, cfg=cfg,
+            candidates_out=candidates_out,
+        )
+
+    def test_same_frame_alternates_ranked_best_first(self):
+        worlds, pixels, steps = _rolling_scene()
+        ctx = FakePlayerContext({
+            30: [
+                _joint("P003", "l_foot", worlds[30], pixels[30]),
+                _joint("P003", "r_foot", worlds[30], pixels[30]),
+            ],
+        })
+        events = (
+            BallEvent(frame=30, kind="touch", score=0.6,
+                      player_id="P003", bone="l_foot"),
+            BallEvent(frame=30, kind="touch", score=0.8,
+                      player_id="P003", bone="r_foot"),
+        )
+        out: dict = {}
+        anchors = self._gen(events, steps, ctx, out)
+        # Single-winner minting is unchanged: higher score (r_foot) wins
+        # the frame, same schema as before.
+        touch = [a for a in anchors if a.state == "player_touch"]
+        assert len(touch) == 1 and touch[0].bone == "r_foot"
+        # But BOTH alternates are ranked in the sidecar, best-first.
+        assert 30 in out
+        assert [c["bone"] for c in out[30]] == ["r_foot", "l_foot"]
+        assert out[30][0]["score"] == pytest.approx(0.8)
+        assert out[30][1]["score"] == pytest.approx(0.6)
+        assert all(c["gap_m"] is not None for c in out[30])
+        assert all(c["player_id"] == "P003" for c in out[30])
+
+    def test_single_candidate_frame_still_ranked(self):
+        worlds, pixels, steps = _rolling_scene()
+        ctx = FakePlayerContext({
+            30: [_joint("P003", "r_foot", worlds[30], pixels[30])],
+        })
+        events = (BallEvent(frame=30, kind="touch", score=0.8,
+                            player_id="P003", bone="r_foot"),)
+        out: dict = {}
+        self._gen(events, steps, ctx, out)
+        assert out == {30: [{"player_id": "P003", "bone": "r_foot",
+                            "gap_m": pytest.approx(0.0, abs=1e-6),
+                            "score": pytest.approx(0.8)}]}
+
+    def test_non_touch_candidates_excluded(self):
+        worlds, pixels, steps = _rolling_scene()
+        events = (BallEvent(frame=20, kind="bounce", score=0.7),)
+        out: dict = {}
+        self._gen(events, steps, FakePlayerContext(), out)
+        assert out == {}
+
+    def test_candidates_out_cleared_between_calls(self):
+        """An out-param is fully REPLACED each call, not accumulated —
+        a frame from a prior call must not leak into a re-mint (e.g.
+        _remint_and_resolve) with a different event set."""
+        worlds, pixels, steps = _rolling_scene()
+        ctx = FakePlayerContext({
+            30: [_joint("P003", "r_foot", worlds[30], pixels[30])],
+        })
+        out: dict = {}
+        self._gen(
+            (BallEvent(frame=30, kind="touch", score=0.8,
+                      player_id="P003", bone="r_foot"),),
+            steps, ctx, out,
+        )
+        assert 30 in out
+        self._gen((), steps, ctx, out)
+        assert out == {}
+
+    def test_candidates_out_none_is_a_noop(self):
+        # Default (no candidates_out) behaves exactly as before.
+        worlds, pixels, steps = _rolling_scene()
+        ctx = FakePlayerContext({
+            30: [_joint("P003", "r_foot", worlds[30], pixels[30])],
+        })
+        events = (BallEvent(frame=30, kind="touch", score=0.8,
+                            player_id="P003", bone="r_foot"),)
+        anchors = _generate(events, steps, 60, ctx=ctx)
+        assert [a for a in anchors if a.state == "player_touch"]

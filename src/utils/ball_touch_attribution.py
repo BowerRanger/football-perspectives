@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Collection, Sequence
+from typing import TYPE_CHECKING, Collection, Mapping, Sequence
 
 import numpy as np
 
@@ -43,6 +43,14 @@ class TouchAttributionCfg:
     # When an expected ball world is available, each candidate's score adds
     # depth_weight × |along-ray depth mismatch|.
     depth_weight: float = 0.5
+    # W3 (ball-auto-anchor ranked candidates): when the standard relabel
+    # check above doesn't trigger (margin not met, or the depth-weighted
+    # score disagrees), fall back to the PURE 3-D ray-gap ranking minting
+    # already computed and discarded by generate_auto_anchors's one-
+    # anchor-per-frame collapse — an independent second opinion untainted
+    # by the depth term's expected-world assumption. Only trusted when it
+    # beats the current label's own minted gap.
+    consider_ranked_candidates: bool = True
 
 
 def _best_gaps_in_window(
@@ -93,6 +101,61 @@ def _best_gaps_in_window(
     return best
 
 
+def _corroborated_alternate(
+    e: "BallEvent",
+    ranked_candidates: Mapping[int, Sequence[Mapping]],
+    cfg: TouchAttributionCfg,
+) -> tuple[str, str] | None:
+    """A ranked touch-candidate alternate for ``e`` — an independent
+    second opinion from generate_auto_anchors's minting-time candidate
+    pool (pure 3-D ray gap, no depth weighting) — when one beats the
+    current label's own minted gap.
+
+    Looks across ``+/- cfg.window`` frames (the same neighbourhood the
+    ray-gap check above considers) for the smallest-gap candidate whose
+    (player, bone) differs from ``e``'s current label and whose gap
+    clears ``cfg.max_gap_m``; returns it only when it is strictly better
+    than the current label's own minted gap (when known — an unminted
+    current label has nothing to lose to). The current label's gap is
+    the TRUE minimum across every sighting in the window, preferring an
+    exact sighting at ``e.frame`` itself when one exists (the frame the
+    event actually claims) over any off-frame sighting. None when no
+    alternate qualifies.
+    """
+    current_gap: float | None = None
+    current_gap_own_frame: float | None = None
+    best: tuple[str, str] | None = None
+    best_gap = float("inf")
+    for f in range(e.frame - cfg.window, e.frame + cfg.window + 1):
+        for c in ranked_candidates.get(f, ()):
+            pid, bone, gap = c.get("player_id"), c.get("bone"), c.get("gap_m")
+            if pid is None or bone is None or gap is None:
+                continue
+            gap = float(gap)
+            if (pid, bone) == (e.player_id, e.bone):
+                if f == e.frame:
+                    current_gap_own_frame = (
+                        gap if current_gap_own_frame is None
+                        else min(current_gap_own_frame, gap)
+                    )
+                else:
+                    current_gap = (
+                        gap if current_gap is None else min(current_gap, gap)
+                    )
+                continue
+            if gap > cfg.max_gap_m:
+                continue
+            if gap < best_gap:
+                best_gap, best = gap, (pid, bone)
+    if current_gap_own_frame is not None:
+        current_gap = current_gap_own_frame
+    if best is None:
+        return None
+    if current_gap is not None and best_gap >= current_gap:
+        return None
+    return best
+
+
 def refine_touch_attribution(
     events: "Sequence[BallEvent]",
     *,
@@ -104,11 +167,18 @@ def refine_touch_attribution(
     distortion: tuple[float, float],
     cfg: TouchAttributionCfg,
     expected_world_by_frame: dict | None = None,
+    ranked_candidates: "Mapping[int, Sequence[Mapping]] | None" = None,
 ) -> "tuple[BallEvent, ...]":
     """Relabel touch events to the best-scoring joint; everything else
     passes through untouched (same order, same length). With
     ``expected_world_by_frame`` the score is depth-aware (W5d), so a
-    joint lying on the ray but metres from the ball never wins."""
+    joint lying on the ray but metres from the ball never wins.
+
+    ``ranked_candidates`` (W3), when given, is consulted ONLY when the
+    depth-aware check above does not already relabel: a genuinely
+    corroborated alternate from the minting-time candidate pool (see
+    :func:`_corroborated_alternate`) can still flip the label. Always
+    relabels — never adds, removes, or reorders events."""
     if not cfg.enabled:
         return tuple(events)
     out: "list[BallEvent]" = []
@@ -122,17 +192,22 @@ def refine_touch_attribution(
             per_frame_t=per_frame_t, distortion=distortion, cfg=cfg,
             expected_world_by_frame=expected_world_by_frame,
         )
-        if not gaps:
-            out.append(e)
-            continue
-        (best_pid, best_bone), best_gap = min(
-            gaps.items(), key=lambda kv: (kv[1], kv[0]))
-        current_gap = gaps.get((e.player_id, e.bone))
-        relabel = (
-            best_gap <= cfg.max_gap_m
-            and (best_pid, best_bone) != (e.player_id, e.bone)
-            and (current_gap is None or best_gap + cfg.margin_m < current_gap)
-        )
+        best_pid = best_bone = None
+        relabel = False
+        if gaps:
+            (best_pid, best_bone), best_gap = min(
+                gaps.items(), key=lambda kv: (kv[1], kv[0]))
+            current_gap = gaps.get((e.player_id, e.bone))
+            relabel = (
+                best_gap <= cfg.max_gap_m
+                and (best_pid, best_bone) != (e.player_id, e.bone)
+                and (current_gap is None or best_gap + cfg.margin_m < current_gap)
+            )
+        if not relabel and cfg.consider_ranked_candidates and ranked_candidates:
+            alt = _corroborated_alternate(e, ranked_candidates, cfg)
+            if alt is not None:
+                best_pid, best_bone = alt
+                relabel = True
         if relabel:
             out.append(dataclasses.replace(
                 e, player_id=best_pid, bone=best_bone))

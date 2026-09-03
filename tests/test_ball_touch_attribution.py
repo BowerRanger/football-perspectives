@@ -225,6 +225,139 @@ def test_expected_worlds_interpolate_between_ground_anchors():
     assert 25 not in worlds        # no extrapolation past the last anchor
 
 
+class TestRankedCandidatesCorroboration:
+    """W3 (foot-contact locomotion regression recovery): when the
+    depth-blind ray-gap check above doesn't clear its own margin, a
+    genuinely corroborated alternate from generate_auto_anchors's
+    minting-time candidate pool (persisted to the diag sidecar and
+    passed in here as ``ranked_candidates``) can still flip the label —
+    an independent second opinion, not just a wider search window."""
+
+    def _near_tie_scene(self):
+        K, R, t = _camera()
+        ball_uv = _project(np.array([40.0, 34.0, 0.11]), K, R, t)
+        joints = [
+            _Joint("P001", "l_foot", (40.02, 34.0, 0.11),
+                   _project(np.array([40.02, 34.0, 0.11]), K, R, t), 0.9),
+            _Joint("P001", "r_foot", (40.05, 34.0, 0.11),
+                   _project(np.array([40.05, 34.0, 0.11]), K, R, t), 0.9),
+        ]
+        return _Ctx(joints), {10: np.asarray(ball_uv)}, K, R, t
+
+    def test_corroborated_alternate_flips_when_standard_check_stays_tied(self):
+        ctx, uvs, K, R, t = self._near_tie_scene()
+        events = (BallEvent(frame=10, kind="touch", score=0.7,
+                            player_id="P001", bone="r_foot"),)
+        # Standard ray-gap check alone stays inside the ambiguity margin
+        # (see test_ambiguous_margin_keeps_original) and keeps r_foot.
+        baseline = refine_touch_attribution(
+            events, player_ctx=ctx, ball_uvs=uvs,
+            per_frame_K={10: K}, per_frame_R={10: R}, per_frame_t={10: t},
+            distortion=(0.0, 0.0), cfg=CFG,
+        )
+        assert baseline[0].bone == "r_foot"
+        # But the minting-time candidate pool shows l_foot with a
+        # meaningfully smaller gap than r_foot ever achieved there.
+        ranked = {10: [
+            {"player_id": "P001", "bone": "r_foot", "gap_m": 0.30, "score": 0.8},
+            {"player_id": "P001", "bone": "l_foot", "gap_m": 0.10, "score": 0.6},
+        ]}
+        out = refine_touch_attribution(
+            events, player_ctx=ctx, ball_uvs=uvs,
+            per_frame_K={10: K}, per_frame_R={10: R}, per_frame_t={10: t},
+            distortion=(0.0, 0.0), cfg=CFG, ranked_candidates=ranked,
+        )
+        assert out[0].bone == "l_foot"
+        assert out[0].player_id == "P001"
+        assert out[0].frame == 10 and len(out) == 1
+
+    def test_current_label_gap_is_the_true_window_minimum(self):
+        """The current label's own best gap must be the MIN across the
+        whole window, not whatever occurrence the scan happens to see
+        first. A same-frame occurrence at ``e.frame`` overrides an
+        earlier off-frame sighting correctly, but a LATER off-frame
+        sighting with a smaller gap than the first must still count —
+        otherwise a stale, larger "first seen" gap makes a mediocre
+        alternate look like an improvement it isn't."""
+        ctx, uvs, K, R, t = self._near_tie_scene()
+        events = (BallEvent(frame=10, kind="touch", score=0.7,
+                            player_id="P001", bone="r_foot"),)
+        ranked = {
+            # Current label (r_foot) sighted twice off-frame: an early,
+            # mediocre gap at frame 8, then a much tighter gap at frame
+            # 11 — the true window-best for the current label is 0.05.
+            8: [{"player_id": "P001", "bone": "r_foot",
+                 "gap_m": 0.40, "score": 0.5}],
+            11: [{"player_id": "P001", "bone": "r_foot",
+                  "gap_m": 0.05, "score": 0.5}],
+            # Alternate beats the naive "first sighting" (0.40) but NOT
+            # the true best (0.05) — must not corroborate.
+            10: [{"player_id": "P001", "bone": "l_foot",
+                  "gap_m": 0.20, "score": 0.9}],
+        }
+        out = refine_touch_attribution(
+            events, player_ctx=ctx, ball_uvs=uvs,
+            per_frame_K={10: K}, per_frame_R={10: R}, per_frame_t={10: t},
+            distortion=(0.0, 0.0), cfg=CFG, ranked_candidates=ranked,
+        )
+        assert out[0].bone == "r_foot"
+
+    def test_ranked_candidates_never_override_an_already_confident_relabel(self):
+        ctx, uvs, Ks, Rs, ts = _setup()  # l_foot right AT the ball
+        events = (BallEvent(frame=10, kind="touch", score=0.7,
+                            player_id="P001", bone="r_foot"),)
+        # Contradicts the standard result — must be ignored since the
+        # depth-blind check already relabelled confidently.
+        ranked = {10: [
+            {"player_id": "P001", "bone": "r_foot", "gap_m": 0.01, "score": 0.9},
+        ]}
+        out = refine_touch_attribution(
+            events, player_ctx=ctx, ball_uvs=uvs,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0), cfg=CFG, ranked_candidates=ranked,
+        )
+        assert out[0].bone == "l_foot"
+
+    def test_alternate_over_max_gap_m_never_corroborates(self):
+        ctx, uvs, K, R, t = self._near_tie_scene()
+        events = (BallEvent(frame=10, kind="touch", score=0.7,
+                            player_id="P001", bone="r_foot"),)
+        ranked = {10: [
+            {"player_id": "P001", "bone": "r_foot", "gap_m": 0.90, "score": 0.8},
+            # Beats r_foot's gap but exceeds max_gap_m (0.45) itself.
+            {"player_id": "P001", "bone": "l_foot", "gap_m": 0.60, "score": 0.6},
+        ]}
+        out = refine_touch_attribution(
+            events, player_ctx=ctx, ball_uvs=uvs,
+            per_frame_K={10: K}, per_frame_R={10: R}, per_frame_t={10: t},
+            distortion=(0.0, 0.0), cfg=CFG, ranked_candidates=ranked,
+        )
+        assert out[0].bone == "r_foot"
+
+    def test_consider_ranked_candidates_false_disables_corroboration(self):
+        ctx, uvs, K, R, t = self._near_tie_scene()
+        events = (BallEvent(frame=10, kind="touch", score=0.7,
+                            player_id="P001", bone="r_foot"),)
+        ranked = {10: [
+            {"player_id": "P001", "bone": "r_foot", "gap_m": 0.30, "score": 0.8},
+            {"player_id": "P001", "bone": "l_foot", "gap_m": 0.10, "score": 0.6},
+        ]}
+        cfg = TouchAttributionCfg(enabled=True, consider_ranked_candidates=False)
+        out = refine_touch_attribution(
+            events, player_ctx=ctx, ball_uvs=uvs,
+            per_frame_K={10: K}, per_frame_R={10: R}, per_frame_t={10: t},
+            distortion=(0.0, 0.0), cfg=cfg, ranked_candidates=ranked,
+        )
+        assert out[0].bone == "r_foot"
+
+    def test_config_block_has_consider_ranked_candidates(self):
+        import yaml
+        from pathlib import Path
+        cfg = yaml.safe_load(
+            Path("config/default.yaml").read_text())["ball"]["touch_attribution"]
+        assert cfg["consider_ranked_candidates"] is True
+
+
 def test_context_expected_worlds_bridge_over_touch_windows():
     from src.utils.ball_touch_attribution import context_expected_worlds
 

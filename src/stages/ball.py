@@ -722,6 +722,8 @@ def _touch_attribution_cfg(cfg_dict: dict) -> TouchAttributionCfg:
         max_gap_m=float(cfg_dict.get("max_gap_m", base.max_gap_m)),
         margin_m=float(cfg_dict.get("margin_m", base.margin_m)),
         min_fk_conf=float(cfg_dict.get("min_fk_conf", base.min_fk_conf)),
+        consider_ranked_candidates=bool(cfg_dict.get(
+            "consider_ranked_candidates", base.consider_ranked_candidates)),
     )
 
 
@@ -1898,6 +1900,13 @@ class BallStage(BaseStage):
             propose_shot_chains(events, chain_cfg) if anchor_cfg.enabled else ()
         )
         auto_by_frame: dict[int, BallAnchor] = {}
+        # W3 (ranked touch candidates): the ranked player_touch candidate
+        # pool considered at minting time, keyed by frame — refreshed on
+        # every generate_auto_anchors call (incl. _remint_and_resolve's
+        # re-mint below) so it always reflects the FINAL candidate pool,
+        # persisted to the diag sidecar and offered to touch_attribution's
+        # second pass as an independent (depth-unweighted) second opinion.
+        touch_candidates_by_frame: dict[int, list[dict]] = {}
         if anchor_cfg.enabled:
             try:
                 auto_anchors = generate_auto_anchors(
@@ -1908,6 +1917,7 @@ class BallStage(BaseStage):
                     fps=artifacts.camera_fps, pitch_cfg=pitch_cfg, cfg=anchor_cfg,
                     sources=sources,
                     manual_anchors=manual_by_frame,
+                    candidates_out=touch_candidates_by_frame,
                 )
                 auto_by_frame = {a.frame: a for a in auto_anchors}
                 BallAnchorSet(
@@ -2107,6 +2117,7 @@ class BallStage(BaseStage):
                     fps=artifacts.camera_fps, pitch_cfg=pitch_cfg,
                     cfg=anchor_cfg, sources=sources,
                     manual_anchors=manual_by_frame,
+                    candidates_out=touch_candidates_by_frame,
                 )
                 abf = merge_anchors(
                     manual_by_frame, {a.frame: a for a in auto},
@@ -2149,6 +2160,7 @@ class BallStage(BaseStage):
                         per_frame_t=per_frame_t, distortion=distortion,
                         cfg=attr_cfg,
                         expected_world_by_frame=ctx_worlds,
+                        ranked_candidates=touch_candidates_by_frame,
                     )
                     if tuple(events2) != tuple(events):
                         n_rel = sum(1 for a, b in zip(events, events2)
@@ -2432,6 +2444,16 @@ class BallStage(BaseStage):
             "bounces": result.diagnostics.get("bounces", []),
             "splits": result.diagnostics.get("splits", 0),
             "contact_gaps": contact_gaps,
+            # W3 (ranked touch candidates): the full player_touch candidate
+            # pool generate_auto_anchors considered per frame — not just
+            # the single winner minted into the anchor sidecar — so a
+            # downstream attribution pass or the anchor-editor UI can see
+            # (and re-pick from) alternates a one-anchor-per-frame collapse
+            # discarded. Best-first (score descending) per frame.
+            "touch_candidates": [
+                {"frame": f, "candidates": touch_candidates_by_frame[f]}
+                for f in sorted(touch_candidates_by_frame)
+            ],
             "shot_chains": shot_chain_diag,
             "events": [
                 {

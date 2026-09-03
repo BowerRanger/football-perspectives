@@ -738,6 +738,14 @@ ball:
     max_gap_m: 0.45          # candidates beyond this never relabel
     margin_m: 0.05           # required improvement over current attribution
     min_fk_conf: 0.3
+    # W3 (ranked touch candidates, foot-contact locomotion regression
+    # recovery): when the depth-aware check above doesn't relabel, fall
+    # back to the pure ray-gap ranking generate_auto_anchors already
+    # computed and discarded at its one-anchor-per-frame collapse — an
+    # independent second opinion untainted by the depth term's expected-
+    # world assumption. Only trusted when it beats the current label's
+    # own minted gap (see ball_touch_attribution._corroborated_alternate).
+    consider_ranked_candidates: true
   # Automatic anchoring (camera auto-anchor analogy): velocity breaks on
   # the pixel track are classified as player touches / bounces / goal
   # impacts using the players' FK contact joints and the goal geometry,

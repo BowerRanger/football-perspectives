@@ -155,6 +155,12 @@ def auto_anchor_path(ball_dir: Path, shot_id: str) -> Path:
 class _Candidate:
     anchor: BallAnchor
     score: float
+    # Contact gap (3-D bone<->ball-ray distance, metres) at proposal time;
+    # set only for `player_touch` candidates, None otherwise. Reported in
+    # the ranked-candidates sidecar (W3) and available to the physics
+    # tie-break (W2) — recomputing it there would need the same inputs
+    # twice for no benefit.
+    gap_m: float | None = None
 
 
 def _uv_at(steps_by_frame: Mapping[int, tuple[float, float]], frame: int):
@@ -274,6 +280,7 @@ def _event_candidates(
                     touch_type=touch_type,
                 ),
                 ev.score,
+                gap_m=gap,
             ))
         elif ev.kind == "bounce":
             out.append(_Candidate(
@@ -626,9 +633,25 @@ def generate_auto_anchors(
     cfg: AutoAnchorCfg | None = None,
     sources: Mapping[int, str] | None = None,
     manual_anchors: Mapping[int, BallAnchor] | None = None,
+    candidates_out: dict[int, list[dict]] | None = None,
 ) -> tuple[BallAnchor, ...]:
-    """Events + grounded sampling -> validated auto anchors, frame order."""
+    """Events + grounded sampling -> validated auto anchors, frame order.
+
+    ``candidates_out``, when given, is populated (mutated in place) with
+    the full ranked ``player_touch`` candidate pool per frame that
+    survived gating — not just the single winner minted into the
+    returned anchors — as
+    ``{frame: [{"player_id", "bone", "gap_m", "score"}, ...]}``, best
+    first. Sub-20cm campaign W3: a one-anchor-per-frame collapse can
+    correctly discard a same-frame alternate for the SOLVE (only one
+    knot per frame makes sense) while still losing information a
+    downstream attribution pass or the anchor-editor UI could use to
+    re-pick — e.g. gberch f192, where the higher-kin-score r_foot wins
+    the frame over the smaller-gap l_foot the operator actually clicked.
+    """
     cfg = cfg or AutoAnchorCfg()
+    if candidates_out is not None:
+        candidates_out.clear()
     if not cfg.enabled:
         return ()
 
@@ -709,6 +732,23 @@ def generate_auto_anchors(
         distortion, player_ctx, fps, pitch_cfg, cfg,
         steps_by_frame=steps_by_frame,
     )
+    if candidates_out is not None:
+        touch_by_frame: dict[int, list[_Candidate]] = {}
+        for cand in gated:
+            if cand.anchor.state == "player_touch":
+                touch_by_frame.setdefault(cand.anchor.frame, []).append(cand)
+        for f, cands in touch_by_frame.items():
+            ranked = sorted(cands, key=lambda c: -c.score)
+            candidates_out[f] = [
+                {
+                    "player_id": c.anchor.player_id,
+                    "bone": c.anchor.bone,
+                    "gap_m": (round(float(c.gap_m), 4)
+                              if c.gap_m is not None else None),
+                    "score": round(float(c.score), 4),
+                }
+                for c in ranked
+            ]
     # One anchor per frame. Specific beats generic regardless of score —
     # a touch/impact carries strictly more information than a grounded
     # sample of the same instant; scores only break ties within a rank.

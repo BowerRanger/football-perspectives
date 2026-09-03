@@ -125,7 +125,15 @@ class StrikeWindowCfg:
     # a non-collapsing confidence trend.
     chain_min_frames: int = 5
     chain_max_gap_frames: int = 2
-    chain_speed_slack: float = 2.5
+    # 3.0, not a tighter value: the gberch f343 smoke test found the
+    # window's own (multi-frame-smoothed) dspeed_px trigger estimate
+    # under-measures the TRUE single-frame peak speed right at a strike's
+    # sharpest instant (a 346px/frame real step at f334->f335 vs a 136.8
+    # smoothed trigger reading) -- 2.5x left a hairline-infeasible first
+    # edge (342.28 needed vs 342.0 allowed) that silently steered the DP
+    # onto a worse first candidate. Harmless there (an existing anchor's
+    # confidence protected the frame anyway) but worth the margin.
+    chain_speed_slack: float = 3.0
     chain_min_avg_score: float = 0.15
     chain_trend_tolerance: float = 0.25
 
@@ -532,3 +540,40 @@ def select_kinematic_chain(
         )
         for i in path_idx
     ]
+
+
+def apply_chain_detections(
+    chain: list[StrikeWindowDetection],
+    static_lock: frozenset[int],
+    cur_uv: dict[int, tuple[float, float]],
+    raw_confidences: dict[int, float],
+    sources: dict[int, str],
+) -> int:
+    """Merge accepted chain detections into the observation stream
+    IN PLACE, honouring the "never downgrade a stronger existing
+    detection" rule that second_pass/foot_guided also apply — EXCEPT for
+    frames the static-lock filter has already demoted.
+
+    A demoted frame's existing confidence is untrustworthy by
+    construction: the gberch smoke test found static-lock rows (e.g.
+    f346-348) whose stale confidence traces back to the SAME underlying
+    detector computation as the chain's correct replacement (only the
+    position differs — see the module docstring for why), so a strict
+    ``<=`` comparison against that confidence would protect the
+    known-wrong frozen value with an exact tie forever. Returns the
+    number of frames actually replaced.
+    """
+    accepted = 0
+    for d in chain:
+        prev = raw_confidences.get(d.frame)
+        if (
+            d.frame not in static_lock
+            and prev is not None
+            and d.combined_score <= prev
+        ):
+            continue
+        cur_uv[d.frame] = d.uv
+        raw_confidences[d.frame] = d.combined_score
+        sources[d.frame] = "strike_window"
+        accepted += 1
+    return accepted

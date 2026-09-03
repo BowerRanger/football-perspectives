@@ -681,47 +681,76 @@ ball:
     # recovered launch frame CAN support (not just decorate) anchor
     # minting elsewhere, once the corridor is trustworthy (see below).
     #
-    # DEFAULT OFF as of the 2026-09-03 go/no-go smoke test (gberch f343
-    # window, real fine-tuned-v1 WASB detector on MPS): the true ball IS
-    # visible at STANDARD resolution -- a plain full-frame low-threshold
-    # pass found a smooth, monotonic, rising-confidence (0.43->0.92)
-    # candidate track across f335-351 that lines up with the known-good
-    # f350/f351 production values -- so upscaling was never the
-    # bottleneck here. The corridor predictor (straight-line interpolation
-    # between the last/first REAL-sourced pixel flanking the window) IS
-    # what failed: hand-verified it correctly picked flanking foot_guided
-    # knots at f334/f352, but a straight line between two points 18 frames
-    # apart badly undershoots a real strike's curve, drifting up to ~290px
-    # from the true ball by mid-window -- well outside even a widened
-    # crop_px=320. Worse: shrinking window_radius_frames 8->3 made it FAIL
-    # HARDER (0/7), because the post-window knot search landed exactly on
+    # ORIGINAL go/no-go smoke test (2026-09-03, gberch f343 window, real
+    # fine-tuned-v1 WASB detector on MPS) found the true ball IS visible
+    # at STANDARD resolution -- a plain full-frame low-threshold pass
+    # found a smooth, monotonic, rising-confidence (0.43->0.92) candidate
+    # track across f335-351 that lines up with the known-good f350/f351
+    # production values -- so upscaling was never the bottleneck. What
+    # failed was the straight-line corridor gate: correctly-picked
+    # flanking foot_guided knots at f334/f352, but a straight line 18
+    # frames apart drifts up to ~290px from the true curve, and a
+    # narrowed window landed the post-window knot search exactly on
     # gberch's own f347 static-lock false positive (source="detector" is
-    # trusted as "real" evidence even when the detection itself is wrong),
-    # dragging the whole interpolation off by >800px.
+    # trusted as "real" evidence even when the detection itself is
+    # wrong), dragging the interpolation off by >800px. Shipped
+    # default-OFF pending a better corridor model.
     #
-    # W6 CONTINUATION (see ball_strike_window.py's module docstring for
-    # the full design): fixes both failure modes. (1) static_lock_* below
-    # controls find_static_lock_frames, which demotes a sub-pixel-frozen
-    # "real" evidence run (the f347 signature) from evidence status
+    # W6 CONTINUATION -- ENABLED (2026-09-03, see ball_strike_window.py's
+    # module docstring for the full design) after fixing both failure
+    # modes and re-running the same gberch f343 window with the real
+    # detector: (1) static_lock_* controls find_static_lock_frames, which
+    # demotes a sub-pixel-frozen "real" evidence run from evidence status
     # EVERYWHERE it is consulted -- corridor/chain knot selection and,
     # via source relabelling, the solver/event evidence sets -- unless the
     # run is genuinely a resting ball (no fast motion flanking it). (2)
-    # chain_* below controls select_kinematic_chain, which replaces the
-    # straight-line corridor's per-frame spatial gate with a temporal one:
-    # low-threshold candidates are gathered FULL-FRAME (no crop --
-    # matching the smoke test's own validated methodology, so
+    # chain_* controls select_kinematic_chain, which replaces the
+    # straight-line corridor's per-frame spatial gate with a temporal
+    # one: low-threshold candidates are gathered FULL-FRAME (no crop --
+    # matching the original smoke test's own validated methodology, so
     # crop_px/upscale_factor/corridor_radius_px/corridor_sigma below are
     # now dead weight for the shipped path, kept only because
     # predict_corridor_centers/map_upscaled_crop_candidates remain valid,
-    # independently-tested utilities a future corridor-crop consumer could
-    # still use) across the window, and a chain is accepted only if it
-    # bridges the break for >= chain_min_frames at a physically plausible
-    # (chain_speed_slack over the max of the window's own jump and the
-    # flanking knots' speed), non-collapsing-confidence
-    # (chain_trend_tolerance) pace. See the ball-accuracy notes for the
-    # gberch f343 re-run with this mechanism before flipping this flag.
+    # independently-tested utilities a future corridor-crop consumer
+    # could still use) across the window, and a chain is accepted only
+    # if it bridges the break for >= chain_min_frames at a physically
+    # plausible speed, chain_min_avg_score, and a non-collapsing
+    # confidence trend.
+    #
+    # Re-run result: static_lock flagged BOTH the documented f344-349
+    # run AND a previously-undocumented second static-lock cluster at
+    # f317-320 (a completely different decoy pixel) -- the mechanism
+    # generalises past the one hand-diagnosed instance. The chain search
+    # recovered a smooth, physically plausible 17-frame path across
+    # f335-351 that lands within ~6px of the known-good f350/f351 values,
+    # correctly excluding the f347 decoy from ever contributing.
+    # apply_chain_detections found and fixed a second real bug along the
+    # way: three of the frozen rows (f346-348) carried a confidence that
+    # EXACTLY TIED the chain's replacement (the frozen row's confidence
+    # traces back to the same underlying computation as the corrected
+    # one -- only the position differs), which the normal "never
+    # downgrade a stronger existing detection" rule would have protected
+    # forever; a static-lock-demoted frame's own confidence no longer
+    # gates its replacement. chain_speed_slack raised 2.5->3.0 after the
+    # same run showed the trigger's smoothed dspeed_px estimate can
+    # under-measure the true single-frame peak speed right at the
+    # sharpest instant of a strike (346px/frame actual vs a 136.8
+    # smoothed reading), leaving a hairline-infeasible first edge.
+    # Cross-clip check (read-only window-selection scan, no full runs):
+    # kroupi01/origi01/origi02/s013 show ZERO static-lock frames in their
+    # current observation sidecars -- so far a gberch-specific artifact,
+    # not yet confirmed elsewhere. A bounded probe on kroupi01's own
+    # strongest break window (the fine-tune HOLDOUT clip, weaker
+    # detector) found the chain search correctly accepts NOTHING there
+    # (0/17) rather than fabricating a low-confidence path -- the
+    # corroboration gates (chain_min_avg_score / speed bounds / trend)
+    # hold on a clip where the low-threshold candidates are too noisy to
+    # form a plausible chain, which is the intended safe failure mode.
+    # Not yet re-certified against the full wasb-cached eval harness
+    # (holdout vs full) -- do that before trusting this beyond the
+    # bounded-window smoke test above.
     strike_window:
-      enabled: false
+      enabled: true
       min_dspeed_px: 12.0
       break_velocity_frames: 3
       window_radius_frames: 8
@@ -741,7 +770,7 @@ ball:
       static_lock_lookback_frames: 5
       chain_min_frames: 5
       chain_max_gap_frames: 2
-      chain_speed_slack: 2.5
+      chain_speed_slack: 3.0
       chain_min_avg_score: 0.15
       chain_trend_tolerance: 0.25
   # Phase B: direction-change segmentation. Corners of a robust piecewise

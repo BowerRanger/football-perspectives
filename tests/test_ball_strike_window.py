@@ -11,6 +11,8 @@ from src.utils.ball_strike_window import (
     REAL_EVIDENCE_SOURCES,
     StrikeWindow,
     StrikeWindowCfg,
+    StrikeWindowDetection,
+    apply_chain_detections,
     find_static_lock_frames,
     find_strike_triggers,
     flanking_knots,
@@ -544,6 +546,79 @@ def test_select_kinematic_chain_single_sided_pre_only():
         cfg=_cfg(chain_min_frames=5, chain_speed_slack=3.0, chain_min_avg_score=0.1),
     )
     assert len(chain) == 10
+
+
+@pytest.mark.unit
+def test_apply_chain_detections_replaces_static_lock_frame_despite_tie():
+    """Regression guard for a real bug found during the gberch f343 smoke
+    test: three static-lock frames (f346-348) carried a confidence that
+    EXACTLY tied the chain's replacement candidate — the frozen row's
+    confidence traces back to the same underlying detector/tracker
+    computation as the corrected one (only the position differs; see the
+    module docstring). A strict `<=` "never downgrade" comparison would
+    protect the known-wrong frozen value forever. A frame the
+    static-lock filter has already demoted must not be shielded by its
+    own (untrustworthy) confidence."""
+    static_lock = frozenset({20})
+    cur_uv = {20: (900.0, 650.0)}  # the frozen decoy value
+    raw_confidences = {20: 0.811}  # the frozen row's own confidence
+    sources = {20: "static_lock"}
+    chain = [StrikeWindowDetection(frame=20, uv=(700.0, 500.0), combined_score=0.811)]
+
+    accepted = apply_chain_detections(chain, static_lock, cur_uv, raw_confidences, sources)
+
+    assert accepted == 1
+    assert cur_uv[20] == (700.0, 500.0)
+    assert raw_confidences[20] == 0.811
+    assert sources[20] == "strike_window"
+
+
+@pytest.mark.unit
+def test_apply_chain_detections_still_protects_non_static_lock_tie():
+    """The existing "never downgrade" rule (shared with second_pass /
+    foot_guided) must be preserved for frames NOT flagged as
+    static-lock: a tie or a weaker chain candidate must not overwrite
+    perfectly good existing evidence."""
+    static_lock: frozenset[int] = frozenset()
+    cur_uv = {20: (700.0, 500.0)}
+    raw_confidences = {20: 0.9}
+    sources = {20: "detector"}
+    chain = [StrikeWindowDetection(frame=20, uv=(701.0, 501.0), combined_score=0.9)]
+
+    accepted = apply_chain_detections(chain, static_lock, cur_uv, raw_confidences, sources)
+
+    assert accepted == 0
+    assert cur_uv[20] == (700.0, 500.0)
+    assert sources[20] == "detector"
+
+
+@pytest.mark.unit
+def test_apply_chain_detections_always_replaces_strictly_higher_score():
+    static_lock: frozenset[int] = frozenset()
+    cur_uv = {20: (700.0, 500.0)}
+    raw_confidences = {20: 0.5}
+    sources = {20: "detector"}
+    chain = [StrikeWindowDetection(frame=20, uv=(750.0, 520.0), combined_score=0.8)]
+
+    accepted = apply_chain_detections(chain, static_lock, cur_uv, raw_confidences, sources)
+
+    assert accepted == 1
+    assert cur_uv[20] == (750.0, 520.0)
+    assert sources[20] == "strike_window"
+
+
+@pytest.mark.unit
+def test_apply_chain_detections_new_frame_has_no_prior_to_compare():
+    static_lock: frozenset[int] = frozenset()
+    cur_uv: dict[int, tuple[float, float]] = {}
+    raw_confidences: dict[int, float] = {}
+    sources: dict[int, str] = {}
+    chain = [StrikeWindowDetection(frame=20, uv=(750.0, 520.0), combined_score=0.2)]
+
+    accepted = apply_chain_detections(chain, static_lock, cur_uv, raw_confidences, sources)
+
+    assert accepted == 1
+    assert sources[20] == "strike_window"
 
 
 @pytest.mark.unit

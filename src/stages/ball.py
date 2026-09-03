@@ -126,7 +126,7 @@ from src.utils.ball_shot_chain import (
 )
 from src.utils.ball_strike_window import (
     StrikeWindowCfg,
-    StrikeWindowDetection,
+    apply_chain_detections,
     find_static_lock_frames,
     flanking_knots,
     select_kinematic_chain,
@@ -1668,14 +1668,9 @@ class BallStage(BaseStage):
                     chain = select_kinematic_chain(
                         cand_by_frame, pre, post, win, sw_cfg,
                     )
-                    for d in chain:
-                        prev = raw_confidences.get(d.frame)
-                        if prev is not None and d.combined_score <= prev:
-                            continue
-                        cur_uv[d.frame] = d.uv
-                        raw_confidences[d.frame] = d.combined_score
-                        sources[d.frame] = "strike_window"
-                        accepted += 1
+                    accepted += apply_chain_detections(
+                        chain, static_lock, cur_uv, raw_confidences, sources,
+                    )
                 n_strike_window = accepted
                 if accepted:
                     logger.info(

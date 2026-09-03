@@ -344,3 +344,177 @@ def test_bucket_anchor_in_air_run_keeps_bucket_depth():
 def _uv_zup2(world, R, t):
     uv = project_world_to_image(_K2, R, t, _DIST, np.asarray([world]))[0]
     return (float(uv[0]), float(uv[1]))
+
+
+# ---------------------------------------------------------------------------
+# Scoped touch-node body-pinning fix (WS5): for player_touch anchors, the
+# steep-ray bypass (>= 3 deg elevation snaps straight to ray ∩ z=r even when
+# the joint is far away) must not override the in_reach gate for AUTO
+# anchors — auto touches trust the body FK over a possibly-noisy detector
+# pixel once they disagree by more than the 0.6 m contact envelope. Manual
+# (operator-clicked) anchors keep the pre-fix behaviour exactly: the
+# clicked pixel stays authoritative for the ray per the ray-faithful
+# anchoring conventions (C1-C4), so the steep bypass still applies to them.
+
+
+def test_touch_auto_beyond_reach_steep_ray_lifts_at_joint():
+    """Same geometry as the steep-ray regression above, but with an explicit
+    empty manual_frames set (all-auto). The joint pin must now win: the
+    resolved point must NOT land at the far ray/ground intersection, and
+    must instead fall through to the same vertical-lift-at-depth-nearest-
+    joint fallback the resolver already uses for the grazing-ray/beyond-
+    reach case (project the joint onto the CLICKED ray at the depth
+    nearest the joint, offset toward camera by the ball radius, then clamp
+    z up to the radius — the pixel stays laterally authoritative even in
+    the fallback; only the depth pick shifts toward the joint)."""
+    R, t = _cam_zup()   # ~26 deg elevation — comfortably steep
+    true_ball = np.array([2.0, 6.0, _RADIUS])   # grounded ball, clicked
+    joint = (3.8, 7.5, -0.4)   # >0.6 m from ray ∩ z=r (same as manual test)
+    # Expected fallback point, computed independently via the same two
+    # primitives _resolve_touch_world composes (verified against the
+    # fixed function's actual output during test development).
+    expected = np.array([2.11461914, 7.49004888, _RADIUS])
+    ctx = _FakeCtx({(0, "P1", "r_foot"): joint})
+    anc = BallAnchor(frame=0, image_xy=_uv_zup(true_ball, R, t),
+                     state="player_touch", player_id="P1", bone="r_foot")
+    res = resolve_events(
+        anchor_by_frame={0: anc}, player_ctx=ctx,
+        per_frame_K={0: _K2}, per_frame_R={0: R}, per_frame_t={0: t},
+        distortion=_DIST, ball_radius=_RADIUS, goal_geometry=None,
+        n_frames=1, fps=25.0, clip_id="c", image_size=(1920, 1080),
+        manual_frames=frozenset(),   # explicit: no manual anchors at all
+    )
+    world, _ = res.world_by_frame[0]
+    # Must NOT snap to the far ray/ground point any more.
+    assert np.linalg.norm(np.asarray(world) - true_ball) > 0.5
+    assert np.linalg.norm(np.asarray(world) - expected) < 0.01
+    assert res.diagnostics.get("touch_ground_clamped", 0) == 1
+
+
+def test_touch_manual_beyond_reach_steep_ray_keeps_ray_authority():
+    """Explicit manual_frames membership (rather than relying on the
+    default): the operator's clicked pixel stays authoritative even when
+    the FK joint disagrees by more than the reach envelope — unchanged
+    from pre-fix behaviour."""
+    R, t = _cam_zup()
+    true_ball = np.array([2.0, 6.0, _RADIUS])
+    joint = (3.8, 7.5, -0.4)
+    ctx = _FakeCtx({(0, "P1", "r_foot"): joint})
+    anc = BallAnchor(frame=0, image_xy=_uv_zup(true_ball, R, t),
+                     state="player_touch", player_id="P1", bone="r_foot")
+    res = resolve_events(
+        anchor_by_frame={0: anc}, player_ctx=ctx,
+        per_frame_K={0: _K2}, per_frame_R={0: R}, per_frame_t={0: t},
+        distortion=_DIST, ball_radius=_RADIUS, goal_geometry=None,
+        n_frames=1, fps=25.0, clip_id="c", image_size=(1920, 1080),
+        manual_frames=frozenset({0}),   # explicit: frame 0 is manual
+    )
+    world, _ = res.world_by_frame[0]
+    assert np.linalg.norm(np.asarray(world) - true_ball) < 0.05
+    assert res.diagnostics.get("touch_ground_clamped", 0) == 1
+
+
+def test_touch_default_manual_frames_none_keeps_ray_authority():
+    """Backward-compat: callers that don't pass manual_frames at all (the
+    pre-existing test suite, and any caller unsure of provenance) keep the
+    pre-fix ray-authoritative behaviour — same convention as the segment-fit
+    manual/auto split elsewhere in this module (manual_frames is None means
+    'treat as manual')."""
+    R, t = _cam_zup()
+    true_ball = np.array([2.0, 6.0, _RADIUS])
+    joint = (3.8, 7.5, -0.4)
+    ctx = _FakeCtx({(0, "P1", "r_foot"): joint})
+    anc = BallAnchor(frame=0, image_xy=_uv_zup(true_ball, R, t),
+                     state="player_touch", player_id="P1", bone="r_foot")
+    res = _resolve_zup({0: anc}, ctx, R, t)   # no manual_frames kwarg
+    world, _ = res.world_by_frame[0]
+    assert np.linalg.norm(np.asarray(world) - true_ball) < 0.05
+
+
+def test_touch_auto_within_reach_still_snaps_to_ray_ground_shallow():
+    """AUTO touch, in-reach, shallow (non-steep) ray: in_reach alone must
+    still trigger the ground-point clamp — the fix only removes the
+    *steep-bypass*, not the in_reach path itself.
+
+    Geometry tuned (not arbitrary): with this ~1.8 deg grazing camera, a
+    joint only 1.5 cm below the pitch keeps ray ∩ z=r within the 0.6 m
+    reach envelope (~0.47 m) while staying comfortably below the elevation
+    floor (sin_elev's steep test is False) — verified numerically, see the
+    fix's validation script."""
+    fwd = np.array([0.0, 60.0, -1.9])
+    fwd /= np.linalg.norm(fwd)
+    up = np.array([0.0, 0.0, 1.0])
+    right = np.cross(fwd, up)
+    right /= np.linalg.norm(right)
+    down = np.cross(fwd, right)
+    R = np.stack([right, down, fwd])
+    C = np.array([0.0, -60.0, 2.0])
+    t = -R @ C
+    joint = np.array([0.0, 0.0, _RADIUS - 0.015])   # 1.5 cm below pitch
+    expected_ground_pt = np.array([0.0, -0.47244094, _RADIUS])
+    uv = project_world_to_image(_K2, R, t, _DIST, joint.reshape(1, 3))[0]
+    ctx = _FakeCtx({(0, "P1", "r_foot"): tuple(joint)})
+    anc = BallAnchor(frame=0, image_xy=(float(uv[0]), float(uv[1])),
+                     state="player_touch", player_id="P1", bone="r_foot")
+    res = resolve_events(
+        anchor_by_frame={0: anc}, player_ctx=ctx,
+        per_frame_K={0: _K2}, per_frame_R={0: R}, per_frame_t={0: t},
+        distortion=_DIST, ball_radius=_RADIUS, goal_geometry=None,
+        n_frames=1, fps=25.0, clip_id="c", image_size=(1920, 1080),
+        manual_frames=frozenset(),   # explicit auto
+    )
+    world, _ = res.world_by_frame[0]
+    assert np.linalg.norm(np.asarray(world) - expected_ground_pt) < 0.01
+    assert res.diagnostics.get("touch_ground_clamped", 0) == 1
+
+
+def test_touch_grazing_ray_still_lifts_vertically_when_auto():
+    """The W2a grazing defense survives for AUTO anchors too: below the
+    elevation floor the steep flag is False for either provenance, so the
+    gate reduces to in_reach regardless — no behaviour change from the
+    pre-fix grazing-ray path."""
+    fwd = np.array([0.0, 60.0, -1.9])
+    fwd /= np.linalg.norm(fwd)
+    up = np.array([0.0, 0.0, 1.0])
+    right = np.cross(fwd, up)
+    right /= np.linalg.norm(right)
+    down = np.cross(fwd, right)
+    R = np.stack([right, down, fwd])
+    C = np.array([0.0, -60.0, 2.0])
+    t = -R @ C
+    joint = np.array([0.0, 0.0, -0.15])
+    uv = project_world_to_image(_K2, R, t, _DIST, joint.reshape(1, 3))[0]
+    ctx = _FakeCtx({(0, "P1", "r_foot"): tuple(joint)})
+    anc = BallAnchor(frame=0, image_xy=(float(uv[0]), float(uv[1])),
+                     state="player_touch", player_id="P1", bone="r_foot")
+    res = resolve_events(
+        anchor_by_frame={0: anc}, player_ctx=ctx,
+        per_frame_K={0: _K2}, per_frame_R={0: R}, per_frame_t={0: t},
+        distortion=_DIST, ball_radius=_RADIUS, goal_geometry=None,
+        n_frames=1, fps=25.0, clip_id="c", image_size=(1920, 1080),
+        manual_frames=frozenset(),
+    )
+    world, _ = res.world_by_frame[0]
+    assert np.linalg.norm(np.asarray(world)[:2] - joint[:2]) < 0.5
+
+
+def test_non_touch_grounded_state_unaffected_by_manual_frames():
+    """Regression guard: the fix is scoped to player_touch resolution only.
+    A non-touch (grounded) anchor's resolved world position must be
+    bit-identical whether manual_frames marks its frame manual, auto, or
+    is omitted entirely — _resolve_waypoint_world never consults it."""
+    R, t = _cam_zup()
+    ground = np.array([2.0, 6.0, _RADIUS])
+    anc = BallAnchor(frame=0, image_xy=_uv_zup(ground, R, t), state="grounded")
+    kwargs = dict(
+        anchor_by_frame={0: anc}, player_ctx=_FakeCtx({}),
+        per_frame_K={0: _K2}, per_frame_R={0: R}, per_frame_t={0: t},
+        distortion=_DIST, ball_radius=_RADIUS, goal_geometry=None,
+        n_frames=1, fps=25.0, clip_id="c", image_size=(1920, 1080),
+    )
+    w_none = resolve_events(**kwargs, manual_frames=None).world_by_frame[0][0]
+    w_manual = resolve_events(
+        **kwargs, manual_frames=frozenset({0})).world_by_frame[0][0]
+    w_auto = resolve_events(
+        **kwargs, manual_frames=frozenset()).world_by_frame[0][0]
+    assert w_none == w_manual == w_auto

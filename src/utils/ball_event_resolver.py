@@ -45,12 +45,19 @@ class _PlayerCtx(Protocol):
 _CLAMP_CONTACT_MAX_M = 0.6
 
 # ...or when the click ray is steep enough that ray ∩ z=r is trustworthy on
-# its own. The operator clicked the BALL's pixel: on a normal broadcast
+# its own. The OPERATOR clicked the BALL's pixel: on a normal broadcast
 # elevation the ray + ground plane fully determine a grounded ball, and the
 # (depth-soft) player solve must not veto them — origi01 showed FK joints
 # metres off the click ray at range. Below this floor the along-ray depth
 # noise of a grazing ray explodes (~px_noise / tan(elev)), so the joint-side
 # vertical lift remains the lesser evil.
+#
+# WS5 scoping (2026-09): this bypass is reserved for MANUAL anchors. An
+# AUTO touch anchor's pixel comes from a detector/attribution pass, not an
+# operator's eyes — trusting it over the body FK once they disagree by
+# more than ``_CLAMP_CONTACT_MAX_M`` measurably drifted touch nodes off
+# the attributed joint (gberch: 16 touch nodes, median 0.415 m, max
+# 1.43 m). See ``_resolve_touch_world``'s ``is_manual`` gate.
 _GROUND_SNAP_MIN_ELEV_RAD = math.radians(3.0)
 
 
@@ -92,6 +99,7 @@ def _resolve_touch_world(
     t: np.ndarray | None,
     distortion: tuple[float, float],
     ball_radius: float,
+    is_manual: bool = True,
 ) -> tuple[np.ndarray | None, bool]:
     """Body-pinned touch resolution (spec §7).
 
@@ -100,6 +108,16 @@ def _resolve_touch_world(
     otherwise carry that error straight into the touch keyframe (sub-20cm
     campaign W2a). With a pixel the clamp stays on the clicked ray
     (ray ∩ z = ball_radius); without one it lifts vertically.
+
+    ``is_manual`` scopes the steep-ray bypass below (WS5 body-pinning fix):
+    an AUTO touch anchor's pixel comes from a detector/attribution pass
+    that can be wrong by more than the joint's contact reach, so once the
+    ray and the joint disagree beyond ``_CLAMP_CONTACT_MAX_M`` the body FK
+    wins outright — the steep-ray bypass no longer overrides it. A MANUAL
+    (operator-clicked) anchor keeps the pre-fix behaviour: the clicked
+    pixel stays authoritative for lateral position (ray-faithful anchoring
+    C1-C4) even when it disagrees with the joint by more than the reach
+    envelope, subject to the same grazing-ray numerical floor.
     """
     if not (anc.player_id and anc.bone):
         return None, False
@@ -140,7 +158,12 @@ def _resolve_touch_world(
             ray = ground_pt - cam_c
             sin_elev = abs(float(ray[2])) / max(float(np.linalg.norm(ray)), 1e-9)
             steep = sin_elev >= math.sin(_GROUND_SNAP_MIN_ELEV_RAD)
-            if in_reach or steep:
+            # Scoped precedence (WS5): the steep-ray bypass only overrides
+            # in_reach for MANUAL anchors (operator pixel stays
+            # authoritative — C1-C4). An AUTO anchor beyond reach falls
+            # through to the joint-pinned vertical lift below instead of
+            # trusting a possibly-noisy detector/attribution ray.
+            if in_reach or (steep and is_manual):
                 clamped = ground_pt
         except Exception:  # noqa: BLE001 — grazing ray: fall through
             clamped = None
@@ -244,8 +267,10 @@ def resolve_events(
         if anc.state == "off_screen_flight":
             world = None
         elif anc.state == "player_touch":
+            is_manual = manual_frames is None or fi in manual_frames
             world, was_clamped = _resolve_touch_world(
                 anc, fi, player_ctx, K, R, t, distortion, ball_radius,
+                is_manual=is_manual,
             )
             n_ground_clamped += int(was_clamped)
             if world is None:

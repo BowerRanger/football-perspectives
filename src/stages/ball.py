@@ -687,6 +687,10 @@ def _kinematic_touch_cfg(cfg_dict: dict) -> KinematicTouchCfg:
         min_fk_conf=float(d.get("min_fk_conf", base.min_fk_conf)),
         kin_window=int(d.get("kin_window", base.kin_window)),
         kin_min_foot_speed=float(d.get("kin_min_foot_speed", base.kin_min_foot_speed)),
+        kin_min_foot_speed_tight_gap_m=float(d.get(
+            "kin_min_foot_speed_tight_gap_m", base.kin_min_foot_speed_tight_gap_m)),
+        kin_min_foot_speed_relaxed=float(d.get(
+            "kin_min_foot_speed_relaxed", base.kin_min_foot_speed_relaxed)),
         kin_min_head_speed_m=float(d.get("kin_min_head_speed_m", base.kin_min_head_speed_m)),
         confirm_window=int(d.get("confirm_window", base.confirm_window)),
         nms_window=int(d.get("nms_window", base.nms_window)),

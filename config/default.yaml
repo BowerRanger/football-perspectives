@@ -687,12 +687,26 @@ ball:
     kinematic_bonus_weight: 0.3
   kinematic_touch:
     enabled: true            # body-kinematics touch proposer (additive recall)
-    contact_gap_m: 0.30      # max bone<->ball-ray 3-D gap for a contact (m)
+    # W1 (multi-clip touch-gate calibration, 2026-09-03,
+    # scripts/eval_touch_gate_calibration.py, contact-anchored-FK refresh):
+    # 0.30->0.40. Across the 32 manual touches in gberch/kroupi01/s013/
+    # origi01, gap3d_m at the claimed bone sorted [..0.311(gberch f49),
+    # 0.354, 0.375(s013 f173), 0.383(gberch f56), 0.392(origi01 f201)] then
+    # a clear elbow to [0.903, 0.922, 1.093, 2.900, 3.444, 10.388] -- that
+    # upper cluster is track-identity/occlusion failures (verified NOT
+    # explained by depth/px->m noise: kroupi01 f42's 10.4m outlier sits at
+    # the SHALLOWEST depth of any touch, 23.6m), a different bug this gate
+    # cannot and should not chase. 0.40 recovers the 0.31-0.39 cluster (19
+    # ->24/32 raw candidate recall) while staying below the outlier mass;
+    # background (non-touch) local-minima pass-rate rises 14.1%->22.7%
+    # (pre score/NMS/event-evidence gates -- see the calibration script's
+    # background pool for the full distribution).
+    contact_gap_m: 0.40      # max bone<->ball-ray 3-D gap for a contact (m)
     touch_relaxed_px: 60.0   # max bone<->ball pixel distance at the minimum
     max_ball_gap_frames: 6   # longest ball-pixel gap we interpolate across
     min_fk_conf: 0.3         # min bone FK confidence to consider
     kin_window: 2            # +/- frames to find the kinematic peak
-    # Tried lowering 8.0->6.0 (2026-09-02, foot-contact-locomotion
+    # Tried lowering 8.0->6.0 flat (2026-09-02, foot-contact-locomotion
     # regression investigation): theory was that the new contact-aware
     # foot-lock IK damps stance-phase foot jitter enough that genuine
     # soft/close-control touches now read a lower peak pixel speed than
@@ -700,12 +714,26 @@ ball:
     # both well inside the 30cm contact_gap_m gate). REVERTED: validated
     # against the gberch touch-recall harness, 6.0 recovered zero of the
     # 8 manual touches (f192 and f343 are each blocked by a separate,
-    # independent gate downstream — see
-    # docs/superpowers/notes/ball-accuracy/ or the ball-camera IC's
-    # 2026-09-02 diagnosis) while adding ~10 new false-positive candidates
-    # in an unrelated close-control passage, measurably hurting precision
-    # for no recall gain. Left at 8.0 pending a more targeted fix.
+    # independent gate downstream) while adding ~10 new false-positive
+    # candidates in an unrelated close-control passage, measurably hurting
+    # precision for no recall gain.
     kin_min_foot_speed: 8.0  # min foot pixel-speed (px/frame) for a kick
+    # W1 (multi-clip touch-gate calibration, 2026-09-03): a targeted
+    # SECOND corroborating signal instead of the reverted flat lowering
+    # above -- kinematic_gate only swaps in this lower floor when the
+    # bone<->ball-ray gap is already tight (<= kin_min_foot_speed_tight_
+    # gap_m), i.e. a confident spatial contact backs up the slow foot
+    # (soft first touches/lay-offs). Across the 4 clips, 7 of 13
+    # kin_min_foot_speed misses have gap3d_m <= 0.17 (gberch f310 gap=
+    # 0.152 peak=5.24 px/frame; s013 f85 gap=0.149 peak=3.17; kroupi01 f87
+    # gap=0.089 peak=5.56; origi01 f7 gap=0.056 peak=3.96, among others
+    # spanning all 4 clips) -- recovered by this corridor for +17
+    # background local-minima candidates (candidate-pool level, pre
+    # score/NMS/event-evidence gates, so an upper bound on the real FP
+    # delta). Touches outside the corridor (e.g. gberch f343's 3.44m
+    # outlier) get no benefit and remain correctly gated.
+    kin_min_foot_speed_tight_gap_m: 0.17
+    kin_min_foot_speed_relaxed: 3.0
     kin_min_head_speed_m: 0.05  # min head 3-D speed (m/frame) for a header
     confirm_window: 3        # +/- frames to look for a ball-pixel break
     nms_window: 2            # temporal NMS half-width (frames)

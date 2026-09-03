@@ -156,6 +156,43 @@ def test_missing_foot_data_fails_gate():
     assert strength == pytest.approx(0.0)
 
 
+def test_slow_foot_fails_gate_without_gap3d():
+    # 5 px/frame < kin_min_foot_speed (8); no gap3d_m passed -> no corroboration
+    # path available, standard floor applies (backward-compatible default).
+    ctx = _foot_ctx({0: (897.5, 540.0), 1: (902.5, 540.0), 2: (907.5, 540.0)})
+    passed, _ = kinematic_gate(ctx, 1, "P1", "r_foot", KinematicTouchCfg())
+    assert passed is False
+
+
+def test_slow_foot_passes_gate_with_tight_corroborating_gap():
+    # Same 5 px/frame foot speed, but a tight bone<->ball-ray gap (close
+    # control / soft touch) corroborates it via the relaxed floor.
+    ctx = _foot_ctx({0: (897.5, 540.0), 1: (902.5, 540.0), 2: (907.5, 540.0)})
+    cfg = KinematicTouchCfg()
+    passed, _ = kinematic_gate(
+        ctx, 1, "P1", "r_foot", cfg, gap3d_m=0.10)
+    assert passed is True  # 5 >= kin_min_foot_speed_relaxed (3.0)
+
+
+def test_slow_foot_still_fails_gate_when_gap_not_tight_enough():
+    # Same foot speed, but the gap is outside kin_min_foot_speed_tight_gap_m
+    # -- corroboration does not fire, standard floor still governs.
+    ctx = _foot_ctx({0: (897.5, 540.0), 1: (902.5, 540.0), 2: (907.5, 540.0)})
+    cfg = KinematicTouchCfg()
+    passed, _ = kinematic_gate(
+        ctx, 1, "P1", "r_foot", cfg, gap3d_m=cfg.kin_min_foot_speed_tight_gap_m + 0.01)
+    assert passed is False
+
+
+def test_very_slow_foot_fails_gate_even_with_tight_gap():
+    # 1 px/frame is below even the relaxed floor (3.0) -- corroboration
+    # lowers the bar, it does not remove it.
+    ctx = _foot_ctx({0: (899.5, 540.0), 1: (900.5, 540.0), 2: (901.5, 540.0)})
+    passed, _ = kinematic_gate(
+        ctx, 1, "P1", "r_foot", KinematicTouchCfg(), gap3d_m=0.05)
+    assert passed is False
+
+
 def test_confirm_boost_when_break_nearby():
     cfg = KinematicTouchCfg()
     assert ball_confirm(10, cfg, confirm_frames=frozenset({11}),

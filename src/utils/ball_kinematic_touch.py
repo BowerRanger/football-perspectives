@@ -55,6 +55,22 @@ class KinematicTouchCfg:
     min_fk_conf: float = 0.3
     kin_window: int = 2
     kin_min_foot_speed: float = 8.0
+    # Multi-clip touch-gate calibration (2026-09, scripts/eval_touch_gate_
+    # calibration.py): a second, lower speed floor for close-control
+    # contacts -- when the bone<->ball-ray gap is already very tight (a
+    # confident spatial contact), a much slower foot still counts as a
+    # touch (soft lay-offs/first touches move the ball with little foot
+    # speed). Only applies inside kin_min_foot_speed_tight_gap_m of the
+    # ball ray; elsewhere kin_min_foot_speed alone still governs, so a
+    # background candidate with a loose gap gets no benefit from a slow
+    # foot. Calibrated on manual touches across gberch/kroupi01/s013/origi01:
+    # 7 of 13 speed-gate misses have gap3d_m <= 0.17 (gberch f310 gap=0.152
+    # peak=5.24; s013 f85 gap=0.149 peak=3.17; kroupi01 f87 gap=0.089
+    # peak=5.56; origi01 f7 gap=0.056 peak=3.96 among them) -- recovered by
+    # this corridor for +17 background local-minima candidates (pre score/
+    # NMS/event-evidence gates, so an upper bound on the real FP delta).
+    kin_min_foot_speed_tight_gap_m: float = 0.17
+    kin_min_foot_speed_relaxed: float = 3.0
     kin_min_head_speed_m: float = 0.05
     confirm_window: int = 3
     nms_window: int = 2
@@ -160,15 +176,26 @@ def _head_speed_m(player_ctx: "PlayerContext", frame: int, player_id: str, bone:
 
 
 def kinematic_gate(player_ctx: "PlayerContext", frame: int, player_id: str, bone: str,
-                   cfg: KinematicTouchCfg) -> tuple[bool, float]:
+                   cfg: KinematicTouchCfg, *,
+                   gap3d_m: float | None = None) -> tuple[bool, float]:
     """(passed, strength in [0,1]) for the bone's contact signature.
 
     ``cfg.kin_min_foot_speed`` is the gate-pass threshold; ``_KICK_SPEED_PX`` is
     the separate speed at which the returned strength saturates to 1.0.
+
+    ``gap3d_m``, when given and <= ``cfg.kin_min_foot_speed_tight_gap_m``,
+    swaps in the lower ``cfg.kin_min_foot_speed_relaxed`` floor -- a tight
+    spatial contact corroborating a slow-foot soft touch. ``None`` (the
+    default) preserves the original single-floor behaviour exactly.
     """
     if bone in SPEED_GATED_BONES:
         peak = _peak_foot_speed(player_ctx, frame, player_id, bone, cfg.kin_window)
-        return (peak >= cfg.kin_min_foot_speed, min(1.0, peak / _KICK_SPEED_PX))
+        floor = cfg.kin_min_foot_speed
+        if (gap3d_m is not None
+                and gap3d_m <= cfg.kin_min_foot_speed_tight_gap_m
+                and cfg.kin_min_foot_speed_relaxed < floor):
+            floor = cfg.kin_min_foot_speed_relaxed
+        return (peak >= floor, min(1.0, peak / _KICK_SPEED_PX))
     if bone in HEAD_BONES:
         speed = _head_speed_m(player_ctx, frame, player_id, bone)
         return (speed >= cfg.kin_min_head_speed_m,
@@ -252,7 +279,8 @@ def propose_touches(
             gap3d, pixgap, fk_conf = per_frame[f]
             if pixgap > cfg.touch_relaxed_px:
                 continue
-            passed, strength = kinematic_gate(player_ctx, f, pid, bone, cfg)
+            passed, strength = kinematic_gate(
+                player_ctx, f, pid, bone, cfg, gap3d_m=gap3d)
             if not passed:
                 continue
             confirm = ball_confirm(

@@ -14,3 +14,12 @@ def test_overrides_are_applied():
     assert cfg.kin_min_foot_speed == 10.0
     # untouched keys keep defaults
     assert cfg.nms_window == KinematicTouchCfg().nms_window
+
+
+def test_tight_gap_corroboration_overrides_are_applied():
+    cfg = _kinematic_touch_cfg({
+        "kin_min_foot_speed_tight_gap_m": 0.2,
+        "kin_min_foot_speed_relaxed": 2.5,
+    })
+    assert cfg.kin_min_foot_speed_tight_gap_m == 0.2
+    assert cfg.kin_min_foot_speed_relaxed == 2.5

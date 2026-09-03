@@ -4,10 +4,11 @@ import pytest
 from pathlib import Path
 from src.pipeline.config import load_config
 from src.schemas.shots import Shot, ShotsManifest
-from src.schemas.tracks import TracksResult
+from src.schemas.tracks import Track, TrackFrame, TracksResult
 from src.stages.tracking import PlayerTrackingStage
 from src.utils.player_detector import Detection, FakePlayerDetector
 from src.utils.team_classifier import FakeTeamClassifier
+from src.utils.track_backfill import BackfillConfig
 
 
 @pytest.fixture(scope="module")
@@ -120,6 +121,50 @@ def test_tracking_stage_fits_team_classifier_before_classify(tiny_shot_dir):
     assert classifier.fit_call_count >= 1
     assert len(result.tracks) >= 1
     assert result.tracks[0].team == "A"
+
+
+def test_backfill_disabled_by_default_in_config():
+    """tracking.backfill.enabled must default to False — the in-stage
+    backfill path is opt-in so existing tracks.json outputs stay stable
+    unless an operator explicitly turns it on (ball-stage campaign
+    Workstream 4)."""
+    cfg = load_config()
+    assert cfg["tracking"]["backfill"]["enabled"] is False
+
+
+def test_backfill_shot_extends_a_late_track_when_enabled(tiny_shot_dir):
+    """Exercises PlayerTrackingStage._backfill_shot end to end against
+    the fixture's real (tiny) clip via VideoFrameSource, proving the
+    in-stage wiring (not just the underlying algorithm, covered by
+    tests/test_track_backfill.py) works."""
+    cfg = _test_cfg()
+    stage = PlayerTrackingStage(
+        config=cfg,
+        output_dir=tiny_shot_dir,
+        player_detector=FakePlayerDetector([[_one_player_det()]]),
+        team_classifier=FakeTeamClassifier("A"),
+    )
+    late_track = Track(
+        track_id="T005", class_name="player", team="A",
+        player_id="P005", player_name="Late",
+        frames=[TrackFrame(frame=5, bbox=[50.0, 30.0, 150.0, 200.0], confidence=0.9, pitch_position=None)],
+    )
+    result = TracksResult(shot_id="shot_001", tracks=[late_track])
+    backfill_cfg = BackfillConfig(min_late_start_frames=1, patience=0)
+    # _one_player_det() always returns the SAME bbox, so every backward
+    # step is an unambiguous IoU=1.0 match all the way to frame 0.
+    always_match = FakePlayerDetector([[_one_player_det()]])
+
+    new_result = stage._backfill_shot(
+        "shots/shot_001.mp4", result, always_match, backfill_cfg
+    )
+
+    assert new_result.tracks[0].track_id == "T005"
+    assert new_result.tracks[0].player_id == "P005"
+    assert new_result.tracks[0].frames[0].frame == 0
+    assert new_result.tracks[0].frames[0].source == "backfill"
+    assert new_result.tracks[0].frames[-1].frame == 5
+    assert new_result.tracks[0].frames[-1].source == "detector"
 
 
 # Unit tests for PlayerDetector (from plan Task 2)

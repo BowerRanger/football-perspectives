@@ -193,6 +193,29 @@ tracking:
     frame_rate: 30
     fuse_first_associate: false
     with_reid: true
+  # Backward track-extension pass (ball-stage campaign Workstream 4):
+  # for each track whose first frame starts more than
+  # min_late_start_frames into the shot, re-run the detector one frame
+  # at a time walking backward from the track's original first bbox
+  # and prepend accepted matches — fixes late track births (warm-up /
+  # partial-visibility misses on the true first few frames) WITHOUT
+  # minting a new track id or touching operator-assigned
+  # player_id/player_name. Motivating case: gberch P008 (Hato) starts
+  # at frame 62 though visible earlier, leaving a manual touch anchor
+  # at frame 56 unattributable. Default OFF so existing tracks.json
+  # outputs stay stable; run scripts/backfill_tracks.py to apply it to
+  # an existing output dir without re-running tracking, or flip
+  # enabled: true to run it in-stage on future tracking runs. See
+  # src/utils/track_backfill.py for the acceptance-gate algorithm.
+  backfill:
+    enabled: false
+    min_late_start_frames: 2
+    max_backfill_frames: 60
+    min_iou: 0.3
+    ambiguity_margin: 0.1
+    patience: 2
+    use_appearance_gate: false
+    max_appearance_distance: 0.6
 
 camera:
   first_anchor_min_landmarks: 6

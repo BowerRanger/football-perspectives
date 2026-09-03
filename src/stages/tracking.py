@@ -12,6 +12,7 @@ from src.schemas.tracks import Track, TrackFrame, TracksResult
 from src.utils.camera import project_to_pitch
 from src.utils.player_detector import PlayerDetector, YOLOPlayerDetector
 from src.utils.team_classifier import CLIPTeamClassifier, FakeTeamClassifier, TeamClassifier
+from src.utils.track_backfill import BackfillConfig, VideoFrameSource, backfill_tracks_result
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +229,7 @@ class PlayerTrackingStage(BaseStage):
             team_classifier = FakeTeamClassifier(default_team_label)
 
         manifest = ShotsManifest.load(self.output_dir / "shots" / "shots_manifest.json")
+        backfill_cfg = BackfillConfig.from_dict(cfg.get("backfill", {}))
 
         for shot in manifest.active_shots():
             # TODO(Phase 1c): once CameraStage produces camera_track.json,
@@ -237,8 +239,35 @@ class PlayerTrackingStage(BaseStage):
             result = self._track_shot(
                 shot.id, shot.clip_file, detector, team_classifier, calibration
             )
+            if backfill_cfg.enabled:
+                result = self._backfill_shot(shot.clip_file, result, detector, backfill_cfg)
             result.save(tracks_dir / f"{shot.id}_tracks.json")
             print(f"  -> {shot.id}: {len(result.tracks)} tracks")
+
+    def _backfill_shot(
+        self,
+        clip_file: str,
+        result: TracksResult,
+        detector: PlayerDetector,
+        backfill_cfg: BackfillConfig,
+    ) -> TracksResult:
+        """Opt-in backward track-extension (``tracking.backfill.enabled``).
+        Off by default — see src/utils/track_backfill.py."""
+        frame_source = VideoFrameSource(self.output_dir / clip_file)
+        try:
+            new_result, reports = backfill_tracks_result(
+                result, frame_source, detector, backfill_cfg
+            )
+        finally:
+            frame_source.close()
+        for r in reports:
+            if r.frames_added > 0:
+                print(
+                    f"     backfill {r.track_id} ({r.player_id or 'unassigned'}): "
+                    f"frame {r.original_start_frame} -> {r.new_start_frame} "
+                    f"(+{r.frames_added}, stop={r.stop_reason})"
+                )
+        return new_result
 
     def _track_shot(
         self,

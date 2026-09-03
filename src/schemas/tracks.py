@@ -14,6 +14,13 @@ class TrackFrame:
     interpolated: bool = False  # True when the bbox was linearly filled
                                 # in by a post-pass gap interpolator
                                 # rather than produced by the detector.
+    source: str = "detector"    # provenance tag. "detector" (default,
+                                # covers every pre-existing frame on
+                                # load since the field didn't used to
+                                # exist) | "backfill" (prepended by
+                                # src.utils.track_backfill, walking
+                                # backward from the track's original
+                                # first frame).
 
 
 @dataclass

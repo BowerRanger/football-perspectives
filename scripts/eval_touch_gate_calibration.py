@@ -73,7 +73,9 @@ from src.utils.ball_tracker import TrackerStep  # noqa: E402
 from src.utils.goal_geometry import GoalGeometry  # noqa: E402
 
 SPEED_GATED_BONES = frozenset(FOOT_BONES) | frozenset(KNEE_BONES)
-REAL_DETECTOR_SOURCES = frozenset({"detector", "second_pass", "foot_guided"})
+REAL_DETECTOR_SOURCES = frozenset({
+    "detector", "second_pass", "foot_guided", "strike_window",
+})
 BREAK_KINDS = frozenset({"touch", "velocity_break", "bounce", "goal_impact"})
 
 # (output_dir, shot_id) pairs with manual ball_anchors.json (pseudo-GT).

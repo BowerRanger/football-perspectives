@@ -130,7 +130,7 @@ def _load_fixes(path: Path):
     return [(fx.frame, fx.xyz, fx.ray_miss_m) for fx in fs.fixes]
 
 
-_DENSE_EVAL_SOURCES = {"detector", "second_pass", "foot_guided"}
+_DENSE_EVAL_SOURCES = {"detector", "second_pass", "foot_guided", "strike_window"}
 # A detection within this many frames of a manual anchor but farther than
 # this many pixels from the operator's click is overruled by the operator
 # — it is a known-false detection (e.g. gberch's post-kick static cluster

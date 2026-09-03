@@ -216,7 +216,9 @@ def _resolve_waypoint_world(
         return None
 
 
-_HARD_EVIDENCE_SOURCES = frozenset({"detector", "second_pass", "foot_guided"})
+_HARD_EVIDENCE_SOURCES = frozenset({
+    "detector", "second_pass", "foot_guided", "strike_window",
+})
 _EVIDENCE_MIN_CONF = 0.3
 
 

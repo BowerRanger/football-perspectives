@@ -75,10 +75,11 @@ class AutoAnchorCfg:
     require_event_evidence: bool = True
     event_evidence_window: int = 3
     event_evidence_sources: tuple[str, ...] = (
-        "detector", "second_pass", "foot_guided",
+        "detector", "second_pass", "foot_guided", "strike_window",
     )
     grounded_evidence_sources: tuple[str, ...] = (
-        "detector", "second_pass", "foot_guided", "bridge", "anchor",
+        "detector", "second_pass", "foot_guided", "strike_window",
+        "bridge", "anchor",
     )
     # Synthetic-born events (no hard evidence in window) may REFINE the
     # operator's path but never REWRITE it: kept only when the resolved pin

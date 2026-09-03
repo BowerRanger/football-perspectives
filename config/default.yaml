@@ -652,6 +652,78 @@ ball:
     # ball — replacing a pass-1 hit only when the zoom is strictly stronger.
     redetect_low_conf: true
     redetect_max_conf: 0.5
+    # Strike-window high-res redetection (workstream 6): a fast strike
+    # (shot/clearance) accelerates the ball past WASB's trained scale
+    # regime within a handful of frames -- small, motion-blurred, tens of
+    # px/frame. The plain second-pass zoom above re-decodes gaps at the
+    # SAME crop_px, so it cannot recover a genuinely too-small/blurred
+    # ball; worse, the base-resolution detector often locks onto a
+    # confident WRONG static blob near the strike rather than reporting
+    # nothing (measured on gberch f344-349: every frame carries a
+    # `source`, several repeat one pixel to the 4th decimal -- a
+    # static-lock false positive, not real evidence). This pass re-decodes
+    # a tight +/- window_radius_frames window around each hard velocity
+    # break (NOT gated on evidence being absent -- see
+    # ball_strike_window.py's docstring for why) at a corridor_px crop
+    # bicubically upscaled by upscale_factor (160*2.0=320, matching
+    # zoom_crop_px's already-proven letterbox sizing but covering a much
+    # smaller real-world region, so the ball is proportionally larger
+    # within the detector's fixed input). The corridor is predicted from
+    # the trajectory FLANKING the window (last/first REAL evidence before/
+    # after it), never from anything inside the window itself.
+    # Cost: bounded to max_windows_per_shot * max_crops_per_window extra
+    # detector calls per shot (default 3 * 17 = 51 frames -- a small
+    # fraction of one full detector pass on a typical multi-hundred-frame
+    # shot). Accepted frames carry source="strike_window"; never mint
+    # auto-anchors directly (same rule as second_pass), and are added to
+    # the *_evidence_sources lists in ball_auto_anchor.py /
+    # ball_event_resolver.py / the flight-veto check in ball.py so a
+    # recovered launch frame CAN support (not just decorate) anchor
+    # minting elsewhere, once the corridor is trustworthy (see below).
+    #
+    # DEFAULT OFF (2026-09-03 go/no-go smoke test, gberch f343 window,
+    # real fine-tuned-v1 WASB detector on MPS): the true ball IS visible
+    # at STANDARD resolution -- a plain full-frame low-threshold pass
+    # found a smooth, monotonic, rising-confidence (0.43->0.92) candidate
+    # track across f335-351 that lines up with the known-good f350/f351
+    # production values -- so upscaling was never the bottleneck here.
+    # The corridor predictor (straight-line interpolation between the
+    # last/first REAL-sourced pixel flanking the window) IS what failed:
+    # hand-verified it correctly picked flanking foot_guided knots at
+    # f334/f352, but a straight line between two points 18 frames apart
+    # badly undershoots a real strike's curve, drifting up to ~290px from
+    # the true ball by mid-window -- well outside even a widened
+    # crop_px=320 (0/17 accepted at the default crop_px=160 corridor_
+    # radius_px=60 recovered a verified-correct frame; widening to
+    # crop_px=320 corridor_radius_px=120 raised ACCEPT count to 17/17 but
+    # most accepts were a different, roughly-stationary decoy nearer the
+    # bad corridor centre than the true ball -- confidently WRONG, not a
+    # fix). Worse: shrinking window_radius_frames 8->3 made it FAIL
+    # HARDER (0/7), because the post-window knot search landed exactly on
+    # gberch's own f347 static-lock false positive (source="detector" is
+    # trusted as "real" evidence even when the detection itself is wrong),
+    # dragging the whole interpolation off by >800px. Net: the module and
+    # its tests are sound (crop/upscale/coordinate-mapping/budget wiring
+    # all work as designed), but the corridor model is not yet trustworthy
+    # enough to drive it on real fast strikes. Left off pending a better
+    # corridor predictor in a future session (candidates: a ballistic/
+    # quadratic fit instead of a straight line, or excluding suspiciously
+    # static "real"-sourced frames from knot selection).
+    strike_window:
+      enabled: false
+      min_dspeed_px: 12.0
+      break_velocity_frames: 3
+      window_radius_frames: 8
+      max_windows_per_shot: 3
+      max_crops_per_window: 17
+      crop_px: 160
+      upscale_factor: 2.0
+      corridor_radius_px: 60.0
+      corridor_sigma: 3.0
+      accept_min: 0.2
+      candidate_min_score: 0.05
+      top_k: 5
+      velocity_lookback_frames: 5
   # Phase B: direction-change segmentation. Corners of a robust piecewise
   # fit of the ball track are the touch/bounce candidates (replaces fragile
   # local velocity-break windows). max_residual_px is the piecewise-linear

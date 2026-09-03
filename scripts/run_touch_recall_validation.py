@@ -33,6 +33,7 @@ from scripts.ball_touch_recall_report import (  # noqa: E402
     _print_table,
     proposer_only_touches,
     recall_table,
+    strict_recall_table,
 )
 from src.utils.ball_touch_recall import touches_from_anchor_set  # noqa: E402
 
@@ -101,7 +102,10 @@ def main() -> int:
         ball_dir / f"{args.shot}_ball_anchors_auto_union.json")
     proposer_only = proposer_only_touches(break_only, union)
     table = recall_table(manual, break_only, proposer_only, union)
-    _print_table(table)
+    _print_table(table, label="LEGACY (frame + bone; player_id not checked)")
+    print()
+    strict_table = strict_recall_table(manual, break_only, proposer_only, union)
+    _print_table(strict_table, label="STRICT (frame + bone + player_id)")
 
     from src.utils.ball_touch_recall import (
         dismissed_touches_from_anchor_set,
@@ -117,7 +121,10 @@ def main() -> int:
                   f"unreviewed={b['fp_unreviewed']}")
 
     report_path = ball_dir / f"{args.shot}_touch_recall.json"
-    report_path.write_text(json.dumps(table, indent=2))
+    # "legacy" preserves the original flat shape at the report's top level
+    # for any consumer reading the old file format unchanged; "strict" is
+    # additive, reported alongside — never replacing — the legacy numbers.
+    report_path.write_text(json.dumps({**table, "strict": strict_table}, indent=2))
     print(f"written {report_path}")
     return 0
 

@@ -27,6 +27,37 @@ def test_bone_mismatch_is_not_a_match_when_required():
     assert match_touches(manual, auto, frame_tol=2, require_bone=False)["true_positive"] == 1
 
 
+def test_strict_player_mismatch_is_not_a_match():
+    # Same frame + bone, wrong player -- the legacy metric (require_player
+    # defaults False) counts this a hit; strict (require_player=True) must
+    # not. Regression case: gberch f343 credited via P016 vs manual P006.
+    manual = [(343, "P006", "r_foot")]
+    auto = [(342, "P016", "r_foot")]
+    legacy = match_touches(manual, auto, frame_tol=2)
+    strict = match_touches(manual, auto, frame_tol=2, require_player=True)
+    assert legacy["true_positive"] == 1
+    assert strict["true_positive"] == 0
+    assert strict["recall"] == 0.0
+
+
+def test_strict_player_match_still_counts():
+    manual = [(100, "P1", "r_foot")]
+    auto = [(101, "P1", "r_foot")]
+    strict = match_touches(manual, auto, frame_tol=2, require_player=True)
+    assert strict["true_positive"] == 1
+    assert strict["recall"] == 1.0
+
+
+def test_strict_does_not_change_legacy_default_call():
+    # require_player defaults to False -- existing (legacy) call sites are
+    # untouched by this feature (historical comparability).
+    manual = [(343, "P006", "r_foot")]
+    auto = [(342, "P016", "r_foot")]
+    r = match_touches(manual, auto, frame_tol=2)
+    assert r["true_positive"] == 1
+    assert "require_player" not in r
+
+
 def test_one_auto_cannot_claim_two_manuals():
     manual = [(100, "P1", "r_foot"), (101, "P1", "r_foot")]
     auto = [(100, "P1", "r_foot")]

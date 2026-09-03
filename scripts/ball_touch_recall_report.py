@@ -31,7 +31,10 @@ def recall_table(
     *,
     frame_tol: int = 2,
 ) -> dict[str, dict]:
-    """recall/precision for each config against ``manual``."""
+    """recall/precision for each config against ``manual`` (LEGACY metric:
+    frame + bone, player_id NOT checked). Unchanged shape/values — see
+    :func:`strict_recall_table` for the player-checked variant, reported
+    alongside this one, never in place of it (historical comparability)."""
     return {
         name: match_touches(manual, auto, frame_tol=frame_tol, require_bone=True)
         for name, auto in (
@@ -42,7 +45,33 @@ def recall_table(
     }
 
 
-def _print_table(table: dict[str, dict]) -> None:
+def strict_recall_table(
+    manual: list[Touch],
+    break_only: list[Touch],
+    proposer_only: list[Touch],
+    union: list[Touch],
+    *,
+    frame_tol: int = 2,
+) -> dict[str, dict]:
+    """STRICT recall/precision for each config against ``manual``: frame +
+    bone + player_id all required to agree (``match_touches(...,
+    require_player=True)``). A same-frame/same-bone hit credited to the
+    WRONG player — observed on gberch f343, matched via P016 when the
+    manual anchor is P006 — counts in :func:`recall_table` but not here."""
+    return {
+        name: match_touches(manual, auto, frame_tol=frame_tol, require_bone=True,
+                            require_player=True)
+        for name, auto in (
+            ("break_only", break_only),
+            ("proposer_only", proposer_only),
+            ("union", union),
+        )
+    }
+
+
+def _print_table(table: dict[str, dict], *, label: str = "") -> None:
+    if label:
+        print(label)
     print(f"{'config':<16}{'recall':>8}{'precision':>11}{'tp':>5}{'fp':>5}")
     for name, m in table.items():
         print(f"{name:<16}{m['recall']:>8.3f}{m['precision']:>11.3f}"
@@ -72,7 +101,11 @@ if __name__ == "__main__":
     break_only = touches_from_anchor_set(sys.argv[2])
     union = touches_from_anchor_set(sys.argv[3])
     proposer_only = proposer_only_touches(break_only, union)
-    _print_table(recall_table(manual, break_only, proposer_only, union))
+    _print_table(recall_table(manual, break_only, proposer_only, union),
+                 label="LEGACY (frame + bone; player_id not checked)")
+    print()
+    _print_table(strict_recall_table(manual, break_only, proposer_only, union),
+                 label="STRICT (frame + bone + player_id)")
 
     dismissed = dismissed_touches_from_anchor_set(manual_path)
     if dismissed:

@@ -35,6 +35,7 @@ def match_touches(
     *,
     frame_tol: int = 2,
     require_bone: bool = True,
+    require_player: bool = False,
 ) -> dict:
     """Greedy 1:1 matching of auto touches to manual touches.
 
@@ -42,6 +43,14 @@ def match_touches(
     (when ``require_bone``) the bone agrees. Each manual touch can be
     claimed at most once (nearest unclaimed auto wins). Returns counts and
     recall/precision.
+
+    ``require_player`` (default ``False``, preserving every existing call
+    site's number for historical comparability) additionally requires the
+    player_id to agree. Without it, a same-frame/same-bone touch attributed
+    to the WRONG player still counts as a hit -- observed on gberch f343,
+    credited via P016 when the manual anchor is P006 -- which is why the
+    strict variant exists; report it alongside the legacy metric, never in
+    its place.
     """
     manual_sorted = sorted(manual, key=lambda t: t[0])
     auto_sorted = sorted(auto, key=lambda t: t[0])
@@ -57,6 +66,8 @@ def match_touches(
             if d > frame_tol:
                 continue
             if require_bone and ab != mb:
+                continue
+            if require_player and ap != mp:
                 continue
             if d < best_d:
                 best_d, best_j = d, j

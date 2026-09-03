@@ -97,6 +97,45 @@ class AutoAnchorCfg:
     # consecutive micro-touches during ball control are 2+ frames apart
     # (measured on gberch's manual touches at f43/45/49).
     touch_burst_nms_frames: int = 1
+    # Physics-consistency tie-break (sub-20cm campaign W2, foot-contact
+    # locomotion regression recovery). The reachability gate below drops
+    # the lower-SCORED of two candidates whose implied speed is
+    # impossible; when the pair is two DIFFERENT-player `player_touch`
+    # candidates disputing the same moment (a "scramble" — two players'
+    # limbs both pass the contact-gap gate a frame or two apart, e.g.
+    # gberch f55 P019 vs f56 P020), raw kin-strength score is a weak
+    # arbiter — it favours whichever limb was moving fastest, not
+    # whichever one actually redirected the ball. Physical consistency
+    # with the BALL'S OWN velocity change is a stronger, principled
+    # signal, blending two terms (validated on gberch f55/f56: the real
+    # toucher scores 0.98 direction / 0.96 kink vs the bystander's
+    # 0.92 / 0.03):
+    #
+    #   * direction — does the ball's trajectory after this candidate's
+    #     frame move AWAY from the candidate's own joint (an impulse
+    #     pushes the ball away from the striking limb)?
+    #   * kink — does the ball's pixel trajectory actually change
+    #     direction around this candidate's frame at all (a bystander
+    #     one frame before the true contact sits on the smooth incoming
+    #     glide, not the reversal)?
+    #
+    # When enabled, the reachability comparison uses
+    # `score + physics_tiebreak_bonus_weight * term` instead of raw score
+    # (term = dir_weight*direction + kink_weight*kink, weights documented
+    # to sum to 1.0). Disabled -> exact legacy behaviour (raw score only).
+    physics_tiebreak_enabled: bool = True
+    # Two candidates more than this many frames apart never engage the
+    # tie-break — a "scramble" is a same-instant dispute, not two
+    # genuinely separate touches accidentally tripping the speed cap.
+    physics_tiebreak_max_candidate_gap_frames: int = 4
+    # +/- frames around each candidate's OWN frame used to sample the
+    # ball's incoming/outgoing pixel-velocity direction.
+    physics_tiebreak_velocity_window: int = 3
+    # direction_term + kink_term weights (sum to 1.0 by convention).
+    physics_tiebreak_dir_weight: float = 0.6
+    physics_tiebreak_kink_weight: float = 0.4
+    # Scales the [0,1] physics term into score units before comparison.
+    physics_tiebreak_bonus_weight: float = 0.5
 
 
 _AERIAL_TOUCH_BONES = frozenset({"head", "chest", "l_shoulder", "r_shoulder"})
@@ -387,6 +426,118 @@ def _path_deviation_m(
     return float(np.linalg.norm(np.asarray(world, dtype=float) - ref))
 
 
+def _physics_consistency_term(
+    cand: _Candidate,
+    steps_by_frame: Mapping[int, tuple[float, float]],
+    player_ctx,
+    cfg: AutoAnchorCfg,
+) -> float | None:
+    """[0, 1] consistency of a ``player_touch`` candidate with the ball's
+    own pixel-velocity change around the candidate's OWN frame.
+
+    Two terms (weighted, see :class:`AutoAnchorCfg`), both sampled from
+    the ball pixel track over +/- ``physics_tiebreak_velocity_window``
+    frames of ``cand.anchor.frame``:
+
+    * ``direction_term`` — cosine similarity (rescaled to [0,1]) between
+      the ball's outgoing pixel-velocity direction and the direction from
+      the candidate's joint pixel to the ball's post-window pixel. High
+      when the ball moves away from the joint — the "an impulse pushes
+      the ball away from the striking limb" signature.
+    * ``kink_term`` — how much the ball's pixel-velocity direction
+      actually CHANGES across the candidate's frame (1 - cosine of
+      incoming vs. outgoing direction, rescaled to [0,1]). A bystander
+      whose local-minimum frame sits just before the true contact is
+      still on the smooth incoming glide (little to no direction
+      change); the real toucher's frame straddles the reversal.
+
+    Empirically separates gberch's f55 (P019, bystander: direction 0.92,
+    kink 0.03) from f56 (P020, real toucher: direction 0.99, kink 0.96).
+
+    Returns None when the ball pixel track or the candidate's joint pixel
+    aren't available in the window — callers must fall back to raw score
+    in that case (no discriminating signal).
+    """
+    a = cand.anchor
+    if a.state != "player_touch" or not a.player_id or not a.bone:
+        return None
+    w = cfg.physics_tiebreak_velocity_window
+    v0 = _uv_at(steps_by_frame, a.frame - w)
+    b0 = _uv_at(steps_by_frame, a.frame)
+    v1 = _uv_at(steps_by_frame, a.frame + w)
+    if v0 is None or b0 is None or v1 is None:
+        return None
+    joint_uv = None
+    for s in player_ctx.joints_at(a.frame):
+        if s.player_id == a.player_id and s.bone == a.bone and s.uv is not None:
+            joint_uv = s.uv
+            break
+    if joint_uv is None:
+        return None
+
+    in_dir = np.array([b0[0] - v0[0], b0[1] - v0[1]])
+    out_dir = np.array([v1[0] - b0[0], v1[1] - b0[1]])
+    away = np.array([v1[0] - joint_uv[0], v1[1] - joint_uv[1]])
+    in_norm = float(np.linalg.norm(in_dir))
+    out_norm = float(np.linalg.norm(out_dir))
+    away_norm = float(np.linalg.norm(away))
+
+    if out_norm < 1e-6 or away_norm < 1e-6:
+        direction_term = 0.5  # no discriminating signal -> neutral
+    else:
+        cos = float(np.dot(out_dir, away) / (out_norm * away_norm))
+        direction_term = max(0.0, min(1.0, (cos + 1.0) / 2.0))
+
+    if in_norm < 1e-6 or out_norm < 1e-6:
+        kink_term = 0.5  # ball near-stationary on one side -> ambiguous
+    else:
+        cos = float(np.dot(in_dir, out_dir) / (in_norm * out_norm))
+        kink_term = max(0.0, min(1.0, (1.0 - cos) / 2.0))
+
+    return (
+        cfg.physics_tiebreak_dir_weight * direction_term
+        + cfg.physics_tiebreak_kink_weight * kink_term
+    )
+
+
+def _reachability_winner(
+    cand: _Candidate,
+    prev_cand: _Candidate,
+    steps_by_frame: Mapping[int, tuple[float, float]],
+    player_ctx,
+    cfg: AutoAnchorCfg,
+) -> _Candidate:
+    """Which of two reachability-conflicting candidates survives.
+
+    Raw score wins by default (a tie favours ``prev_cand``, matching the
+    walk-in-frame-order behaviour this replaces). When both are
+    `player_touch` candidates for DIFFERENT players within
+    ``physics_tiebreak_max_candidate_gap_frames`` of each other (a
+    same-instant "scramble" dispute, not two unrelated touches), the
+    comparison adds a physics-consistency bonus to each raw score first
+    (sub-20cm campaign W2 — recovers scramble-ambiguity misses like
+    gberch f56, where a same-neighbourhood bystander candidate used to
+    beat the real toucher purely on kin-strength score).
+    """
+    cand_score, prev_score = cand.score, prev_cand.score
+    if (
+        cfg.physics_tiebreak_enabled
+        and cand.anchor.state == "player_touch"
+        and prev_cand.anchor.state == "player_touch"
+        and cand.anchor.player_id != prev_cand.anchor.player_id
+        and abs(cand.anchor.frame - prev_cand.anchor.frame)
+        <= cfg.physics_tiebreak_max_candidate_gap_frames
+    ):
+        cand_term = _physics_consistency_term(
+            cand, steps_by_frame, player_ctx, cfg)
+        prev_term = _physics_consistency_term(
+            prev_cand, steps_by_frame, player_ctx, cfg)
+        if cand_term is not None and prev_term is not None:
+            cand_score = cand.score + cfg.physics_tiebreak_bonus_weight * cand_term
+            prev_score = prev_cand.score + cfg.physics_tiebreak_bonus_weight * prev_term
+    return prev_cand if cand_score <= prev_score else cand
+
+
 def _apply_gates(
     candidates: list[_Candidate],
     per_frame_K: Mapping[int, np.ndarray],
@@ -397,6 +548,7 @@ def _apply_gates(
     fps: float,
     pitch_cfg: Mapping[str, float],
     cfg: AutoAnchorCfg,
+    steps_by_frame: Mapping[int, tuple[float, float]] | None = None,
 ) -> list[_Candidate]:
     length = float(pitch_cfg.get("length_m", 105.0))
     width = float(pitch_cfg.get("width_m", 68.0))
@@ -422,9 +574,12 @@ def _apply_gates(
             continue
         resolved.append((cand, world))
 
-    # Reachability: walk in frame order; drop the lower-scored member of
-    # any pair implying an impossible speed.
+    # Reachability: walk in frame order; drop the loser of any pair
+    # implying an impossible speed (raw score by default; a physics-
+    # consistency bonus breaks DIFFERENT-player player_touch ties in a
+    # same-instant scramble — see _reachability_winner).
     _GROUND_STATES = ("grounded", "bounce")
+    steps_by_frame = steps_by_frame or {}
     kept: list[tuple[_Candidate, np.ndarray]] = []
     for cand, world in resolved:
         if kept:
@@ -441,7 +596,10 @@ def _apply_gates(
                 )
                 speed = float(np.linalg.norm(world - prev_world)) * fps / df
                 if speed > cap:
-                    if cand.score <= prev_cand.score:
+                    winner = _reachability_winner(
+                        cand, prev_cand, steps_by_frame, player_ctx, cfg,
+                    )
+                    if winner is prev_cand:
                         logger.info(
                             "ball auto-anchor: %s at frame %d rejected — "
                             "%.0f m/s to previous anchor",
@@ -549,6 +707,7 @@ def generate_auto_anchors(
     gated = _apply_gates(
         candidates, per_frame_K, per_frame_R, per_frame_t,
         distortion, player_ctx, fps, pitch_cfg, cfg,
+        steps_by_frame=steps_by_frame,
     )
     # One anchor per frame. Specific beats generic regardless of score —
     # a touch/impact carries strictly more information than a grounded

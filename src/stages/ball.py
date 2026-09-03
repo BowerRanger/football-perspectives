@@ -782,6 +782,22 @@ def _auto_anchor_cfg(auto_cfg: dict, ball_radius: float) -> AutoAnchorCfg:
             "event_evidence_sources", base.event_evidence_sources)),
         grounded_evidence_sources=tuple(auto_cfg.get(
             "grounded_evidence_sources", base.grounded_evidence_sources)),
+        physics_tiebreak_enabled=bool(auto_cfg.get(
+            "physics_tiebreak_enabled", base.physics_tiebreak_enabled)),
+        physics_tiebreak_max_candidate_gap_frames=int(auto_cfg.get(
+            "physics_tiebreak_max_candidate_gap_frames",
+            base.physics_tiebreak_max_candidate_gap_frames)),
+        physics_tiebreak_velocity_window=int(auto_cfg.get(
+            "physics_tiebreak_velocity_window",
+            base.physics_tiebreak_velocity_window)),
+        physics_tiebreak_dir_weight=float(auto_cfg.get(
+            "physics_tiebreak_dir_weight", base.physics_tiebreak_dir_weight)),
+        physics_tiebreak_kink_weight=float(auto_cfg.get(
+            "physics_tiebreak_kink_weight",
+            base.physics_tiebreak_kink_weight)),
+        physics_tiebreak_bonus_weight=float(auto_cfg.get(
+            "physics_tiebreak_bonus_weight",
+            base.physics_tiebreak_bonus_weight)),
     )
 
 

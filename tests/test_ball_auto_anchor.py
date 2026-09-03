@@ -628,3 +628,93 @@ class TestFlightGateAndBurstNMS:
         anchors = self._gen(events, steps, ctx)
         touches = [a for a in anchors if a.state == "player_touch"]
         assert sorted(a.bone for a in touches) == ["l_foot", "r_foot"]
+
+
+class TestPhysicsTiebreak:
+    """W2 (foot-contact locomotion regression recovery): a reachability
+    conflict between two DIFFERENT-player player_touch candidates should
+    resolve toward whichever is physically consistent with the ball's
+    own trajectory kink, not raw kin-strength score alone (gberch f56:
+    P020's real gap-0.214 touch used to lose to P019's higher-scoring
+    gap-0.624 candidate one frame earlier — a scramble ambiguity)."""
+
+    def _corner_scene(self, n=60):
+        """Ball rolls +x to a corner at frame 30, then turns +y — a sharp
+        but non-degenerate direction change (unlike a straight-line
+        reversal, this doesn't saturate the cosine terms identically for
+        neighbouring frames)."""
+        K, R, t = broadcast_camera()
+        worlds = {}
+        for i in range(31):
+            worlds[i] = np.array([30.0 + 2.0 * i, 20.0, 0.11])
+        for i in range(31, n):
+            worlds[i] = np.array([90.0, 20.0 + 2.0 * (i - 30), 0.11])
+        pixels = project_track(worlds, K, R, t)
+        return worlds, pixels, steps_from_pixels(pixels, n)
+
+    def _scene_events(self, worlds, pixels):
+        # P_bystander sits on the smooth pre-corner glide (frame 29,
+        # HIGHER raw score); P_real sits exactly at the corner (frame 30,
+        # LOWER raw score) — raw score alone picks the wrong one.
+        ctx = FakePlayerContext({
+            29: [_joint("P_bystander", "r_knee", worlds[29], pixels[29])],
+            30: [_joint("P_real", "r_knee", worlds[30], pixels[30])],
+        })
+        events = (
+            BallEvent(frame=29, kind="touch", score=0.85,
+                      player_id="P_bystander", bone="r_knee"),
+            BallEvent(frame=30, kind="touch", score=0.70,
+                      player_id="P_real", bone="r_knee"),
+        )
+        return ctx, events
+
+    def test_physics_consistent_candidate_wins_reachability_conflict(self):
+        worlds, pixels, steps = self._corner_scene()
+        ctx, events = self._scene_events(worlds, pixels)
+        cfg = AutoAnchorCfg(physics_tiebreak_velocity_window=1)
+        anchors = self._gen_with(events, steps, ctx, cfg)
+        touches = {a.frame: a.player_id
+                   for a in anchors if a.state == "player_touch"}
+        assert touches == {30: "P_real"}
+
+    def test_disabling_tiebreak_restores_legacy_raw_score_behaviour(self):
+        worlds, pixels, steps = self._corner_scene()
+        ctx, events = self._scene_events(worlds, pixels)
+        cfg = AutoAnchorCfg(physics_tiebreak_velocity_window=1,
+                            physics_tiebreak_enabled=False)
+        anchors = self._gen_with(events, steps, ctx, cfg)
+        touches = {a.frame: a.player_id
+                   for a in anchors if a.state == "player_touch"}
+        assert touches == {29: "P_bystander"}
+
+    def test_same_player_conflict_never_engages_physics_bonus(self):
+        # Same-player different-frame conflicts are FK jitter (already
+        # handled by burst NMS upstream, or a genuine solo speed issue),
+        # not a scramble between two people — the tiebreak must not
+        # engage regardless of frame proximity or score gap.
+        worlds, pixels, steps = self._corner_scene()
+        ctx = FakePlayerContext({
+            29: [_joint("P005", "r_knee", worlds[29], pixels[29])],
+            30: [_joint("P005", "l_knee", worlds[30], pixels[30])],
+        })
+        events = (
+            BallEvent(frame=29, kind="touch", score=0.85,
+                      player_id="P005", bone="r_knee"),
+            BallEvent(frame=30, kind="touch", score=0.70,
+                      player_id="P005", bone="l_knee"),
+        )
+        cfg = AutoAnchorCfg(physics_tiebreak_velocity_window=1)
+        anchors = self._gen_with(events, steps, ctx, cfg)
+        touches = {a.frame: a.bone
+                   for a in anchors if a.state == "player_touch"}
+        # Raw score alone (bystander-style legacy behaviour): frame 29
+        # (higher score) wins, exactly as if the tiebreak were disabled.
+        assert touches == {29: "r_knee"}
+
+    def _gen_with(self, events, steps, ctx, cfg):
+        Ks, Rs, ts = per_frame_cams(60)
+        return generate_auto_anchors(
+            events=events, steps=steps, confidences={}, player_ctx=ctx,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0), fps=FPS, pitch_cfg=PITCH_CFG, cfg=cfg,
+        )

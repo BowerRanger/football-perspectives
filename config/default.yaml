@@ -781,6 +781,24 @@ ball:
     # Reachability caps: ground-level anchor pairs use the rolling cap.
     max_speed_m_s: 45.0
     max_ground_speed_m_s: 35.0
+    # W2 (physics-consistency tie-break, foot-contact locomotion
+    # regression recovery): when the reachability check above conflicts
+    # two DIFFERENT-player player_touch candidates within
+    # physics_tiebreak_max_candidate_gap_frames of each other (a same-
+    # instant "scramble" dispute — e.g. gberch f55/f56), resolve by
+    # score + physics_tiebreak_bonus_weight * consistency_term instead of
+    # raw score alone. consistency_term blends whether the ball's
+    # trajectory moves AWAY from the candidate's own joint after its
+    # frame (dir_weight) and whether the ball's pixel direction actually
+    # kinks around that frame at all (kink_weight) — both sampled +/-
+    # physics_tiebreak_velocity_window frames of the candidate's frame.
+    # See ball_auto_anchor._physics_consistency_term.
+    physics_tiebreak_enabled: true
+    physics_tiebreak_max_candidate_gap_frames: 4
+    physics_tiebreak_velocity_window: 3
+    physics_tiebreak_dir_weight: 0.6
+    physics_tiebreak_kink_weight: 0.4
+    physics_tiebreak_bonus_weight: 0.5
   # Piecewise-physical solver: rolling friction cap, residual gates and
   # the bounce restitution envelope (violations are flagged in the
   # diagnostics/quality report, never silently corrected).

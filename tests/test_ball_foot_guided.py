@@ -4,6 +4,9 @@ player context + injected zoom fn."""
 
 from __future__ import annotations
 
+import inspect
+
+from src.pipeline.config import load_config
 from src.utils.ball_foot_guided import foot_ball_detections, gated_feet
 from src.utils.ball_player_context import JointSample
 
@@ -58,3 +61,22 @@ def test_foot_ball_detections_best_per_frame():
         return ((center[0] + 5, center[1]), 0.4 if center[0] == 110.0 else 0.8)
     out = foot_ball_detections(gated, zoom, ball_near_foot_px=40.0)
     assert len(out) == 1 and out[0][1] == "P2"
+
+
+def test_ball_near_foot_px_matches_measured_corridor():
+    """Corridor radius, tightened 2026-09-03 (workstream 5) after the FK
+    contact-anchoring fix. Measured accepted-detection distance from the
+    seeding foot/knee/head/chest on the raw (gap_fill=False) foot_guided
+    frames of the observations sidecars across gberch/kroupi01/japan-s013/
+    origi01/origi02: the one fresh-FK same-run sample (gberch, n=6) maxed
+    at 32.1px (median 5.2px); all 4 clips combined (n=19, most from
+    pre-FK-fix ball runs) had 16/19 (84%) <= 32.1px. 40.0 keeps ~8px
+    margin over the clean max while cutting accept area ~21% vs the old
+    45.0px default. config/default.yaml and the ball stage's fallback
+    default must move together, so pin both here."""
+    cfg = load_config(None)
+    configured = float(cfg["ball"]["foot_guided"]["ball_near_foot_px"])
+    module_default = inspect.signature(foot_ball_detections).parameters[
+        "ball_near_foot_px"].default
+    assert configured == 40.0
+    assert module_default == 40.0

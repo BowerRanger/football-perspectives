@@ -674,7 +674,22 @@ ball:
   foot_guided:
     enabled: true
     min_foot_speed_px: 8.0      # gate: contact-joint pixel speed (a kick/contact)
-    ball_near_foot_px: 45.0     # accept a zoomed ball within this of the foot
+    # Corridor radius tightened 45.0->40.0 (2026-09-03, workstream 5) after
+    # the FK contact-anchoring fix (ankle reprojection 8-13px -> 4-7px):
+    # measured accepted-detection distance from the seeding foot/knee/head
+    # on the one same-run (fresh-FK) sample available, gberch (n=6 raw
+    # accepted foot_guided frames, i.e. gap_fill=False in the observations
+    # sidecar), maxed at 32.1px (median 5.2px). Across all 4 clips (n=19,
+    # including 13 pre-FK-fix ball runs whose PlayerContext is stale
+    # relative to today's refined_poses -- see scratchpad measurement
+    # script), 16/19 (84%) still landed <=32.1px; the 3 outliers (150-207px)
+    # are attributed to that FK-version skew, not genuine corridor need.
+    # 40.0 keeps ~8px margin over the clean max while cutting accept area
+    # ~21% vs the old 45.0. min_foot_speed_px left at 8.0: measured
+    # winning-joint speeds ranged 8.2-23.5px/frame with the minimum barely
+    # above the gate, so there's no margin to raise it without risking
+    # recall.
+    ball_near_foot_px: 40.0     # accept a zoomed ball within this of the foot
     min_score: 0.25
     nms_window_frames: 8        # temporal NMS: a touch is isolated, not every frame
   # Phase C: pose-anchored touch attribution. A direction-change break is

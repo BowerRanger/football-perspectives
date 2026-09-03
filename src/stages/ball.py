@@ -1444,7 +1444,7 @@ class BallStage(BaseStage):
                 if gated:
                     fdets = self._foot_guided_loop(
                         clip_path, gated, detector, sp_cfg,
-                        ball_near_foot_px=float(foot_cfg.get("ball_near_foot_px", 45.0)),
+                        ball_near_foot_px=float(foot_cfg.get("ball_near_foot_px", 40.0)),
                         min_score=float(foot_cfg.get("min_score", 0.25)),
                     )
                     # Temporal NMS: a real touch is isolated — you can't touch

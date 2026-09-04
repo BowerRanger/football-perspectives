@@ -358,6 +358,213 @@ class TestRankedCandidatesCorroboration:
         assert cfg["consider_ranked_candidates"] is True
 
 
+class TestCrossPlayerPhysicsGuard:
+    """Touch-gate calibration follow-up (2026-09-03): both relabel paths
+    compare raw bone<->ball-ray gaps only — depth-blind AND kink-blind. A
+    bystander whose torso/hand sits nearer the ball's pixel ray than the
+    true toucher's (motion-blurred, FK-noisy) foot can win purely on
+    geometry; when the winner is a DIFFERENT PLAYER this silently
+    reassigns the touch (gberch f343 in production: a correctly
+    player-attributed-but-wrong-bone event on P006 flips to bystander
+    P009 sitting on the ball's ray during a crowded moment). The guard
+    reuses ball_auto_anchor's minting-time physics-consistency term
+    (direction + kink of the ball's OWN pixel path) to veto a cross-player
+    flip the ball's own trajectory doesn't corroborate."""
+
+    def _kink_scene(self):
+        """Ball pixel path with a sharp reversal at frame 10 (a genuine
+        touch signature) then a smooth glide onward with no further kink
+        (frames 11-13 keep decelerating in the same new direction)."""
+        K, R, t = _camera()
+        path_x = {7: 20.0, 8: 25.0, 9: 28.0, 10: 30.0,
+                  11: 27.0, 12: 24.0, 13: 21.0, 14: 18.0, 15: 15.0}
+        ball_uvs = {f: np.asarray(_project((x, 34.0, 0.11), K, R, t))
+                    for f, x in path_x.items()}
+        return K, R, t, ball_uvs
+
+    def test_blocks_flip_to_bystander_on_smooth_glide(self):
+        """Candidate B sits exactly on the ball's ray at frame 12 — deep
+        into the post-touch glide, no kink there — while candidate A (the
+        current label) sits near the frame-10 reversal itself. Raw ray
+        gap alone prefers B; the physics guard restores A."""
+        K, R, t, ball_uvs = self._kink_scene()
+        a_world = (30.15, 34.0, 0.11)   # near the frame-10 reversal
+        b_world = (24.0, 34.0, 0.11)    # exactly on-ray at frame 12 (no kink)
+
+        class _Ctx2:
+            def joints_at(self, frame):
+                return [
+                    _Joint("P001", "r_knee", a_world,
+                           _project(a_world, K, R, t), 0.9),
+                    _Joint("P002", "chest", b_world,
+                           _project(b_world, K, R, t), 0.9),
+                ]
+
+        ctx = _Ctx2()
+        Ks = {f: K for f in ball_uvs}
+        Rs = {f: R for f in ball_uvs}
+        ts = {f: t for f in ball_uvs}
+        events = (BallEvent(frame=10, kind="touch", score=0.8,
+                            player_id="P001", bone="r_knee"),)
+
+        # Guard off: raw gap alone wins -> flips to the bystander.
+        out_off = refine_touch_attribution(
+            events, player_ctx=ctx, ball_uvs=ball_uvs,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0),
+            cfg=TouchAttributionCfg(enabled=True,
+                                     cross_player_physics_guard=False))
+        assert (out_off[0].player_id, out_off[0].bone) == ("P002", "chest")
+
+        # Guard on: the ball's own trajectory doesn't corroborate the
+        # bystander (no kink at its frame) -> stays with the real toucher.
+        out_on = refine_touch_attribution(
+            events, player_ctx=ctx, ball_uvs=ball_uvs,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0),
+            cfg=TouchAttributionCfg(enabled=True,
+                                     cross_player_physics_guard=True))
+        assert (out_on[0].player_id, out_on[0].bone) == ("P001", "r_knee")
+
+    def test_allows_flip_when_alternate_is_also_at_the_kink(self):
+        """Both candidates sample the SAME frame (the real reversal) —
+        the alternate is just as physically corroborated as the current
+        label, so the guard must not block a raw-gap-driven flip it has
+        no genuine grounds to veto."""
+        K, R, t, ball_uvs = self._kink_scene()
+        a_world = (30.25, 34.0, 0.11)   # near frame-10, bigger offset
+        b_world = (30.05, 34.0, 0.11)   # near frame-10, smaller offset
+
+        class _Ctx3:
+            def joints_at(self, frame):
+                return [
+                    _Joint("P001", "r_knee", a_world,
+                           _project(a_world, K, R, t), 0.9),
+                    _Joint("P002", "chest", b_world,
+                           _project(b_world, K, R, t), 0.9),
+                ]
+
+        ctx = _Ctx3()
+        Ks = {f: K for f in ball_uvs}
+        Rs = {f: R for f in ball_uvs}
+        ts = {f: t for f in ball_uvs}
+        events = (BallEvent(frame=10, kind="touch", score=0.8,
+                            player_id="P001", bone="r_knee"),)
+        out = refine_touch_attribution(
+            events, player_ctx=ctx, ball_uvs=ball_uvs,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0),
+            cfg=TouchAttributionCfg(enabled=True,
+                                     cross_player_physics_guard=True))
+        assert (out[0].player_id, out[0].bone) == ("P002", "chest")
+
+    def test_same_player_bone_flip_never_gated(self):
+        """The guard only ever engages on a DIFFERENT player — a same-
+        player bone correction (the common case) must be unaffected even
+        when the ball track carries no kink at all near the event."""
+        ctx, uvs, Ks, Rs, ts = _setup()  # l_foot right AT the ball
+        events = (BallEvent(frame=10, kind="touch", score=0.7,
+                            player_id="P001", bone="r_foot"),)
+        out = refine_touch_attribution(
+            events, player_ctx=ctx, ball_uvs=uvs,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0),
+            cfg=TouchAttributionCfg(enabled=True,
+                                     cross_player_physics_guard=True))
+        assert (out[0].player_id, out[0].bone) == ("P001", "l_foot")
+
+    def test_no_ball_track_signal_falls_back_to_unguarded_behaviour(self):
+        """When the physics term can't be computed for either side (ball
+        track too sparse for the velocity window), the guard must not
+        block a flip the raw-gap gates already found convincing — no
+        discriminating signal means no veto, matching
+        ball_auto_anchor's _reachability_winner fallback."""
+        K, R, t, ball_uvs = self._kink_scene()
+        sparse_uvs = {10: ball_uvs[10]}  # no v0/v1 in any velocity window
+        a_world = (30.15, 34.0, 0.11)
+        b_world = (30.02, 34.0, 0.11)
+
+        class _Ctx4:
+            def joints_at(self, frame):
+                return [
+                    _Joint("P001", "r_knee", a_world,
+                           _project(a_world, K, R, t), 0.9),
+                    _Joint("P002", "chest", b_world,
+                           _project(b_world, K, R, t), 0.9),
+                ]
+
+        ctx = _Ctx4()
+        events = (BallEvent(frame=10, kind="touch", score=0.8,
+                            player_id="P001", bone="r_knee"),)
+        out = refine_touch_attribution(
+            events, player_ctx=ctx, ball_uvs=sparse_uvs,
+            per_frame_K={10: K}, per_frame_R={10: R}, per_frame_t={10: t},
+            distortion=(0.0, 0.0),
+            cfg=TouchAttributionCfg(enabled=True,
+                                     cross_player_physics_guard=True))
+        assert (out[0].player_id, out[0].bone) == ("P002", "chest")
+
+    def test_corroborated_alternate_cross_player_blocked_without_kink(self):
+        """The same guard applies on the W3 ranked-candidates second-
+        opinion path (:func:`_corroborated_alternate`), not just the
+        primary ray-gap check. The bystander is kept OUT of the primary
+        check's own FK scan via low confidence (below min_fk_conf) so
+        the standard check stays tied, forcing the fallback path — but
+        the physics term still sees its joint pixel."""
+        K, R, t, ball_uvs = self._kink_scene()
+        r_foot_world = (30.02, 34.0, 0.11)
+        chest_world = (24.0, 34.0, 0.11)  # on-ray at frame 12, no kink there
+
+        class _Ctx5:
+            def joints_at(self, frame):
+                return [
+                    _Joint("P001", "r_foot", r_foot_world,
+                           _project(r_foot_world, K, R, t), 0.9),
+                    _Joint("P002", "chest", chest_world,
+                           _project(chest_world, K, R, t), 0.05),
+                ]
+
+        ctx = _Ctx5()
+        Ks = {f: K for f in ball_uvs}
+        Rs = {f: R for f in ball_uvs}
+        ts = {f: t for f in ball_uvs}
+        events = (BallEvent(frame=10, kind="touch", score=0.7,
+                            player_id="P001", bone="r_foot"),)
+        ranked = {
+            10: [{"player_id": "P001", "bone": "r_foot",
+                  "gap_m": 0.30, "score": 0.8}],
+            12: [{"player_id": "P002", "bone": "chest",
+                  "gap_m": 0.02, "score": 0.9}],
+        }
+
+        out_off = refine_touch_attribution(
+            events, player_ctx=ctx, ball_uvs=ball_uvs,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0), ranked_candidates=ranked,
+            cfg=TouchAttributionCfg(enabled=True,
+                                     cross_player_physics_guard=False))
+        assert (out_off[0].player_id, out_off[0].bone) == ("P002", "chest")
+
+        out_on = refine_touch_attribution(
+            events, player_ctx=ctx, ball_uvs=ball_uvs,
+            per_frame_K=Ks, per_frame_R=Rs, per_frame_t=ts,
+            distortion=(0.0, 0.0), ranked_candidates=ranked,
+            cfg=TouchAttributionCfg(enabled=True,
+                                     cross_player_physics_guard=True))
+        assert (out_on[0].player_id, out_on[0].bone) == ("P001", "r_foot")
+
+    def test_config_block_has_cross_player_physics_guard(self):
+        import yaml
+        from pathlib import Path
+        cfg = yaml.safe_load(
+            Path("config/default.yaml").read_text())["ball"]["touch_attribution"]
+        assert cfg["cross_player_physics_guard"] is True
+        assert cfg["cross_player_physics_window"] == 3
+        assert cfg["cross_player_physics_dir_weight"] == pytest.approx(0.6)
+        assert cfg["cross_player_physics_kink_weight"] == pytest.approx(0.4)
+        assert cfg["cross_player_physics_slack"] == pytest.approx(0.0)
+
+
 def test_context_expected_worlds_bridge_over_touch_windows():
     from src.utils.ball_touch_attribution import context_expected_worlds
 

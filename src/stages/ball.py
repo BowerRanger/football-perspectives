@@ -803,6 +803,18 @@ def _touch_attribution_cfg(cfg_dict: dict) -> TouchAttributionCfg:
         min_fk_conf=float(cfg_dict.get("min_fk_conf", base.min_fk_conf)),
         consider_ranked_candidates=bool(cfg_dict.get(
             "consider_ranked_candidates", base.consider_ranked_candidates)),
+        cross_player_physics_guard=bool(cfg_dict.get(
+            "cross_player_physics_guard", base.cross_player_physics_guard)),
+        cross_player_physics_window=int(cfg_dict.get(
+            "cross_player_physics_window", base.cross_player_physics_window)),
+        cross_player_physics_dir_weight=float(cfg_dict.get(
+            "cross_player_physics_dir_weight",
+            base.cross_player_physics_dir_weight)),
+        cross_player_physics_kink_weight=float(cfg_dict.get(
+            "cross_player_physics_kink_weight",
+            base.cross_player_physics_kink_weight)),
+        cross_player_physics_slack=float(cfg_dict.get(
+            "cross_player_physics_slack", base.cross_player_physics_slack)),
     )
 
 

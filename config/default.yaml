@@ -1404,6 +1404,33 @@ refined_poses:
     # resolved_max_step_m kwarg.
     resolved_max_step_m: 0.02
 
+  # Gated PhysPT takeover — the stage's true final pass (runs after the
+  # foot-lock finale). Spans where the refined motion is unrealistic
+  # (root acceleration/rotation spikes, low keypoint confidence i.e.
+  # occlusion) are re-posed from a PhysPT physics-prior refinement,
+  # re-anchored to the surrounding animation at both span edges and
+  # verified per channel (a takeover that worsens the span's own peak
+  # acceleration or rotation step is rejected). All other frames stay
+  # bit-identical. Needs the gitignored third_party/PhysPT checkout +
+  # released assets and torch; skips with a warning when unavailable.
+  # Validated on gberch 2026-09-08 (docs/physpt-experiment-results.md):
+  # 3.2% of frames flagged, every motion metric equal-or-better, mean
+  # reprojection unchanged. Detector thresholds are gberch-tuned —
+  # re-sweep before trusting them on very different footage.
+  physpt_takeover:
+    enabled: true
+    device: auto           # auto -> mps when available, else cpu
+    batch_size: 8
+    acc_hi: 35.0           # root acceleration spike, m/s^2
+    step_hi: 15.0          # root rotation step spike, deg/frame
+    conf_lo: 0.25          # mean keypoint confidence occlusion cutoff
+    dilate: 4
+    merge_gap: 6
+    min_len: 3
+    ease: 6                # rotation blend ramp, frames
+    smooth_window: 9       # savgol over the spliced translation (odd; <=2 disables)
+    verify_slack: 1.05     # per-span acceptance factor vs the current span peak
+
 export:
   gltf_enabled: true
   fbx_enabled: true

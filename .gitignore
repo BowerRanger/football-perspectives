@@ -219,6 +219,8 @@ __marimo__/
 /checkpoints
 /data/models/
 .venv311/
+.venv_physpt/
+third_party/PhysPT/
 .DS_Store
 *.pt
 test-media/

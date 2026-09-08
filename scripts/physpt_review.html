@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PhysPT physics prior — before & after — Football Perspectives</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101b24;color:#e6eceb;font:16px/1.5 system-ui,sans-serif}main{max-width:1300px;margin:auto;padding:36px 24px}h1{font-size:36px;line-height:1.2}p{color:#b5c7cb;max-width:1000px}a{color:#80dccc}button,select,input{font:inherit}button,select{background:#213740;color:#fff;border:1px solid #547076;border-radius:6px;padding:8px 14px}button{cursor:pointer}.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}.panel{background:#172c36;border-radius:10px;overflow:hidden}.label{padding:10px 16px;font-weight:600}canvas{width:100%;display:block;aspect-ratio:1.35}video{display:block;width:100%}.controls{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin:20px 0}.controls input[type=range]{flex:1;min-width:200px}table{border-collapse:collapse;width:100%;margin:24px 0}th,td{text-align:left;border-bottom:1px solid #354c55;padding:10px}small{color:#b9c7c9}.card{background:#172c36;padding:18px;border-radius:10px;margin:24px 0}.source{max-width:900px;margin:20px auto}#time{font-variant-numeric:tabular-nums;min-width:140px}#selectedMetrics td{font-variant-numeric:tabular-nums}.legend{display:flex;gap:24px;color:#d8e1e3}.before{color:#ffbf87}.after{color:#76e0b3}.variantBar{display:flex;gap:12px;align-items:center;margin:18px 0;flex-wrap:wrap}@media(max-width:700px){.pair{grid-template-columns:1fr}h1{font-size:28px}main{padding:24px 12px}table{font-size:13px}}
+</style>
+<script>
+const CUR_PRE='../animation_comparison/after/review_render/gberch/',CUR_NEW='current_render/gberch/',
+      ORIG_PRE='../animation_comparison/before/review_render/gberch/',ORIG_NEW='original_side/review_render/gberch/',
+      ONLY='physpt_only/review_render/gberch/',PP='physpt_current/review_render/gberch/',PHYS='physpt/review_render/gberch/';
+const CAM_P005=['focus_p005','P005 · Frames 225–285'],CAM_P020=['focus_p020','P020 · Frames 30–90'],
+      CAM_P007=['focus_p007','P007 · Frames 312–372'],CAM_P021=['focus_p021','P021 · Frames 283–343'],
+      CAM_ORBIT=['wide_orbit','Wide orbit · Frames 250–400 · whole-squad view'];
+const TIMING='Refining all 22 players with PhysPT took ≈4 minutes on this machine (MPS, ≈10.6 s per player); the pipeline’s own constrained refinement takes ≈34 s on the same machine — about 7× faster. Both are small next to the HMR extraction itself.';
+const VARIANTS={
+ postpass:{dir:'',beforeName:'Current',afterName:'+ PhysPT',eventLabel:'Largest current turn',
+  cams:[[...CAM_ORBIT,CUR_NEW,PP],[...CAM_P005,CUR_PRE,PP],[...CAM_P020,CUR_PRE,PP]],
+  desc:'The current pipeline animation and the same animation with a PhysPT post-pass. PhysPT (CVPR 2024) refines pose and trajectory with a learned physics prior on top of our full hand-built refinement.'},
+ only:{dir:'only/',beforeName:'Current',afterName:'PhysPT only',eventLabel:'Largest current turn',
+  cams:[[...CAM_ORBIT,CUR_NEW,ONLY],[...CAM_P005,CUR_PRE,ONLY],[...CAM_P020,CUR_PRE,ONLY],[...CAM_P007,CUR_NEW,ONLY],[...CAM_P021,CUR_NEW,ONLY]],
+  desc:'The current pipeline animation (full hand-built refinement) against PhysPT run directly on the raw HMR extraction — PhysPT as the only refinement step, with none of our cleanup, smoothing, or foot locking. '+TIMING},
+ original:{dir:'vs_original/',beforeName:'Original',afterName:'+ PhysPT',eventLabel:'Largest original turn',
+  cams:[[...CAM_ORBIT,ORIG_NEW,PHYS],[...CAM_P005,ORIG_PRE,PHYS],[...CAM_P020,ORIG_PRE,PHYS]],
+  desc:'The preserved original animation (pre-September pipeline) and the same animation with a PhysPT post-pass.'},
+ original_vs_only:{dir:'original_vs_only/',beforeName:'Original',afterName:'PhysPT only',eventLabel:'Largest original turn',
+  cams:[[...CAM_ORBIT,ORIG_NEW,ONLY],[...CAM_P005,ORIG_PRE,ONLY],[...CAM_P020,ORIG_PRE,ONLY],[...CAM_P007,ORIG_NEW,ONLY],[...CAM_P021,ORIG_NEW,ONLY]],
+  desc:'The preserved original animation (pre-September pipeline) against PhysPT run directly on the raw HMR extraction — what we would have had by replacing the whole refinement with just PhysPT. '+TIMING},
+ hybrid:{dir:'hybrid/',beforeName:'Current',afterName:'Hybrid',eventLabel:'Largest current turn',
+  cams:[['wide_orbit','Wide orbit · Frames 250–400 · whole-squad view','current_render/gberch/','physpt_hybrid/review_render/gberch/'],
+        ['focus_p019','P019 · Frames 48–108 · takeover span 71–86','current_render/gberch/','physpt_hybrid/review_render/gberch/']],
+  desc:'Gated takeover: the current animation stays authoritative except on spans a detector flags as unrealistic (acceleration/rotation spikes, occlusion) — 262 of 8,257 frames (3.2%) across 10 players. There the PhysPT post-pass takes over, re-anchored to the surrounding motion at both span edges, and each span is verified per channel: a takeover that worsens the span’s own peak acceleration or rotation step is rejected (20 channel-takeovers accepted, 16 rejected). Untouched frames are bit-identical to the current animation.'},
+ kroupi:{dir:'kroupi/',beforeName:'Current (kroupi)',afterName:'PhysPT only',eventLabel:'Largest current turn',
+  sourceVideo:'../../output-kroupi/shots/kroupi01.mp4',
+  cams:[['wide_orbit','Wide orbit · Frames 20–140 · whole-squad view','kroupi/current_side/review_render/kroupi01/','kroupi/physpt_only/review_render/kroupi01/']],
+  desc:'Cross-clip check on kroupi01, whose camera tracking is less stable (mean confidence 0.67, 19 of 156 frames below 0.5): the current pipeline animation against PhysPT run directly on the raw HMR extraction. The shakier camera amplifies PhysPT-only’s failure modes — reprojection error and acceleration spikes grow far beyond the gberch results.'}};
+const VKEY=(k=>VARIANTS[k]?k:'postpass')(new URLSearchParams(location.search).get('variant'));
+const V=VARIANTS[VKEY];
+</script>
+<main>
+<small>FOOTBALL PERSPECTIVES · PHYSPT EXPERIMENT</small>
+<h1>Before & after: PhysPT physics prior</h1>
+<div class="variantBar"><label>Comparison <select id="variant">
+<option value="postpass">Current vs + PhysPT post-pass</option>
+<option value="only">Current vs PhysPT only (raw HMR in)</option>
+<option value="original">Original vs + PhysPT post-pass</option>
+<option value="original_vs_only">Original vs PhysPT only (raw HMR in)</option>
+<option value="hybrid">Current vs Hybrid (PhysPT on flagged spans)</option>
+<option value="kroupi">kroupi01 · Current vs PhysPT only (unstable camera)</option>
+</select></label></div>
+<p id="variantDesc"></p>
+<p>The calibrated camera is untouched: saved world-space motion is resampled from 30 fps to the model's 20 fps time step, refined in overlapping 16-sample windows, and resampled back. Each contiguous tracking run keeps one starting XY anchor; predicted XY increments are integrated from there, and height is the model's prediction. Runs shorter than the model window are left unchanged.</p>
+<div id="summary" class="card">Loading comparison…</div>
+<div class="controls"><label>Player <select id="player"></select></label><button id="play">Play</button><label>Speed <select id="speed"><option value=".25">¼ speed</option><option value=".5" selected>½ speed</option><option value="1">Real time</option></select></label><label>View <select id="view"><option value="-.7">Three-quarter</option><option value="0">Front</option><option value="1.57">Side</option><option value="3.14">Reverse</option></select></label><button id="event"></button><button id="jointEvent">Largest PhysPT joint step</button></div>
+<div class="pair"><div class="panel"><div class="label before" id="beforeLabel"></div><canvas id="before" width="900" height="660"></canvas></div><div class="panel"><div class="label after" id="afterLabel"></div><canvas id="after" width="900" height="660"></canvas></div></div>
+<div class="controls"><input id="frame" type="range" min="0" max="428" value="0" step="1" aria-label="Video frame"><span id="time"></span></div>
+<small>Both panels share the same viewing direction and follow the first version's player position. Missing observations are shown as gaps. The wire figure displays the saved skeletal motion directly.</small>
+<table id="selectedMetrics"><thead><tr><th>Selected player</th><th id="beforeHead"></th><th id="afterHead"></th></tr></thead><tbody></tbody></table>
+<div class="source"><video id="source" controls muted playsinline preload="metadata" src="../shots/gberch.mp4"></video><small>Original broadcast. Scrubbing the animation timeline also seeks the source video.</small></div>
+<p>Contact measurements below use the same original candidate labels for both versions. PhysPT was not given our contact labels or 2D keypoints; reprojection against the original observations measures how far its physics prior moves the body from the image evidence.</p>
+<h2>Matching rendered clips</h2>
+<p>These clips use identical review cameras and rendering settings. Each pair can be played together at half speed.</p>
+<div id="renders"></div>
+<h2>All players</h2>
+<small>Reprojection uses the same original 2D observations. Candidate-contact measurements use the same original candidate spans; these observations and labels are reference evidence, not ground truth.</small>
+<table id="all"><thead><tr><th>Player</th><th>Largest root turn / frame</th><th>Peak root acceleration</th><th>Mean reprojection error</th></tr></thead><tbody></tbody></table>
+<p><a id="dataLink" href="comparison.json">Download measurements</a> · <a href="../../docs/physpt-experiment-results.md">Implementation and validation notes</a></p>
+</main><script>document.write('<script src="'+V.dir+'motion.js"><\/script>')</script><script>
+const A=window.ANIMATION,M=window.METRICS.players,sel=document.querySelector('#player'),frame=document.querySelector('#frame'),source=document.querySelector('#source');
+const parents=[-1,0,0,0,1,2,3,4,5,6,7,8,9,9,9,12,13,14,16,17,18,19,20,21];
+let playing=false,last=0,clock=0;
+const fmt=(v,d=2)=>v==null?'—':v.toFixed(d),pair=(x,k,s='max')=>`${fmt(x.before[k][s])} → ${fmt(x.after[k][s])}`;
+document.querySelector('#variant').value=VKEY;
+document.querySelector('#variant').onchange=e=>{location.search='?variant='+e.target.value};
+document.querySelector('#variantDesc').textContent=V.desc;
+document.querySelector('#beforeLabel').textContent=V.beforeName;document.querySelector('#afterLabel').textContent=V.afterName;
+document.querySelector('#beforeHead').textContent=V.beforeName;document.querySelector('#afterHead').textContent=V.afterName;
+document.querySelector('#event').textContent=V.eventLabel;
+document.querySelector('#dataLink').href=V.dir+'comparison.json';
+if(V.sourceVideo)source.src=V.sourceVideo;
+for(const pid of Object.keys(A)){const o=new Option(pid,pid);sel.add(o)}sel.value=A.P005?'P005':sel.options[0]?.value;
+function drawPanel(id,points,center,yaw){const c=document.querySelector('#'+id),ctx=c.getContext('2d'),W=c.width,H=c.height;ctx.fillStyle='#162d35';ctx.fillRect(0,0,W,H);const color=id==='before'?'#ffbf87':'#76e0b3';
+ function project(p){let x=p[0]-center[0],y=p[1]-center[1],z=p[2];let u=Math.cos(yaw)*x+Math.sin(yaw)*y,v=-Math.sin(yaw)*x+Math.cos(yaw)*y;return [W*.5+u*170,H*.83-z*190+v*50]}
+ ctx.strokeStyle='#355551';ctx.lineWidth=1;for(let i=-4;i<=4;i++){for(const axis of [0,1]){let p=[center[0]-4,center[1]-4,0],q=[center[0]+4,center[1]+4,0];p[axis]=q[axis]=center[axis]+i;let a=project(p),b=project(q);ctx.beginPath();ctx.moveTo(...a);ctx.lineTo(...b);ctx.stroke()}}
+ if(!points){ctx.fillStyle='#b5c7cb';ctx.font='22px system-ui';ctx.fillText('No observation at this frame',W*.25,H*.4);return}
+ ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineCap='round';
+ const segments=parents.map((p,j)=>[p,j]).filter(([p])=>p>=0);segments.sort((a,b)=>(points[a[1]][1]-points[b[1]][1]));
+ for(const [p,j] of segments){const a=project(points[p]),b=project(points[j]);ctx.lineWidth=j<12?11:8;ctx.beginPath();ctx.moveTo(...a);ctx.lineTo(...b);ctx.stroke()}
+ for(let j=0;j<22;j++){let p=project(points[j]);ctx.beginPath();ctx.arc(...p,j===15?15:5,0,2*Math.PI);ctx.fill()}
+}
+function refresh(seek=false){if(!sel.value)return;let a=A[sel.value],f=+frame.value,i=a.frames.indexOf(f),nearest=i>=0?i:a.frames.reduce((best,v,k)=>Math.abs(v-f)<Math.abs(a.frames[best]-f)?k:best,0),center=a.before[nearest][0],yaw=+document.querySelector('#view').value;for(const v of ['before','after'])drawPanel(v,i<0?null:a[v][i],center,yaw);document.querySelector('#time').textContent=`Frame ${f} · ${(f/a.fps).toFixed(2)} s`;if(seek&&source.readyState)source.currentTime=f/a.fps}
+function selectPlayer(){const a=A[sel.value];frame.min=a.frames[0];frame.max=a.frames.at(-1);frame.value=frame.min;clock=+frame.value;const m=M[sel.value];const rows=[['Largest root turn per frame','root_step_deg','max','°'],['Largest joint turn per frame','joint_step_deg','max','°'],['Peak root acceleration','root_acc_m_s2','max',' m/s²'],['Peak foot speed','foot_speed_m_s','max',' m/s'],['Mean body reprojection','body_reprojection_px','mean',' px']];document.querySelector('#selectedMetrics tbody').innerHTML=rows.map(([name,key,stat,unit])=>`<tr><td>${name}</td>${['before','after'].map(v=>`<td>${fmt(m[v][key][stat])}${unit}</td>`).join('')}</tr>`).join('');document.querySelector('#selectedMetrics tbody').innerHTML+=['stance_speed_m_s','transition_speed_m_s'].map((k,i)=>`<tr><td>${i?'Mean contact-boundary foot speed':'Mean candidate-stance foot speed'}</td>${['before','after'].map(v=>`<td>${fmt(m[v].candidate_contact[k].mean)} m/s</td>`).join('')}</tr>`).join('');refresh(true)}
+sel.onchange=selectPlayer;frame.oninput=()=>{clock=+frame.value;refresh(true)};document.querySelector('#view').onchange=()=>refresh();document.querySelector('#play').onclick=()=>{playing=!playing;document.querySelector('#play').textContent=playing?'Pause':'Play';last=0};document.querySelector('#event').onclick=()=>{frame.value=M[sel.value].before.largest_root_step_frame;clock=+frame.value;refresh(true)};
+document.querySelector('#jointEvent').onclick=()=>{frame.value=M[sel.value].after.largest_joint_step_frame;clock=+frame.value;refresh(true)};
+function tick(t){if(playing&&sel.value){if(last){clock+=(t-last)/1000*A[sel.value].fps*(+document.querySelector('#speed').value);if(clock>+frame.max)clock=+frame.min;frame.value=Math.floor(clock);refresh()}last=t}else last=0;requestAnimationFrame(tick)}
+const entries=Object.entries(M),sum=(side,key)=>entries.reduce((n,[,m])=>n+m[side][key],0),peak=(side,key)=>Math.max(...entries.map(([,m])=>m[side][key].max));
+document.querySelector('#summary').textContent=`${entries.length} players compared · Root turns over 90° in one frame: ${sum('before','root_steps_over_90_deg')} → ${sum('after','root_steps_over_90_deg')} · Largest root turn: ${fmt(peak('before','root_step_deg'),1)}° → ${fmt(peak('after','root_step_deg'),1)}° · Mean reprojection: ${fmt(window.METRICS.aggregate.before.body_reprojection_px.mean,1)} px → ${fmt(window.METRICS.aggregate.after.body_reprojection_px.mean,1)} px`;
+document.querySelector('#all tbody').innerHTML=entries.map(([pid,m])=>`<tr><td><button data-player="${pid}">${pid}</button></td><td>${pair(m,'root_step_deg')}°</td><td>${pair(m,'root_acc_m_s2')} m/s²</td><td>${pair(m,'body_reprojection_px','mean')} px</td></tr>`).join('');document.querySelectorAll('[data-player]').forEach(b=>b.onclick=()=>{sel.value=b.dataset.player;selectPlayer();window.scrollTo({top:250,behavior:'smooth'})});
+for(const [cam,title,srcBefore,srcAfter] of V.cams){const div=document.createElement('div');div.className='card';div.innerHTML=`<h3>${title}</h3><button class="sync">Play pair at ½ speed</button><div class="pair">${['before','after'].map(v=>`<div><p>${v==='before'?V.beforeName:V.afterName}</p><video controls muted playsinline loop preload="metadata" src="${v==='before'?srcBefore:srcAfter}${cam}.mp4"></video></div>`).join('')}</div>`;div.querySelector('.sync').onclick=()=>div.querySelectorAll('video').forEach(v=>{v.currentTime=0;v.playbackRate=.5;v.play()});document.querySelector('#renders').append(div)}
+selectPlayer();requestAnimationFrame(tick);
+</script></html>

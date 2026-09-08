@@ -56,6 +56,7 @@ from src.utils.smpl_skeleton import (
 )
 from src.utils.temporal_smoothing import savgol_axis
 from src.utils.pose_temporal import frame_runs, smooth_pose, smooth_rotations, interpolate_pose
+from src.utils.physpt_hybrid import TakeoverConfig, build_hybrid, keypoint_confidence
 
 logger = logging.getLogger(__name__)
 
@@ -2253,6 +2254,25 @@ class RefinedPosesStage(BaseStage):
                 foot_lock_summary["mean_pin_err_m_before"] = err_before_wsum / err_weight
                 foot_lock_summary["mean_pin_err_m_after"] = err_after_wsum / err_weight
 
+        # Code-level default is OFF so bare test configs and light
+        # environments never touch torch/PhysPT; config/default.yaml
+        # ships enabled: true, which is what makes this the pipeline
+        # default.
+        physpt_raw = (cfg.get("physpt_takeover") or {})
+        physpt_enabled = bool(physpt_raw.get("enabled", False))
+        physpt_takeover_cfg = TakeoverConfig.from_mapping(physpt_raw)
+        physpt_state: dict = {}
+        physpt_summary: dict = {
+            "enabled": physpt_enabled,
+            "available": None,
+            "players_with_spans": 0,
+            "spans_flagged": 0,
+            "translation_accepted": 0,
+            "rotation_accepted": 0,
+            "flagged_frames": 0,
+            "penetration_frames_raised": 0,
+        }
+
         summary: dict = {
             "players_refined": 0,
             "single_shot_players": 0,
@@ -2262,6 +2282,7 @@ class RefinedPosesStage(BaseStage):
             "jitter": jitter_summary,
             "residual_consensus": residual_summary,
             "foot_lock": foot_lock_summary,
+            "physpt_takeover": physpt_summary,
         }
 
         # 5. Assemble each player on the reference timeline and save.
@@ -2297,6 +2318,30 @@ class RefinedPosesStage(BaseStage):
                 cleanup_summary["assembly_accel_clamped_frames"] += int(
                     a_stats["accel_clamped_frames"]
                 )
+            if physpt_enabled:
+                refined, takeover_stats = _apply_physpt_takeover(
+                    refined, hmr_dir, sync_map, physpt_takeover_cfg,
+                    physpt_state,
+                    device=str(physpt_raw.get("device", "auto")),
+                    batch_size=int(physpt_raw.get("batch_size", 8)),
+                    sole_clearance_m=foot_lock_kwargs["sole_clearance_m"],
+                )
+                physpt_summary["available"] = takeover_stats is not None
+                if takeover_stats is not None:
+                    spans = takeover_stats["spans"]
+                    (out_dir / f"{pid}_physpt_takeover.json").write_text(
+                        json.dumps(takeover_stats, indent=2)
+                    )
+                    physpt_summary["players_with_spans"] += bool(spans)
+                    physpt_summary["spans_flagged"] += len(spans)
+                    physpt_summary["translation_accepted"] += sum(
+                        s["translation"] == "accepted" for s in spans)
+                    physpt_summary["rotation_accepted"] += sum(
+                        s["rotation"] == "accepted" for s in spans)
+                    physpt_summary["flagged_frames"] += sum(
+                        s["frames"] for s in spans)
+                    physpt_summary["penetration_frames_raised"] += (
+                        takeover_stats["penetration_frames_raised"])
             refined.save(out_dir / f"{pid}_refined.npz")
             provenance = {"config": cfg, "sources": {}}
             for sid, _ in contribs:
@@ -2381,6 +2426,95 @@ class RefinedPosesStage(BaseStage):
 
 # ----------------------------------------------------------------------
 # Helpers (module-level so tests can import them directly).
+
+
+def _apply_physpt_takeover(
+    refined: RefinedPose,
+    hmr_dir: Path,
+    sync_map: SyncMap,
+    takeover_cfg: TakeoverConfig,
+    state: dict,
+    *,
+    device: str = "auto",
+    batch_size: int = 8,
+    sole_clearance_m: float = 0.025,
+    fps: float = 30.0,
+) -> tuple[RefinedPose, dict | None]:
+    """Gated PhysPT takeover — the stage's true final pass.
+
+    Returns ``(refined', stats)``; ``stats`` is None (and the track
+    unchanged) when PhysPT is unavailable — the checkout, its released
+    assets, and torch are all optional, so light environments and CI
+    skip cleanly with one warning. ``state`` caches the loaded refiner
+    (and the unavailability verdict) across players.
+
+    Module-level so tests can drive it with a stubbed ``state``.
+    """
+    from src.utils import physpt_refiner
+
+    if state.get("failed"):
+        return refined, None
+    if state.get("refiner") is None:
+        if not physpt_refiner.physpt_available():
+            logger.warning(
+                "[refined_poses] physpt_takeover enabled but the PhysPT "
+                "checkout/assets/torch are unavailable — skipping "
+                "(setup: docs/physpt-experiment-results.md)"
+            )
+            state["failed"] = True
+            return refined, None
+        try:
+            state["refiner"] = physpt_refiner.PhysPTRefiner(
+                device=device, batch_size=batch_size,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[refined_poses] PhysPT load failed (%s) — skipping takeover",
+                exc,
+            )
+            state["failed"] = True
+            return refined, None
+
+    # Occlusion evidence: best keypoint confidence any contributing
+    # shot has for each reference frame (sync offsets map reference
+    # frames onto each shot's sidecar timeline).
+    conf = np.zeros(len(refined.frames))
+    for sid in refined.contributing_shots:
+        offset = sync_map.offset_for_shot(sid) if sid else 0
+        conf = np.maximum(conf, keypoint_confidence(
+            hmr_dir / f"{sid}__{refined.player_id}_kp2d.json",
+            refined.frames, offset,
+        ))
+    if not conf.any():
+        # No kp2d sidecar at all: an all-zero confidence array would
+        # flag the whole track as occluded. Fall back to the kinematic
+        # triggers only.
+        logger.warning(
+            "[refined_poses] no kp2d sidecar for %s — physpt_takeover "
+            "occlusion trigger disabled", refined.player_id,
+        )
+        takeover_cfg = replace(takeover_cfg, conf_lo=-1.0)
+
+    phys, runs = state["refiner"].refine(refined)
+    hybrid, spans = build_hybrid(refined, phys, conf, fps, takeover_cfg)
+    stats = {
+        "spans": spans,
+        "physpt_runs": runs,
+        "penetration_frames_raised": 0,
+    }
+    if any(s["translation"] == "accepted" or s["rotation"] == "accepted"
+           for s in spans):
+        # The splice runs after the foot-lock finale, so re-run the
+        # raise-only penetration guard: a taken-over span must not
+        # leave sole penetration the finale had already cleared.
+        new_root_t, guard_stats = penetration_guard(
+            thetas=hybrid.thetas, root_R=hybrid.root_R,
+            root_t=hybrid.root_t, betas=hybrid.betas,
+            sole_clearance_m=sole_clearance_m,
+        )
+        hybrid = replace(hybrid, root_t=new_root_t.astype(np.float32))
+        stats["penetration_frames_raised"] = guard_stats["frames_raised"]
+    return hybrid, stats
 
 
 def _discover_player_ids(hmr_dir: Path) -> set[str]:

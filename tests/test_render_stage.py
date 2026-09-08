@@ -162,6 +162,84 @@ def test_virtual_camera_tracks_written(tmp_path):
     assert track["frames"] and "R" in track["frames"][0]
 
 
+# ── New cinematic rigs: goal / goalline / orbit / chase / dolly ────────
+# goal:<side> and goalline:<side> must dispatch on the pitch side token
+# BEFORE the rig:PID partition — "goal:left" is never a request for a
+# player literally named "left".
+
+@pytest.mark.integration
+def test_virtual_camera_tracks_written_for_new_cinematic_rigs(tmp_path):
+    _write_min_fixture(tmp_path)
+    _add_player_fixture(tmp_path)
+    cfg = _cfg(cameras=["broadcast", "goal:left", "goalline:right", "orbit", "chase", "dolly"])
+    stage = RenderStage(cfg, tmp_path)
+    written = stage._write_virtual_camera_tracks(
+        "", ["goal:left", "goalline:right", "orbit", "chase", "dolly"])
+    assert set(written) == {"goal:left", "goalline:right", "orbit", "chase", "dolly"}
+    cams = tmp_path / "render" / "clip" / "cameras"
+    assert (cams / "goal_left_camera_track.json").exists()
+    assert (cams / "goalline_right_camera_track.json").exists()
+    assert (cams / "orbit_camera_track.json").exists()
+    assert (cams / "chase_camera_track.json").exists()
+    assert (cams / "dolly_camera_track.json").exists()
+
+
+@pytest.mark.unit
+def test_goal_camera_id_not_parsed_as_player_left(tmp_path, caplog):
+    """'goal:left' must dispatch to the behind-goal rig, never look up a
+    player track for id 'left' (which would warn 'no player track')."""
+    _write_min_fixture(tmp_path)
+    _add_player_fixture(tmp_path)
+    stage = RenderStage(_cfg(), tmp_path)
+    written = stage._write_virtual_camera_tracks("", ["goal:left"])
+    assert written == ["goal:left"]
+    assert not any("no player track" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_goalline_camera_id_not_parsed_as_player_right(tmp_path, caplog):
+    _write_min_fixture(tmp_path)
+    _add_player_fixture(tmp_path)
+    stage = RenderStage(_cfg(), tmp_path)
+    written = stage._write_virtual_camera_tracks("", ["goalline:right"])
+    assert written == ["goalline:right"]
+    assert not any("no player track" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_unknown_goal_side_skipped_with_warning(tmp_path, caplog):
+    # "goal:center" isn't a valid side, so it falls through to the same
+    # unresolvable-reference handling as any other bad camera id — never
+    # crashes, always skips with a warning.
+    _write_min_fixture(tmp_path)
+    _add_player_fixture(tmp_path)
+    stage = RenderStage(_cfg(), tmp_path)
+    written = stage._write_virtual_camera_tracks("", ["goal:center"])
+    assert written == []
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_virtual_camera_cfg_threads_new_rig_params(tmp_path):
+    cfg = _cfg()
+    cfg["export"] = {
+        "blender_path": "blender",
+        "virtual_cameras": {
+            "goal_back_m": 12.5, "orbit_radius_m": 20.0,
+            "chase_min_speed_m_s": 1.5, "dolly_y_m": -7.0,
+        },
+    }
+    stage = RenderStage(cfg, tmp_path)
+    rig = stage._virtual_camera_cfg()
+    assert rig.goal_back_m == 12.5
+    assert rig.orbit_radius_m == 20.0
+    assert rig.chase_min_speed_m_s == 1.5
+    assert rig.dolly_y_m == -7.0
+    # Untouched keys keep their documented defaults.
+    assert rig.goal_height_m == 1.2
+    assert rig.goalline_post_offset_m == 1.5
+
+
 @pytest.mark.unit
 def test_unknown_player_camera_skipped_with_warning(tmp_path, caplog):
     _write_min_fixture(tmp_path)
@@ -295,7 +373,7 @@ def test_resolve_camera_request_bad_camera_id_in_sidecar_warns_and_falls_back(
     render_dir = tmp_path / "render"
     render_dir.mkdir()
     (render_dir / "clip_render_selection.json").write_text(
-        '{"shot_id": "", "cameras": ["dolly"]}'
+        '{"shot_id": "", "cameras": ["unknown_rig"]}'
     )
     cfg = _cfg(cameras=["broadcast"])
     stage = RenderStage(cfg, tmp_path)

@@ -83,6 +83,7 @@ def iter_player_fbx_entries(
                     "thetas": thetas,
                     "root_R": root_R,
                     "root_t": root_t,
+                    "betas": np_mod.asarray(data["betas"]) if "betas" in data.files else np_mod.zeros(10),
                 }
         return
 
@@ -100,6 +101,7 @@ def iter_player_fbx_entries(
             "thetas": np_mod.asarray(data["thetas"]),
             "root_R": np_mod.asarray(data["root_R"]),
             "root_t": np_mod.asarray(data["root_t"]),
+            "betas": np_mod.asarray(data["betas"]) if "betas" in data.files else np_mod.zeros(10),
         }
 
 
@@ -185,3 +187,23 @@ def load_smpl_body_data(repo_root, np_mod):
         smpl_data["joint_positions"][0], dtype=np_mod.float64
     )
     return smpl_data, pelvis_canon_shifted
+
+
+def shape_smpl_body_data(smpl_data, betas, np_mod):
+    """Shape a copy of the mesh AND rest skeleton using the track's betas.
+
+    The common neutral foot-midpoint translation is retained; callers place
+    the root using the returned shaped pelvis. Shared neutral assets are not
+    modified, so one player's shape cannot leak into the next player.
+    """
+    if smpl_data is None:
+        return None, np_mod.zeros(3)
+    result = dict(smpl_data)
+    beta = np_mod.asarray(betas).reshape(-1)
+    for value, directions in (("v_template", "shapedirs"),
+                              ("joint_positions", "joint_shapedirs")):
+        if directions in result:
+            d = np_mod.asarray(result[directions])
+            n = min(len(beta), d.shape[-1])
+            result[value] = np_mod.asarray(result[value]) + d[..., :n] @ beta[:n]
+    return result, np_mod.asarray(result["joint_positions"][0])

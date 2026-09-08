@@ -38,7 +38,7 @@ def test_from_dict_accepts_broadcast_drone_pov_ots() -> None:
 @pytest.mark.unit
 def test_from_dict_rejects_unknown_camera_id() -> None:
     with pytest.raises(RenderSelectionError):
-        RenderSelection.from_dict({"shot_id": "s", "cameras": ["dolly"]})
+        RenderSelection.from_dict({"shot_id": "s", "cameras": ["unknown_rig"]})
 
 
 @pytest.mark.unit

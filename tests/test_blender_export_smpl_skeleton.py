@@ -36,7 +36,14 @@ bones = [
 ]
 fcurves = []
 if arm.animation_data and arm.animation_data.action:
-    fcurves = arm.animation_data.action.fcurves
+    action = arm.animation_data.action
+    if hasattr(action, 'fcurves'):
+        fcurves = list(action.fcurves)
+    else:
+        for layer in action.layers:
+            for strip in layer.strips:
+                for channelbag in strip.channelbags:
+                    fcurves.extend(channelbag.fcurves)
 n_kfs = max((len(fc.keyframe_points) for fc in fcurves), default=0)
 out = {
     'bones': bones,

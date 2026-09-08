@@ -347,7 +347,7 @@ def main(argv: list[str]) -> int:
     # ``arm.location = root_t - root_R @ pelvis_canon_shifted`` so the
     # pelvis still lands at root_t even though the canonical layout
     # has been re-anchored on the foot midpoint.
-    from src.utils.blender_scene_io import load_smpl_body_data
+    from src.utils.blender_scene_io import load_smpl_body_data, shape_smpl_body_data
     smpl_data, pelvis_canon_shifted = load_smpl_body_data(repo_root, np)
     smpl_joint_positions = (
         smpl_data.get("joint_positions") if smpl_data is not None else None
@@ -448,6 +448,8 @@ def main(argv: list[str]) -> int:
     # on disk. See ``iter_player_fbx_entries`` for the full contract.
     for entry in iter_player_fbx_entries(output_dir, np):
         player_id = entry["player_id"]
+        player_smpl, player_pelvis = shape_smpl_body_data(smpl_data, entry["betas"], np)
+        player_joints = player_smpl["joint_positions"] if player_smpl is not None else None
         shot_id = entry["shot_id"]
         display_name = display_name_for(player_id, name_mapping)
         # FBX filenames must be unique per (shot, player) — two shots
@@ -469,10 +471,10 @@ def main(argv: list[str]) -> int:
         scene.frame_start = int(frames[0])
         scene.frame_end = int(frames[-1])
         scene.render.fps = int(round(fps))
-        arm = _build_smpl_armature(display_name, joint_positions=smpl_joint_positions)
+        arm = _build_smpl_armature(display_name, joint_positions=player_joints)
         arm.rotation_mode = "QUATERNION"
         if smpl_data is not None:
-            placeholder = _add_smpl_skinned_mesh(arm, display_name, smpl_data)
+            placeholder = _add_smpl_skinned_mesh(arm, display_name, player_smpl)
         else:
             placeholder = _add_placeholder_skinned_mesh(arm, display_name)
 
@@ -485,7 +487,7 @@ def main(argv: list[str]) -> int:
             # in armature local space, so its world position is
             # arm.location + root_R[i] @ pelvis_canon_shifted.
             pelvis_world_offset_i = (
-                root_R[i] @ pelvis_canon_shifted
+                root_R[i] @ player_pelvis
             )
             arm.location = (
                 float(root_t[i, 0] - pelvis_world_offset_i[0]),

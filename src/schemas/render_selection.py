@@ -21,8 +21,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-# broadcast | drone | pov:<player_id> | ots:<player_id>
-_CAMERA_ID_RE = re.compile(r"^(broadcast|drone|(?:pov|ots):[A-Za-z0-9_-]+)$")
+# Match complete IDs, including side-based rigs that do not name a player.
+_CAMERA_ID_RE = re.compile(
+    r"(?:broadcast|drone|tactical|orbit|chase|dolly|"
+    r"(?:goal|goalline|corner):(?:left|right)|sideline:(?:near|far)|"
+    r"(?:pov|ots):[A-Za-z0-9_-]+)"
+)
 
 
 class RenderSelectionError(ValueError):
@@ -49,10 +53,12 @@ class RenderSelection:
             raise RenderSelectionError("cameras must be a list")
         cameras: list[str] = []
         for cam in raw_cameras:
-            if not isinstance(cam, str) or not _CAMERA_ID_RE.match(cam):
+            if not isinstance(cam, str) or not _CAMERA_ID_RE.fullmatch(cam):
                 raise RenderSelectionError(
                     f"invalid camera id {cam!r}; expected 'broadcast', "
-                    f"'drone', 'pov:<player_id>' or 'ots:<player_id>'"
+                    f"'drone', 'tactical', 'orbit', 'chase', 'dolly', "
+                    f"'goal/goalline/corner:left/right', 'sideline:near/far', "
+                    f"'pov:<player_id>' or 'ots:<player_id>'"
                 )
             cameras.append(cam)
         vertical_variant = data.get("vertical_variant", None)

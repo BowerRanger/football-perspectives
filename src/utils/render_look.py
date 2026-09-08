@@ -98,3 +98,90 @@ def lens_mm_from_K(
 ) -> float:
     fx = float(K[0][0])
     return fx * sensor_mm / float(width_px)
+
+
+def merge_partial(defaults: dict, overrides: dict | None) -> dict:
+    """Shallow-merge a possibly-``None``/partial override dict over
+    ``defaults``.
+
+    Used by ``blender_render_scene.py``'s ``_resolve_style`` for the
+    ``palette``/``post``/``post.duotone`` sub-blocks: a caller can
+    override a single nested key (e.g. only ``post.grain``) without
+    having to repeat every sibling key. Every key absent from
+    ``overrides`` falls back to ``defaults`` — the byte-identical-
+    defaults guarantee new style keys must preserve.
+    """
+    return {**defaults, **(overrides or {})}
+
+
+def duotone_colors(
+    duotone: dict | None,
+) -> tuple[tuple, tuple] | None:
+    """Resolve a ``style.post.duotone`` block to ``(shadow, highlight)``
+    linear RGBA pairs, or ``None`` when the duotone effect is inactive.
+
+    Both endpoints are required: a duotone gradient with only one color
+    set is ambiguous (there's no principled fallback for the other
+    end), so it's treated as fully off rather than guessing — same
+    "absent key means off" posture as every other post-effect default.
+    """
+    if not duotone:
+        return None
+    shadow = duotone.get("shadow")
+    highlight = duotone.get("highlight")
+    if not shadow or not highlight:
+        return None
+    return hex_to_linear_rgba(shadow), hex_to_linear_rgba(highlight)
+
+
+def post_style_is_active(post: dict | None) -> bool:
+    """True when at least one ``style.post`` effect deviates from its
+    neutral/off default.
+
+    Gates whether the render script bothers attaching a post-processing
+    compositor graph at all: an all-default post block (e.g. the
+    ``_resolve_style`` fallback when the caller never asked for ``post``)
+    must never attach a compositor node group, or it would trip the same
+    cross-pass "compositor poisoning" gotcha documented for AOV — a later
+    render call with no post effects of its own would still see
+    ``scene.compositing_node_group`` from a previous call attached.
+    """
+    if not post:
+        return False
+    if float(post.get("glare", 0.0)) > 0.0:
+        return True
+    if float(post.get("grain", 0.0)) > 0.0:
+        return True
+    if float(post.get("vignette", 0.0)) > 0.0:
+        return True
+    if int(post.get("posterize", 0) or 0) >= 2:
+        return True
+    if float(post.get("saturation", 1.0)) != 1.0:
+        return True
+    if duotone_colors(post.get("duotone")) is not None:
+        return True
+    return False
+
+
+def grain_noise_pixels(width: int, height: int, seed: int = 0) -> np.ndarray:
+    """Flat float32 RGBA noise buffer for the compositor film-grain
+    overlay blend, sized exactly ``width`` x ``height`` (the Blender
+    ``Image`` datablock the render script bakes this into must match
+    the render's own resolution pixel-for-pixel).
+
+    Grayscale (R==G==B per pixel), normally distributed and centered at
+    0.5 — the neutral point for an ``OVERLAY`` blend, so mixing this in
+    at ``Fac=0`` is a true no-op and increasing ``Fac`` smoothly ramps
+    grain visibility. Deterministic per ``(width, height, seed)`` via a
+    local ``Generator`` (never perturbs global numpy random state, so
+    it's safe to call from a bpy-free unit test).
+    """
+    rng = np.random.default_rng(seed)
+    mono = rng.normal(loc=0.5, scale=0.14, size=(height, width)).astype(np.float32)
+    np.clip(mono, 0.0, 1.0, out=mono)
+    rgba = np.empty((height, width, 4), dtype=np.float32)
+    rgba[..., 0] = mono
+    rgba[..., 1] = mono
+    rgba[..., 2] = mono
+    rgba[..., 3] = 1.0
+    return rgba.reshape(-1)

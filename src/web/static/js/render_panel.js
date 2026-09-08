@@ -235,10 +235,26 @@ async function _renderSelectionEditor(container, shotId) {
     }
   }
 
-  // broadcast / drone
+  // Stadium and action cameras
   const fixedRow = document.createElement("div");
-  fixedRow.style.cssText = "display:flex;gap:16px;align-items:center;margin-bottom:10px;";
-  for (const camId of ["broadcast", "drone"]) {
+  fixedRow.style.cssText = "display:flex;flex-wrap:wrap;gap:12px 18px;align-items:center;margin-bottom:16px;";
+  const cameraOptions = [
+    ["broadcast", "Original broadcast", "Matches the source footage"],
+    ["drone", "Action drone", "Elevated view following the action"],
+    ["tactical", "Full pitch", "Steady overhead view of team shape"],
+    ["sideline:near", "Main sideline", "Elevated near-touchline replay"],
+    ["sideline:far", "Reverse sideline", "The action from the opposite stand"],
+    ["corner:left", "Left corner", "Elevated diagonal view toward play"],
+    ["corner:right", "Right corner", "Elevated diagonal view toward play"],
+    ["goal:left", "Behind left goal", "Low view through the goal net"],
+    ["goal:right", "Behind right goal", "Low view through the goal net"],
+    ["goalline:left", "Left goal line", "Close view inside the goal mouth"],
+    ["goalline:right", "Right goal line", "Close view inside the goal mouth"],
+    ["orbit", "Orbit", "Sweeps around the action"],
+    ["chase", "Ball chase", "Trails the ball's direction of travel"],
+    ["dolly", "Touchline dolly", "Low tracking shot along the near touchline"],
+  ];
+  for (const [camId, name, description] of cameraOptions) {
     const cbLabel = document.createElement("label");
     cbLabel.style.cssText = "display:flex;align-items:center;gap:6px;font-size:13px;color:#cbd5e1;cursor:pointer;";
     const cb = document.createElement("input");
@@ -247,7 +263,8 @@ async function _renderSelectionEditor(container, shotId) {
     cb.checked = chosenCameras.has(camId);
     cb.addEventListener("change", save);
     cbLabel.appendChild(cb);
-    cbLabel.append(camId);
+    cbLabel.append(name);
+    cbLabel.title = description;
     fixedRow.appendChild(cbLabel);
   }
   body.appendChild(fixedRow);

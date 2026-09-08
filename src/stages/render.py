@@ -112,6 +112,29 @@ class RenderStage(BaseStage):
             drone_height_m=float(raw.get("drone_height_m", 40.0)),
             drone_back_m=float(raw.get("drone_back_m", 25.0)),
             drone_smooth_frames=int(raw.get("drone_smooth_frames", 25)),
+            goal_fov_deg=float(raw.get("goal_fov_deg", 40.0)),
+            goal_height_m=float(raw.get("goal_height_m", 1.2)),
+            goal_back_m=float(raw.get("goal_back_m", 8.0)),
+            goalline_fov_deg=float(raw.get("goalline_fov_deg", 50.0)),
+            goalline_height_m=float(raw.get("goalline_height_m", 0.4)),
+            goalline_post_offset_m=float(raw.get("goalline_post_offset_m", 1.5)),
+            orbit_fov_deg=float(raw.get("orbit_fov_deg", 50.0)),
+            orbit_radius_m=float(raw.get("orbit_radius_m", 15.0)),
+            orbit_height_m=float(raw.get("orbit_height_m", 6.0)),
+            orbit_sweep_deg=float(raw.get("orbit_sweep_deg", 180.0)),
+            chase_fov_deg=float(raw.get("chase_fov_deg", 45.0)),
+            chase_back_m=float(raw.get("chase_back_m", 6.0)),
+            chase_height_m=float(raw.get("chase_height_m", 2.0)),
+            chase_smooth_frames=int(raw.get("chase_smooth_frames", 9)),
+            chase_min_speed_m_s=float(raw.get("chase_min_speed_m_s", 0.5)),
+            dolly_fov_deg=float(raw.get("dolly_fov_deg", 30.0)),
+            dolly_y_m=float(raw.get("dolly_y_m", -3.0)),
+            dolly_height_m=float(raw.get("dolly_height_m", 1.0)),
+            tactical_fov_deg=float(raw.get("tactical_fov_deg", 55.0)),
+            sideline_fov_deg=float(raw.get("sideline_fov_deg", 55.0)),
+            sideline_height_m=float(raw.get("sideline_height_m", 14.0)),
+            corner_fov_deg=float(raw.get("corner_fov_deg", 58.0)),
+            corner_height_m=float(raw.get("corner_height_m", 10.0)),
         )
 
     def _build_one_virtual_camera(
@@ -124,10 +147,35 @@ class RenderStage(BaseStage):
         fps: float,
         clip_id: str,
     ) -> CameraTrack | None:
+        all_tracks = list(tracks_by_pid.values())
+        if cam_id in ("tactical", "sideline:near", "sideline:far", "corner:left", "corner:right"):
+            return vcam.build_stadium_track(
+                cam_id, all_tracks, ball_track, cfg, image_size, fps, clip_id)
         if cam_id == "drone":
             return vcam.build_drone_track(
-                list(tracks_by_pid.values()), ball_track, cfg, image_size, fps, clip_id)
-        rig, _, player_id = cam_id.partition(":")
+                all_tracks, ball_track, cfg, image_size, fps, clip_id)
+        if cam_id == "orbit":
+            return vcam.build_orbit_track(
+                all_tracks, ball_track, cfg, image_size, fps, clip_id)
+        if cam_id == "chase":
+            return vcam.build_chase_track(
+                all_tracks, ball_track, cfg, image_size, fps, clip_id)
+        if cam_id == "dolly":
+            return vcam.build_dolly_track(
+                all_tracks, ball_track, cfg, image_size, fps, clip_id)
+        rig, _, rest = cam_id.partition(":")
+        # goal:<side> / goalline:<side> are dispatched here, BEFORE the
+        # rig:PID handling below — "goal:left" must never be parsed as
+        # player id "left" (the side tokens "left"/"right" are never
+        # valid player ids, but this ordering keeps the two namespaces
+        # unambiguous regardless).
+        if rig == "goal" and rest in ("left", "right"):
+            return vcam.build_goal_track(
+                rest, all_tracks, ball_track, cfg, image_size, fps, clip_id)
+        if rig == "goalline" and rest in ("left", "right"):
+            return vcam.build_goalline_track(
+                rest, all_tracks, ball_track, cfg, image_size, fps, clip_id)
+        player_id = rest
         if not player_id:
             logger.warning("render: unknown virtual camera id %r; skipping", cam_id)
             return None

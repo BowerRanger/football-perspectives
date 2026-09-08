@@ -1,0 +1,187 @@
+# Render-experiment matrix — consumed by scripts/render_experiments.py.
+#
+# Usage:
+#   .venv311/bin/python scripts/render_experiments.py \
+#       --output output --shot gberch \
+#       --experiments config/render_experiments.yaml \
+#       [--only id1,id2] [--quality draft|clean] [--dry-run]
+#
+# Schema per entry (see scripts/render_experiments.py:validate_experiment):
+#   id:         unique string — the run's --only key and the manifest.json key
+#   camera:     one of broadcast | drone | orbit | chase | dolly |
+#               pov:<PID> | ots:<PID> | goal:left|right | goalline:left|right
+#   rig:        optional mapping of virtual_cameras.RigConfig field overrides
+#               (e.g. ots_fov_deg) — applied via dataclasses.replace, so any
+#               field the rig builders add is overridable for free
+#   style:      optional mapping merged (deep) over config/default.yaml's
+#               render.style, passed to Blender as --style-json
+#   style_name: optional label recorded in manifest.json; defaults to `id`
+#               when `style` is present, else null
+#   frames:     optional [start, end] int frame range (--frame-start/--frame-end)
+#   vertical:   optional bool — adds the 9:16 pass (non-broadcast cameras only)
+#   speed:      optional post-render ffmpeg slow-mo — a bare number (factor,
+#               method defaults to setpts) or {factor, method}. method:
+#               minterpolate is gated to --quality clean (validated before
+#               any experiment in the run starts).
+#
+# Quality presets (set via --quality, not per-experiment):
+#   draft = 960x540,  8 samples
+#   clean = 1920x1080, 16 samples
+#
+# Every experiment here writes under <output>/render_experiments/<id>/ —
+# NEVER under <output>/render/, which stays the protected baseline tree.
+
+experiments:
+  # --- D1: camera drafts ---------------------------------------------
+  # gberch, default style (no `style:` key -> config/default.yaml's
+  # render.style), draft quality.
+  #   run: --shot gberch --quality draft \
+  #        --only goal_left,goalline_left,orbit,chase,dolly,ots_p003_tight
+
+  # Attacked side CONFIRMED left for gberch (T1: ball track runs x≈31.3 → x≈0
+  # through the left goal mouth at x=0, y 30.34–37.66).
+  - id: goal_left
+    camera: "goal:left"
+
+  - id: goalline_left
+    camera: "goalline:left"
+
+  - id: orbit
+    camera: orbit
+
+  - id: chase
+    camera: chase
+
+  - id: dolly
+    camera: dolly
+
+  # Tight OTS variant: narrower FOV than the config default (60deg) via a
+  # rig override, rather than a new camera id.
+  - id: ots_p003_tight
+    camera: "ots:P003"
+    rig:
+      ots_fov_deg: 35.0
+
+  # --- D2: style drafts -------------------------------------------------
+  # gberch, broadcast camera, draft quality. Style dicts are T2's
+  # recommended presets (verified against Blender 5.1.1 headless renders).
+  #   run: --shot gberch --quality draft \
+  #        --only night_floodlit,neon_synthwave,retro_comic,mono_duotone,gritty_documentary
+
+  - id: night_floodlit
+    camera: broadcast
+    style:
+      sun_energy: 0.15
+      world_strength: 0.05
+      lines_emission_strength: 3.0
+      post:
+        glare: 1.4
+        vignette: 0.5
+
+  - id: neon_synthwave
+    camera: broadcast
+    style:
+      palette:
+        outline: "#ff2ec4"
+      lines_emission_strength: 3.5
+      post:
+        glare: 1.8
+        saturation: 1.8
+        vignette: 0.3
+
+  - id: retro_comic
+    camera: broadcast
+    style:
+      outline_width_m: 0.05
+      post:
+        posterize: 4
+        saturation: 1.3
+
+  - id: mono_duotone
+    camera: broadcast
+    style:
+      post:
+        duotone:
+          shadow: "#0b1d3a"
+          highlight: "#f4c95d"
+        saturation: 0.0
+
+  - id: gritty_documentary
+    camera: broadcast
+    style:
+      post:
+        grain: 0.5
+        vignette: 0.6
+        saturation: 0.35
+
+  # --- D3: clean shortlist -----------------------------------------------
+  # From fp-blender triage of the 11 drafts. gberch goal timing (ball track):
+  # strike ~frame 368, ball crosses goal line at 389, settles ~428.
+
+  - id: chase_gritty_clean
+    camera: chase
+    style:
+      post:
+        grain: 0.5
+        vignette: 0.6
+        saturation: 0.35
+    style_name: chase_gritty_clean
+    frames: [300, 428]
+    vertical: true
+
+  - id: orbit_floodlit_clean
+    camera: orbit
+    style:
+      sun_energy: 0.15
+      world_strength: 0.05
+      lines_emission_strength: 3.0
+      post:
+        glare: 1.4
+        vignette: 0.5
+    style_name: orbit_floodlit_clean
+    frames: [220, 428]
+    vertical: true
+
+  - id: goal_left_duotone_clean
+    camera: "goal:left"
+    style:
+      post:
+        duotone:
+          shadow: "#0b1d3a"
+          highlight: "#f4c95d"
+        saturation: 0.0
+    style_name: goal_left_duotone_clean
+    # Black-band mitigation: stand-bowl fill is a near-black diffuse
+    # material (palette.outline * 0.55-0.8), so world_strength/sky values
+    # don't meaningfully lift it (verified against night_floodlit's draft).
+    # Raising the camera shrinks the stand's angular footprint instead —
+    # no palette tradeoff on the toon outline colour.
+    rig:
+      goal_height_m: 2.2   # was 1.2
+    frames: [300, 428]
+    vertical: true
+
+  # OTS self-occlusion redraft (drafts showed P003's head blocking frames
+  # ~230-320 at ots_back_m 0.4). Validate at --quality draft before
+  # promoting to a clean pass.
+  - id: ots_p003_redraft
+    camera: "ots:P003"
+    rig:
+      ots_fov_deg: 38.0     # was 35.0, slight widen to compensate for pulling back
+      ots_back_m: 1.4       # was 0.4 — the head-block distance
+      ots_up_m: 0.55        # was 0.3 — look over the shoulder, not into the back of the head
+
+  # --- D4: slow-mo replay cut --------------------------------------------
+  # Strike-to-net window of the chase+gritty combo, savored at 2.5x
+  # (minterpolate is allowed at clean quality only).
+  - id: chase_strike_slowmo
+    camera: chase
+    style:
+      post:
+        grain: 0.5
+        vignette: 0.6
+        saturation: 0.35
+    style_name: chase_strike_slowmo
+    frames: [370, 428]
+    vertical: true
+    speed: {factor: 2.5, method: minterpolate}

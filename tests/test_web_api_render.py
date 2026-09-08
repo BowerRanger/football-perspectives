@@ -221,7 +221,7 @@ def test_render_selection_put_rejects_unknown_player(client) -> None:
 @pytest.mark.integration
 def test_render_selection_put_rejects_bad_camera_id(client) -> None:
     c, _ = client
-    body = {"shot_id": "shot01", "cameras": ["dolly"]}
+    body = {"shot_id": "shot01", "cameras": ["unknown_rig"]}
     r = c.put("/api/render/selection", params={"shot": "shot01"}, json=body)
     assert r.status_code == 400
 
@@ -329,3 +329,16 @@ def test_render_stage_complete_respects_sidecar_camera_request(client) -> None:
 
     (clip_dir / "drone.mp4").write_bytes(b"x")
     assert stage_complete() is True
+
+
+@pytest.mark.integration
+def test_render_selection_stadium_cameras_round_trip_without_player_data(client):
+    c, _ = client
+    cameras = ['tactical', 'sideline:near', 'sideline:far', 'corner:left',
+               'corner:right', 'goal:left', 'goal:right', 'goalline:left',
+               'goalline:right', 'orbit', 'chase', 'dolly']
+    response = c.put('/api/render/selection', params={'shot':'shot01'},
+                     json={'shot_id':'shot01','cameras':cameras})
+    assert response.status_code == 200
+    saved = c.get('/api/render/selection', params={'shot':'shot01'}).json()
+    assert saved['cameras'] == cameras

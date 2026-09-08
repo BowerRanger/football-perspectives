@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from src.schemas.camera_track import CameraFrame, CameraTrack
+from src.utils.pitch import FIFA_LANDMARKS, PITCH_LENGTH, PITCH_WIDTH
 from src.utils.smpl_skeleton import compute_joint_world_pose
 
 WORLD_UP = np.array([0.0, 0.0, 1.0])
@@ -69,6 +70,28 @@ def look_at_view(
     return R, t
 
 
+def _look_at_safe(center: np.ndarray, target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``look_at_view`` wrapper that nudges a degenerate (coincident)
+    ``center``/``target`` pair apart by an epsilon instead of raising.
+
+    ``look_at_view`` intentionally raises ``ValueError`` on a coincident
+    center/target (see its docstring) — correct for rigs whose geometry
+    guarantees separation by construction (e.g. ``build_drone_track``'s
+    non-zero ``drone_back_m``/``drone_height_m``). ``build_chase_track``
+    can't make that guarantee: under a degenerate config
+    (``chase_back_m=0`` and ``chase_height_m=0``) with a static/missing
+    ball, its camera center and look-at target both collapse to the
+    same point. Rather than let that raise mid-render, nudge the center
+    up by 1mm — imperceptible on screen, and keeps the rig always
+    produce a valid frame.
+    """
+    center = np.asarray(center, dtype=np.float64).reshape(3)
+    target = np.asarray(target, dtype=np.float64).reshape(3)
+    if float(np.linalg.norm(target - center)) < 1e-6:
+        center = center + np.array([0.0, 0.0, 1e-3])
+    return look_at_view(center, target)
+
+
 HEAD_JOINT_IDX = 15
 # SMPL canonical (y-up) facing axis. +Z is "forward" out of the torso for the
 # rest pose; sign may need flipping after the first real export — kept as a
@@ -89,6 +112,43 @@ class RigConfig:
     drone_height_m: float = 40.0
     drone_back_m: float = 25.0
     drone_smooth_frames: int = 25
+    # Low behind-goal camera: fixed x/y behind the named goal's line,
+    # looking down-pitch and panning with the smoothed action centroid
+    # (shares drone_smooth_frames for that smoothing window).
+    goal_fov_deg: float = 40.0
+    goal_height_m: float = 1.2
+    goal_back_m: float = 8.0
+    # On the goal line itself, offset in from the near post — low and
+    # dramatic. Also pans with the smoothed action centroid.
+    goalline_fov_deg: float = 50.0
+    goalline_height_m: float = 0.4
+    goalline_post_offset_m: float = 1.5
+    # Arc sweep at fixed radius/height around the smoothed action
+    # centroid, azimuth interpolated linearly across the shot's frames.
+    orbit_fov_deg: float = 50.0
+    orbit_radius_m: float = 15.0
+    orbit_height_m: float = 6.0
+    orbit_sweep_deg: float = 180.0
+    # Ball-chase cam: trails the smoothed ball's horizontal velocity
+    # vector; falls back to the smoothed action centroid (using
+    # drone_smooth_frames) when the ball is missing or its smoothed
+    # speed is below chase_min_speed_m_s ("static").
+    chase_fov_deg: float = 45.0
+    chase_back_m: float = 6.0
+    chase_height_m: float = 2.0
+    chase_smooth_frames: int = 9
+    chase_min_speed_m_s: float = 0.5
+    # Low sideline dolly: fixed y near the nearside touchline (negative
+    # = just off the pitch, y=0 is the touchline itself), x tracks the
+    # smoothed action centroid, long lens.
+    dolly_fov_deg: float = 30.0
+    dolly_y_m: float = -3.0
+    dolly_height_m: float = 1.0
+    tactical_fov_deg: float = 55.0
+    sideline_fov_deg: float = 55.0
+    sideline_height_m: float = 14.0
+    corner_fov_deg: float = 58.0
+    corner_height_m: float = 10.0
 
 
 def _head_pose_world(
@@ -227,6 +287,56 @@ def build_ots_track(
     return _make_track(clip_id, image_size, fps, K, per_frame)
 
 
+def _smoothed_centroid(
+    tracks: Sequence["SmplWorldTrack"],
+    ball_track: object,
+    smooth_frames: int,
+) -> tuple[list[int], np.ndarray]:
+    """Per-frame centroid of all player root positions (+ ball when
+    tracked), smoothed with a centered moving average over
+    ``smooth_frames`` frames (edge-padded) so single-frame jitter never
+    reaches a camera that follows it.
+
+    Shared "follow the action" primitive for ``build_drone_track`` and
+    the goal/goalline/orbit/dolly rigs. Returns ``(frames, smoothed)``:
+    ``frames`` is the sorted union of frame indices across ``tracks``
+    (empty when ``tracks`` contributes none at all); ``smoothed`` is an
+    ``(N, 3)`` array aligned to it.
+    """
+    ball_xyz = _ball_xyz_by_frame(ball_track) if ball_track is not None else {}
+
+    # Union of frame indices across tracks.
+    all_frames = sorted({int(f) for tr in tracks
+                         for f in np.asarray(tr.frames).tolist()})
+    if not all_frames:
+        return [], np.zeros((0, 3))
+
+    # Raw per-frame centroid.
+    by_frame_pos: dict[int, list[np.ndarray]] = {f: [] for f in all_frames}
+    for tr in tracks:
+        idx = {int(f): i for i, f in enumerate(np.asarray(tr.frames).tolist())}
+        for f, i in idx.items():
+            by_frame_pos[f].append(np.asarray(tr.root_t[i], dtype=np.float64))
+    raw = []
+    for f in all_frames:
+        pts = list(by_frame_pos[f])
+        if f in ball_xyz:
+            pts.append(np.asarray(ball_xyz[f], dtype=np.float64))
+        raw.append(np.mean(pts, axis=0))
+    raw_arr = np.asarray(raw)
+
+    # Centered moving average (edge-padded).
+    win = max(1, int(smooth_frames))
+    pad = win // 2
+    padded = np.pad(raw_arr, ((pad, pad), (0, 0)), mode="edge")
+    kernel = np.ones(win) / win
+    smooth = np.stack(
+        [np.convolve(padded[:, k], kernel, mode="valid") for k in range(3)],
+        axis=1,
+    )[: len(all_frames)]
+    return all_frames, smooth
+
+
 def build_drone_track(
     tracks: Sequence["SmplWorldTrack"],
     ball_track: object,
@@ -244,39 +354,10 @@ def build_drone_track(
     smoothed with a centered moving average over ``drone_smooth_frames``
     frames so single-frame jitter never reaches the camera.
     """
-
     K = intrinsics_from_fov(cfg.drone_fov_deg, image_size)
-    ball_xyz = _ball_xyz_by_frame(ball_track) if ball_track is not None else {}
-
-    # Union of frame indices across tracks.
-    all_frames = sorted({int(f) for tr in tracks
-                         for f in np.asarray(tr.frames).tolist()})
+    all_frames, smooth = _smoothed_centroid(tracks, ball_track, cfg.drone_smooth_frames)
     if not all_frames:
         return _make_track(clip_id, image_size, fps, K, [])
-
-    # Raw per-frame centroid.
-    by_frame_pos: dict[int, list[np.ndarray]] = {f: [] for f in all_frames}
-    for tr in tracks:
-        idx = {int(f): i for i, f in enumerate(np.asarray(tr.frames).tolist())}
-        for f, i in idx.items():
-            by_frame_pos[f].append(np.asarray(tr.root_t[i], dtype=np.float64))
-    raw = []
-    for f in all_frames:
-        pts = list(by_frame_pos[f])
-        if f in ball_xyz:
-            pts.append(np.asarray(ball_xyz[f], dtype=np.float64))
-        raw.append(np.mean(pts, axis=0))
-    raw_arr = np.asarray(raw)
-
-    # Centered moving average (edge-padded).
-    win = max(1, int(cfg.drone_smooth_frames))
-    pad = win // 2
-    padded = np.pad(raw_arr, ((pad, pad), (0, 0)), mode="edge")
-    kernel = np.ones(win) / win
-    smooth = np.stack(
-        [np.convolve(padded[:, k], kernel, mode="valid") for k in range(3)],
-        axis=1,
-    )[: len(all_frames)]
 
     per_frame: list[_FrameTuple] = []
     for f, target in zip(all_frames, smooth):
@@ -286,3 +367,272 @@ def build_drone_track(
         R, t = look_at_view(centre, target)
         per_frame.append((int(f), R, t, 1.0))
     return _make_track(clip_id, image_size, fps, K, per_frame)
+
+
+def build_goal_track(
+    side: str,
+    tracks: Sequence["SmplWorldTrack"],
+    ball_track: object,
+    cfg: RigConfig,
+    image_size: tuple[int, int],
+    fps: float,
+    clip_id: str,
+) -> CameraTrack:
+    """Low behind-goal camera (``goal:left`` / ``goal:right``).
+
+    Fixed at ``goal_back_m`` behind the named goal's line, centred on
+    the goal mouth (pitch y = width/2), ``goal_height_m`` up — low and
+    looking straight down the length of the pitch. Pans (but does not
+    translate) with the smoothed action centroid, same smoothing
+    primitive and window (``drone_smooth_frames``) as ``build_drone_track``.
+    """
+    if side not in ("left", "right"):
+        raise ValueError(f"build_goal_track: side must be 'left' or 'right', got {side!r}")
+    K = intrinsics_from_fov(cfg.goal_fov_deg, image_size)
+    all_frames, smooth = _smoothed_centroid(tracks, ball_track, cfg.drone_smooth_frames)
+    if not all_frames:
+        return _make_track(clip_id, image_size, fps, K, [])
+
+    goal_x = 0.0 if side == "left" else PITCH_LENGTH
+    behind = -1.0 if side == "left" else 1.0  # step away from the pitch
+    centre = np.array([
+        goal_x + behind * cfg.goal_back_m,
+        PITCH_WIDTH / 2.0,
+        cfg.goal_height_m,
+    ])
+    per_frame: list[_FrameTuple] = []
+    for f, target in zip(all_frames, smooth):
+        R, t = look_at_view(centre, target)
+        per_frame.append((int(f), R, t, 1.0))
+    return _make_track(clip_id, image_size, fps, K, per_frame)
+
+
+def build_goalline_track(
+    side: str,
+    tracks: Sequence["SmplWorldTrack"],
+    ball_track: object,
+    cfg: RigConfig,
+    image_size: tuple[int, int],
+    fps: float,
+    clip_id: str,
+) -> CameraTrack:
+    """Goal-line camera (``goalline:left`` / ``goalline:right``): on the
+    goal line, near the (pitch.py-convention) "near" post, low and
+    dramatic.
+
+    Anchored on ``FIFA_LANDMARKS["{side}_goal_near_post_base"]`` (the
+    single-source-of-truth pitch geometry — never hand-duplicated),
+    offset ``goalline_post_offset_m`` in from the post toward the goal
+    centre so the camera isn't literally inside the goal frame, at
+    ``goalline_height_m``. Pans with the smoothed action centroid like
+    ``build_goal_track``.
+    """
+    if side not in ("left", "right"):
+        raise ValueError(f"build_goalline_track: side must be 'left' or 'right', got {side!r}")
+    K = intrinsics_from_fov(cfg.goalline_fov_deg, image_size)
+    all_frames, smooth = _smoothed_centroid(tracks, ball_track, cfg.drone_smooth_frames)
+    if not all_frames:
+        return _make_track(clip_id, image_size, fps, K, [])
+
+    post = FIFA_LANDMARKS[f"{side}_goal_near_post_base"]
+    goal_y_centre = PITCH_WIDTH / 2.0
+    inward_y = 1.0 if post[1] < goal_y_centre else -1.0
+    centre = np.array([
+        float(post[0]),
+        float(post[1]) + inward_y * cfg.goalline_post_offset_m,
+        cfg.goalline_height_m,
+    ])
+    per_frame: list[_FrameTuple] = []
+    for f, target in zip(all_frames, smooth):
+        R, t = look_at_view(centre, target)
+        per_frame.append((int(f), R, t, 1.0))
+    return _make_track(clip_id, image_size, fps, K, per_frame)
+
+
+def build_orbit_track(
+    tracks: Sequence["SmplWorldTrack"],
+    ball_track: object,
+    cfg: RigConfig,
+    image_size: tuple[int, int],
+    fps: float,
+    clip_id: str,
+) -> CameraTrack:
+    """Arc sweep at fixed radius/height around a pivot — the smoothed
+    action centroid by default (same primitive as ``build_drone_track``).
+
+    Azimuth interpolates linearly from ``-orbit_sweep_deg/2`` to
+    ``+orbit_sweep_deg/2`` across the full frame span (angle 0 matches
+    the drone's "toward the near touchline (-y)" convention), at
+    ``orbit_radius_m``/``orbit_height_m`` from the pivot, always
+    looking at it.
+    """
+    K = intrinsics_from_fov(cfg.orbit_fov_deg, image_size)
+    all_frames, smooth = _smoothed_centroid(tracks, ball_track, cfg.drone_smooth_frames)
+    if not all_frames:
+        return _make_track(clip_id, image_size, fps, K, [])
+
+    n = len(all_frames)
+    per_frame: list[_FrameTuple] = []
+    for i, (f, target) in enumerate(zip(all_frames, smooth)):
+        frac = i / (n - 1) if n > 1 else 0.0
+        angle = math.radians(-cfg.orbit_sweep_deg / 2.0 + cfg.orbit_sweep_deg * frac)
+        centre = np.array([
+            target[0] + cfg.orbit_radius_m * math.sin(angle),
+            target[1] - cfg.orbit_radius_m * math.cos(angle),
+            cfg.orbit_height_m,
+        ])
+        R, t = look_at_view(centre, target)
+        per_frame.append((int(f), R, t, 1.0))
+    return _make_track(clip_id, image_size, fps, K, per_frame)
+
+
+def build_chase_track(
+    tracks: Sequence["SmplWorldTrack"],
+    ball_track: object,
+    cfg: RigConfig,
+    image_size: tuple[int, int],
+    fps: float,
+    clip_id: str,
+) -> CameraTrack:
+    """Ball-chase camera: trails the smoothed ball's horizontal velocity
+    vector, falling back to the smoothed action centroid when the ball
+    is missing on a frame or its smoothed speed is below
+    ``chase_min_speed_m_s`` ("static").
+
+    The ball position sequence is smoothed with the same centered
+    moving-average primitive as the centroid (window
+    ``chase_smooth_frames``), holding the last known position across
+    gaps so a velocity is still computable either side of a short
+    occlusion; frames before the first ever ball sighting use the
+    centroid fallback outright. The trailing direction persists across
+    fallback frames (rather than snapping to a default) so the camera
+    doesn't jerk when the ball reappears.
+    """
+    K = intrinsics_from_fov(cfg.chase_fov_deg, image_size)
+    all_frames, centroid = _smoothed_centroid(tracks, ball_track, cfg.drone_smooth_frames)
+    if not all_frames:
+        return _make_track(clip_id, image_size, fps, K, [])
+
+    ball_xyz = _ball_xyz_by_frame(ball_track) if ball_track is not None else {}
+
+    # Ball position per frame, held across gaps; leading gap (before the
+    # first sighting) stays None so those frames fall back outright.
+    raw_ball: list[np.ndarray | None] = []
+    last: np.ndarray | None = None
+    for f in all_frames:
+        pos = ball_xyz.get(f)
+        if pos is not None:
+            last = np.asarray(pos, dtype=np.float64)
+        raw_ball.append(last)
+
+    have_ball = [p is not None for p in raw_ball]
+    smooth_ball: list[np.ndarray | None] = list(raw_ball)
+    if any(have_ball):
+        first_known = next(p for p in raw_ball if p is not None)
+        filled = np.asarray([p if p is not None else first_known for p in raw_ball])
+        win = max(1, int(cfg.chase_smooth_frames))
+        pad = win // 2
+        padded = np.pad(filled, ((pad, pad), (0, 0)), mode="edge")
+        kernel = np.ones(win) / win
+        smoothed = np.stack(
+            [np.convolve(padded[:, k], kernel, mode="valid") for k in range(3)],
+            axis=1,
+        )[: len(all_frames)]
+        smooth_ball = [smoothed[i] if have_ball[i] else None for i in range(len(all_frames))]
+
+    n = len(all_frames)
+    default_dir = np.array([0.0, -1.0, 0.0])  # matches drone/dolly "toward near touchline"
+    trailing_dir = default_dir
+    per_frame: list[_FrameTuple] = []
+    for i, f in enumerate(all_frames):
+        ball_here = smooth_ball[i]
+        target = None
+        if ball_here is not None:
+            prev_i = max(0, i - 1)
+            next_i = min(n - 1, i + 1)
+            if smooth_ball[prev_i] is not None and smooth_ball[next_i] is not None and next_i > prev_i:
+                vel = (smooth_ball[next_i] - smooth_ball[prev_i]) / (next_i - prev_i)
+                vel_horizontal = np.array([vel[0], vel[1], 0.0])
+                speed = float(np.linalg.norm(vel_horizontal)) * fps
+                if speed >= cfg.chase_min_speed_m_s:
+                    trailing_dir = _normalize(vel_horizontal)
+                    target = ball_here
+        conf = 1.0
+        if target is None:
+            target = centroid[i]
+            conf = 0.5
+        centre = target - cfg.chase_back_m * trailing_dir + np.array([0.0, 0.0, cfg.chase_height_m])
+        R, t = _look_at_safe(centre, target)
+        per_frame.append((int(f), R, t, conf))
+    return _make_track(clip_id, image_size, fps, K, per_frame)
+
+
+def build_dolly_track(
+    tracks: Sequence["SmplWorldTrack"],
+    ball_track: object,
+    cfg: RigConfig,
+    image_size: tuple[int, int],
+    fps: float,
+    clip_id: str,
+) -> CameraTrack:
+    """Low sideline dolly: fixed y near the nearside touchline
+    (``dolly_y_m``, negative = just off the pitch), x tracking the
+    smoothed action centroid, long lens, low to the ground.
+    """
+    K = intrinsics_from_fov(cfg.dolly_fov_deg, image_size)
+    all_frames, smooth = _smoothed_centroid(tracks, ball_track, cfg.drone_smooth_frames)
+    if not all_frames:
+        return _make_track(clip_id, image_size, fps, K, [])
+
+    per_frame: list[_FrameTuple] = []
+    for f, target in zip(all_frames, smooth):
+        centre = np.array([target[0], cfg.dolly_y_m, cfg.dolly_height_m])
+        R, t = look_at_view(centre, target)
+        per_frame.append((int(f), R, t, 1.0))
+    return _make_track(clip_id, image_size, fps, K, per_frame)
+
+
+def build_stadium_track(
+    camera_id: str,
+    tracks: Sequence["SmplWorldTrack"],
+    ball_track: object,
+    cfg: RigConfig,
+    image_size: tuple[int, int],
+    fps: float,
+    clip_id: str,
+) -> CameraTrack:
+    """Stable stadium rigs: whole-pitch overhead, two touchlines and corners.
+
+    Tactical framing includes a 5m run-off on every side at any aspect ratio.
+    Sideline/corner cameras sit inside the board/stand perimeter and above
+    the goals so that dressing does not obstruct their view of play.
+    """
+    frames, targets = _smoothed_centroid(tracks, ball_track, cfg.drone_smooth_frames)
+    if camera_id == "tactical":
+        fov = cfg.tactical_fov_deg
+        half_tan = math.tan(math.radians(fov)/2)
+        aspect = image_size[0]/image_size[1]
+        height = max((PITCH_LENGTH/2+5)/half_tan,
+                     (PITCH_WIDTH/2+5)*aspect/half_tan)
+        center = np.array([PITCH_LENGTH/2, PITCH_WIDTH/2, height])
+        target = np.array([PITCH_LENGTH/2, PITCH_WIDTH/2, 0.])
+        R, t = look_at_view(center, target, up=np.array([0.,1.,0.]))
+        per_frame = [(int(f), R, t, 1.) for f in frames]
+    else:
+        if camera_id in ("sideline:near", "sideline:far"):
+            far = camera_id.endswith(":far")
+            center = np.array([PITCH_LENGTH/2, PITCH_WIDTH+6 if far else -6,
+                               cfg.sideline_height_m])
+            fov = cfg.sideline_fov_deg
+        elif camera_id in ("corner:left", "corner:right"):
+            center = np.array([-6 if camera_id.endswith(":left") else PITCH_LENGTH+6,
+                               -5, cfg.corner_height_m])
+            fov = cfg.corner_fov_deg
+        else:
+            raise ValueError(f"Unknown stadium camera {camera_id!r}")
+        per_frame = []
+        for f, target in zip(frames, targets):
+            R, t = _look_at_safe(center, target)
+            per_frame.append((int(f), R, t, 1.))
+    return _make_track(clip_id, image_size, fps,
+                       intrinsics_from_fov(fov,image_size), per_frame)

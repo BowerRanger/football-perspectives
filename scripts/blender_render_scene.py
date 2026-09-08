@@ -15,7 +15,7 @@ Split into module-level pure helpers (importable/testable without
 as ``scripts/blender_export_fbx.py``. The bpy-dependent scene builders
 (``_build_environment``, ``_build_ball``, ``_build_players``,
 ``_add_camera_from_track``, ``_render``) are nested inside ``main()``
-since they close over the lazily-imported ``bpy``/``bmesh``/
+since they close over the lazily-imported ``bpy``/
 ``mathutils`` modules; later tasks (toon materials, virtual-camera
 renders, vertical/AOV variants) extend those nested functions in place.
 """
@@ -31,6 +31,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from src.utils import render_look  # noqa: E402
 from src.utils.pitch import PITCH_LENGTH, PITCH_WIDTH  # noqa: E402
 
 # --- Pitch-geometry constants -------------------------------------------
@@ -50,15 +51,6 @@ GOAL_POST_RADIUS_M = 0.06
 # --- Render-scene constants ----------------------------------------------
 LINE_Z = 0.02
 LINE_BEVEL_DEPTH = 0.06
-STADIUM_SEGMENTS = 48
-STADIUM_INNER_R = 75.0
-STADIUM_INNER_H = 2.0
-STADIUM_OUTER_R = 95.0
-STADIUM_OUTER_H = 18.0
-# Two-tone stand shading: both derived from palette["outline"], alternated
-# per angular segment (see _build_stadium) for a flat dark two-tone look.
-STADIUM_DARK_FACTOR = 0.55
-STADIUM_LIGHT_FACTOR = 0.8
 BALL_RADIUS_M = 0.11
 SENSOR_WIDTH_MM = 36.0
 DEFAULT_FPS = 25.0
@@ -108,7 +100,15 @@ BALL_SHADOW_RADIUS_M = 0.15
 # Task 2's config/default.yaml `render.style` block, verbatim — the
 # fallback whenever `--style-json` omits a key (RenderStage always
 # passes `render.style`, but a bare `{}` — as in the smoke test — must
-# still produce a fully populated style).
+# still produce a fully populated style). Extended (render-experiments
+# task) with sun/world/lines look knobs and the `post` compositor-effects
+# block — every new key's default here reproduces the exact hardcoded
+# value the script used before this task (DEFAULT_SUN_ENERGY,
+# DEFAULT_SUN_ROTATION_DEG, and the implicit 1.0 Blender defaults for
+# world Background strength / emission Strength), and every `post`
+# sub-effect defaults to its own no-op value — see
+# render_look.post_style_is_active, which a fully-defaulted `post` block
+# must report as inactive.
 _DEFAULT_STYLE: dict = {
     "palette": {
         "grass_light": "#4d9e46",
@@ -121,22 +121,50 @@ _DEFAULT_STYLE: dict = {
     "ramp_steps": 3,
     "outline_width_m": 0.02,
     "grass_stripes": 10,
+    "sun_energy": DEFAULT_SUN_ENERGY,
+    "sun_rotation_deg": DEFAULT_SUN_ROTATION_DEG,
+    "world_strength": 1.0,
+    "lines_emission_strength": 1.0,
+    "stadium": {"enabled": True, "roof": True, "crowd_density": 0.65,
+                "seat_color": "#294b65", "accent_color": "#d6b66e"},
+    "post": {
+        "glare": 0.0,
+        "grain": 0.0,
+        "vignette": 0.0,
+        "posterize": 0,
+        "duotone": {"shadow": None, "highlight": None},
+        "saturation": 1.0,
+    },
 }
 
 
 def _resolve_style(style: dict) -> dict:
-    """Merge a (possibly partial) style dict over the Task 2 defaults.
+    """Merge a (possibly partial) style dict over the defaults above.
 
     Pure — no ``bpy`` — so it's unit-testable on its own. Top-level
-    keys and the nested ``palette`` dict are merged independently so a
-    caller can override e.g. only ``palette.grass_light`` without
-    having to repeat every other palette entry.
+    keys and the nested ``palette``/``post``/``post.duotone`` dicts are
+    merged independently (via ``render_look.merge_partial``) so a
+    caller can override e.g. only ``post.grain`` without having to
+    repeat every sibling key, at any nesting level.
     """
-    merged = {k: v for k, v in _DEFAULT_STYLE.items() if k != "palette"}
-    merged.update({k: v for k, v in style.items() if k != "palette"})
-    palette = dict(_DEFAULT_STYLE["palette"])
-    palette.update(style.get("palette") or {})
-    merged["palette"] = palette
+    merged = render_look.merge_partial(
+        {k: v for k, v in _DEFAULT_STYLE.items() if k not in ("palette", "post")},
+        {k: v for k, v in style.items() if k not in ("palette", "post")},
+    )
+    merged["palette"] = render_look.merge_partial(
+        _DEFAULT_STYLE["palette"], style.get("palette"))
+
+    post_defaults = _DEFAULT_STYLE["post"]
+    post_in = style.get("post") or {}
+    post = render_look.merge_partial(
+        {k: v for k, v in post_defaults.items() if k != "duotone"},
+        {k: v for k, v in post_in.items() if k != "duotone"},
+    )
+    post["duotone"] = render_look.merge_partial(
+        post_defaults["duotone"], post_in.get("duotone"))
+    merged["post"] = post
+    merged["stadium"] = render_look.merge_partial(
+        _DEFAULT_STYLE["stadium"], style.get("stadium"))
     return merged
 
 
@@ -146,6 +174,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Toon render of one shot")
     p.add_argument("--output-dir", required=True)
     p.add_argument("--shot", default="")
+    p.add_argument(
+        "--render-root", default="render",
+        help="Path component substituted for 'render' in both the render "
+             "output dir (output-dir/<render-root>/<shot>/...) and the "
+             "non-broadcast camera-track lookup dir (same location, "
+             ".../cameras/). Default 'render' reproduces today's exact "
+             "paths; render-experiments passes a distinct value so a "
+             "matrix run never clobbers the protected baseline under "
+             "output/render/<shot>/.")
     p.add_argument("--cameras", type=lambda s: s.split(","),
                     default=["broadcast"])
     p.add_argument("--width", type=int, default=1920)
@@ -181,17 +218,16 @@ def main(argv: list[str]) -> int:
         )
         return 2
 
-    import bmesh  # type: ignore
     import numpy as np
     from math import radians
 
     from mathutils import Matrix, Quaternion, Vector  # type: ignore
 
-    from src.utils import render_look
     from src.utils.blender_scene_io import (
         iter_player_fbx_entries,
         load_camera_track,
         load_smpl_body_data,
+        shape_smpl_body_data,
         prepare_ball_keys,
     )
     from src.utils.smpl_skeleton import (
@@ -210,10 +246,17 @@ def main(argv: list[str]) -> int:
 
     output_dir = Path(args.output_dir).resolve()
     shot = args.shot
+    # --render-root substitutes the "render" path component below (and
+    # in _camera_track_path's non-broadcast branch, further down) so a
+    # render-experiments matrix run can redirect its entire output tree
+    # — including where it looks up virtual-camera tracks — away from
+    # the protected output/render/<shot>/ baseline. Default "render"
+    # reproduces every path byte-identically.
+    render_root = args.render_root
     # Legacy empty shot id renders under a fixed "clip" directory name —
     # keeps output/render/<dir>/<camera>.mp4 stable for single-shot runs.
     shot_dir = shot or "clip"
-    out_dir = output_dir / "render" / shot_dir
+    out_dir = output_dir / render_root / shot_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -277,7 +320,20 @@ def main(argv: list[str]) -> int:
         nt.links.new(mmul.outputs[0], mfloor.inputs[0])
         nt.links.new(mfloor.outputs[0], mmod.inputs[0])
         nt.links.new(mmod.outputs[0], mix.inputs["Fac"])
-        nt.links.new(mix.outputs["Color"], diffuse.inputs["Color"])
+        noise = nt.nodes.new("ShaderNodeTexNoise")
+        noise.inputs["Scale"].default_value = 2.5
+        noise.inputs["Detail"].default_value = 2.0
+        nt.links.new(texc.outputs["Object"], noise.inputs["Vector"])
+        variation = nt.nodes.new("ShaderNodeMapRange")
+        variation.inputs["To Min"].default_value = 0.88
+        variation.inputs["To Max"].default_value = 1.04
+        nt.links.new(noise.outputs["Fac"], variation.inputs["Value"])
+        tint = nt.nodes.new("ShaderNodeMixRGB")
+        tint.blend_type = "MULTIPLY"
+        tint.inputs["Fac"].default_value = 1.0
+        nt.links.new(mix.outputs["Color"], tint.inputs["Color1"])
+        nt.links.new(variation.outputs["Result"], tint.inputs["Color2"])
+        nt.links.new(tint.outputs["Color"], diffuse.inputs["Color"])
         nt.links.new(diffuse.outputs["BSDF"], out.inputs["Surface"])
         return mat
 
@@ -342,6 +398,62 @@ def main(argv: list[str]) -> int:
             PITCH_LENGTH - SIX_YARD_BOX_DEPTH_M, PITCH_LENGTH,
             SIX_YARD_BOX_WIDTH_M / 2), lines_mat, cyclic=True)
 
+    def _build_pitch_details(lines_mat):
+        from math import acos, cos, sin, pi
+        def arc(name, x, y, radius, start, end):
+            pts = [(x+radius*cos(start+(end-start)*i/64),
+                    y+radius*sin(start+(end-start)*i/64)) for i in range(65)]
+            _line_object(name, pts, lines_mat)
+        theta = acos((PENALTY_BOX_DEPTH_M-11)/CENTRE_CIRCLE_R)
+        arc("L_PenaltyArc_Left",11,PITCH_WIDTH/2,CENTRE_CIRCLE_R,-theta,theta)
+        arc("L_PenaltyArc_Right",PITCH_LENGTH-11,PITCH_WIDTH/2,
+            CENTRE_CIRCLE_R,pi-theta,pi+theta)
+        for x,y,start in [(0,0,0),(PITCH_LENGTH,0,pi/2),
+                          (PITCH_LENGTH,PITCH_WIDTH,pi),(0,PITCH_WIDTH,3*pi/2)]:
+            arc("L_CornerArc",x,y,1.,start,start+pi/2)
+        for x in (11,PITCH_LENGTH/2,PITCH_LENGTH-11):
+            bpy.ops.mesh.primitive_circle_add(vertices=24, radius=0.11,
+                fill_type="NGON", location=(x,PITCH_WIDTH/2,LINE_Z))
+            bpy.context.object.name = "L_Spot"
+            bpy.context.object.data.materials.append(lines_mat)
+
+    def _build_nets(lines_mat):
+        net_mat = _new_diffuse_material("M_GoalNet", (0.58,0.64,0.62,1))
+        for x, sign in [(0.,-1.),(PITCH_LENGTH,1.)]:
+            curve = bpy.data.curves.new("GoalNet", "CURVE")
+            curve.dimensions = "3D"
+            curve.bevel_depth = 0.009
+            curve.bevel_resolution = 0
+            def strand(points):
+                sp = curve.splines.new("POLY")
+                sp.points.add(len(points)-1)
+                for p, co in zip(sp.points, points):
+                    p.co = (*co,1)
+            y0,y1 = PITCH_WIDTH/2-GOAL_HALF_WIDTH_M,PITCH_WIDTH/2+GOAL_HALF_WIDTH_M
+            back=x+sign*2.0
+            for y in np.linspace(y0,y1,42):
+                strand([(x,y,GOAL_HEIGHT_M),(back,y,GOAL_HEIGHT_M),(back,y,0.05)])
+            for z in np.linspace(0.05,GOAL_HEIGHT_M,15):
+                strand([(x,y0,z),(back,y0,z),(back,y1,z),(x,y1,z)])
+            for xx in np.linspace(x,back,12):
+                strand([(xx,y0,0.05),(xx,y0,GOAL_HEIGHT_M),
+                        (xx,y1,GOAL_HEIGHT_M),(xx,y1,0.05)])
+            obj = bpy.data.objects.new("GoalNet",curve)
+            bpy.context.collection.objects.link(obj)
+            curve.materials.append(net_mat)
+            support = bpy.data.curves.new("GoalRearSupport", "CURVE")
+            support.dimensions = "3D"
+            support.bevel_depth = 0.035
+            sp = support.splines.new("POLY")
+            points=[(x,y0,0.04),(back,y0,0.04),(back,y0,GOAL_HEIGHT_M),
+                    (back,y1,GOAL_HEIGHT_M),(back,y1,0.04),(x,y1,0.04)]
+            sp.points.add(len(points)-1)
+            for p,co in zip(sp.points,points):
+                p.co=(*co,1)
+            obj=bpy.data.objects.new("GoalRearSupport",support)
+            bpy.context.collection.objects.link(obj)
+            support.materials.append(lines_mat)
+
     def _build_goals(lines_mat: object) -> None:
         for x in (0.0, PITCH_LENGTH):
             for y in (PITCH_WIDTH / 2 - GOAL_HALF_WIDTH_M,
@@ -356,62 +468,7 @@ def main(argv: list[str]) -> int:
                 rotation=(radians(90), 0.0, 0.0))
             bpy.context.active_object.data.materials.append(lines_mat)
 
-    def _build_stadium(palette: dict) -> None:
-        """Raked stadium bowl ring: a low inward-tucked riser wall from
-        the r=95 ground footprint to r=75 at h=2, then the main bowl
-        flaring back out to r=95 at h=18 — built directly with bmesh
-        so the two extrude+scale stages are explicit.
-
-        Flat dark two-tone stand: two diffuse materials (both shades of
-        `palette["outline"]`) are alternated per angular segment across
-        both extrusion bands, giving vertical light/dark bays around the
-        bowl rather than a single flat tone.
-        """
-        mesh = bpy.data.meshes.new("StadiumBowl")
-        bm = bmesh.new()
-        bmesh.ops.create_circle(
-            bm, cap_ends=False, segments=STADIUM_SEGMENTS,
-            radius=STADIUM_OUTER_R)
-        base_edges = list(bm.edges)
-
-        ext1 = bmesh.ops.extrude_edge_only(bm, edges=base_edges)
-        verts1 = [g for g in ext1["geom"] if isinstance(g, bmesh.types.BMVert)]
-        edges1 = [g for g in ext1["geom"] if isinstance(g, bmesh.types.BMEdge)]
-        faces1 = [g for g in ext1["geom"] if isinstance(g, bmesh.types.BMFace)]
-        bmesh.ops.translate(bm, verts=verts1, vec=(0.0, 0.0, STADIUM_INNER_H))
-        scale1 = STADIUM_INNER_R / STADIUM_OUTER_R
-        bmesh.ops.scale(bm, verts=verts1, vec=(scale1, scale1, 1.0))
-
-        ext2 = bmesh.ops.extrude_edge_only(bm, edges=edges1)
-        verts2 = [g for g in ext2["geom"] if isinstance(g, bmesh.types.BMVert)]
-        faces2 = [g for g in ext2["geom"] if isinstance(g, bmesh.types.BMFace)]
-        bmesh.ops.translate(
-            bm, verts=verts2, vec=(0.0, 0.0, STADIUM_OUTER_H - STADIUM_INNER_H))
-        scale2 = STADIUM_OUTER_R / STADIUM_INNER_R
-        bmesh.ops.scale(bm, verts=verts2, vec=(scale2, scale2, 1.0))
-
-        # Alternate material slot 0/1 per angular segment, independently
-        # in each band (both bands index their segments 0..N-1 in the
-        # same order they were created from `base_edges`/`edges1`, so a
-        # given segment gets the same tone in both bands — vertical bays).
-        for i, f in enumerate(faces1):
-            f.material_index = i % 2
-        for i, f in enumerate(faces2):
-            f.material_index = i % 2
-
-        bm.to_mesh(mesh)
-        bm.free()
-        obj = bpy.data.objects.new("StadiumBowl", mesh)
-        bpy.context.collection.objects.link(obj)
-        obj.location = (PITCH_LENGTH / 2, PITCH_WIDTH / 2, 0.0)
-
-        outline = render_look.hex_to_linear_rgba(palette["outline"])
-        dark = tuple(c * STADIUM_DARK_FACTOR for c in outline[:3]) + (1.0,)
-        light = tuple(c * STADIUM_LIGHT_FACTOR for c in outline[:3]) + (1.0,)
-        obj.data.materials.append(_new_diffuse_material("M_Stand_Dark", dark))
-        obj.data.materials.append(_new_diffuse_material("M_Stand_Light", light))
-
-    def _build_world(palette: dict) -> None:
+    def _build_world(style: dict, palette: dict) -> None:
         top = render_look.hex_to_linear_rgba(palette["sky_top"])
         bottom = render_look.hex_to_linear_rgba(palette["sky_bottom"])
         world = bpy.data.worlds.new("W_Sky")
@@ -420,12 +477,16 @@ def main(argv: list[str]) -> int:
         nt.nodes.clear()
         out = nt.nodes.new("ShaderNodeOutputWorld")
         bg = nt.nodes.new("ShaderNodeBackground")
+        # world_strength (default 1.0 — Blender's own Background node
+        # default) dims/brightens the whole sky+ambient contribution;
+        # night/floodlit looks pair a low value here with a low sun_energy.
+        bg.inputs["Strength"].default_value = float(style.get("world_strength", 1.0))
         mix = nt.nodes.new("ShaderNodeMixRGB")
         mix.inputs["Color1"].default_value = bottom
         mix.inputs["Color2"].default_value = top
         sep = nt.nodes.new("ShaderNodeSeparateXYZ")
         texc = nt.nodes.new("ShaderNodeTexCoord")
-        nt.links.new(texc.outputs["Generated"], sep.inputs["Vector"])
+        nt.links.new(texc.outputs["Normal"], sep.inputs["Vector"])
         nt.links.new(sep.outputs["Z"], mix.inputs["Fac"])
         nt.links.new(mix.outputs["Color"], bg.inputs["Color"])
         nt.links.new(bg.outputs["Background"], out.inputs["Surface"])
@@ -434,18 +495,23 @@ def main(argv: list[str]) -> int:
         bpy.ops.object.light_add(type="SUN")
         sun = bpy.context.active_object
         sun.name = "Sun"
-        sun.rotation_euler = tuple(radians(d) for d in DEFAULT_SUN_ROTATION_DEG)
-        sun.data.energy = DEFAULT_SUN_ENERGY
+        sun_rotation_deg = style.get("sun_rotation_deg", DEFAULT_SUN_ROTATION_DEG)
+        sun.rotation_euler = tuple(radians(d) for d in sun_rotation_deg)
+        sun.data.energy = float(style.get("sun_energy", DEFAULT_SUN_ENERGY))
 
     def _build_environment(style: dict) -> None:
         palette = style["palette"]
         lines_mat = _new_emission_material(
-            "M_Lines", render_look.hex_to_linear_rgba(palette["lines"]))
+            "M_Lines", render_look.hex_to_linear_rgba(palette["lines"]),
+            strength=float(style.get("lines_emission_strength", 1.0)))
         _build_pitch(style, palette)
         _build_lines(lines_mat)
+        _build_pitch_details(lines_mat)
         _build_goals(lines_mat)
-        _build_stadium(palette)
-        _build_world(palette)
+        _build_nets(lines_mat)
+        from scripts.blender_stadium import build_stadium
+        build_stadium(bpy, style)
+        _build_world(style, palette)
 
     # --- Toon materials, outlines, blob shadows -------------------------
     # Cel-shaded look (Task 7): Diffuse -> Shader-to-RGB -> constant
@@ -797,6 +863,9 @@ def main(argv: list[str]) -> int:
             if entry["shot_id"] not in ("", shot_id):
                 continue
             pid = entry["player_id"]
+            player_smpl, player_pelvis = shape_smpl_body_data(smpl_data, entry["betas"], np)
+            player_rest = player_smpl["joint_positions"] if player_smpl is not None else rest_joints
+            endpoints = _bone_rest_endpoints(player_rest, _bone_children_map())
             frames = np.asarray(entry["frames"])
             thetas = np.asarray(entry["thetas"])
             root_R = np.asarray(entry["root_R"])
@@ -835,7 +904,7 @@ def main(argv: list[str]) -> int:
             # body part gets an inverted-hull outline (Task 7 toon look).
             if smpl_data is not None:
                 body_objs = _add_smpl_mesh_body(
-                    arm, pid, smpl_data, colors, materials_cache, ramp_steps,
+                    arm, pid, player_smpl, colors, materials_cache, ramp_steps,
                     endpoints)
             else:
                 body_objs = _add_capsule_body(
@@ -861,7 +930,7 @@ def main(argv: list[str]) -> int:
                 # position (zero when smpl_data is None — verified
                 # SMPL_REST_JOINTS_YUP[0] == (0, 0, 0) — so this formula
                 # is exact in both the asset and fallback cases).
-                offset = R @ pelvis_canon
+                offset = R @ player_pelvis
                 loc = root_t[i] - offset
                 arm.location = (float(loc[0]), float(loc[1]), float(loc[2]))
                 m = Matrix((
@@ -957,11 +1026,187 @@ def main(argv: list[str]) -> int:
         _aov_file_output_node = fo
         return fo
 
+    # --- Style-post compositor (render-experiments task) ------------------
+    # style.post's {glare, grain, vignette, posterize, duotone, saturation}
+    # become a SECOND compositor graph, mutually exclusive with AOV (see
+    # _render's gating below: an --aov request always wins, with a
+    # one-time warning, over a configured post block — running both
+    # would mean the AOV File Output node and the post effects fight over
+    # the scene's single `compositing_node_group` slot, and AOV's raw
+    # passes are the more valuable artifact to protect for downstream
+    # tooling). Unlike _setup_aov_compositor this is REBUILT (not cached)
+    # on every call that needs it: the grain effect bakes a noise image at
+    # the calling resolution, and the 9:16 vertical pass renders at
+    # swapped (height, width) from its landscape counterpart — a cached
+    # graph would leave grain misaligned/wrong-aspect on whichever pass
+    # didn't build it.
+    #
+    # Blender 5.1.1 adaptation (verified via a probe script rendering
+    # actual stills and diffing pixels before wiring this — same
+    # discipline as the AOV section above): a `CompositorNodeTree`
+    # assigned to `scene.compositing_node_group` has NO "Composite"
+    # output node in this version (`CompositorNodeComposite` doesn't
+    # exist) — the redesigned compositor instead uses the generic
+    # node-group interface: an OUTPUT socket declared via
+    # `group.interface.new_socket(name=..., in_out='OUTPUT',
+    # socket_type='NodeSocketColor')` plus a `NodeGroupOutput` node whose
+    # matching input socket is what actually feeds the final rendered
+    # image. Skipping the interface-socket step leaves the graph
+    # silently inert — a `NodeGroupOutput` node's un-declared socket
+    # links but has no effect on the render (confirmed by a probe render
+    # with a naive Invert-only graph coming back pixel-identical to the
+    # uncomposited baseline until the interface socket was added).
+    # Also note several node types below are `ShaderNode*`, not
+    # `CompositorNode*` (no compositor-native ColorRamp/Math/MixRGB exist
+    # in this version) — cross-tree node reuse confirmed working via the
+    # same probe.
+    _post_compositor_group = None
+    _post_grain_image = None
+
+    def _teardown_post_compositor() -> None:
+        nonlocal _post_compositor_group, _post_grain_image
+        if _post_grain_image is not None:
+            bpy.data.images.remove(_post_grain_image)
+            _post_grain_image = None
+        if _post_compositor_group is not None:
+            bpy.data.node_groups.remove(_post_compositor_group)
+            _post_compositor_group = None
+
+    def _setup_post_compositor(post: dict, width: int, height: int) -> object:
+        """(Re)build the style.post effect chain for this call's exact
+        (width, height); see the module comment above for why this
+        rebuilds every time rather than caching like AOV does.
+
+        Effect order — Render Layers -> saturation -> duotone -> posterize
+        -> glare -> vignette -> grain -> (group output): duotone fully
+        replaces color (by design — a 2-color gradient has no "hue" left
+        for a prior saturation change to act on, so saturation must run
+        first to have any visible effect when both are set); glare runs
+        on the graded/posterized image so its bloom picks up the
+        stylised bright regions rather than the raw pre-grade render;
+        vignette darkens after glare so the glow itself falls off toward
+        the edges too; grain is the final film-stock-like overlay, last
+        in any real photochemical pipeline.
+        """
+        nonlocal _post_compositor_group, _post_grain_image
+        _teardown_post_compositor()
+
+        group = bpy.data.node_groups.new("PostFX", "CompositorNodeTree")
+        bpy.context.scene.compositing_node_group = group
+        rl = group.nodes.new("CompositorNodeRLayers")
+        rl.layer = bpy.context.view_layer.name
+        prev = rl.outputs["Image"]
+
+        saturation = float(post.get("saturation", 1.0))
+        if saturation != 1.0:
+            hue_sat = group.nodes.new("CompositorNodeHueSat")
+            hue_sat.inputs["Hue"].default_value = 0.5
+            hue_sat.inputs["Value"].default_value = 1.0
+            hue_sat.inputs["Factor"].default_value = 1.0
+            hue_sat.inputs["Saturation"].default_value = saturation
+            group.links.new(prev, hue_sat.inputs["Image"])
+            prev = hue_sat.outputs["Image"]
+
+        duotone_pair = render_look.duotone_colors(post.get("duotone"))
+        if duotone_pair is not None:
+            shadow_rgba, highlight_rgba = duotone_pair
+            to_bw = group.nodes.new("CompositorNodeRGBToBW")
+            group.links.new(prev, to_bw.inputs["Image"])
+            ramp = group.nodes.new("ShaderNodeValToRGB")
+            ramp.color_ramp.interpolation = "LINEAR"
+            ramp.color_ramp.elements[0].position = 0.0
+            ramp.color_ramp.elements[0].color = shadow_rgba
+            ramp.color_ramp.elements[1].position = 1.0
+            ramp.color_ramp.elements[1].color = highlight_rgba
+            group.links.new(to_bw.outputs["Val"], ramp.inputs["Factor"])
+            prev = ramp.outputs["Color"]
+
+        posterize_steps = int(post.get("posterize", 0) or 0)
+        if posterize_steps >= 2:
+            poster = group.nodes.new("CompositorNodePosterize")
+            poster.inputs["Steps"].default_value = float(posterize_steps)
+            group.links.new(prev, poster.inputs["Image"])
+            prev = poster.outputs["Image"]
+
+        glare_strength = float(post.get("glare", 0.0))
+        if glare_strength > 0.0:
+            glare = group.nodes.new("CompositorNodeGlare")
+            # "Fog Glow" is the closest analogue to legacy bloom (EEVEE
+            # Next has none natively — see the CLAUDE.md/task note this
+            # mirrors); Type is a MENU input socket taking these exact
+            # title-case strings, not an enum property on the node.
+            glare.inputs["Type"].default_value = "Fog Glow"
+            glare.inputs["Threshold"].default_value = 0.5
+            glare.inputs["Strength"].default_value = glare_strength
+            group.links.new(prev, glare.inputs["Image"])
+            prev = glare.outputs["Image"]
+
+        vignette_strength = float(post.get("vignette", 0.0))
+        if vignette_strength > 0.0:
+            mask = group.nodes.new("CompositorNodeEllipseMask")
+            mask.inputs["Position"].default_value = (0.5, 0.5)
+            mask.inputs["Size"].default_value = (0.8, 0.8)
+            blur = group.nodes.new("CompositorNodeBlur")
+            blur.inputs["Type"].default_value = "Gaussian"
+            blur.inputs["Size"].default_value = (0.3, 0.3)
+            group.links.new(mask.outputs["Mask"], blur.inputs["Image"])
+            mask_val = group.nodes.new("CompositorNodeRGBToBW")
+            group.links.new(blur.outputs["Image"], mask_val.inputs["Image"])
+            # darken_factor = vignette_strength * (1 - blurred_mask):
+            # 0 at frame centre (mask==1, no darkening), ramping up
+            # toward the edges (mask->0).
+            invert = group.nodes.new("ShaderNodeMath")
+            invert.operation = "SUBTRACT"
+            invert.inputs[0].default_value = 1.0
+            group.links.new(mask_val.outputs["Val"], invert.inputs[1])
+            darken = group.nodes.new("ShaderNodeMath")
+            darken.operation = "MULTIPLY"
+            darken.inputs[1].default_value = vignette_strength
+            group.links.new(invert.outputs[0], darken.inputs[0])
+            black = group.nodes.new("CompositorNodeRGB")
+            black.outputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+            vignette_mix = group.nodes.new("ShaderNodeMixRGB")
+            vignette_mix.blend_type = "MIX"
+            group.links.new(prev, vignette_mix.inputs["Color1"])
+            group.links.new(black.outputs["Color"], vignette_mix.inputs["Color2"])
+            group.links.new(darken.outputs[0], vignette_mix.inputs["Fac"])
+            prev = vignette_mix.outputs["Color"]
+
+        grain_amount = float(post.get("grain", 0.0))
+        if grain_amount > 0.0:
+            pixels = render_look.grain_noise_pixels(width, height)
+            img = bpy.data.images.new(
+                "PostFX_Grain", width, height, alpha=True, float_buffer=True)
+            # Non-Color: this is raw blend data, not a color to run
+            # through Blender's sRGB/view-transform pipeline.
+            img.colorspace_settings.name = "Non-Color"
+            img.pixels.foreach_set(pixels)
+            _post_grain_image = img
+            img_node = group.nodes.new("CompositorNodeImage")
+            img_node.image = img
+            grain_mix = group.nodes.new("ShaderNodeMixRGB")
+            grain_mix.blend_type = "OVERLAY"
+            grain_mix.inputs["Fac"].default_value = grain_amount
+            group.links.new(prev, grain_mix.inputs["Color1"])
+            group.links.new(img_node.outputs["Image"], grain_mix.inputs["Color2"])
+            prev = grain_mix.outputs["Color"]
+
+        group.interface.new_socket(
+            name="Image", in_out="OUTPUT", socket_type="NodeSocketColor")
+        group_out = group.nodes.new("NodeGroupOutput")
+        group.links.new(prev, group_out.inputs["Image"])
+
+        _post_compositor_group = group
+        return group
+
+    _printed_post_aov_warning = False
+
     # --- Render ----------------------------------------------------------
 
     def _render(camera_obj: object, out_path: Path, fps: float,
                 frame_range: tuple[int, int], width: int, height: int,
-                samples: int, aov_dir: Path | None = None) -> None:
+                samples: int, aov_dir: Path | None = None,
+                post: dict | None = None) -> None:
         scene = bpy.context.scene
         scene.camera = camera_obj
         scene.render.resolution_x = width
@@ -999,26 +1244,54 @@ def main(argv: list[str]) -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         scene.render.filepath = str(out_path)
 
-        # `scene.compositing_node_group` (once assigned by
-        # _setup_aov_compositor, below) stays attached to the scene for
-        # every subsequent render call — Blender doesn't clear it, and
-        # `scene.render.use_compositing` (a separate flag, default True)
-        # is never touched elsewhere, so the compositor keeps running on
-        # every later render regardless of this call's own `aov_dir`. Left
-        # ungated, a landscape pass with `--aov` "poisons" every following
-        # render (e.g. the 9:16 vertical pass, or a next camera without
-        # AOV) into re-firing the File Output node at its stale directory
-        # and stale (wrong-resolution) frame — and since the rename-to-
-        # `.exr` loop below is itself gated on `aov_dir`, that stray write
-        # is left as a corrupt extension-less file. Explicitly gating
-        # `use_compositing` on *this* call's `aov_dir` on every call (not
-        # just when AOV is requested) is what actually scopes the
-        # compositor to the calls that asked for it.
-        scene.render.use_compositing = aov_dir is not None
+        # `scene.compositing_node_group` (once assigned by either
+        # _setup_aov_compositor or _setup_post_compositor, below) stays
+        # attached to the scene for every subsequent render call —
+        # Blender doesn't clear it, and `scene.render.use_compositing`
+        # (a separate flag, default True) is never touched elsewhere, so
+        # the compositor keeps running on every later render regardless
+        # of this call's own `aov_dir`/`post`. Left ungated, a landscape
+        # pass with `--aov` (or an active style.post) "poisons" every
+        # following render (e.g. the 9:16 vertical pass, or a next camera
+        # without AOV) into re-firing at a stale directory/resolution —
+        # and since the AOV rename-to-`.exr` loop below is itself gated
+        # on `aov_dir`, that stray write is left as a corrupt extension-
+        # less file. Explicitly (re)deciding `use_compositing` AND which
+        # graph (if any) is attached on *every* call — not just when a
+        # request is present — is what actually scopes each to the calls
+        # that asked for it.
+        #
+        # AOV and style.post are mutually exclusive for now: both would
+        # otherwise need to share the scene's single
+        # `compositing_node_group` slot, and AOV's raw Z/Normal/
+        # Cryptomatte passes are the more valuable artifact for
+        # downstream tooling to protect, so an `--aov` request always
+        # wins — with a one-time warning — over a configured post block.
+        active_post = post if post and render_look.post_style_is_active(post) else None
+        if active_post is not None and aov_dir is not None:
+            nonlocal _printed_post_aov_warning
+            if not _printed_post_aov_warning:
+                print(
+                    "[render] style.post effects are configured but --aov "
+                    "was requested; AOV wins (style.post is disabled for "
+                    "this run) — see blender_render_scene.py's AOV/post "
+                    "mutual-exclusion note."
+                )
+                _printed_post_aov_warning = True
+            active_post = None
+
         if aov_dir is not None:
+            scene.render.use_compositing = True
+            _teardown_post_compositor()
             fo = _setup_aov_compositor()
             aov_dir.mkdir(parents=True, exist_ok=True)
             fo.directory = str(aov_dir) + "/"
+        elif active_post is not None:
+            scene.render.use_compositing = True
+            _setup_post_compositor(active_post, width, height)
+        else:
+            scene.render.use_compositing = False
+            _teardown_post_compositor()
 
         t0 = time.time()
         bpy.ops.render.render(animation=True)
@@ -1084,7 +1357,7 @@ def main(argv: list[str]) -> int:
         if cam_id == "broadcast":
             return output_dir / "camera" / (
                 f"{shot}_camera_track.json" if shot else "camera_track.json")
-        return (output_dir / "render" / shot_dir / "cameras"
+        return (output_dir / render_root / shot_dir / "cameras"
                 / f"{_safe_cam_id(cam_id)}_camera_track.json")
 
     broadcast_path = _camera_track_path("broadcast")
@@ -1121,7 +1394,17 @@ def main(argv: list[str]) -> int:
         cam_entries.append((cam_id, cam_obj, frame_start, frame_end))
 
     if args.save_blend and cam_entries:
-        bpy.context.scene.camera = cam_entries[0][1]
+        scene = bpy.context.scene
+        scene.camera = cam_entries[0][1]
+        scene.render.engine = "BLENDER_EEVEE"
+        scene.render.resolution_x = args.width
+        scene.render.resolution_y = args.height
+        scene.render.resolution_percentage = 100
+        scene.render.fps = int(round(fps))
+        scene.render.fps_base = int(round(fps)) / fps
+        scene.frame_start = min(entry[2] for entry in cam_entries)
+        scene.frame_end = max(entry[3] for entry in cam_entries)
+        scene.frame_set(scene.frame_start)
         bpy.ops.wm.save_as_mainfile(filepath=str(out_dir / "scene.blend"))
 
     for cam_id, cam_obj, frame_start, frame_end in cam_entries:
@@ -1132,7 +1415,7 @@ def main(argv: list[str]) -> int:
         aov_dir = (out_dir / "aov" / safe_id) if args.aov else None
         _render(cam_obj, out_dir / f"{safe_id}.mp4", fps,
                 (frame_start, frame_end), args.width, args.height, args.samples,
-                aov_dir=aov_dir)
+                aov_dir=aov_dir, post=style.get("post"))
 
         # 9:16 portrait pass (Task 8): every non-broadcast camera gets a
         # second render at swapped (height, width) resolution. Reframed
@@ -1141,11 +1424,15 @@ def main(argv: list[str]) -> int:
         # scaling them would require re-keying every frame; sensor_fit
         # instead changes how the *existing* keyed lens maps to FOV for
         # this pass only, then is restored to "HORIZONTAL" for the next
-        # camera's landscape render.
+        # camera's landscape render. style.post still applies here (it's
+        # never gated on --vertical the way AOV is) — _setup_post_compositor
+        # rebuilds its grain bake at this call's swapped resolution, so it
+        # stays aligned rather than reusing the landscape pass's tile.
         if args.vertical and cam_id != "broadcast":
             cam_obj.data.sensor_fit = "VERTICAL"
             _render(cam_obj, out_dir / f"{safe_id}_9x16.mp4", fps,
-                    (frame_start, frame_end), args.height, args.width, args.samples)
+                    (frame_start, frame_end), args.height, args.width, args.samples,
+                    post=style.get("post"))
             cam_obj.data.sensor_fit = "HORIZONTAL"
 
     return 0

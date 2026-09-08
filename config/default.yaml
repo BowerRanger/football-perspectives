@@ -1404,11 +1404,42 @@ export:
     drone_height_m: 40.0
     drone_back_m: 25.0
     drone_smooth_frames: 25
+    # Low behind-goal camera (goal:left / goal:right) — fixed behind the
+    # named goal's line, panning with the smoothed action centroid.
+    goal_fov_deg: 40.0
+    goal_height_m: 1.2
+    goal_back_m: 8.0
+    # On the goal line near the post (goalline:left / goalline:right).
+    goalline_fov_deg: 50.0
+    goalline_height_m: 0.4
+    goalline_post_offset_m: 1.5
+    # Arc sweep around the smoothed action centroid (orbit).
+    orbit_fov_deg: 50.0
+    orbit_radius_m: 15.0
+    orbit_height_m: 6.0
+    orbit_sweep_deg: 180.0
+    # Ball-chase cam, falls back to the action centroid (chase).
+    chase_fov_deg: 45.0
+    chase_back_m: 6.0
+    chase_height_m: 2.0
+    chase_smooth_frames: 9
+    chase_min_speed_m_s: 0.5
+    # Low sideline dolly (dolly).
+    dolly_fov_deg: 30.0
+    dolly_y_m: -3.0
+    dolly_height_m: 1.0
+    tactical_fov_deg: 55.0
+    sideline_fov_deg: 55.0
+    sideline_height_m: 14.0
+    corner_fov_deg: 58.0
+    corner_height_m: 10.0
 
 render:
   enabled: true
   blender_path: null          # null → fall back to export.blender_path
-  cameras: [broadcast, drone] # also accepts pov:<PID>, ots:<PID>
+  # Also: tactical, sideline:near/far, corner:left/right, goal:left/right,
+  # goalline:left/right, orbit, chase, dolly, pov:<PID>, ots:<PID>.
+  cameras: [broadcast, drone]
   resolution: [1920, 1080]
   vertical_variant: false     # additionally render 1080x1920 for non-broadcast cams
   samples: 16                 # EEVEE taa_render_samples
@@ -1423,6 +1454,12 @@ render:
     ramp_steps: 3
     outline_width_m: 0.02
     grass_stripes: 10
+    stadium:
+      enabled: true
+      roof: true
+      crowd_density: 0.65   # 0 = empty seats, 1 = full; deterministic layout
+      seat_color: "#294b65"
+      accent_color: "#d6b66e"
   teams:
     defaults:
       home: {shirt: "#c0392b", shorts: "#ffffff", socks: "#c0392b"}

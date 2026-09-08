@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from scripts.blender_render_scene import _parse_args
+from scripts.blender_render_scene import _DEFAULT_STYLE, _parse_args, _resolve_style
 from src.stages.render import RenderStage
 from src.utils.blender_scene_io import load_smpl_body_data
 from src.utils.smpl_skeleton import SMPL_JOINT_NAMES, compute_all_joint_worlds
@@ -58,6 +58,108 @@ def test_parse_args_defaults_and_flags():
     assert ns.style_json == "{}"
     assert ns.vertical is True and ns.aov is True and ns.save_blend is True
     assert (ns.frame_start, ns.frame_end) == (10, 20)
+    assert ns.render_root == "render"
+
+
+@pytest.mark.unit
+def test_parse_args_render_root_override():
+    ns = _parse_args([
+        "--output-dir", "/tmp/o", "--render-root", "render_experiments/variant_a",
+    ])
+    assert ns.render_root == "render_experiments/variant_a"
+
+
+# --- _resolve_style: new style keys (render-experiments task) -----------
+# The frozen-interface guarantee: every new key absent from --style-json
+# must reproduce byte-identical current behaviour. These pin the exact
+# defaults _build_world/_build_environment/_render read when a key is
+# missing, independent of whichever hardcoded constants the script uses
+# internally (a future refactor could rename those constants; these
+# tests only care about the values _resolve_style actually returns).
+
+@pytest.mark.unit
+def test_resolve_style_no_new_keys_reproduces_exact_prior_defaults():
+    resolved = _resolve_style({})
+    assert resolved["sun_energy"] == 3.0
+    assert tuple(resolved["sun_rotation_deg"]) == (50.0, 0.0, -30.0)
+    assert resolved["world_strength"] == 1.0
+    assert resolved["lines_emission_strength"] == 1.0
+    # Every post effect must resolve to its neutral/off value — an
+    # empty style-json must never attach a post compositor.
+    post = resolved["post"]
+    assert post["glare"] == 0.0
+    assert post["grain"] == 0.0
+    assert post["vignette"] == 0.0
+    assert post["posterize"] == 0
+    assert post["saturation"] == 1.0
+    assert post["duotone"] == {"shadow": None, "highlight": None}
+    # Task 2/7 defaults (palette/ramp_steps/outline/stripes) must be
+    # completely untouched by this task's additions.
+    assert resolved["ramp_steps"] == _DEFAULT_STYLE["ramp_steps"]
+    assert resolved["outline_width_m"] == _DEFAULT_STYLE["outline_width_m"]
+    assert resolved["grass_stripes"] == _DEFAULT_STYLE["grass_stripes"]
+    assert resolved["palette"] == _DEFAULT_STYLE["palette"]
+
+
+@pytest.mark.unit
+def test_resolve_style_top_level_new_keys_overridable_independently():
+    resolved = _resolve_style({"sun_energy": 0.4, "world_strength": 0.1})
+    assert resolved["sun_energy"] == 0.4
+    assert resolved["world_strength"] == 0.1
+    # Untouched siblings keep their defaults.
+    assert tuple(resolved["sun_rotation_deg"]) == (50.0, 0.0, -30.0)
+    assert resolved["lines_emission_strength"] == 1.0
+
+
+@pytest.mark.unit
+def test_resolve_style_post_partial_override_keeps_other_effects_off():
+    resolved = _resolve_style({"post": {"vignette": 0.6}})
+    post = resolved["post"]
+    assert post["vignette"] == 0.6
+    assert post["glare"] == 0.0
+    assert post["grain"] == 0.0
+    assert post["posterize"] == 0
+    assert post["saturation"] == 1.0
+    assert post["duotone"] == {"shadow": None, "highlight": None}
+
+
+@pytest.mark.unit
+def test_resolve_style_post_duotone_partial_override():
+    resolved = _resolve_style(
+        {"post": {"duotone": {"shadow": "#001122"}, "saturation": 0.0}})
+    post = resolved["post"]
+    assert post["duotone"] == {"shadow": "#001122", "highlight": None}
+    assert post["saturation"] == 0.0
+    # Sibling post effects still default to off.
+    assert post["glare"] == 0.0
+
+
+@pytest.mark.unit
+def test_resolve_style_full_look_dict_round_trips():
+    style = {
+        "sun_energy": 0.3,
+        "sun_rotation_deg": [20.0, 0.0, 10.0],
+        "world_strength": 0.05,
+        "lines_emission_strength": 4.0,
+        "post": {
+            "glare": 1.2,
+            "grain": 0.25,
+            "vignette": 0.4,
+            "posterize": 6,
+            "duotone": {"shadow": "#0a0a2a", "highlight": "#ffb347"},
+            "saturation": 1.6,
+        },
+        "palette": {"grass_light": "#123456"},
+    }
+    resolved = _resolve_style(style)
+    assert resolved["sun_energy"] == 0.3
+    assert resolved["sun_rotation_deg"] == [20.0, 0.0, 10.0]
+    assert resolved["world_strength"] == 0.05
+    assert resolved["lines_emission_strength"] == 4.0
+    assert resolved["post"] == style["post"]
+    assert resolved["palette"]["grass_light"] == "#123456"
+    # Untouched palette entries keep their defaults.
+    assert resolved["palette"]["outline"] == _DEFAULT_STYLE["palette"]["outline"]
 
 
 def _add_hostile_pose_fixture(root, n=1):
@@ -586,3 +688,198 @@ def test_smoke_render_vertical_and_aov_together(tmp_path):
             assert f.suffix == ".exr", (
                 f"non-.exr file leaked into {aov_dir}: {[p.name for p in files]}"
             )
+
+
+def _render_one_frame(tmp_path: Path, style: dict, out_name: str,
+                       extra_args: list[str] | None = None):
+    """Shared helper for the style.post smoke tests below: renders one
+    frame of the broadcast camera with the given style, extracts frame 0
+    to a PNG via ffmpeg, and returns (subprocess result, PNG path)."""
+    res = subprocess.run(
+        [_BLENDER, "--background", "--python", _SCRIPT, "--",
+         "--output-dir", str(tmp_path), "--shot", "",
+         "--cameras", "broadcast", "--width", "160", "--height", "90",
+         "--samples", "1", "--style-json", json.dumps(style),
+         "--frame-start", "0", "--frame-end", "0", *(extra_args or [])],
+        capture_output=True, text=True, timeout=600)
+    out = tmp_path / "render" / "clip" / "broadcast.mp4"
+    frame_path = tmp_path / out_name
+    if res.returncode == 0 and out.exists():
+        extract = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(out), "-frames:v", "1", str(frame_path)],
+            capture_output=True, text=True, timeout=60)
+        assert extract.returncode == 0, extract.stderr[-2000:]
+    return res, frame_path
+
+
+@pytest.mark.fbx
+@pytest.mark.skipif(_BLENDER is None, reason="blender not on PATH")
+def test_smoke_render_style_post_vignette_darkens_corners(tmp_path):
+    """style.post.vignette (render-experiments task) must visibly darken
+    the frame's corners relative to its centre in a REAL headless
+    render — the compositor node-graph math (EllipseMask -> Blur ->
+    RGBToBW -> Math -> MixRGB) was validated in isolation via a probe
+    script before this task shipped; this is the integration check that
+    it's wired correctly end to end through --style-json.
+    """
+    _write_min_fixture(tmp_path)
+
+    res_base, base_png = _render_one_frame(tmp_path, {}, "base_frame.png")
+    assert res_base.returncode == 0, res_base.stderr[-3000:]
+
+    res_vig, vig_png = _render_one_frame(
+        tmp_path, {"post": {"vignette": 1.0}}, "vig_frame.png")
+    assert res_vig.returncode == 0, res_vig.stderr[-3000:]
+
+    from PIL import Image
+    base_arr = np.asarray(Image.open(base_png).convert("RGB"), dtype=np.float64)
+    vig_arr = np.asarray(Image.open(vig_png).convert("RGB"), dtype=np.float64)
+
+    base_corner = base_arr[:10, :10].mean()
+    vig_corner = vig_arr[:10, :10].mean()
+    base_center = base_arr[35:55, 65:95].mean()
+    vig_center = vig_arr[35:55, 65:95].mean()
+
+    assert vig_corner < base_corner - 10, (
+        f"expected vignette to darken corners; base={base_corner:.1f} "
+        f"vig={vig_corner:.1f}"
+    )
+    # Centre sits inside the EllipseMask's unblurred core (mask ~= 1
+    # there), so it should stay close to the baseline's centre brightness.
+    assert abs(vig_center - base_center) < base_center * 0.5 + 10, (
+        f"expected centre roughly unaffected; base={base_center:.1f} "
+        f"vig={vig_center:.1f}"
+    )
+
+
+@pytest.mark.fbx
+@pytest.mark.skipif(_BLENDER is None, reason="blender not on PATH")
+def test_smoke_render_style_post_all_effects_combined(tmp_path):
+    """Every style.post effect active at once must not crash the
+    compositor graph build. Each effect (saturation/duotone/posterize/
+    glare/vignette/grain) was probe-validated in isolation before this
+    task shipped; this is the integration check that chaining all six
+    together in one graph — several reusing `ShaderNode*` node types
+    inside the `CompositorNodeTree`, per the Blender 5.1.1 adaptation
+    note in ``_setup_post_compositor`` — doesn't hit a socket/link
+    conflict.
+    """
+    _write_min_fixture(tmp_path)
+    style = {
+        "post": {
+            "glare": 1.0,
+            "grain": 0.3,
+            "vignette": 0.5,
+            "posterize": 4,
+            "duotone": {"shadow": "#101018", "highlight": "#ffcc66"},
+            "saturation": 0.2,
+        }
+    }
+    res, _ = _render_one_frame(tmp_path, style, "combined_frame.png")
+    assert res.returncode == 0, res.stderr[-3000:]
+    out = tmp_path / "render" / "clip" / "broadcast.mp4"
+    assert out.exists() and out.stat().st_size > 0
+
+
+@pytest.mark.fbx
+@pytest.mark.skipif(_BLENDER is None, reason="blender not on PATH")
+def test_smoke_render_aov_and_post_together_warns_and_prefers_aov(tmp_path):
+    """--aov and a configured style.post are mutually exclusive (task
+    decision, documented in ``_render``): AOV always wins, with a
+    one-time warning printed to stdout, and the AOV EXRs still come out
+    exactly as they would without any style.post configured.
+    """
+    _write_min_fixture(tmp_path)
+    res, _ = _render_one_frame(
+        tmp_path, {"post": {"vignette": 1.0}}, "aov_post_frame.png",
+        extra_args=["--aov"])
+    assert res.returncode == 0, res.stderr[-3000:]
+    assert "style.post effects are configured but --aov was requested" in res.stdout
+
+    out = tmp_path / "render" / "clip" / "broadcast.mp4"
+    assert out.exists() and out.stat().st_size > 0
+    aov_dir = tmp_path / "render" / "clip" / "aov" / "broadcast"
+    exrs = list(aov_dir.glob("*.exr"))
+    assert len(exrs) >= 1, res.stdout[-3000:]
+
+
+@pytest.mark.fbx
+@pytest.mark.skipif(_BLENDER is None, reason="blender not on PATH")
+def test_render_root_redirects_output_and_camera_track_lookup(tmp_path):
+    """--render-root substitutes the "render" path component for BOTH
+    the render output dir and the non-broadcast camera-track lookup dir.
+
+    RenderStage._write_virtual_camera_tracks (the real writer) always
+    writes under the literal "render" root; a render-experiments matrix
+    run instead pre-stages the track at the alternate root and expects
+    this script to look for it there too. The drone track is MOVED (not
+    copied) off the default "render" root before the render, so if
+    --render-root failed to redirect the lookup the script would fail to
+    find it and error out — a real regression guard, not just "the
+    custom path also happens to work".
+    """
+    _write_min_fixture(tmp_path)
+    _add_player_fixture(tmp_path)
+    cfg = {
+        "render": {"resolution": [160, 90]},
+        "export": {"virtual_cameras": {}},
+    }
+    stage = RenderStage(cfg, tmp_path)
+    written = stage._write_virtual_camera_tracks("", ["drone"])
+    assert written == ["drone"]
+
+    default_track = tmp_path / "render" / "clip" / "cameras" / "drone_camera_track.json"
+    assert default_track.exists()
+
+    custom_root = "render_experiment_x"
+    custom_track_dir = tmp_path / custom_root / "clip" / "cameras"
+    custom_track_dir.mkdir(parents=True)
+    default_track.replace(custom_track_dir / "drone_camera_track.json")
+
+    res = subprocess.run(
+        [_BLENDER, "--background", "--python", _SCRIPT, "--",
+         "--output-dir", str(tmp_path), "--shot", "",
+         "--cameras", "drone", "--width", "160", "--height", "90",
+         "--samples", "1", "--style-json", "{}",
+         "--frame-start", "0", "--frame-end", "0",
+         "--render-root", custom_root],
+        capture_output=True, text=True, timeout=600)
+    assert res.returncode == 0, res.stderr[-3000:]
+
+    out = tmp_path / custom_root / "clip" / "drone.mp4"
+    assert out.exists() and out.stat().st_size > 0
+    # The protected default-root baseline must never be touched.
+    assert not (tmp_path / "render" / "clip" / "drone.mp4").exists()
+
+
+@pytest.mark.fbx
+@pytest.mark.skipif(_BLENDER is None, reason="blender not on PATH")
+def test_saved_stadium_has_dressing_and_opens_with_requested_render_settings(tmp_path):
+    _write_min_fixture(tmp_path)
+    result, _ = _render_one_frame(tmp_path, {}, 'stadium.png',
+                                  extra_args=['--save-blend'])
+    assert result.returncode == 0, result.stderr[-3000:]
+    probe = tmp_path / 'inspect_stadium.py'
+    probe.write_text('''import bpy
+scene = bpy.context.scene
+assert scene.render.engine == 'BLENDER_EEVEE'
+assert (scene.render.resolution_x, scene.render.resolution_y) == (160,90)
+assert scene.frame_start == scene.frame_end == scene.frame_current == 0
+assert scene.camera.name == 'broadcast'
+for name in ['Stadium_Seats','Stadium_Roof','Stadium_Boards','Stadium_CrowdSkin']:
+    obj = bpy.data.objects[name]
+    assert len(obj.data.polygons) > 0, name
+# Stand seating is outside the playing rectangle, including both end stands.
+for vertex in bpy.data.objects['Stadium_Seats'].data.vertices:
+    x,y,z = vertex.co
+    assert x < 0 or x > 105 or y < 0 or y > 68
+nets = [o for o in scene.objects if o.name.startswith('GoalNet')]
+assert len(nets) == 2
+assert all(len(o.data.splines) > 50 for o in nets)
+assert bpy.data.objects.get('L_PenaltyArc_Left') is not None
+assert bpy.data.objects.get('L_PenaltyArc_Right') is not None
+''')
+    checked = subprocess.run([_BLENDER, '--background',
+        str(tmp_path / 'render/clip/scene.blend'), '--python-exit-code', '1',
+        '--python', str(probe)], capture_output=True,text=True,timeout=120)
+    assert checked.returncode == 0, checked.stdout[-3000:] + checked.stderr[-3000:]

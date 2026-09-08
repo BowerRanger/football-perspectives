@@ -1111,11 +1111,27 @@ refined_poses:
     reprojection_sigma_px: 8.0
     reprojection_weight: 2.0
     joint_acc_weight: 2.0
-    joint_angular_acc_weight: 8.0
+    # 8.0 -> 3.0 in the 2026-09-08 motion-snap promotion: the uniform
+    # smoothness prior was flattening genuine sharp movements (floaty
+    # look); see docs/motion-snap-experiments.md.
+    joint_angular_acc_weight: 3.0
     root_acc_weight: 2.0
     contact_weight: 4.0
     resolved_pin_err_m: 0.06
     resolved_max_step_m: 0.02
+    # Speed-adaptive weighting: where the OBSERVED keypoints move fast
+    # and confidently, the acceleration priors scale down to acc_scale
+    # and the reprojection term is boosted, ramping linearly between
+    # obs_speed_lo_px and obs_speed_hi_px of per-frame keypoint speed.
+    # Quiet frames keep full smoothing. The workhorse of the motion-snap
+    # promotion: sharp-move speed ratio 0.880 -> 0.899 with mean
+    # reprojection IMPROVING 3.80 -> 3.59 px on gberch.
+    speed_adaptive:
+      enabled: true
+      obs_speed_lo_px: 6.0
+      obs_speed_hi_px: 14.0
+      acc_scale: 0.25
+      reprojection_boost: 2.0
   lean_correction_factor: 0.0
   root_max_speed_deg_s: 720.0
   # Ground-snap target height (m) for the in-contact foot joint above
@@ -1133,8 +1149,10 @@ refined_poses:
   min_contributing_views: 1
   high_disagreement_pos_m: 0.5
   high_disagreement_rot_rad: 0.5
-  # Smoothing (reuses src/utils/temporal_smoothing.py).
-  savgol_window: 7
+  # Smoothing (reuses src/utils/temporal_smoothing.py). Window 7 -> 5
+  # in the motion-snap promotion (keeps flip rejection, returns some
+  # high-frequency limb detail).
+  savgol_window: 5
   savgol_poly: 3
   smooth_rotations: true
   # Beta fusion across all shots a player appears in.
@@ -1430,6 +1448,24 @@ refined_poses:
     ease: 6                # rotation blend ramp, frames
     smooth_window: 9       # savgol over the spliced translation (odd; <=2 disables)
     verify_slack: 1.05     # per-span acceptance factor vs the current span peak
+
+  # Procedural end-effector motion (src/utils/end_effector_motion.py) —
+  # the last pose pass. GVHMR leaves SMPL hand joints frozen and toes
+  # near-rigid (COCO-17 evidence ends at wrists/ankles); this adds a
+  # relaxed hand curl, follow-through (lagged echo of wrist angular
+  # velocity, clamped), and contact-driven toe roll (plantarflex after
+  # lift-off, height-gated against pitch penetration; dorsiflex before
+  # touchdown). Body joints and evaluation metrics are untouched.
+  end_effectors:
+    enabled: true
+    hand_curl_deg: 20.0
+    follow_through_gain: 0.6
+    follow_through_decay: 0.75
+    follow_through_max_deg: 25.0
+    toe_roll_deg: 22.0
+    toe_up_deg: 12.0
+    toe_roll_frames: 4
+    min_toe_clearance_m: 0.06
 
 export:
   gltf_enabled: true

@@ -165,6 +165,30 @@ def refine_motion(*, frames, thetas, root_R, root_t, betas, rest_joints,
             conf = kp[:,:,2].clamp(0,1)**2
             # Never fit absent/occluded observations as zero-valued pixels.
             conf = conf * (kp[:,:,2] >= .3)
+        # Speed-adaptive weighting: where the OBSERVED keypoints move fast
+        # (and confidently), relax the acceleration priors and let the
+        # reprojection term pull harder, so genuine sharp movements are
+        # not regressed toward the mean along with the noise. The floaty-
+        # animation diagnosis measured sharp moves at ~75-88% of observed
+        # speed with uniform weights; this is the targeted counter.
+        acc_scale_t = None; reproj_boost_t = None
+        speed_cfg = cfg.get('speed_adaptive') or {}
+        if obs is not None and bool(speed_cfg.get('enabled', False)) and b-a > 3:
+            kp_np = np.asarray(observations['kp2d'][a:b])[:,COCO_BODY]
+            ok = (kp_np[:,:,2] >= .5)
+            disp = np.linalg.norm(np.diff(kp_np[:,:,:2],axis=0),axis=2)
+            pair_speed = np.where(ok[:-1]&ok[1:],disp,0.).max(axis=1)
+            lo = float(speed_cfg.get('obs_speed_lo_px',6.0))
+            hi = float(speed_cfg.get('obs_speed_hi_px',14.0))
+            s_pair = np.clip((pair_speed-lo)/max(hi-lo,1e-6),0.,1.)
+            s_frame = np.zeros(b-a)
+            s_frame[:-1] = s_pair
+            s_frame[1:] = np.maximum(s_frame[1:],s_pair)
+            acc_floor = float(speed_cfg.get('acc_scale',0.25))
+            s_acc = np.maximum(np.maximum(s_frame[:-2],s_frame[1:-1]),s_frame[2:])
+            acc_scale_t = tensor(1.-s_acc*(1.-acc_floor))
+            boost = float(speed_cfg.get('reprojection_boost',2.0))
+            reproj_boost_t = tensor(1.+s_frame*(boost-1.))
         optimizer = torch.optim.LBFGS([pose_var,root_delta,translation_delta],
             max_iter=int(cfg.get('iterations',160)), history_size=12,
             line_search_fn='strong_wolfe', tolerance_grad=1e-7, tolerance_change=1e-9)
@@ -186,14 +210,23 @@ def refine_motion(*, frames, thetas, root_R, root_t, betas, rest_joints,
             loss = loss + .25*((r-r0)**2).mean()/.2**2
             loss = loss + .3*(translation_delta/.2).square().mean()
             joint_acc = (w[2:]-2*w[1:-1]+w[:-2])*fps**2
-            loss = loss + float(cfg.get('joint_acc_weight',2.0))*(joint_acc/25).square().mean()
+            joint_acc_sq = (joint_acc/25).square()
+            if acc_scale_t is not None:
+                joint_acc_sq = joint_acc_sq*acc_scale_t[:,None,None]
+            loss = loss + float(cfg.get('joint_acc_weight',2.0))*joint_acc_sq.mean()
             root_acc = (t[2:]-2*t[1:-1]+t[:-2])*fps**2
-            loss = loss + float(cfg.get('root_acc_weight',2.0))*(root_acc/15).square().mean()
+            root_acc_sq = (root_acc/15).square()
+            if acc_scale_t is not None:
+                root_acc_sq = root_acc_sq*acc_scale_t[:,None]
+            loss = loss + float(cfg.get('root_acc_weight',2.0))*root_acc_sq.mean()
             # Changes of relative rotation approximate angular acceleration
             # in a local tangent frame and are safe across +/-pi charts.
             relative = local[:-1].transpose(-1,-2) @ local[1:]
             root_relative = r[:-1].transpose(-1,-2) @ r[1:]
-            loss = loss + float(cfg.get('joint_angular_acc_weight',8.0))*((relative[1:]-relative[:-1])*fps**2/60).square().mean()
+            angular_acc_sq = ((relative[1:]-relative[:-1])*fps**2/60).square()
+            if acc_scale_t is not None:
+                angular_acc_sq = angular_acc_sq*acc_scale_t[:,None,None,None]
+            loss = loss + float(cfg.get('joint_angular_acc_weight',8.0))*angular_acc_sq.mean()
             loss = loss + .5*((root_relative[1:]-root_relative[:-1])*fps**2/40).square().mean()
             feet = w[:,[10,11]]
             loss = loss + 8*(torch.relu(clearance-feet[:,:,2])/.02).square().mean()
@@ -207,7 +240,8 @@ def refine_motion(*, frames, thetas, root_R, root_t, betas, rest_joints,
                 pixels = torch.einsum('fij,fkj->fki',obs['K'],homo)[:,:,:2]
                 residual = (pixels-kp[:,:,:2])/float(cfg.get('reprojection_sigma_px',8.0))
                 robust = 2*(torch.sqrt(1+residual.square().sum(-1))-1)
-                loss = loss + float(cfg.get('reprojection_weight',2.0))*(robust*conf).sum()/conf.sum().clamp_min(1)
+                weighted_conf = conf if reproj_boost_t is None else conf*reproj_boost_t[:,None]
+                loss = loss + float(cfg.get('reprojection_weight',2.0))*(robust*weighted_conf).sum()/weighted_conf.sum().clamp_min(1)
                 loss = loss + (torch.relu(.1-pc[:,:,2])*conf).square().mean()
             if not torch.isfinite(loss):
                 raise FloatingPointError('Nonfinite kinematic objective')

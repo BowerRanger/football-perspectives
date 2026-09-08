@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Motion snap — before & after — Football Perspectives</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101b24;color:#e6eceb;font:16px/1.5 system-ui,sans-serif}main{max-width:1300px;margin:auto;padding:36px 24px}h1{font-size:36px;line-height:1.2}p{color:#b5c7cb;max-width:1000px}a{color:#80dccc}button,select,input{font:inherit}button,select{background:#213740;color:#fff;border:1px solid #547076;border-radius:6px;padding:8px 14px}button{cursor:pointer}.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}.panel{background:#172c36;border-radius:10px;overflow:hidden}.label{padding:10px 16px;font-weight:600}canvas{width:100%;display:block;aspect-ratio:1.35}video{display:block;width:100%}.controls{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin:20px 0}.controls input[type=range]{flex:1;min-width:200px}table{border-collapse:collapse;width:100%;margin:24px 0}th,td{text-align:left;border-bottom:1px solid #354c55;padding:10px}small{color:#b9c7c9}.card{background:#172c36;padding:18px;border-radius:10px;margin:24px 0}.source{max-width:900px;margin:20px auto}#time{font-variant-numeric:tabular-nums;min-width:140px}#selectedMetrics td{font-variant-numeric:tabular-nums}.before{color:#ffbf87}.after{color:#76e0b3}.variantBar{display:flex;gap:12px;align-items:center;margin:18px 0;flex-wrap:wrap}.snapline{background:#1d3d33;border-left:4px solid #76e0b3;padding:10px 14px;border-radius:6px;color:#cfe9dd;max-width:1000px}@media(max-width:700px){.pair{grid-template-columns:1fr}h1{font-size:28px}main{padding:24px 12px}table{font-size:13px}}
+</style>
+<script>
+const CAM_KICK=['focus_p006','P006 goal strike · Frames 341–401'],CAM_TURN=['focus_p019','P019 sharp turn · Frames 48–108'];
+const BEFORE='before_render/gberch/';
+const VARIANTS={
+ A_speed_adaptive:{dir:'cmp_A_speed_adaptive/',afterName:'Speed-adaptive',
+  snap:'Sharp-move speed ratio 0.880 → 0.899 · knee peak turn +16% · high-frequency limb motion +78% · mean reprojection IMPROVES 3.80 → 3.59 px · 0 flips, 0 penetration',
+  desc:'Fix A — speed-adaptive refinement weights. Where the observed 2D keypoints move fast and confidently, the joint refinement relaxes its acceleration priors (down to 25%) and lets the reprojection term pull up to 2× harder — so genuine sharp movements are no longer regressed toward the mean along with the noise. Quiet frames keep full smoothing.'},
+ B_lighter_smoothing:{dir:'cmp_B_lighter_smoothing/',afterName:'Lighter smoothing',
+  snap:'Sharp-move speed ratio 0.880 → 0.884 · knee peak turn +13% · high-frequency limb motion +6% · mean reprojection 3.80 → 3.76 px · 0 flips, 0 penetration',
+  desc:'Fix B — lighter global smoothing knobs: joint angular-acceleration weight 8 → 3 and the final rotation Savitzky–Golay window 7 → 5. A blunter instrument than fix A: it restores some peak joint speed everywhere but cannot distinguish signal from noise, so the gains are smaller.'},
+ C_end_effectors:{dir:'cmp_C_end_effectors/',afterName:'End effectors',
+  snap:'Body metrics unchanged by design (knee p99 12.4 → 12.4, reprojection 3.80 → 3.80 px) — watch the hands and feet in the clips instead',
+  desc:'Fix C — procedural end-effector motion. GVHMR leaves the SMPL hand joints frozen (0.00°/frame all clip) and toes near-rigid, because the 2D evidence ends at wrists and ankles. This pass adds a relaxed hand curl, follow-through (a lagged echo of wrist angular velocity, so fast swings whip through the hand), and contact-driven toe roll — plantarflex easing out after lift-off, dorsiflex before touchdown.'},
+ compound:{dir:'cmp_compound/',afterName:'All fixes',
+  snap:'Sharp-move speed ratio 0.880 → 0.901 · knee peak turn +21% · high-frequency limb motion +83% · mean reprojection IMPROVES 3.80 → 3.59 px · 0 flips, 0 penetration',
+  desc:'Compounded result — speed-adaptive refinement + lighter smoothing + end-effector motion together, with the shipped PhysPT gated takeover kept ON (the pipeline default). This is the proposed new default configuration.'}};
+const VKEY=(k=>VARIANTS[k]?k:'compound')(new URLSearchParams(location.search).get('variant'));
+const V=VARIANTS[VKEY];
+</script>
+<main>
+<small>FOOTBALL PERSPECTIVES · MOTION SNAP EXPERIMENTS</small>
+<h1>Before & after: recovering the sharp movements</h1>
+<div class="variantBar"><label>Fix <select id="variant">
+<option value="A_speed_adaptive">A · Speed-adaptive refinement weights</option>
+<option value="B_lighter_smoothing">B · Lighter smoothing knobs</option>
+<option value="C_end_effectors">C · End-effector motion (hands, toes)</option>
+<option value="compound">Compound · All fixes together</option>
+</select></label></div>
+<p id="variantDesc"></p>
+<div class="snapline" id="snapline"></div>
+<p>Both versions are scored against the same original 2D keypoints; the sharp-move speed ratio compares projected limb speed to OBSERVED keypoint speed on the top-decile fastest observed frames (1.0 = matches the video). The floaty-animation diagnosis measured the current animation at 0.880 with limb detail 3.5× smoother than the pre-September original.</p>
+<div id="summary" class="card">Loading comparison…</div>
+<div class="controls"><label>Player <select id="player"></select></label><button id="play">Play</button><label>Speed <select id="speed"><option value=".25">¼ speed</option><option value=".5" selected>½ speed</option><option value="1">Real time</option></select></label><label>View <select id="view"><option value="-.7">Three-quarter</option><option value="0">Front</option><option value="1.57">Side</option><option value="3.14">Reverse</option></select></label><button id="event">Largest current turn</button><button id="jointEvent">Largest updated joint step</button></div>
+<div class="pair"><div class="panel"><div class="label before">Current</div><canvas id="before" width="900" height="660"></canvas></div><div class="panel"><div class="label after" id="afterLabel"></div><canvas id="after" width="900" height="660"></canvas></div></div>
+<div class="controls"><input id="frame" type="range" min="0" max="428" value="0" step="1" aria-label="Video frame"><span id="time"></span></div>
+<small>Both panels share the same viewing direction and follow the current animation's player position. Missing observations are shown as gaps. The wire figure displays the saved skeletal motion directly.</small>
+<table id="selectedMetrics"><thead><tr><th>Selected player</th><th>Current</th><th id="afterHead"></th></tr></thead><tbody></tbody></table>
+<div class="source"><video id="source" controls muted playsinline preload="metadata" src="../shots/gberch.mp4"></video><small>Original broadcast. Scrubbing the animation timeline also seeks the source video.</small></div>
+<h2>Matching rendered clips</h2>
+<p>Identical review cameras and settings. The P006 strike (right-foot shot at frame 371, in the net at 402) is the sharpest action in the clip — watch the kicking leg's speed and, for fix C, the hands and toe roll. Play pairs together at half speed.</p>
+<div id="renders"></div>
+<h2>All players</h2>
+<small>Reprojection uses the same original 2D observations; these are reference evidence, not ground truth.</small>
+<table id="all"><thead><tr><th>Player</th><th>Largest root turn / frame</th><th>Peak root acceleration</th><th>Mean reprojection error</th></tr></thead><tbody></tbody></table>
+<p><a id="dataLink" href="#">Download measurements</a> · <a href="../../docs/motion-snap-experiments.md">Implementation and validation notes</a></p>
+</main><script>document.write('<script src="'+V.dir+'motion.js"><\/script>')</script><script>
+const A=window.ANIMATION,M=window.METRICS.players,sel=document.querySelector('#player'),frame=document.querySelector('#frame'),source=document.querySelector('#source');
+const parents=[-1,0,0,0,1,2,3,4,5,6,7,8,9,9,9,12,13,14,16,17,18,19,20,21];
+let playing=false,last=0,clock=0;
+const fmt=(v,d=2)=>v==null?'—':v.toFixed(d),pair=(x,k,s='max')=>`${fmt(x.before[k][s])} → ${fmt(x.after[k][s])}`;
+document.querySelector('#variant').value=VKEY;
+document.querySelector('#variant').onchange=e=>{location.search='?variant='+e.target.value};
+document.querySelector('#variantDesc').textContent=V.desc;
+document.querySelector('#snapline').textContent=V.snap;
+document.querySelector('#afterLabel').textContent=V.afterName;document.querySelector('#afterHead').textContent=V.afterName;
+document.querySelector('#dataLink').href=V.dir+'comparison.json';
+for(const pid of Object.keys(A)){const o=new Option(pid,pid);sel.add(o)}sel.value=A.P006?'P006':sel.options[0]?.value;
+function drawPanel(id,points,center,yaw){const c=document.querySelector('#'+id),ctx=c.getContext('2d'),W=c.width,H=c.height;ctx.fillStyle='#162d35';ctx.fillRect(0,0,W,H);const color=id==='before'?'#ffbf87':'#76e0b3';
+ function project(p){let x=p[0]-center[0],y=p[1]-center[1],z=p[2];let u=Math.cos(yaw)*x+Math.sin(yaw)*y,v=-Math.sin(yaw)*x+Math.cos(yaw)*y;return [W*.5+u*170,H*.83-z*190+v*50]}
+ ctx.strokeStyle='#355551';ctx.lineWidth=1;for(let i=-4;i<=4;i++){for(const axis of [0,1]){let p=[center[0]-4,center[1]-4,0],q=[center[0]+4,center[1]+4,0];p[axis]=q[axis]=center[axis]+i;let a=project(p),b=project(q);ctx.beginPath();ctx.moveTo(...a);ctx.lineTo(...b);ctx.stroke()}}
+ if(!points){ctx.fillStyle='#b5c7cb';ctx.font='22px system-ui';ctx.fillText('No observation at this frame',W*.25,H*.4);return}
+ ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineCap='round';
+ const segments=parents.map((p,j)=>[p,j]).filter(([p])=>p>=0);segments.sort((a,b)=>(points[a[1]][1]-points[b[1]][1]));
+ for(const [p,j] of segments){const a=project(points[p]),b=project(points[j]);ctx.lineWidth=j<12?11:8;ctx.beginPath();ctx.moveTo(...a);ctx.lineTo(...b);ctx.stroke()}
+ for(let j=0;j<22;j++){let p=project(points[j]);ctx.beginPath();ctx.arc(...p,j===15?15:5,0,2*Math.PI);ctx.fill()}
+}
+function refresh(seek=false){if(!sel.value)return;let a=A[sel.value],f=+frame.value,i=a.frames.indexOf(f),nearest=i>=0?i:a.frames.reduce((best,v,k)=>Math.abs(v-f)<Math.abs(a.frames[best]-f)?k:best,0),center=a.before[nearest][0],yaw=+document.querySelector('#view').value;for(const v of ['before','after'])drawPanel(v,i<0?null:a[v][i],center,yaw);document.querySelector('#time').textContent=`Frame ${f} · ${(f/a.fps).toFixed(2)} s`;if(seek&&source.readyState)source.currentTime=f/a.fps}
+function selectPlayer(){const a=A[sel.value];frame.min=a.frames[0];frame.max=a.frames.at(-1);frame.value=frame.min;clock=+frame.value;const m=M[sel.value];const rows=[['Largest root turn per frame','root_step_deg','max','°'],['Largest joint turn per frame','joint_step_deg','max','°'],['Peak root acceleration','root_acc_m_s2','max',' m/s²'],['Peak foot speed','foot_speed_m_s','max',' m/s'],['Mean body reprojection','body_reprojection_px','mean',' px']];document.querySelector('#selectedMetrics tbody').innerHTML=rows.map(([name,key,stat,unit])=>`<tr><td>${name}</td>${['before','after'].map(v=>`<td>${fmt(m[v][key][stat])}${unit}</td>`).join('')}</tr>`).join('');refresh(true)}
+sel.onchange=selectPlayer;frame.oninput=()=>{clock=+frame.value;refresh(true)};document.querySelector('#view').onchange=()=>refresh();document.querySelector('#play').onclick=()=>{playing=!playing;document.querySelector('#play').textContent=playing?'Pause':'Play';last=0};document.querySelector('#event').onclick=()=>{frame.value=M[sel.value].before.largest_root_step_frame;clock=+frame.value;refresh(true)};
+document.querySelector('#jointEvent').onclick=()=>{frame.value=M[sel.value].after.largest_joint_step_frame;clock=+frame.value;refresh(true)};
+function tick(t){if(playing&&sel.value){if(last){clock+=(t-last)/1000*A[sel.value].fps*(+document.querySelector('#speed').value);if(clock>+frame.max)clock=+frame.min;frame.value=Math.floor(clock);refresh()}last=t}else last=0;requestAnimationFrame(tick)}
+const entries=Object.entries(M),peak=(side,key)=>Math.max(...entries.map(([,m])=>m[side][key].max));
+document.querySelector('#summary').textContent=`${entries.length} players compared · Largest root turn: ${fmt(peak('before','root_step_deg'),1)}° → ${fmt(peak('after','root_step_deg'),1)}° · Largest joint turn: ${fmt(peak('before','joint_step_deg'),1)}° → ${fmt(peak('after','joint_step_deg'),1)}° · Mean reprojection: ${fmt(window.METRICS.aggregate.before.body_reprojection_px.mean,2)} px → ${fmt(window.METRICS.aggregate.after.body_reprojection_px.mean,2)} px`;
+document.querySelector('#all tbody').innerHTML=entries.map(([pid,m])=>`<tr><td><button data-player="${pid}">${pid}</button></td><td>${pair(m,'root_step_deg')}°</td><td>${pair(m,'root_acc_m_s2')} m/s²</td><td>${pair(m,'body_reprojection_px','mean')} px</td></tr>`).join('');document.querySelectorAll('[data-player]').forEach(b=>b.onclick=()=>{sel.value=b.dataset.player;selectPlayer();window.scrollTo({top:250,behavior:'smooth'})});
+const VDIR=VKEY+'/review_render/gberch/';
+for(const [cam,title] of [CAM_KICK,CAM_TURN]){const div=document.createElement('div');div.className='card';div.innerHTML=`<h3>${title}</h3><button class="sync">Play pair at ½ speed</button><div class="pair">${['before','after'].map(v=>`<div><p>${v==='before'?'Current':V.afterName}</p><video controls muted playsinline loop preload="metadata" src="${v==='before'?BEFORE:VDIR}${cam}.mp4"></video></div>`).join('')}</div>`;div.querySelector('.sync').onclick=()=>div.querySelectorAll('video').forEach(v=>{v.currentTime=0;v.playbackRate=.5;v.play()});document.querySelector('#renders').append(div)}
+selectPlayer();requestAnimationFrame(tick);
+</script></html>

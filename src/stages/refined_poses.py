@@ -57,6 +57,7 @@ from src.utils.smpl_skeleton import (
 from src.utils.temporal_smoothing import savgol_axis
 from src.utils.pose_temporal import frame_runs, smooth_pose, smooth_rotations, interpolate_pose
 from src.utils.physpt_hybrid import TakeoverConfig, build_hybrid, keypoint_confidence
+from src.utils.end_effector_motion import animate_end_effectors
 
 logger = logging.getLogger(__name__)
 
@@ -2342,6 +2343,23 @@ class RefinedPosesStage(BaseStage):
                         s["frames"] for s in spans)
                     physpt_summary["penetration_frames_raised"] += (
                         takeover_stats["penetration_frames_raised"])
+            # Procedural end-effector motion (experiment; code default
+            # OFF): relaxed hands + follow-through + contact-driven toe
+            # roll. Runs after the takeover so spliced spans get it too.
+            ee_raw = (cfg.get("end_effectors") or {})
+            if bool(ee_raw.get("enabled", False)):
+                contacts_ee = (
+                    _contacts_for_track(resolved_contacts_by_pid[pid], refined.frames)
+                    if pid in resolved_contacts_by_pid else None)
+                ee_thetas, ee_stats = animate_end_effectors(
+                    thetas=refined.thetas, root_R=refined.root_R,
+                    root_t=refined.root_t, betas=refined.betas,
+                    contacts=contacts_ee, fps=30.0, cfg=ee_raw)
+                refined = replace(refined, thetas=ee_thetas.astype(np.float32))
+                ee_summary = summary.setdefault(
+                    "end_effectors", {"players": 0, "toe_roll_frames": 0})
+                ee_summary["players"] += 1
+                ee_summary["toe_roll_frames"] += ee_stats["toe_roll_frames"]
             refined.save(out_dir / f"{pid}_refined.npz")
             provenance = {"config": cfg, "sources": {}}
             for sid, _ in contribs:

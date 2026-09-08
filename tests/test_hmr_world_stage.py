@@ -119,6 +119,7 @@ def fake_gvhmr(monkeypatch):
         estimator=None,
         per_frame_K=None,
         per_frame_R=None,
+        overlap_frames=0, fps=30.0, feature_cache_dir=None,
     ):
         n = len(track_frames)
         # COCO-17: keypoints 15/16 are left/right ankles. Other joints are
@@ -308,6 +309,7 @@ def test_hmr_world_reuses_one_estimator_across_players(
         estimator=None,
         per_frame_K=None,
         per_frame_R=None,
+        overlap_frames=0, fps=30.0, feature_cache_dir=None,
     ):
         seen_estimator_ids.append(id(estimator) if estimator is not None else None)
         n = len(track_frames)
@@ -502,6 +504,10 @@ def test_is_complete_ignores_legacy_files(tmp_path: Path) -> None:
     stage = HmrWorldStage(config={}, output_dir=tmp_path)
     assert stage.is_complete() is False
     (out / "alpha__P001_smpl_world.npz").write_bytes(b"new")
+    assert stage.is_complete() is False  # pre-fix rotations need re-extraction
+    (out / "alpha__P001_provenance.json").write_text(json.dumps({
+        "pose_convention":"smpl_pytorch3d_rows_v2", "config":{},
+    }))
     assert stage.is_complete() is True
 
 
@@ -693,6 +699,7 @@ def test_process_player_passes_dense_camera_r_to_run_on_track(
         estimator=None,
         per_frame_K=None,
         per_frame_R=None,
+        overlap_frames=0, fps=30.0, feature_cache_dir=None,
     ):
         seen_per_frame_R.append(per_frame_R)
         n = len(track_frames)
@@ -813,6 +820,7 @@ def test_hmr_world_forwards_extractor_device_to_both_call_sites(
         estimator=None,
         per_frame_K=None,
         per_frame_R=None,
+        overlap_frames=0, fps=30.0, feature_cache_dir=None,
     ):
         run_calls.append({"device": device, "extractor_device": extractor_device})
         n = len(track_frames)
@@ -980,6 +988,22 @@ def _synthetic_ankle_mid_fixture(n: int = 40, seed: int = 0):
     ]), (n, 1, 1))
 
     return frame_indices, kp2d, per_frame_K, per_frame_R, per_frame_t, root_R
+
+
+@pytest.mark.unit
+def test_reappearing_contact_carrier_never_smooths_from_pitch_origin() -> None:
+    from src.stages.hmr_world import _carrier_translation, _ANKLE_IN_ROOT
+    frames, kp, K, R, t, root_R = _synthetic_ankle_mid_fixture()
+    kp[:3, [15, 16], 2] = .1
+    carrier, confidence = _carrier_translation(
+        kp2d=kp, frame_indices=frames, per_frame_K=K, per_frame_R=R,
+        per_frame_t=t, distortion=(0., 0.), root_R=root_R,
+        offsets=np.tile(_ANKLE_IN_ROOT, (len(frames), 1)), fill_leading=True,
+    )
+    np.testing.assert_allclose(carrier[:3], np.tile(carrier[3], (3, 1)))
+    assert np.all(confidence[:3] == .1)
+    np.testing.assert_allclose(carrier[15:18], np.tile(carrier[14], (3, 1)))
+    assert np.all(confidence[15:18] == 0)
 
 
 @pytest.mark.unit

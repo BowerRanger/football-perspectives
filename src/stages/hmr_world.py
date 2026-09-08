@@ -12,8 +12,8 @@ For each (shot_id, player_id) pair in ``output/tracks/{shot_id}_tracks.json``:
    GVHMR's internal ViTPose-Huge.
 2. Median-aggregate the (per-frame-noisy) shape parameters.
 3. Convert root rotation from camera frame to pitch frame via the
-   calibrated camera extrinsic for *this shot*, then SLERP-smooth.
-4. Savgol-smooth the per-joint axis-angle pose.
+   calibrated camera extrinsic for *this shot*, then quaternion-smooth.
+4. Smooth each joint on SO(3) within contiguous observed runs.
 5. Apply the monocular lean-correction to root_R (see
    ``_apply_lean_correction``), then anchor the per-frame root
    translation (see ``anchor_root_translation``, shared with
@@ -31,6 +31,8 @@ Outputs per (shot, player) pair:
 - ``output/hmr_world/{shot_id}__{player_id}_foot_contacts.json`` — per-foot
   stance spans (``anchor_mode: contact`` only; see
   ``src/schemas/foot_contacts.py``).
+- ``*_raw.npz`` / ``*_provenance.json`` — unfiltered model predictions,
+  retained global trajectory/contact probabilities, and extraction settings.
 
 The ``__`` separator delimits shot_id from player_id at the filename
 level. Both substrings are constrained to ``[A-Za-z0-9_-]`` upstream;
@@ -55,7 +57,7 @@ from src.schemas.foot_contacts import save_foot_contacts
 from src.schemas.smpl_world import SmplWorldTrack
 from src.schemas.tracks import TracksResult
 from src.utils.foot_anchor import ankle_ray_to_pitch, anchor_translation
-from src.utils.foot_contact import FootContacts, detect_contacts
+from src.utils.foot_contact import ContactSpan, FootContacts, detect_contacts
 from src.utils.foot_lock import solve_root_with_pins
 from src.utils.smpl_pitch_transform import smpl_root_in_pitch_frame
 from src.utils.smpl_skeleton import (
@@ -64,10 +66,10 @@ from src.utils.smpl_skeleton import (
     compute_canonical_joints_batch,
     load_smpl_neutral_model,
 )
+from src.utils.pose_temporal import frame_runs, smooth_pose, smooth_rotations
 from src.utils.temporal_smoothing import (
     ground_snap_z,
     savgol_axis,
-    slerp_window,
 )
 
 # Indices of left/right ankle in COCO 17 keypoints.
@@ -125,6 +127,19 @@ def _output_key(shot_id: str, player_id: str) -> str:
     return f"{shot_id}{_OUTPUT_SEPARATOR}{player_id}"
 
 
+def _current_output(path: Path, cfg: dict | None = None) -> bool:
+    """Never silently reuse tracks produced with the transposed 6D convention."""
+    if not path.exists():
+        return False
+    provenance = path.with_name(path.name.replace("_smpl_world.npz", "_provenance.json"))
+    try:
+        data = json.loads(provenance.read_text())
+    except (OSError, ValueError):
+        return False
+    return (data.get("pose_convention") == "smpl_pytorch3d_rows_v2"
+            and (cfg is None or data.get("config") == cfg))
+
+
 def _wipe_legacy_outputs(out_dir: Path) -> int:
     """Delete pre-multi-shot ``hmr_world`` artefacts.
 
@@ -166,7 +181,8 @@ class HmrWorldStage(BaseStage):
         # files shouldn't flip the stage green when the new code would
         # rebuild them all.
         return any(
-            _OUTPUT_SEPARATOR in p.stem for p in out.glob("*_smpl_world.npz")
+            _OUTPUT_SEPARATOR in p.stem and _current_output(p, self.config.get("hmr_world", {}))
+            for p in out.glob("*_smpl_world.npz")
         )
 
     def run(self) -> None:
@@ -267,7 +283,7 @@ class HmrWorldStage(BaseStage):
         total = len(ordered)
         cached = sum(
             1 for (sid, pid), _ in ordered
-            if (out_dir / f"{_output_key(sid, pid)}_smpl_world.npz").exists()
+            if _current_output(out_dir / f"{_output_key(sid, pid)}_smpl_world.npz", cfg)
         )
         to_process = total - cached
         if total == 0:
@@ -338,7 +354,7 @@ class HmrWorldStage(BaseStage):
                 avg = sum(elapsed_per_player) / len(elapsed_per_player)
                 remaining = sum(
                     1 for (sid2, pid2), _ in ordered[i:]
-                    if not (out_dir / f"{_output_key(sid2, pid2)}_smpl_world.npz").exists()
+                    if not _current_output(out_dir / f"{_output_key(sid2, pid2)}_smpl_world.npz", cfg)
                 )
                 eta = avg * remaining
                 print(
@@ -521,6 +537,7 @@ def _carrier_translation(
     distortion: tuple[float, float],
     root_R: np.ndarray,
     offsets: np.ndarray,
+    fill_leading: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-frame ankle-midpoint ray-cast anchor, shared by both
     ``anchor_mode`` strategies in :func:`anchor_root_translation`.
@@ -550,11 +567,14 @@ def _carrier_translation(
     root_t = np.zeros((n, 3), dtype=float)
     confidence = np.zeros(n, dtype=float)
     last_anchored: np.ndarray | None = None
+    first_anchored: int | None = None
     for i in range(n):
         fi_int = int(frame_indices[i])
         R = per_frame_R.get(fi_int)
         if R is None:
             # No camera for this frame — leave translation/confidence zero.
+            if fill_leading and last_anchored is not None:
+                root_t[i] = last_anchored
             continue
         K = per_frame_K[fi_int]
         t = per_frame_t[fi_int]
@@ -583,8 +603,16 @@ def _carrier_translation(
             confidence[i] = 0.0
             continue
         root_t[i] = anchor_translation(foot_world, offsets[i], root_R[i])
+        if first_anchored is None:
+            first_anchored = i
         last_anchored = root_t[i]
         confidence[i] = ankle_conf
+    if fill_leading and first_anchored is not None:
+        # A reappearing track can begin with occluded ankles. Zero is an
+        # uninitialised position, not a pitch observation: smoothing it
+        # into the first valid anchor creates a many-metre teleport.
+        # Only borrow within this contiguous run; confidence stays low.
+        root_t[:first_anchored] = root_t[first_anchored]
     return root_t, confidence
 
 
@@ -743,6 +771,20 @@ def anchor_root_translation(
     frame_indices = np.asarray(frame_indices)
     root_R = np.asarray(root_R, dtype=float)
     n = int(frame_indices.shape[0])
+    runs = frame_runs(frame_indices)
+    if len(runs) > 1:
+        results = [anchor_root_translation(
+            kp2d=kp2d[a:b], frame_indices=frame_indices[a:b], per_frame_K=per_frame_K,
+            per_frame_R=per_frame_R, per_frame_t=per_frame_t, distortion=distortion,
+            thetas=thetas[a:b], root_R=root_R[a:b], betas=betas, cfg=cfg, fps=fps,
+        ) for a,b in runs]
+        contacts = None
+        if results[0][2] is not None:
+            contacts = FootContacts(n, np.concatenate([r[2].in_contact for r in results]),
+                np.concatenate([r[2].quality for r in results]),
+                tuple(ContactSpan(s.side, s.start+a, s.end+a, s.pin)
+                      for (a,b), r in zip(runs, results) for s in r[2].spans))
+        return np.concatenate([r[0] for r in results]), np.concatenate([r[1] for r in results]), contacts
     anchor_mode = str(cfg.get("anchor_mode", "contact"))
     savgol_window = int(cfg.get("root_t_savgol_window", 5))
     savgol_order = int(cfg.get("root_t_savgol_order", 2))
@@ -769,6 +811,7 @@ def anchor_root_translation(
         per_frame_K=per_frame_K, per_frame_R=per_frame_R,
         per_frame_t=per_frame_t, distortion=distortion,
         root_R=root_R, offsets=offsets,
+        fill_leading=True,
     )
     root_t_carrier = _savgol_root_t(root_t_carrier, savgol_window, savgol_order)
 
@@ -830,7 +873,7 @@ def process_player(
     # Re-run Stage button still wipes the directory before invoking,
     # so an explicit re-run from the UI is unaffected.
     out_path = out_dir / f"{out_key}_smpl_world.npz"
-    if out_path.exists():
+    if _current_output(out_path, cfg):
         return "cached"
 
     # Announce up front — this player is going to take minutes on CPU.
@@ -879,7 +922,14 @@ def process_player(
         estimator=estimator,
         per_frame_K=gvhmr_K,
         per_frame_R=gvhmr_R,
+        overlap_frames=int(cfg.get("overlap_frames", 24)), fps=fps,
+        feature_cache_dir=out_dir.parent / "hmr_features" / out_key,
     )
+    np.savez_compressed(out_dir / f"{out_key}_raw.npz", **hmr_out)
+    (out_dir / f"{out_key}_provenance.json").write_text(json.dumps({
+        "pose_convention": "smpl_pytorch3d_rows_v2", "fps": fps,
+        "config": cfg, "observed_frames": [int(fi) for fi, _ in track_frames],
+    }, indent=2))
     thetas = np.asarray(hmr_out["thetas"])             # (N, 24, 3)
     betas_all = np.asarray(hmr_out["betas"])           # (N, 10)
     root_R_cam = np.asarray(hmr_out["root_R_cam"])     # (N, 3, 3)
@@ -891,32 +941,14 @@ def process_player(
     # to this transient, never-persisted signal.
     kp2d = np.asarray(hmr_out["kp2d"])                 # (N, 17, 3)
 
-    # GVHMR's body_pose axis-angles, when fed through our viewer's
-    # standard right-multiply FK chain (rot[i] = rot[par] @ Rl[i]),
-    # render every joint with REVERSED rotation: knees hyperextend,
-    # spine arches backward, arms swing up and behind. Inverting
-    # each axis-angle vector (negating all three components, which
-    # equivalently transposes the corresponding rotation matrix)
-    # produces correct anatomical motion. Confirmed empirically via
-    # a per-joint pose-convention selector in the viewer.
-    #
-    # GVHMR's own SMPL FK in third_party/gvhmr/.../smplx_lite.py:267
-    # is mathematically the same chain as ours, so the underlying
-    # cause is some implicit convention we haven't fully isolated
-    # (handed differently between SMPL releases or between PyTorch3D
-    # axis-angle and our JS Rodrigues). The fix is small and
-    # local; investigating the upstream root cause is an open task.
-    #
-    # The historical "thetas[:, 1:22, 1:3] *= -1" (180°-around-X
-    # conjugation) was a partial fix that handled some axes but
-    # left yaw/roll reversed; the full-vector negation here covers
-    # all three axes uniformly.
-    thetas[:, 1:22, :] *= -1.0
+    # Local rotations already follow SMPL/PyTorch3D conventions. The old
+    # negation compensated for our 6D shim stacking columns instead of rows.
+    # Fixing that shim also fixes root orientation; never negate body_pose.
 
     # 2. Median shape across track.
     betas = np.median(betas_all, axis=0)
 
-    # 3. Convert root rotation to pitch frame and SLERP-smooth. Frames
+    # 3. Convert root rotation to pitch frame and quaternion-smooth. Frames
     # with no camera entry get an identity root_R placeholder — the
     # translation solve below (anchor_root_translation) independently
     # gates on per_frame_R and leaves those frames at zero confidence.
@@ -928,12 +960,18 @@ def process_player(
             root_R_pitch[i] = np.eye(3)
             continue
         root_R_pitch[i] = smpl_root_in_pitch_frame(root_R_cam[i], R_t)
-    root_R_pitch = slerp_window(root_R_pitch, window=slerp_w)
+    for a, b in frame_runs(frame_indices):
+        root_R_pitch[a:b] = smooth_rotations(
+            root_R_pitch[a:b], window=slerp_w, robust=True, fps=fps,
+            max_speed_deg_s=float(cfg.get("root_max_speed_deg_s", 720.0)),
+        )
 
-    # 4. θ Savgol smoothing across time, per-joint, per-axis.
-    thetas_smooth = savgol_axis(
-        thetas, window=savgol_window, order=savgol_order, axis=0
-    ).astype(np.float32)
+    # 4. Smooth each joint on SO(3), independently within observed runs.
+    thetas_smooth = thetas.copy()
+    for a, b in frame_runs(frame_indices):
+        thetas_smooth[a:b] = smooth_pose(
+            thetas[a:b], window=savgol_window, order=savgol_order,
+        )
 
     # 5. Lean-correction pre-pass — the same ankle-mid ray-cast the
     # translation solve below uses, applied to root_R BEFORE anchoring

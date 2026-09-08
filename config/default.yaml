@@ -439,6 +439,8 @@ hmr_world:
   checkpoint: third_party/gvhmr/inputs/checkpoints/gvhmr/gvhmr_siga24_release.ckpt
   batch_size: 16
   max_sequence_length: 120
+  overlap_frames: 24
+  root_max_speed_deg_s: 720.0
   min_track_frames: 10
   beta_aggregation: median
   theta_savgol_window: 11
@@ -456,7 +458,7 @@ hmr_world:
   # axis perpendicular to the camera-to-player direction by this many
   # degrees toward the camera. 0 disables; 5 is a good empirical starting
   # point on broadcast clips.
-  lean_correction_deg: 5.0
+  lean_correction_deg: 0.0  # 6D rotation convention is now fixed at inference.
   # Root-translation anchoring strategy. contact = per-foot ray-cast
   # stance detection pins the planted foot and carries a smooth delta
   # correction over the legacy ankle-mid carrier (fixes sliding).
@@ -1100,6 +1102,22 @@ ball:
     fix_weight_px_per_m: 30.0
 
 refined_poses:
+  # Joint pose/root fitting with the calibrated camera held fixed. PhysPT is
+  # not involved. Candidate and final verified contacts are scored separately.
+  kinematic_refinement:
+    enabled: true
+    iterations: 160
+    sole_clearance_m: 0.025
+    reprojection_sigma_px: 8.0
+    reprojection_weight: 2.0
+    joint_acc_weight: 2.0
+    joint_angular_acc_weight: 8.0
+    root_acc_weight: 2.0
+    contact_weight: 4.0
+    resolved_pin_err_m: 0.06
+    resolved_max_step_m: 0.02
+  lean_correction_factor: 0.0
+  root_max_speed_deg_s: 720.0
   # Ground-snap target height (m) for the in-contact foot joint above
   # the pitch plane. Historically applied to every frame's lower foot;
   # now contact-gated (only frames with an in-contact foot are snapped
@@ -1228,7 +1246,8 @@ refined_poses:
     # smooths each player's track with a heavy Savgol, then treats
     # the cross-player median residual as the camera bias and
     # subtracts it.
-    residual_pass_enabled: true
+    # Fixed-camera ablation: this added no material reprojection benefit.
+    residual_pass_enabled: false
     # Per-player Savgol window (seconds). 1.2 s is wide enough to
     # absorb running velocity (poly=2 fits a parabolic accel within
     # the window) while leaving short-period wobble in the residual.

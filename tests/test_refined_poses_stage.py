@@ -255,8 +255,8 @@ def test_reduce_lean_partial_correction() -> None:
     up /= np.linalg.norm(up)
     cos_a = float(np.clip(up @ np.array([0.0, 0.0, 1.0]), -1.0, 1.0))
     angle_deg = float(np.degrees(np.arccos(cos_a)))
-    # Started at 20°, corrected by 0.5×20° = 10°, leaves 10° from vertical.
-    assert angle_deg == pytest.approx(10.0, abs=0.05)
+    # At 20 degrees the continuous prior has begun to fade (smoothstep).
+    assert 10.0 < angle_deg < 20.0
 
 
 @pytest.mark.unit
@@ -566,6 +566,16 @@ def test_refined_poses_is_complete_after_run(tmp_path: Path) -> None:
     stage = RefinedPosesStage(config=_default_config(), output_dir=output_dir)
     stage.run()
     assert stage.is_complete() is True
+
+    source = output_dir / "hmr_world" / "play__P001_smpl_world.npz"
+    original = source.read_bytes()
+    _make_smpl_track(player_id="P001", shot_id="play", n_frames=6).save(source)
+    assert stage.is_complete() is False
+    source.write_bytes(original)
+    assert stage.is_complete() is True
+    stage.config["refined_poses"]["smooth_root_R_window"] = 11
+    assert stage.is_complete() is False
+    del stage.config["refined_poses"]["smooth_root_R_window"]
 
     (output_dir / "refined_poses" / "P001_refined.npz").unlink()
     assert stage.is_complete() is False

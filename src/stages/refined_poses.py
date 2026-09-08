@@ -28,6 +28,7 @@ continue to consume refined_poses output without modification.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -53,7 +54,8 @@ from src.utils.smpl_skeleton import (
     beta_adjusted_rest_joints as _beta_adjusted_rest_joints,
     load_smpl_neutral_model as _load_smpl_neutral_model,
 )
-from src.utils.temporal_smoothing import savgol_axis, slerp_window
+from src.utils.temporal_smoothing import savgol_axis
+from src.utils.pose_temporal import frame_runs, smooth_pose, smooth_rotations, interpolate_pose
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +222,11 @@ def _reduce_root_lean(
             # bu == -z_up (body upside-down) — undefined axis, leave it.
             continue
         axis = axis / axis_n
-        correction_angle = angle * float(correction_factor)
+        # Fade the prior smoothly to zero over the upper half of its range.
+        # A hard cutoff previously created a ~21 degree jump at 30 degrees.
+        u = np.clip((angle - 0.5 * max_lean_rad) / max(0.5 * max_lean_rad, 1e-9), 0, 1)
+        weight = 1.0 - u*u*(3.0 - 2.0*u)
+        correction_angle = angle * float(correction_factor) * weight
         ca = float(np.cos(correction_angle))
         sa = float(np.sin(correction_angle))
         K = np.array([
@@ -462,9 +468,10 @@ def _contacts_for_track(
         end_pos = int(np.searchsorted(frames_arr, end_f, side="left"))
         if end_pos <= start_pos:
             continue  # span doesn't overlap this track's frame range
-        spans.append(ContactSpan(
-            side=side, start=start_pos, end=end_pos, pin=np.zeros(3),
-        ))
+        for a,b in frame_runs(frames_arr[start_pos:end_pos]):
+            spans.append(ContactSpan(
+                side=side, start=start_pos+a, end=start_pos+b, pin=np.zeros(3),
+            ))
     spans.sort(key=lambda s: (s.start, s.side))
     return FootContacts(
         n_frames=n, in_contact=in_contact, quality=quality, spans=tuple(spans),
@@ -512,7 +519,7 @@ def _load_track_contacts(
             root_R=np.asarray(track.root_R, dtype=float),
             root_t=np.asarray(track.root_t, dtype=float),
             betas=np.asarray(track.betas, dtype=float),
-            fps=fps,
+            fps=fps, frame_indices=raw_frames,
         )
     return _contacts_to_global(contacts, raw_frames)
 
@@ -557,6 +564,8 @@ def _smooth_track(
     root_t_savgol_order: int = 2,
     thetas_savgol_window: int = 9,
     thetas_savgol_order: int = 2,
+    fps: float = 30.0,
+    root_max_speed_deg_s: float = 720.0,
 ) -> SmplWorldTrack:
     """Run temporal smoothers on ``root_R`` / ``root_t`` / ``thetas``.
 
@@ -590,7 +599,10 @@ def _smooth_track(
     for a, b in _frame_run_bounds(frames_arr):
         m = b - a
         if root_R_slerp_window > 1 and m >= 3:
-            root_R[a:b] = slerp_window(root_R[a:b], window=root_R_slerp_window)
+            root_R[a:b] = smooth_rotations(
+                root_R[a:b], window=root_R_slerp_window, robust=True,
+                fps=fps, max_speed_deg_s=root_max_speed_deg_s,
+            )
         if root_t_savgol_window > 1 and m >= root_t_savgol_window:
             root_t[a:b] = savgol_axis(
                 root_t[a:b],
@@ -599,11 +611,8 @@ def _smooth_track(
                 axis=0,
             )
         if thetas_savgol_window > 1 and m >= thetas_savgol_window:
-            thetas[a:b] = savgol_axis(
-                thetas[a:b],
-                window=thetas_savgol_window,
-                order=thetas_savgol_order,
-                axis=0,
+            thetas[a:b] = smooth_pose(
+                thetas[a:b], window=thetas_savgol_window, order=thetas_savgol_order,
             )
 
     return SmplWorldTrack(
@@ -1427,12 +1436,8 @@ def _clean_player_translation(
             dense_t[:, ax] = np.interp(dense_f, rf, root_t[a:b, ax])
         dense_c = np.interp(dense_f, rf, conf[a:b])
 
-        # Densify thetas (linear per element) and rotation (SLERP).
-        rth = thetas[a:b].reshape(b - a, -1)
-        dth = np.empty((len(dense_f), rth.shape[1]))
-        for j in range(rth.shape[1]):
-            dth[:, j] = np.interp(dense_f, rf, rth[:, j])
-        dense_th = dth.reshape((len(dense_f),) + thetas.shape[1:])
+        # Densify every joint and root with shortest-path rotation interpolation.
+        dense_th = interpolate_pose(rf, thetas[a:b], dense_f)
         dense_R = _slerp_fill(rf, root_R[a:b], dense_f)
 
         # Reject position outliers among the originally-present frames,
@@ -1831,9 +1836,20 @@ class RefinedPosesStage(BaseStage):
         player_ids = _discover_player_ids(hmr_dir)
         if not player_ids:
             return True
-        return all(
-            (out_dir / f"{pid}_refined.npz").exists() for pid in player_ids
-        )
+        for pid in player_ids:
+            if not (out_dir / f"{pid}_refined.npz").exists():
+                return False
+            try:
+                provenance = json.loads((out_dir / f"{pid}_provenance.json").read_text())
+            except (OSError, ValueError):
+                return False
+            if provenance.get("config") != (self.config.get("refined_poses") or {}):
+                return False
+            sources = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                       for p in hmr_dir.glob(f"*__{pid}_smpl_world.npz")}
+            if not sources or provenance.get("sources") != sources:
+                return False
+        return True
 
     def run(self) -> None:
         hmr_dir = self.output_dir / "hmr_world"
@@ -1937,6 +1953,8 @@ class RefinedPosesStage(BaseStage):
         # once up front (before the per-player clean loop, which now uses
         # it for the velocity limit / Hampel window).
         fps = _load_clip_fps(self.output_dir)
+        smoothing["fps"] = fps
+        smoothing["root_max_speed_deg_s"] = float(cfg.get("root_max_speed_deg_s", 720.0))
 
         # Per-player robust translation cleanup (gap-fill + outlier
         # rejection + velocity limit + acceleration limit). Disabled when
@@ -2161,13 +2179,52 @@ class RefinedPosesStage(BaseStage):
                 if int(len(tr.frames)) == 0:
                     continue
                 rest_joints = _beta_adjusted_rest_joints(tr.betas, smpl_model)
-                new_tr, fl_stats, resolved_global = _apply_foot_lock_finale(
-                    tr,
-                    contacts_by_key.get((shot_id, pid)),
-                    fps=fps,
-                    rest_joints=rest_joints,
-                    **foot_lock_kwargs,
-                )
+                kinematic_cfg = cfg.get("kinematic_refinement") or {}
+                if kinematic_cfg.get("enabled", False):
+                    from src.utils.kinematic_refinement import refine_motion
+                    from src.schemas.camera_track import CameraTrack
+                    kp_path = hmr_dir / f"{shot_id}__{pid}_kp2d.json"
+                    cam_path = self.output_dir / "camera" / f"{shot_id}_camera_track.json"
+                    observations = None
+                    player_fps = fps
+                    if kp_path.exists() and cam_path.exists():
+                        camera = CameraTrack.load(cam_path)
+                        player_fps = camera.fps
+                        cam_by_f = {f.frame:f for f in camera.frames}
+                        kp_by_f = {f["frame"]:f["keypoints"] for f in json.loads(kp_path.read_text())["frames"]}
+                        observations = {"K":[], "R":[], "t":[], "kp2d":[]}
+                        for f in tr.frames:
+                            cam = cam_by_f.get(int(f))
+                            observations["K"].append(cam.K if cam else np.eye(3))
+                            observations["R"].append(cam.R if cam else np.eye(3))
+                            observations["t"].append((cam.t if cam.t is not None else camera.t_world) if cam else np.zeros(3))
+                            observations["kp2d"].append(kp_by_f.get(int(f),np.zeros((17,3))) if cam else np.zeros((17,3)))
+                        observations = {k:np.asarray(v) for k,v in observations.items()}
+                        observations["distortion"] = camera.distortion
+                    th, rr, rt, fl_stats = refine_motion(
+                        frames=tr.frames, thetas=tr.thetas, root_R=tr.root_R, root_t=tr.root_t,
+                        betas=tr.betas, rest_joints=rest_joints,
+                        contacts=_contacts_for_track(contacts_by_key.get((shot_id,pid)),tr.frames),
+                        fps=player_fps, observations=observations, cfg=kinematic_cfg,
+                    )
+                    resolved_spans = fl_stats.pop("resolved_spans")
+                    resolved_mask = _mask_from_spans(len(tr.frames),resolved_spans)
+                    resolved_global = _contacts_to_global(FootContacts(
+                        len(tr.frames),resolved_mask,resolved_mask.astype(float),resolved_spans),tr.frames)
+                    new_tr = SmplWorldTrack(player_id=tr.player_id, frames=tr.frames, betas=tr.betas,
+                        thetas=th.astype(np.float32),root_R=rr.astype(np.float32),root_t=rt.astype(np.float32),
+                        confidence=tr.confidence,shot_id=tr.shot_id)
+                    logger.info("[refined_poses] %s joint solve: %d/%d contacts, %d -> %d anatomical violations",
+                        pid,fl_stats["spans_locked"],fl_stats["spans_locked"]+fl_stats["spans_unresolved"],
+                        fl_stats["anatomical_violations_before"],fl_stats["anatomical_violations_after"])
+                else:
+                    new_tr, fl_stats, resolved_global = _apply_foot_lock_finale(
+                        tr,
+                        contacts_by_key.get((shot_id, pid)),
+                        fps=fps,
+                        rest_joints=rest_joints,
+                        **foot_lock_kwargs,
+                    )
                 prepared_per_player[pid] = [(shot_id, new_tr)]
                 foot_lock_by_pid[pid] = fl_stats
                 resolved_contacts_by_pid[pid] = resolved_global
@@ -2241,6 +2298,12 @@ class RefinedPosesStage(BaseStage):
                     a_stats["accel_clamped_frames"]
                 )
             refined.save(out_dir / f"{pid}_refined.npz")
+            provenance = {"config": cfg, "sources": {}}
+            for sid, _ in contribs:
+                source = hmr_dir / f"{sid}__{pid}_smpl_world.npz"
+                if source.exists():
+                    provenance["sources"][source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
+            (out_dir / f"{pid}_provenance.json").write_text(json.dumps(provenance, indent=2))
             diag.save(out_dir / f"{pid}_diagnostics.json")
             if pid in resolved_contacts_by_pid:
                 # Resolve the verified/effective contact set (computed

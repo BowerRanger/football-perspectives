@@ -43,7 +43,7 @@ _COCO_ANKLE_IDX = (15, 16)
 _SIDE_NAMES = ("L", "R")
 
 
-def _runs_from_mask(mask: np.ndarray) -> list[tuple[int, int]]:
+def _runs_from_mask(mask: np.ndarray, frames: np.ndarray | None = None) -> list[tuple[int, int]]:
     """Contiguous True runs in a 1-D boolean array, as [start, end) pairs."""
     n = int(mask.shape[0])
     runs: list[tuple[int, int]] = []
@@ -52,6 +52,8 @@ def _runs_from_mask(mask: np.ndarray) -> list[tuple[int, int]]:
         if mask[i]:
             j = i
             while j < n and mask[j]:
+                if j > i and frames is not None and frames[j] != frames[j-1]+1:
+                    break
                 j += 1
             runs.append((i, j))
             i = j
@@ -280,7 +282,8 @@ def foot_quality_metrics(
         contacts_arr = np.asarray(contacts, dtype=bool)
         side_masks = [contacts_arr[:, 0], contacts_arr[:, 1]]
         contact_ratio = float(contacts_arr.any(axis=1).mean())
-        both_up = ~contacts_arr.any(axis=1)
+        # Missing/unverified contact is not evidence of flight.
+        both_up = (feet_z[:,0] > _FLIGHT_THRESHOLD_M) & (feet_z[:,1] > _FLIGHT_THRESHOLD_M)
     else:
         side_masks = [feet_z[:, 0] < _LOW_FOOT_THRESHOLD_M, feet_z[:, 1] < _LOW_FOOT_THRESHOLD_M]
         any_low = side_masks[0] | side_masks[1]
@@ -291,7 +294,7 @@ def foot_quality_metrics(
     all_runs: list[tuple[int, int]] = []
     all_lengths: list[float] = []
     for side, name in enumerate(_SIDE_NAMES):
-        runs = _runs_from_mask(side_masks[side])
+        runs = _runs_from_mask(side_masks[side], np.asarray(frames))
         all_runs.extend(runs)
         all_lengths.extend(_within_run_path_lengths(feet_pos[:, side, :2], runs))
         speeds = _within_run_speeds(feet_pos[:, side, :2], runs, fps)

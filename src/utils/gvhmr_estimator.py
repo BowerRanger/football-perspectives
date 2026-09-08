@@ -17,6 +17,8 @@ weak-perspective camera parameters for 2D reprojection.
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import logging
 import os
 import sys
@@ -231,6 +233,8 @@ class GVHMREstimator:
         of this estimator's lifetime — see ``resolved_extractor_device``
         and ``extractor_fallback_count``.
     """
+
+    supports_feature_cache = True
 
     def __init__(
         self,
@@ -623,6 +627,8 @@ class GVHMREstimator:
         K_per_frame: np.ndarray | None = None,
         R_w2c_per_frame: np.ndarray | None = None,
         legacy_decode: bool = False,
+        precomputed: dict[str, np.ndarray] | None = None,
+        extraction_only: bool = False,
     ) -> dict[str, np.ndarray]:
         # Serialise across the whole process — see the lock's docstring
         # for the rationale. This blocks rather than failing because the
@@ -630,7 +636,8 @@ class GVHMREstimator:
         # the prior estimate finishes.
         with _GVHMR_INFERENCE_LOCK:
             return self._estimate_sequence_locked(
-                frames_bgr, bboxes, fps, K_per_frame, R_w2c_per_frame, legacy_decode
+                frames_bgr, bboxes, fps, K_per_frame, R_w2c_per_frame, legacy_decode,
+                precomputed, extraction_only,
             )
 
     def _estimate_sequence_locked(
@@ -641,6 +648,8 @@ class GVHMREstimator:
         K_per_frame: np.ndarray | None = None,
         R_w2c_per_frame: np.ndarray | None = None,
         legacy_decode: bool = False,
+        precomputed: dict[str, np.ndarray] | None = None,
+        extraction_only: bool = False,
     ) -> dict[str, np.ndarray]:
         """Run GVHMR on a tracked player's video sequence.
 
@@ -706,94 +715,107 @@ class GVHMREstimator:
 
         img_h, img_w = frames_bgr[0].shape[:2]
 
-        # Write frames to a temp video for GVHMR's preprocessors
-        # (they expect a video path, not raw frames)
-        t0 = time.perf_counter()
-        tmp_video = self._write_temp_video(frames_bgr, fps)
-        timing["temp_video_write"] = time.perf_counter() - t0
+        if precomputed is None:
+            # Write frames to a temp video for GVHMR's preprocessors
+            # (they expect a video path, not raw frames)
+            t0 = time.perf_counter()
+            tmp_video = self._write_temp_video(frames_bgr, fps)
+            timing["temp_video_write"] = time.perf_counter() - t0
 
-        # Calibrated camera rotation takes priority over SimpleVO — see
-        # the R_w2c_per_frame docstring above.
-        R_w2c: torch.Tensor | None = None
-        if R_w2c_per_frame is not None and len(R_w2c_per_frame) == n_frames:
-            R_w2c = torch.tensor(
-                np.asarray(R_w2c_per_frame, dtype=np.float32), dtype=torch.float32
-            )  # (N, 3, 3)
+            # Calibrated camera rotation takes priority over SimpleVO — see
+            # the R_w2c_per_frame docstring above.
+            R_w2c: torch.Tensor | None = None
+            if R_w2c_per_frame is not None and len(R_w2c_per_frame) == n_frames:
+                R_w2c = torch.tensor(
+                    np.asarray(R_w2c_per_frame, dtype=np.float32), dtype=torch.float32
+                )  # (N, 3, 3)
 
-        # GVHMR's preprocessors also call ``.cuda()`` on per-batch tensors
-        # during inference. Each extract phase runs on the resolved
-        # extractor device (``_run_extractor_phase`` handles its own
-        # ``_redirect_cuda`` scoping, plus the MPS-fallback retry policy);
-        # SimpleVO is a separate SIFT+pycolmap pipeline, unrelated to the
-        # extractor split, and keeps running under the main-device redirect.
-        try:
-            if legacy_decode:
-                # Bench/regression escape hatch: each extractor
-                # decodes + preprocesses the temp video independently
-                # (the original, pre-single-decode behaviour).
-                t0 = time.perf_counter()
-                kp2d = self._run_extractor_phase(
-                    lambda: self._vitpose.extract(str(tmp_video), bbx_xys),
-                    phase="vitpose_extract",
-                )  # (N, 17, 3)
-                timing["vitpose_extract"] = time.perf_counter() - t0
-
-                t0 = time.perf_counter()
-                f_imgseq = self._run_extractor_phase(
-                    lambda: self._extractor.extract_video_features(str(tmp_video), bbx_xys),
-                    phase="hmr2_extract",
-                )  # (N, 1024)
-                timing["hmr2_extract"] = time.perf_counter() - t0
-            else:
-                # Single shared decode: call the vendored get_batch()
-                # once and feed the same cropped/normalised tensor to
-                # both extractors, instead of each decoding the temp
-                # video independently. NOTE: the outer ``bbx_xys``
-                # (used below for ``data["bbx_xys"]``) is intentionally
-                # left untouched — only this adjusted copy is passed
-                # to the extractors, matching what get_batch() would
-                # have returned internally for either legacy call.
-                # get_batch() itself never calls .cuda() (pure decode +
-                # normalise), so it runs outside any device redirect and
-                # its output stays a plain CPU tensor — the extractors'
-                # own per-mini-batch .cuda() redirect (inside
-                # _run_extractor_phase) is what moves slices to the
-                # extractor device; do NOT pre-move the whole tensor here.
-                t0 = time.perf_counter()
-                imgs, bbx_xys_adj = get_batch(str(tmp_video), bbx_xys, img_ds=0.5)
-                timing["decode_preproc"] = time.perf_counter() - t0
-                # MPS has no float64 kernels; a silently-upcast imgs
-                # tensor reaching an MPS-placed extractor would crash far
-                # from this call site. Fail here with a clear message.
-                assert imgs.dtype == torch.float32, (
-                    f"get_batch() returned imgs dtype {imgs.dtype}, expected "
-                    "float32 (required for the MPS extractor path)"
-                )
-
-                t0 = time.perf_counter()
-                kp2d = self._run_extractor_phase(
-                    lambda: self._vitpose.extract(imgs, bbx_xys_adj),
-                    phase="vitpose_extract",
-                )  # (N, 17, 3)
-                timing["vitpose_extract"] = time.perf_counter() - t0
-
-                t0 = time.perf_counter()
-                f_imgseq = self._run_extractor_phase(
-                    lambda: self._extractor.extract_video_features(imgs, bbx_xys_adj),
-                    phase="hmr2_extract",
-                )  # (N, 1024)
-                timing["hmr2_extract"] = time.perf_counter() - t0
-
-            # Camera trajectory via SimpleVO (broadcast cameras pan).
-            # Skipped when a calibrated R_w2c was supplied above, or
-            # when static_cam was forced on by the caller.
-            if R_w2c is None and not self._static_cam:
-                with _redirect_cuda(self._device):
+            # GVHMR's preprocessors also call ``.cuda()`` on per-batch tensors
+            # during inference. Each extract phase runs on the resolved
+            # extractor device (``_run_extractor_phase`` handles its own
+            # ``_redirect_cuda`` scoping, plus the MPS-fallback retry policy);
+            # SimpleVO is a separate SIFT+pycolmap pipeline, unrelated to the
+            # extractor split, and keeps running under the main-device redirect.
+            try:
+                if legacy_decode:
+                    # Bench/regression escape hatch: each extractor
+                    # decodes + preprocesses the temp video independently
+                    # (the original, pre-single-decode behaviour).
                     t0 = time.perf_counter()
-                    R_w2c = self._estimate_camera_rotations(tmp_video, n_frames)
-                    timing["simple_vo"] = time.perf_counter() - t0
-        finally:
-            tmp_video.unlink(missing_ok=True)
+                    kp2d = self._run_extractor_phase(
+                        lambda: self._vitpose.extract(str(tmp_video), bbx_xys),
+                        phase="vitpose_extract",
+                    )  # (N, 17, 3)
+                    timing["vitpose_extract"] = time.perf_counter() - t0
+
+                    t0 = time.perf_counter()
+                    f_imgseq = self._run_extractor_phase(
+                        lambda: self._extractor.extract_video_features(str(tmp_video), bbx_xys),
+                        phase="hmr2_extract",
+                    )  # (N, 1024)
+                    timing["hmr2_extract"] = time.perf_counter() - t0
+                else:
+                    # Single shared decode: call the vendored get_batch()
+                    # once and feed the same cropped/normalised tensor to
+                    # both extractors, instead of each decoding the temp
+                    # video independently. NOTE: the outer ``bbx_xys``
+                    # (used below for ``data["bbx_xys"]``) is intentionally
+                    # left untouched — only this adjusted copy is passed
+                    # to the extractors, matching what get_batch() would
+                    # have returned internally for either legacy call.
+                    # get_batch() itself never calls .cuda() (pure decode +
+                    # normalise), so it runs outside any device redirect and
+                    # its output stays a plain CPU tensor — the extractors'
+                    # own per-mini-batch .cuda() redirect (inside
+                    # _run_extractor_phase) is what moves slices to the
+                    # extractor device; do NOT pre-move the whole tensor here.
+                    t0 = time.perf_counter()
+                    imgs, bbx_xys_adj = get_batch(str(tmp_video), bbx_xys, img_ds=0.5)
+                    timing["decode_preproc"] = time.perf_counter() - t0
+                    # MPS has no float64 kernels; a silently-upcast imgs
+                    # tensor reaching an MPS-placed extractor would crash far
+                    # from this call site. Fail here with a clear message.
+                    assert imgs.dtype == torch.float32, (
+                        f"get_batch() returned imgs dtype {imgs.dtype}, expected "
+                        "float32 (required for the MPS extractor path)"
+                    )
+
+                    t0 = time.perf_counter()
+                    kp2d = self._run_extractor_phase(
+                        lambda: self._vitpose.extract(imgs, bbx_xys_adj),
+                        phase="vitpose_extract",
+                    )  # (N, 17, 3)
+                    timing["vitpose_extract"] = time.perf_counter() - t0
+
+                    t0 = time.perf_counter()
+                    f_imgseq = self._run_extractor_phase(
+                        lambda: self._extractor.extract_video_features(imgs, bbx_xys_adj),
+                        phase="hmr2_extract",
+                    )  # (N, 1024)
+                    timing["hmr2_extract"] = time.perf_counter() - t0
+
+                # Camera trajectory via SimpleVO (broadcast cameras pan).
+                # Skipped when a calibrated R_w2c was supplied above, or
+                # when static_cam was forced on by the caller.
+                if R_w2c is None and not self._static_cam:
+                    with _redirect_cuda(self._device):
+                        t0 = time.perf_counter()
+                        R_w2c = self._estimate_camera_rotations(tmp_video, n_frames)
+                        timing["simple_vo"] = time.perf_counter() - t0
+            finally:
+                tmp_video.unlink(missing_ok=True)
+
+        else:
+            kp2d = torch.as_tensor(precomputed["kp2d"], dtype=torch.float32)
+            f_imgseq = torch.as_tensor(precomputed["f_imgseq"], dtype=torch.float32)
+            if R_w2c_per_frame is None:
+                raise ValueError("Cached features require calibrated camera rotations")
+            R_w2c = torch.as_tensor(R_w2c_per_frame, dtype=torch.float32)
+
+        if extraction_only:
+            self.timings.append(timing)
+            return {"kp2d": kp2d.detach().cpu().numpy(),
+                    "f_imgseq": f_imgseq.detach().cpu().numpy()}
 
         # Camera intrinsics: prefer the calibrated per-frame K from the
         # pipeline's camera_track when supplied. GVHMR's default
@@ -900,7 +922,16 @@ class GVHMREstimator:
             chunk_total,
         )
 
+        global_params = pred.get("smpl_params_global", {})
+        stationary = net_outputs.get("static_conf_logits")
+        extra = {}
+        if stationary is not None:
+            extra["stationary_probability"] = stationary.sigmoid().squeeze(0).cpu().numpy()
+        for key in ("transl", "global_orient"):
+            if key in global_params:
+                extra["global_" + key] = global_params[key].cpu().numpy()
         return {
+            **extra,
             "global_orient": global_orient.astype(np.float32),
             "body_pose": body_pose.astype(np.float32),
             "betas": betas_avg.astype(np.float32),
@@ -1131,6 +1162,9 @@ def run_on_track(
     per_frame_R: np.ndarray | None = None,
     legacy_decode: bool = False,
     extractor_device: str = "cpu",
+    overlap_frames: int = 0,
+    fps: float = 30.0,
+    feature_cache_dir: Path | None = None,
 ) -> dict[str, np.ndarray]:
     """Run GVHMR over a single player's track.
 
@@ -1230,72 +1264,97 @@ def run_on_track(
     bboxes = [list(map(float, bb)) for _, bb in track_frames]
     frames_bgr = _read_video_frames(video_path, frame_indices)
 
-    chunk = max(1, int(max_sequence_length))
-    all_thetas: list[np.ndarray] = []
-    all_betas: list[np.ndarray] = []
-    all_root_R_cam: list[np.ndarray] = []
-    all_root_t_cam: list[np.ndarray] = []
-    all_joint_conf: list[np.ndarray] = []
-    all_kp2d: list[np.ndarray] = []
+    from src.utils.pose_temporal import frame_runs
 
-    for start in range(0, n, chunk):
-        end = min(start + chunk, n)
-        sub_frames = frames_bgr[start:end]
-        sub_bboxes = bboxes[start:end]
-        sub_K = (
-            per_frame_K[start:end] if per_frame_K is not None else None
-        )
-        sub_R = (
-            per_frame_R[start:end] if per_frame_R is not None else None
-        )
-        out = estimator.estimate_sequence(
-            sub_frames, sub_bboxes,
-            K_per_frame=sub_K, R_w2c_per_frame=sub_R,
-            legacy_decode=legacy_decode,
-        )
+    chunk = max(2, int(max_sequence_length))
+    overlap = min(max(0, int(overlap_frames)), chunk // 2)
+    runs = frame_runs(np.asarray(frame_indices))
+    # A missing observation ends a run: no temporal inference or contact
+    # velocity is ever computed as if a long absence lasted one frame.
+    # Short gaps are filled on the true frame grid later, by Refine Poses.
+    feature_data = None
+    if (getattr(estimator, "supports_feature_cache", False)
+            and per_frame_R is not None and not legacy_decode and feature_cache_dir is not None):
+        parts = []
+        stat = video_path.stat()
+        for start in range(0, n, chunk):
+            end = min(start + chunk, n)
+            fingerprint = json.dumps({
+                "version": 1, "video": str(video_path.resolve()),
+                "size": stat.st_size, "mtime": stat.st_mtime_ns,
+                "frames": frame_indices[start:end], "bboxes": bboxes[start:end],
+                "extractor": getattr(estimator, "resolved_extractor_device", extractor_device),
+            }, sort_keys=True).encode()
+            cache = None
+            if feature_cache_dir is not None:
+                feature_cache_dir.mkdir(parents=True, exist_ok=True)
+                cache = feature_cache_dir / (hashlib.sha256(fingerprint).hexdigest() + ".npz")
+            if cache is not None and cache.exists():
+                with np.load(cache, allow_pickle=False) as z:
+                    part = {k: z[k] for k in ("kp2d", "f_imgseq")}
+            else:
+                part = estimator.estimate_sequence(
+                    frames_bgr[start:end], bboxes[start:end], fps=fps,
+                    R_w2c_per_frame=per_frame_R[start:end], extraction_only=True,
+                )
+                if cache is not None:
+                    tmp = cache.with_suffix(".tmp.npz")
+                    np.savez_compressed(tmp, **part)
+                    tmp.replace(cache)
+            parts.append(part)
+        feature_data = {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
 
-        global_orient = out["global_orient"]                # (M, 3)
-        body_pose = out["body_pose"].reshape(-1, 21, 3)     # (M, 21, 3)
-        betas_avg = out["betas"]                            # (10,)
-        transl = out["transl"]                              # (M, 3)
-        kp2d = out["kp2d"]                                  # (M, 17, 3)
-
-        m = global_orient.shape[0]
-        thetas = np.zeros((m, 24, 3), dtype=np.float32)
-        thetas[:, 0, :] = global_orient
-        thetas[:, 1:22, :] = body_pose
-        # joints 22, 23 (hand placeholders) remain zero
-
-        betas_per_frame = np.tile(betas_avg.astype(np.float32), (m, 1))
-        root_R_cam = _axis_angle_to_matrix(global_orient).astype(np.float32)
-        root_t_cam = transl.astype(np.float32)
-
-        # Joint confidence: GVHMR's ViTPose 2D keypoint confidences cover 17
-        # COCO joints. For the 24 SMPL joints, take the mean of the per-frame
-        # 2D-keypoint confidence and broadcast — the foot-anchor stage only
-        # uses min(joint_confidence) anyway. Joints with no 2D analogue
-        # (root, spine) inherit the same scalar. This is intentionally
-        # conservative; if needed, downstream can refine.
-        if kp2d.size:
-            scalar_conf = kp2d[:, :, 2].mean(axis=1, keepdims=True)  # (M, 1)
+    result = {}
+    support = np.full(n, -1.0)
+    window_ids = np.full(n, -1, dtype=np.int64)
+    for run_start, run_end in runs:
+        if overlap == 0:
+            starts = list(range(run_start, run_end, chunk))
         else:
-            scalar_conf = np.zeros((m, 1), dtype=np.float32)
-        joint_conf = np.broadcast_to(scalar_conf, (m, 24)).astype(np.float32)
-
-        all_thetas.append(thetas)
-        all_betas.append(betas_per_frame)
-        all_root_R_cam.append(root_R_cam)
-        all_root_t_cam.append(root_t_cam)
-        all_joint_conf.append(joint_conf)
-        all_kp2d.append(kp2d.astype(np.float32))
-
+            starts = list(range(run_start, max(run_start + 1, run_end-chunk+1), chunk-overlap))
+            if run_end - starts[-1] > chunk:
+                starts.append(run_end-chunk)
+        for start in starts:
+            end = min(start+chunk, run_end)
+            kwargs = dict(K_per_frame=None if per_frame_K is None else per_frame_K[start:end],
+                          R_w2c_per_frame=None if per_frame_R is None else per_frame_R[start:end],
+                          legacy_decode=legacy_decode)
+            if getattr(estimator, "supports_feature_cache", False):
+                kwargs["fps"] = fps
+            if feature_data is not None:
+                kwargs["precomputed"] = {k: v[start:end] for k,v in feature_data.items()}
+            out = estimator.estimate_sequence(frames_bgr[start:end], bboxes[start:end], **kwargs)
+            m = end-start
+            # Prefer predictions with the most bidirectional temporal context.
+            # Selection avoids averaging incompatible root/shape hypotheses.
+            score = np.minimum(np.arange(m)+1, np.arange(m,0,-1)).astype(float)
+            use = score > support[start:end]
+            for key in ("global_orient", "body_pose", "transl", "kp2d",
+                        "stationary_probability", "global_transl", "global_global_orient"):
+                if key not in out:
+                    continue
+                value = np.asarray(out[key])
+                if key not in result:
+                    result[key] = np.zeros((n,) + value.shape[1:], dtype=np.float32)
+                result[key][start:end][use] = value[use]
+            if "betas" not in result:
+                result["betas"] = np.zeros((n, 10), dtype=np.float32)
+            beta = np.asarray(out["betas"])
+            result["betas"][start:end][use] = beta if beta.ndim == 1 else beta[use]
+            support[start:end][use] = score[use]
+            window_ids[start:end][use] = start
+    thetas = np.zeros((n, 24, 3), dtype=np.float32)
+    thetas[:, 0] = result["global_orient"]
+    thetas[:, 1:22] = result["body_pose"].reshape(n,21,3)
+    conf = result["kp2d"][:,:,2].mean(axis=1,keepdims=True)
     return {
-        "thetas": np.concatenate(all_thetas, axis=0) if all_thetas else np.zeros((0, 24, 3), dtype=np.float32),
-        "betas": np.concatenate(all_betas, axis=0) if all_betas else np.zeros((0, 10), dtype=np.float32),
-        "root_R_cam": np.concatenate(all_root_R_cam, axis=0) if all_root_R_cam else np.zeros((0, 3, 3), dtype=np.float32),
-        "root_t_cam": np.concatenate(all_root_t_cam, axis=0) if all_root_t_cam else np.zeros((0, 3), dtype=np.float32),
-        "joint_confidence": np.concatenate(all_joint_conf, axis=0) if all_joint_conf else np.zeros((0, 24), dtype=np.float32),
-        "kp2d": np.concatenate(all_kp2d, axis=0) if all_kp2d else np.zeros((0, 17, 3), dtype=np.float32),
+        "thetas": thetas, "betas": result["betas"],
+        "root_R_cam": _axis_angle_to_matrix(result["global_orient"]).astype(np.float32),
+        "root_t_cam": result["transl"],
+        "joint_confidence": np.broadcast_to(conf, (n,24)).copy(),
+        "kp2d": result["kp2d"], "window_start_index": window_ids,
+        "frame_indices": np.asarray(frame_indices, dtype=np.int64),
+        **{k:v for k,v in result.items() if k.startswith("global_") or k == "stationary_probability"},
     }
 
 

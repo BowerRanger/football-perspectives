@@ -32,6 +32,7 @@ from typing import Callable
 import numpy as np
 
 from src.utils.foot_anchor import ankle_ray_to_pitch
+from src.utils.pose_temporal import frame_runs
 from src.utils.smpl_skeleton import (
     beta_adjusted_rest_joints,
     compute_all_joint_worlds_batch,
@@ -219,6 +220,15 @@ class FootContacts:
 # Shared hysteresis + span machinery (module-private; used by both
 # detect_contacts and derive_contacts_from_fk).
 # ---------------------------------------------------------------------------
+
+
+
+def _join_contact_runs(parts: list[tuple[int, FootContacts]]) -> FootContacts:
+    return FootContacts(sum(p.n_frames for _,p in parts),
+        np.concatenate([p.in_contact for _,p in parts]),
+        np.concatenate([p.quality for _,p in parts]),
+        tuple(ContactSpan(s.side,s.start+a,s.end+a,s.pin)
+              for a,p in parts for s in p.spans))
 
 
 def _nanmedian_filter3(x: np.ndarray) -> np.ndarray:
@@ -626,6 +636,13 @@ def detect_contacts(
     """
     frame_indices = np.asarray(frame_indices)
     n = int(frame_indices.shape[0])
+    runs = frame_runs(frame_indices)
+    if len(runs) > 1:
+        return _join_contact_runs([(a,detect_contacts(
+            kp2d=kp2d[a:b],frame_indices=frame_indices[a:b],per_frame_K=per_frame_K,
+            per_frame_R=per_frame_R,per_frame_t=per_frame_t,distortion=distortion,
+            thetas=thetas[a:b],root_R=root_R[a:b],betas=betas,fps=fps,cfg=cfg,
+        )) for a,b in runs])
     kp2d = np.asarray(kp2d, dtype=float)
 
     speed_enter_m_s = float(cfg.get("speed_enter_m_s", 0.6))
@@ -758,6 +775,7 @@ def derive_contacts_from_fk(
     speed_exit: float = 1.2,
     max_height: float = 0.12,
     min_span_frames: int = 4,
+    frame_indices: np.ndarray | None = None,
 ) -> FootContacts:
     """FK-only ground-contact fallback, for when no ``detect_contacts``
     sidecar (no kp2d/camera evidence) is available — e.g.
@@ -793,6 +811,13 @@ def derive_contacts_from_fk(
     """
     thetas = np.asarray(thetas, dtype=float)
     n = int(thetas.shape[0])
+    runs = frame_runs(np.arange(n) if frame_indices is None else frame_indices)
+    if len(runs) > 1:
+        return _join_contact_runs([(a,derive_contacts_from_fk(
+            thetas=thetas[a:b],root_R=root_R[a:b],root_t=root_t[a:b],betas=betas,
+            fps=fps,speed_enter=speed_enter,speed_exit=speed_exit,max_height=max_height,
+            min_span_frames=min_span_frames,
+        )) for a,b in runs])
     if n == 0:
         empty_bool = np.zeros((0, 2), dtype=bool)
         return FootContacts(

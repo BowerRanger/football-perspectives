@@ -163,7 +163,7 @@ def rotation_6d_to_matrix(d6: Tensor) -> Tensor:
     """Convert 6D rotation representation to rotation matrix.
 
     Args:
-        d6: (*, 6) 6D rotation vectors (first two columns of rotation matrix).
+        d6: (*, 6) 6D rotation vectors (first two rows, PyTorch3D convention).
     Returns:
         (*, 3, 3) rotation matrices.
     """
@@ -175,11 +175,11 @@ def rotation_6d_to_matrix(d6: Tensor) -> Tensor:
     b2 = F.normalize(b2, dim=-1)
     b3 = torch.cross(b1, b2, dim=-1)
 
-    return torch.stack([b1, b2, b3], dim=-1)
+    return torch.stack([b1, b2, b3], dim=-2)
 
 
 def matrix_to_rotation_6d(matrix: Tensor) -> Tensor:
-    """Convert rotation matrix to 6D representation (first two columns).
+    """Convert rotation matrix to 6D representation (first two rows).
 
     Args:
         matrix: (*, 3, 3) rotation matrices.

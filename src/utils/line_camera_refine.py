@@ -67,6 +67,15 @@ class FrameRefinement(NamedTuple):
     t: np.ndarray
     detected_lines: list[LineObservation]
     n_detections: int
+    corridor_deviation_m: float = 0.0
+    """|dC| at the accepted pose when ``corridor_centre`` was supplied —
+    how far this frame's camera centre sits from the anchor-interpolated
+    corridor. ``0.0`` when no corridor was requested (legacy free solve)."""
+    speed_clamped: bool = False
+    """True when ``prev_centre``/``max_step_m`` were supplied AND the
+    fit's own centre exceeded the step budget, so the returned pose was
+    pulled back to the budget boundary (with ``line_rms_px`` honestly
+    recomputed there)."""
 
 
 def refine_camera_from_lines(
@@ -82,14 +91,46 @@ def refine_camera_from_lines(
     min_confidence: float = 0.5,
     min_n_samples: int = 40,
     point_hint_weight: float = 0.3,
+    corridor_centre: np.ndarray | None = None,
+    max_corridor_deviation_m: float = 5.0,
+    prev_centre: np.ndarray | None = None,
+    max_step_m: float | None = None,
 ) -> FrameRefinement:
     """Detect painted lines in ``frame_bgr`` and refine ``(K, R, t)`` to
     fit them.
 
     Iterates: detect lines using the current camera as bootstrap → LM-
-    solve ``(rvec, tvec, fx)`` against the line residuals (plus an
-    optional low-weight point-landmark hint) → repeat with the improved
-    camera so detection windows tighten onto the true painted line.
+    solve against the line residuals (plus an optional low-weight
+    point-landmark hint) → repeat with the improved camera so detection
+    windows tighten onto the true painted line.
+
+    Without ``corridor_centre``, the solve is free over ``(rvec, tvec,
+    fx)`` with a loose ±300m ``tvec`` bound — fine for a well-constrained
+    (many-line) frame, but a frame with only 1-2 detected lines is
+    under-determined (4 residuals for a 7-DOF problem) and that bound
+    does nothing to stop the camera CENTRE (``-R^T @ t``, not the raw
+    ``tvec`` OpenCV vets) from wandering tens to hundreds of metres to a
+    spurious low-RMS local minimum — a real-clip regression (gberch-2):
+    10/181 frames wandered up to 212m off the anchor-interpolated
+    corridor at reported confidence 0.95-1.00. See
+    ``docs/superpowers/specs/2026-09-09-moving-camera-support.md``'s
+    corridor-drift addendum.
+
+    With ``corridor_centre`` supplied (the camera stage passes the
+    anchor-interpolated centre for every non-anchor frame in moving
+    mode), the solve instead parameterises ``(rvec, dC, fx)`` with
+    ``t = -R @ (corridor_centre + dC)`` and ``|dC|_∞ ≤
+    max_corridor_deviation_m`` — the camera CENTRE is bounded near the
+    interpolated rig path BY CONSTRUCTION of the optimiser's own box
+    bounds (a scipy guarantee), not a post-hoc best-effort check.
+
+    ``prev_centre`` + ``max_step_m``, if both given, additionally clamp
+    the ACCEPTED pose's centre to within ``max_step_m`` of
+    ``prev_centre`` (frame-to-frame speed enforcement, for runs of
+    skipped/failed frames where the corridor bound alone might still
+    permit too large a jump between two accepted frames). Line RMS is
+    honestly recalculated at the clamped pose, so confidence never
+    reflects the pre-clamp (spuriously better) fit.
 
     ``point_hint_landmarks`` — when supplied (e.g. the anchor's clicked
     landmarks on an anchor frame), they're added to the cost at
@@ -108,6 +149,10 @@ def refine_camera_from_lines(
     R = R_init.copy()
     t = t_init.astype(np.float64).copy()
     best = FrameRefinement(float("inf"), K.copy(), R.copy(), t.copy(), [], 0)
+    corridor = (
+        np.asarray(corridor_centre, dtype=np.float64)
+        if corridor_centre is not None else None
+    )
 
     for _it in range(max_iters):
         all_dets = detect_painted_lines_in_frame(
@@ -127,24 +172,54 @@ def refine_camera_from_lines(
             for d in dets
         ]
 
-        def _residuals(p: np.ndarray) -> np.ndarray:
-            rvec = p[0:3]
-            tvec = p[3:6]
-            fx = float(p[6])
-            R_m, _ = cv2.Rodrigues(rvec)
-            K_m = _make_K(fx, cx, cy)
-            parts = [_line_residuals(line_obs, K_m, R_m, tvec)]
-            if point_hint_landmarks:
-                parts.append(point_hint_weight * _point_residuals_distorted(
-                    point_hint_landmarks, K_m, rvec, tvec, distortion,
-                ))
-            return np.concatenate(parts)
-
         rvec_init, _ = cv2.Rodrigues(R)
         fx0 = float(K[0, 0])
-        p0 = np.concatenate([rvec_init.reshape(3), t, [fx0]])
-        lower = np.array([-np.pi]*3 + [-300.0]*3 + [fx0 * 0.5])
-        upper = np.array([np.pi]*3 + [300.0]*3 + [fx0 * 2.0])
+
+        if corridor is not None:
+            # Box bound per dC component such that the worst-case L2 stays
+            # at the budget: the LM optimises inside [-c, c]^3 where
+            # c = max_corridor_deviation_m / sqrt(3), so |dC|_2 <=
+            # max_corridor_deviation_m (matches refine_with_bounded_
+            # motion's identical L2-vs-L_inf box-bound conversion).
+            c_bound = max_corridor_deviation_m / float(np.sqrt(3.0))
+            C_init = -R.astype(np.float64).T @ t
+            dC_init = np.clip(C_init - corridor, -c_bound, c_bound)
+
+            def _residuals(p: np.ndarray) -> np.ndarray:
+                rvec = p[0:3]
+                dC = p[3:6]
+                fx = float(p[6])
+                R_m, _ = cv2.Rodrigues(rvec)
+                t_m = -R_m @ (corridor + dC)
+                K_m = _make_K(fx, cx, cy)
+                parts = [_line_residuals(line_obs, K_m, R_m, t_m)]
+                if point_hint_landmarks:
+                    parts.append(point_hint_weight * _point_residuals_distorted(
+                        point_hint_landmarks, K_m, rvec, t_m, distortion,
+                    ))
+                return np.concatenate(parts)
+
+            p0 = np.concatenate([rvec_init.reshape(3), dC_init, [fx0]])
+            lower = np.array([-np.pi] * 3 + [-c_bound] * 3 + [fx0 * 0.5])
+            upper = np.array([np.pi] * 3 + [c_bound] * 3 + [fx0 * 2.0])
+        else:
+            def _residuals(p: np.ndarray) -> np.ndarray:
+                rvec = p[0:3]
+                tvec = p[3:6]
+                fx = float(p[6])
+                R_m, _ = cv2.Rodrigues(rvec)
+                K_m = _make_K(fx, cx, cy)
+                parts = [_line_residuals(line_obs, K_m, R_m, tvec)]
+                if point_hint_landmarks:
+                    parts.append(point_hint_weight * _point_residuals_distorted(
+                        point_hint_landmarks, K_m, rvec, tvec, distortion,
+                    ))
+                return np.concatenate(parts)
+
+            p0 = np.concatenate([rvec_init.reshape(3), t, [fx0]])
+            lower = np.array([-np.pi]*3 + [-300.0]*3 + [fx0 * 0.5])
+            upper = np.array([np.pi]*3 + [300.0]*3 + [fx0 * 2.0])
+
         try:
             result = least_squares(
                 _residuals, p0, bounds=(lower, upper),
@@ -155,7 +230,13 @@ def refine_camera_from_lines(
             break
 
         R, _ = cv2.Rodrigues(result.x[0:3])
-        t = result.x[3:6].copy()
+        if corridor is not None:
+            dC = result.x[3:6]
+            t = -R @ (corridor + dC)
+            deviation = float(np.linalg.norm(dC))
+        else:
+            t = result.x[3:6].copy()
+            deviation = 0.0
         K = _make_K(float(result.x[6]), cx, cy)
         line_rms = float(np.sqrt(
             (_line_residuals(line_obs, K, R, t) ** 2).mean()
@@ -166,15 +247,41 @@ def refine_camera_from_lines(
                 K=K.copy(), R=R.copy(), t=t.copy(),
                 detected_lines=list(line_obs),
                 n_detections=len(line_obs),
+                corridor_deviation_m=deviation,
             )
 
     if best.n_detections == 0:
-        # No usable detections — hand back the input camera untouched.
+        # No usable detections — hand back the input camera unchanged.
         return FrameRefinement(
             line_rms_px=float("nan"),
             K=K_init.copy(), R=R_init.copy(), t=t_init.astype(np.float64).copy(),
             detected_lines=[], n_detections=0,
         )
+
+    # Frame-to-frame speed clamp: even a corridor-bounded fit could imply
+    # an unreasonable step if the previous accepted frame is several
+    # indices away (e.g. a run of failed detections in between). Clamp
+    # the CENTRE (not the raw pose) and honestly re-derive line RMS from
+    # the clamped pose so confidence is never scored against the
+    # pre-clamp (spuriously better) fit.
+    if prev_centre is not None and max_step_m is not None and max_step_m > 0:
+        prev_c = np.asarray(prev_centre, dtype=np.float64)
+        C_best = -best.R.astype(np.float64).T @ best.t.astype(np.float64)
+        step = C_best - prev_c
+        step_norm = float(np.linalg.norm(step))
+        if step_norm > max_step_m and step_norm > 1e-9:
+            C_clamped = prev_c + step * (max_step_m / step_norm)
+            t_clamped = -best.R @ C_clamped
+            line_rms_clamped = (
+                float(np.sqrt(
+                    (_line_residuals(best.detected_lines, best.K, best.R, t_clamped) ** 2).mean()
+                ))
+                if best.detected_lines else best.line_rms_px
+            )
+            best = best._replace(
+                t=t_clamped, line_rms_px=line_rms_clamped, speed_clamped=True,
+            )
+
     return best
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -15,12 +16,24 @@ from src.utils.anchor_solver import (
     AnchorSolveError,
     _estimate_lens_from_best_anchor,
     _estimate_lens_jointly,
+    _make_K,
+    _rvec_to_R,
+    _solve_anchor_with_C_fixed,
+    _solve_one_anchor_full,
+    refine_with_bounded_motion,
     refine_with_shared_translation,
     reprojection_residual_for_anchor,
     solve_anchors_jointly,
 )
 from src.utils.bidirectional_smoother import smooth_between_anchors
 from src.utils.camera_confidence import FrameSignals, confidence_from_signals
+from src.utils.camera_mode_gate import (
+    anchors_needing_click_triage,
+    evaluate_static_gate,
+    find_loo_click_culprit,
+    find_weak_support_gaps,
+    parse_static_camera_mode,
+)
 from src.utils.feature_propagator import propagate_one_frame
 from src.utils.static_line_solver import StaticCameraSolution
 
@@ -310,12 +323,97 @@ class CameraStage(BaseStage):
         # (jumps of tens of metres between adjacent anchors), which
         # downstream foot-anchor ray-casting interprets as players
         # moving across the pitch.
-        static_camera = bool(cfg.get("static_camera", True))
+        # camera.static_camera is tri-state (auto|true|false, or a legacy
+        # bool). `auto` (the default) runs the consistency gate below;
+        # `true`/`false` are back-compat escape hatches that skip the
+        # gate entirely and take today's unconditional static / moving
+        # path respectively — see docs/superpowers/specs/
+        # 2026-09-09-moving-camera-support.md for the gberch-2 diagnosis
+        # (a spidercam replay whose camera body genuinely translates)
+        # that motivated this.
+        config_mode = parse_static_camera_mode(cfg.get("static_camera", "auto"))
+        static_gate_cfg = cfg.get("static_gate", {})
+        gate_residual_ratio = float(static_gate_cfg.get("residual_ratio", 3.0))
+        gate_residual_floor_px = float(
+            static_gate_cfg.get("residual_floor_px", 8.0)
+        )
+        motion_cfg = cfg.get("motion", {})
+        max_speed_m_s = float(motion_cfg.get("max_speed_m_s", 6.0))
+
+        gate_result = None
+        relocked_candidate = None
+        if config_mode == "auto":
+            # Gate: re-solve every rich, non-degenerate anchor with C
+            # clamped to the candidate shared centre and compare against
+            # its own free (solo) residual. Static holds only if EVERY
+            # such anchor survives the clamp within tolerance — one
+            # anchor that only fits with its own free translation is
+            # evidence the camera body actually moved.
+            relocked_candidate = refine_with_shared_translation(
+                tuple(qualifying), sol,
+            )
+            gate_result = evaluate_static_gate(
+                tuple(qualifying), sol, relocked_candidate,
+                residual_ratio=gate_residual_ratio,
+                residual_floor_px=gate_residual_floor_px,
+            )
+            static_camera = gate_result.holds
+            if static_camera:
+                logger.info(
+                    "camera.static_camera=auto (shot %s): static model "
+                    "CONFIRMED — worst anchor f%s clamped %.1fpx vs its "
+                    "own solo %.1fpx (gate: max(%.1fx solo, %.1fpx)); "
+                    "implied centre spread %.2fm across rich anchors",
+                    shot_id, gate_result.worst_frame,
+                    gate_result.worst_clamped_px, gate_result.worst_solo_px,
+                    gate_residual_ratio, gate_residual_floor_px,
+                    gate_result.centre_spread_m,
+                )
+            else:
+                logger.warning(
+                    "camera.static_camera=auto (shot %s): MOVING camera "
+                    "diagnosed — no single shared centre explains anchor "
+                    "f%s (clamped %.1fpx vs its own solo %.1fpx, exceeds "
+                    "gate max(%.1fx solo, %.1fpx)); implied centre spread "
+                    "%.2fm across rich anchors. Falling back to a "
+                    "per-anchor moving-centre model.",
+                    shot_id, gate_result.worst_frame,
+                    gate_result.worst_clamped_px, gate_result.worst_solo_px,
+                    gate_residual_ratio, gate_residual_floor_px,
+                    gate_result.centre_spread_m,
+                )
+        else:
+            static_camera = config_mode == "static"
+
+        camera_summary: dict = {
+            "shot_id": shot_id,
+            "config_mode": config_mode,
+            "mode": "static" if static_camera else "moving",
+            "gate": (
+                {
+                    "holds": gate_result.holds,
+                    "worst_frame": gate_result.worst_frame,
+                    "worst_solo_px": round(gate_result.worst_solo_px, 3),
+                    "worst_clamped_px": round(gate_result.worst_clamped_px, 3),
+                    "centre_spread_m": round(gate_result.centre_spread_m, 3),
+                    "residual_ratio": gate_residual_ratio,
+                    "residual_floor_px": gate_residual_floor_px,
+                }
+                if gate_result is not None else None
+            ),
+            "click_triage": [],
+            "weak_support_gaps": [],
+        }
+
         if static_camera:
             # Joint LM over all anchors with t shared. Replaces the joint
             # solution wholesale so t_world / principal_point reflect the
-            # refined values.
-            sol = refine_with_shared_translation(tuple(qualifying), sol)
+            # refined values. Reuse the gate's own relock candidate under
+            # auto rather than re-solving it a second time.
+            sol = (
+                relocked_candidate if relocked_candidate is not None
+                else refine_with_shared_translation(tuple(qualifying), sol)
+            )
             logger.info(
                 "static_camera=true: joint shared-t refine produced "
                 "t=%s across %d anchors",
@@ -388,6 +486,45 @@ class CameraStage(BaseStage):
                         @ sol.per_anchor_KRt[qualifying[0].frame][2],
                         2).tolist(),
                     len(qualifying))
+        elif config_mode == "auto":
+            # Moving path (auto-diagnosed): every anchor keeps its own
+            # free (solo / jointly-refined) pose — no shared centre is
+            # forced. A generous-but-bounded smoothness prior (a
+            # plausible max rig speed, not a hard per-anchor cap) still
+            # guards against a genuinely-degenerate solo solve
+            # dominating the shot; Task A's hardening already excludes
+            # the worst of those from seeding, this is a second, softer
+            # safety net.
+            anchor_span_s = 0.0
+            if len(qualifying) >= 2 and fps > 0:
+                anchor_span_s = (
+                    max(a.frame for a in qualifying)
+                    - min(a.frame for a in qualifying)
+                ) / fps
+            max_motion_m = max(5.0, max_speed_m_s * anchor_span_s)
+            sol = refine_with_bounded_motion(
+                tuple(qualifying), sol, max_motion_m=max_motion_m,
+            )
+            logger.info(
+                "static_camera=false: moving-centre model for shot %s — "
+                "per-anchor centres free within %.1fm of a shared "
+                "reference (budget = %.1f m/s x %.1fs anchor span)",
+                shot_id, max_motion_m, max_speed_m_s, anchor_span_s,
+            )
+        else:
+            # Legacy back-compat escape hatch: static_camera explicitly
+            # false (or the "moving" alias). Use the raw hybrid/joint
+            # solve exactly as-is — today's pre-existing behaviour for
+            # this value (every anchor independently free, no additional
+            # smoothing prior). The gate-driven bounded-motion treatment
+            # above is deliberately reserved for auto's own diagnosis;
+            # an operator who explicitly pinned false gets a predictable,
+            # unchanged model rather than new machinery under their feet.
+            logger.info(
+                "static_camera=false (explicit): using the raw "
+                "per-anchor solve unchanged across %d anchors",
+                len(sol.per_anchor_KRt),
+            )
         t_world_median = sol.t_world
         principal_point = sol.principal_point
         anchor_solutions: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = (
@@ -402,6 +539,15 @@ class CameraStage(BaseStage):
                     af, residual, anchor_max_residual,
                 )
                 anchor_confidence_override[af] = 0.5
+
+        # Task C: leave-one-out click triage (reporting only). An anchor
+        # whose residual under the CHOSEN model stands out from its
+        # neighbours' may carry one mislabeled click — see if dropping a
+        # single landmark collapses it. Never drops/edits anything;
+        # manual clicks are operator data and always win.
+        camera_summary["click_triage"] = self._click_triage_warnings(
+            qualifying, sol, static_camera, anchor_max_residual, cfg,
+        )
 
         # Step 2: per-frame propagate (K, R) forward/backward between
         # consecutive anchor pairs. Per-frame t is linearly interpolated
@@ -433,15 +579,22 @@ class CameraStage(BaseStage):
         # -R^T @ t == C_locked. LERP'ing t between two anchors with
         # different R does NOT honour that constraint for the SLERP'd R,
         # so the camera body wanders between anchors. Rebuild t = -R @ C
-        # instead. C_locked is None for moving-camera clips; fall back
-        # to LERP in that case.
+        # instead. Gated on ``static_camera`` (the mode decision), NOT on
+        # ``sol.camera_centre is not None`` — the moving path's
+        # bounded-motion solve also reports a ``camera_centre`` (its
+        # shared REFERENCE point, not a per-frame invariant), so that
+        # check alone would wrongly LERP every moving-camera clip's
+        # per-frame t onto one fixed point.
         C_locked = (
-            np.asarray(sol.camera_centre) if sol.camera_centre is not None else None
+            np.asarray(sol.camera_centre)
+            if static_camera and sol.camera_centre is not None else None
         )
         for a, b in zip(anchor_frames, anchor_frames[1:]):
             K_a, R_a, t_a = anchor_solutions[a]
             K_b, R_b, t_b = anchor_solutions[b]
             slerp = Slerp([0.0, 1.0], Rotation.from_matrix([R_a, R_b]))
+            C_a = -np.asarray(R_a, dtype=np.float64).T @ np.asarray(t_a, dtype=np.float64)
+            C_b = -np.asarray(R_b, dtype=np.float64).T @ np.asarray(t_b, dtype=np.float64)
             for offset in range(1, b - a):
                 idx = a + offset
                 # Don't reuse the name `w` — the outer scope holds image
@@ -452,11 +605,33 @@ class CameraStage(BaseStage):
                 per_frame_R[idx] = R_inter
                 if C_locked is not None:
                     per_frame_t[idx] = -R_inter @ C_locked
+                    # Lower confidence than the anchors but still high
+                    # since interpolation is well-behaved between two
+                    # trusted, mutually-consistent anchors.
+                    per_frame_conf[idx] = 0.7
                 else:
-                    per_frame_t[idx] = (1.0 - lerp_w) * t_a + lerp_w * t_b
-                # Lower confidence than the anchors but still high since
-                # interpolation is well-behaved between trusted anchors.
-                per_frame_conf[idx] = 0.7
+                    # Moving-camera clip: no single locked centre.
+                    # Interpolate the physical RIG POSITION (C, not the
+                    # raw OpenCV t) between the two anchors' own
+                    # recovered centres, then rebuild t against the
+                    # SLERP'd R — this tracks a smoothly-translating rig
+                    # (spidercam/wirecam) rather than LERP'ing t
+                    # directly, which conflates translation with
+                    # whatever R happens to do between two anchors that
+                    # don't share a centre.
+                    C_inter = (1.0 - lerp_w) * C_a + lerp_w * C_b
+                    per_frame_t[idx] = -R_inter @ C_inter
+                    # Honest confidence: this frame has NO independent
+                    # observation of its own, just a smooth guess between
+                    # two anchors — decay from the anchors' 0.7 toward a
+                    # floor at the gap midpoint so nothing downstream
+                    # over-trusts a long, unsupported span. Line
+                    # extraction (if enabled) may still raise this
+                    # per-frame below, once it re-fits from real pixels.
+                    dist_frac = min(lerp_w, 1.0 - lerp_w) * 2.0
+                    per_frame_conf[idx] = float(
+                        np.clip(0.7 - 0.3 * dist_frac, 0.35, 0.7)
+                    )
 
         # Step 2.5 (optional): line-extraction refinement. When
         # camera.line_extraction is enabled, every per-frame camera from
@@ -482,7 +657,7 @@ class CameraStage(BaseStage):
                     cap, shot_id, anchors, cfg,
                     per_frame_K, per_frame_R, per_frame_t, per_frame_conf,
                     is_anchor, tuple(sol.distortion),
-                    detected_lines_by_frame,
+                    detected_lines_by_frame, fps=fps,
                 )
 
         cap.release()
@@ -499,6 +674,17 @@ class CameraStage(BaseStage):
                 "cover them",
                 dropped_before, anchor_frames[0],
                 dropped_after, anchor_frames[-1],
+            )
+
+        # Task D: for moving-camera shots, name any between-anchor span
+        # that's both wide and weakly supported (no line-extraction
+        # rescue raised its confidence), suggesting a midpoint frame for
+        # a new anchor. Static shots don't need this — a locked C makes
+        # every inter-anchor frame equally well-determined regardless of
+        # gap width.
+        if not static_camera:
+            camera_summary["weak_support_gaps"] = self._gap_surfacing_warnings(
+                shot_id, anchor_frames, per_frame_conf, cfg,
             )
 
         # Step 3: assemble output.
@@ -543,6 +729,20 @@ class CameraStage(BaseStage):
             principal_point_out = principal_point
             distortion_out = tuple(float(x) for x in sol.distortion)
 
+        # Moving-camera clips have no single shared body position — force
+        # camera_centre to None regardless of what the solver internals
+        # reported (refine_with_bounded_motion's ``camera_centre`` is a
+        # shared REFERENCE point for its bounded-dC parametrisation, not
+        # a per-frame invariant, and static_line_sol never runs for a
+        # moving shot). This keeps the schema's documented contract
+        # exact: camera_centre non-None => every frame's -R^T@t equals
+        # it. Downstream code (quality_report's static-camera drift
+        # check, the export/viewer camera) all already treat None as
+        # "no shared centre, use per-frame t" — see the moving-camera
+        # design doc's consumer audit.
+        if not static_camera:
+            camera_centre_out = None
+
         track = CameraTrack(
             clip_id=anchors.clip_id,
             fps=float(fps),
@@ -557,12 +757,18 @@ class CameraStage(BaseStage):
         )
         track.save(self.output_dir / "camera" / f"{shot_id}_camera_track.json")
 
+        # Task B: camera summary sidecar — which model this shot used and
+        # why, plus any click-triage / gap-surfacing findings, so a
+        # downstream reader (quality_report, a human debugging the clip)
+        # doesn't have to re-derive the decision.
+        summary_path = self.output_dir / "camera" / f"{shot_id}_camera_summary.json"
+        summary_path.write_text(json.dumps(camera_summary, indent=2))
+
         # Persist detected lines as a debug side-output when line
         # extraction ran. Lets the dashboard / anchor editor overlay the
         # detected painted lines and compare against the projected
         # catalogue lines.
         if detected_lines_by_frame:
-            import json
             debug_path = (
                 self.output_dir / "camera" / f"{shot_id}_detected_lines.json"
             )
@@ -586,6 +792,138 @@ class CameraStage(BaseStage):
                 len(detected_lines_by_frame), debug_path,
             )
 
+    def _click_triage_warnings(
+        self,
+        qualifying: list[Anchor],
+        sol,
+        static_camera: bool,
+        anchor_max_residual: float,
+        cfg: dict,
+    ) -> list[dict]:
+        """Task C: leave-one-out click triage (reporting only).
+
+        Flags anchors whose residual under the CHOSEN model (static
+        C-fixed or moving free/bounded) exceeds ``anchor_max_residual``
+        AND stands far above the other anchors', then checks whether
+        dropping a single landmark collapses that residual. Never
+        mutates or drops a click itself — manual clicks are operator
+        data and always win; this only logs + reports the finding so a
+        human can act on it in the anchor editor.
+        """
+        triage_cfg = cfg.get("click_triage", {})
+        min_ratio = float(triage_cfg.get("min_collapse_ratio", 5.0))
+        accept_px = float(triage_cfg.get("accept_below_px", 15.0))
+        by_frame = {a.frame: a for a in qualifying}
+        cx, cy = sol.principal_point
+        dist2 = tuple(float(x) for x in sol.distortion[:2])
+        candidates = anchors_needing_click_triage(
+            sol.per_anchor_residual_px, flag_threshold_px=anchor_max_residual,
+        )
+        findings: list[dict] = []
+        for fr in candidates:
+            anchor = by_frame.get(fr)
+            got = sol.per_anchor_KRt.get(fr)
+            if anchor is None or got is None:
+                continue
+            K0, R0, _t0 = got
+            fx0 = float(K0[0, 0])
+            rvec0, _ = cv2.Rodrigues(np.asarray(R0, dtype=np.float64))
+            rvec0_flat = rvec0.reshape(3)
+
+            if static_camera and sol.camera_centre is not None:
+                C_fixed = np.asarray(sol.camera_centre, dtype=np.float64)
+
+                def _solve_fn(
+                    a: Anchor, _C=C_fixed, _rv=rvec0_flat, _fx=fx0,
+                ) -> float:
+                    rvec, fx = _solve_anchor_with_C_fixed(
+                        a, _C, cx, cy, _fx, _rv, distortion=dist2,
+                    )
+                    R_hat = _rvec_to_R(rvec)
+                    t_hat = -R_hat @ _C
+                    K_hat = _make_K(fx, cx, cy)
+                    return reprojection_residual_for_anchor(
+                        a, K_hat, R_hat, t_hat, distortion=dist2,
+                    )
+            else:
+                def _solve_fn(a: Anchor, _fx=fx0, _K0=K0) -> float:
+                    result = _solve_one_anchor_full(
+                        a, cx, cy, fx_init=_fx, K_init=_K0, distortion=dist2,
+                    )
+                    if result is None:
+                        return float("inf")
+                    K_hat, R_hat, t_hat, _fx_hat = result
+                    return reprojection_residual_for_anchor(
+                        a, K_hat, R_hat, t_hat, distortion=dist2,
+                    )
+
+            # Baseline must come from the SAME model as `_solve_fn`'s
+            # leave-one-out candidates (see find_loo_click_culprit's
+            # docstring). sol.per_anchor_residual_px is safe to reuse for
+            # the static branch (it's literally the C-fixed solve's own
+            # residual) but NOT for moving (that's a jointly-constrained
+            # bounded-motion fit, not the free solo solve _solve_fn uses
+            # there) — pass None there so it self-derives consistently.
+            baseline = (
+                sol.per_anchor_residual_px[fr]
+                if static_camera and sol.camera_centre is not None
+                else None
+            )
+            result = find_loo_click_culprit(
+                anchor, _solve_fn, baseline_residual_px=baseline,
+                min_collapse_ratio=min_ratio, accept_below_px=accept_px,
+            )
+            if result is None:
+                continue
+            logger.warning(
+                "anchor f%d: click '%s' looks mislabeled (%.1f -> %.1fpx "
+                "without it) — reclick or delete in the anchor editor",
+                result.anchor_frame, result.culprit_name,
+                result.residual_with_px, result.residual_without_px,
+            )
+            findings.append({
+                "frame": result.anchor_frame,
+                "culprit_name": result.culprit_name,
+                "residual_with_px": round(result.residual_with_px, 2),
+                "residual_without_px": round(result.residual_without_px, 2),
+            })
+        return findings
+
+    def _gap_surfacing_warnings(
+        self,
+        shot_id: str,
+        anchor_frames: list[int],
+        per_frame_conf: list[float],
+        cfg: dict,
+    ) -> list[dict]:
+        """Task D: for moving-camera shots, name any between-anchor span
+        that's both wide and weakly supported, suggesting a midpoint
+        frame for a new anchor. One line per span."""
+        gap_cfg = cfg.get("moving_gap", {})
+        max_gap_frames = int(gap_cfg.get("max_gap_frames", 60))
+        weak_below = float(gap_cfg.get("weak_confidence_below", 0.6))
+        gaps = find_weak_support_gaps(
+            anchor_frames, per_frame_conf,
+            max_gap_frames=max_gap_frames, weak_confidence_below=weak_below,
+        )
+        findings: list[dict] = []
+        for gap in gaps:
+            logger.warning(
+                "shot %s: span f%d-f%d (%d frames, mean confidence %.2f) "
+                "has weak support under the moving-camera model; consider "
+                "adding an anchor near frame %d",
+                shot_id, gap.start_frame, gap.end_frame, gap.gap_frames,
+                gap.mean_confidence, gap.suggested_frame,
+            )
+            findings.append({
+                "start_frame": gap.start_frame,
+                "end_frame": gap.end_frame,
+                "suggested_frame": gap.suggested_frame,
+                "gap_frames": gap.gap_frames,
+                "mean_confidence": round(gap.mean_confidence, 3),
+            })
+        return findings
+
     def _refine_with_line_extraction(
         self,
         cap: cv2.VideoCapture,
@@ -599,6 +937,7 @@ class CameraStage(BaseStage):
         is_anchor: list,
         distortion: tuple[float, float],
         detected_lines_by_frame: dict[int, list],
+        fps: float = 25.0,
     ) -> None:
         """In-place per-frame camera refinement against detected painted
         lines. Replaces ``per_frame_{K,R,t}`` entries with line-fitted
@@ -607,6 +946,21 @@ class CameraStage(BaseStage):
 
         Frames where line detection fails (occlusion, too few lines)
         keep their propagated camera untouched.
+
+        For every NON-anchor frame, the solve is corridor-bounded to the
+        anchor-interpolated centre already sitting in ``per_frame_R[idx]``
+        / ``per_frame_t[idx]`` (Step 2's LERP output, before this pass
+        overwrites it) and speed-clamped against the immediately
+        preceding frame — this is the moving-camera path (this method
+        only runs when ``static_camera`` is false), and a 1-2-line frame
+        is under-determined enough that an unconstrained solve can
+        wander tens to hundreds of metres to a spurious low-RMS local
+        minimum at reported HIGH confidence (real-clip regression:
+        gberch-2, 10/181 frames up to 212m off the corridor at
+        confidence 0.95-1.00 — see docs/superpowers/specs/
+        2026-09-09-moving-camera-support.md's corridor-drift addendum).
+        Anchor frames are exempt: their own click-based pose is
+        authoritative, not a candidate for corridor/speed constraints.
         """
         from src.utils.line_detector import DetectorConfig
         from src.utils.line_camera_refine import refine_camera_from_lines
@@ -617,6 +971,12 @@ class CameraStage(BaseStage):
             min_gradient=float(cfg.get("line_extraction_min_gradient", 10.0)),
         )
         max_iters = int(cfg.get("line_extraction_max_iters", 4))
+        motion_cfg = cfg.get("motion", {})
+        max_speed_m_s = float(motion_cfg.get("max_speed_m_s", 6.0))
+        max_corridor_deviation_m = float(
+            motion_cfg.get("max_corridor_deviation_m", 5.0)
+        )
+        max_step_m = max_speed_m_s / max(fps, 1e-6)
         # Anchor-frame landmark clicks become low-weight point hints so
         # the line solve doesn't slide into a geometrically wrong basin.
         anchor_landmarks: dict[int, list] = {
@@ -627,6 +987,8 @@ class CameraStage(BaseStage):
         n_frames = len(per_frame_K)
         n_refined = 0
         n_failed = 0
+        n_corridor_constrained = 0
+        n_speed_clamped = 0
         # Can't use list.count(None) — the list holds numpy arrays and
         # `array == None` is element-wise, raising on the truth test.
         n_covered = sum(1 for k in per_frame_K if k is not None)
@@ -638,6 +1000,27 @@ class CameraStage(BaseStage):
             frame = frame_reader.read(idx)
             if frame is None:
                 continue
+
+            corridor_kwargs: dict = {}
+            if not is_anchor[idx]:
+                corridor_centre = -np.asarray(
+                    per_frame_R[idx], dtype=np.float64,
+                ).T @ np.asarray(per_frame_t[idx], dtype=np.float64)
+                corridor_kwargs["corridor_centre"] = corridor_centre
+                corridor_kwargs["max_corridor_deviation_m"] = max_corridor_deviation_m
+                # prev_centre is derived FRESH from the immediately
+                # preceding frame's CURRENT state every iteration (not a
+                # running "last successfully refined" variable) — this
+                # naturally handles runs of failed detections: idx-1's
+                # per_frame_t still holds a sane value (its own
+                # refinement, an anchor's pose, or the untouched LERP)
+                # even when idx-1's OWN line refinement failed.
+                if idx > 0 and per_frame_K[idx - 1] is not None:
+                    corridor_kwargs["prev_centre"] = -np.asarray(
+                        per_frame_R[idx - 1], dtype=np.float64,
+                    ).T @ np.asarray(per_frame_t[idx - 1], dtype=np.float64)
+                    corridor_kwargs["max_step_m"] = max_step_m
+
             result = refine_camera_from_lines(
                 frame,
                 per_frame_K[idx], per_frame_R[idx], per_frame_t[idx],
@@ -645,16 +1028,48 @@ class CameraStage(BaseStage):
                 point_hint_landmarks=anchor_landmarks.get(idx),
                 detector_cfg=det_cfg,
                 max_iters=max_iters,
+                **corridor_kwargs,
             )
             if result.n_detections == 0:
                 n_failed += 1
+                # A frame whose OWN detection fails keeps its existing
+                # (untouched) pose — normally Step 2's LERP corridor
+                # position. But that position was never itself speed-
+                # checked, so if its PREDECESSOR legitimately drifted a
+                # few metres within its own corridor allowance (each
+                # step individually fine), silently falling back here
+                # re-creates exactly the frame-to-frame jump this
+                # feature exists to prevent (real-clip regression:
+                # gberch-2, 1.3-2.6m in a single 1/30s frame after the
+                # corridor fix alone). Clamp the fallback centre against
+                # the same prev_centre/max_step_m too.
+                prev_centre = corridor_kwargs.get("prev_centre")
+                if not is_anchor[idx] and prev_centre is not None:
+                    R_fb = np.asarray(per_frame_R[idx], dtype=np.float64)
+                    C_fb = -R_fb.T @ np.asarray(per_frame_t[idx], dtype=np.float64)
+                    step = C_fb - prev_centre
+                    step_norm = float(np.linalg.norm(step))
+                    if step_norm > max_step_m and step_norm > 1e-9:
+                        C_clamped = prev_centre + step * (max_step_m / step_norm)
+                        per_frame_t[idx] = -R_fb @ C_clamped
+                        n_speed_clamped += 1
                 continue
+            if not is_anchor[idx] and result.corridor_deviation_m >= (
+                max_corridor_deviation_m - 1e-6
+            ):
+                n_corridor_constrained += 1
+            if result.speed_clamped:
+                n_speed_clamped += 1
             per_frame_K[idx] = result.K
             per_frame_R[idx] = result.R
             per_frame_t[idx] = result.t
             # Line-refined frames are high-confidence where the fit is
             # tight; degrade smoothly with line RMS so the dashboard
-            # confidence timeline still surfaces poorly-fit spans.
+            # confidence timeline still surfaces poorly-fit spans. RMS
+            # here is always the ACCEPTED (possibly corridor/speed-
+            # clamped) pose's own residual — never the pre-clamp fit's —
+            # so a frame that had to be pulled back into the corridor
+            # cannot report a falsely high confidence.
             per_frame_conf[idx] = max(
                 0.3, min(1.0, 1.0 - result.line_rms_px / 6.0)
             )
@@ -681,6 +1096,16 @@ class CameraStage(BaseStage):
                 float(arr.mean()), float(np.median(arr)), float(arr.max()),
                 float((arr < 1.0).mean()),
             )
+            if n_corridor_constrained or n_speed_clamped:
+                logger.info(
+                    "line_extraction: %d/%d refined frame(s) corridor-"
+                    "constrained (centre >= %.1fm from the anchor-"
+                    "interpolated path), %d speed-clamped (frame-to-frame "
+                    "step > %.2f m/s implied) — under-determined frames "
+                    "kept bounded rather than left free to wander",
+                    n_corridor_constrained, n_refined, max_corridor_deviation_m,
+                    n_speed_clamped, max_speed_m_s,
+                )
         else:
             logger.warning(
                 "line_extraction: no frame produced usable line detections; "

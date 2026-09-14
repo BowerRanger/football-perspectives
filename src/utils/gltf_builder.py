@@ -589,23 +589,50 @@ def build_glb(bundle: SceneBundle) -> tuple[bytes, dict]:
             "broadcast_camera",
         )
         t_world = np.asarray(cam_track.t_world, dtype=np.float64)
+
+        def _broadcast_centre(fr) -> np.ndarray:
+            # Prefer the per-frame recovered centre (-R^T @ t) — the
+            # camera stage always populates per-frame t, including for a
+            # moving-camera (spidercam/wirecam) shot where it genuinely
+            # differs frame to frame. t_world is only the fallback for a
+            # frame with no per-frame t (legacy tracks).
+            if fr.t is not None:
+                R = np.asarray(fr.R, dtype=np.float64)
+                return -R.T @ np.asarray(fr.t, dtype=np.float64)
+            return t_world
+
         init_q = _camera_orientation_quat(np.asarray(first.R, dtype=np.float64))
+        c0 = _broadcast_centre(first)
         node_idx = g.add_node({
             "name": "broadcast_camera",
             "camera": cam_idx,
-            "translation": [float(t_world[0]), float(t_world[1]), float(t_world[2])],
+            "translation": [float(c0[0]), float(c0[1]), float(c0[2])],
             "rotation": [float(q) for q in init_q],
         })
-        # Animate rotation only — t_world is clip-shared in the spec.
+        # Animate both rotation AND translation. A static broadcast rig's
+        # per-frame centre is constant, so this is a no-op there; a
+        # moving-camera clip's centre genuinely varies, and hardcoding a
+        # single translation (as this used to do, on the theory that
+        # t_world is "clip-shared in the spec") silently misplaced the
+        # camera for the whole shot. Mirrors the extra_cameras (POV/OTS)
+        # path below, which already animates translation this way.
         cam_fps = float(cam_track.fps) if cam_track.fps else fps
         times = np.array([f.frame for f in cam_track.frames], dtype=np.float32) / max(cam_fps, 1e-6)
         quats = np.array([_camera_orientation_quat(np.asarray(f.R, dtype=np.float64)) for f in cam_track.frames], dtype=np.float32)
+        centres = np.array([_broadcast_centre(f) for f in cam_track.frames], dtype=np.float32)
         time_acc = g.add_accessor_scalar_f32(times)
         rot_acc = g.add_accessor_vec4_f32(quats)
+        trans_acc = g.add_accessor_vec3_f32(centres)
         g.add_animation(
             name="camera_anim",
-            samplers=[{"input": time_acc, "output": rot_acc, "interpolation": "LINEAR"}],
-            channels=[{"sampler": 0, "target": {"node": node_idx, "path": "rotation"}}],
+            samplers=[
+                {"input": time_acc, "output": rot_acc, "interpolation": "LINEAR"},
+                {"input": time_acc, "output": trans_acc, "interpolation": "LINEAR"},
+            ],
+            channels=[
+                {"sampler": 0, "target": {"node": node_idx, "path": "rotation"}},
+                {"sampler": 1, "target": {"node": node_idx, "path": "translation"}},
+            ],
         )
         camera_meta = {
             "image_size": [int(img_w), int(img_h)],

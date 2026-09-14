@@ -398,19 +398,55 @@ def refine_with_bounded_motion(
     cx, cy = sol.principal_point
     distortion = sol.distortion
 
-    # Seed C as the mean of solo Cs across rich anchors (so dC starts ≈ 0
-    # for the dominant cluster).
+    # Seed C as the median of solo Cs across rich, NON-DEGENERATE anchors
+    # (so dC starts ≈ 0 for the dominant cluster). Degeneracy exclusion
+    # matters even though Task A already hardened _solve_one_anchor_full:
+    # a "rich" (≥6-landmark) anchor here may have gone through Pass 3's
+    # joint distortion refine, which re-frees every anchor's (rvec, t,
+    # fx) with no degeneracy check of its own — a poisoned click can
+    # still come out the other end with a nonsense pose (real-clip
+    # regression: gberch-2 frame 162 at fx=57227, C≈(-1184, 1123, 733)).
+    # np.mean over an unfiltered rich_Cs lets that ONE anchor's C drag
+    # the shared reference — and therefore every OTHER anchor's centre —
+    # to nonsense; median is additionally robust as long as degenerate
+    # anchors don't outnumber good ones.
     rich_Cs: list[np.ndarray] = []
-    for af, (_K, R, t) in sol.per_anchor_KRt.items():
+    for af, (K, R, t) in sol.per_anchor_KRt.items():
         a = by_frame.get(af)
         if a is None or not _is_rich(a):
             continue
+        if _is_degenerate_solo(t.astype(np.float64), float(K[0, 0])):
+            continue
         rich_Cs.append(-R.astype(np.float64).T @ t.astype(np.float64))
     if rich_Cs:
-        C_seed = np.mean(np.stack(rich_Cs), axis=0)
+        C_seed = np.median(np.stack(rich_Cs), axis=0)
     else:
         C_seed = -sol.per_anchor_KRt[next(iter(sol.per_anchor_KRt))][1].T @ \
                  sol.per_anchor_KRt[next(iter(sol.per_anchor_KRt))][2]
+
+    # Fallback (rvec, fx) for an anchor whose OWN incoming pose is
+    # degenerate: seeding AND bounding its fx/rvec from its own garbage
+    # values (e.g. fx=57227) gives the LM a nonsense search range — the
+    # bound itself is centred on the bad value, so the optimizer can
+    # only make it worse (real-clip regression: gberch-2 frame 162 came
+    # out of this function at residual ~1e18 px). Borrow the nearest
+    # (by frame) non-degenerate qualifying anchor's (rvec, fx) instead;
+    # the anchor's own bad click will still leave it with an
+    # irreducibly poor fit, but a BOUNDED one a caller's degeneracy /
+    # click-triage check can reason about.
+    nondeg_frames: list[tuple[int, np.ndarray, float]] = []
+    for anchor in qualifying:
+        K_a, R_a, t_a = sol.per_anchor_KRt[anchor.frame]
+        if _is_degenerate_solo(t_a.astype(np.float64), float(K_a[0, 0])):
+            continue
+        rv_a, _ = cv2.Rodrigues(R_a.astype(np.float64))
+        nondeg_frames.append((anchor.frame, rv_a.reshape(3).copy(), float(K_a[0, 0])))
+
+    def _fallback_pose(target_frame: int) -> tuple[np.ndarray, float] | None:
+        if not nondeg_frames:
+            return None
+        _f, rv, fx = min(nondeg_frames, key=lambda e: abs(e[0] - target_frame))
+        return rv, fx
 
     PER = 7  # rvec(3), dC(3), fx
     n = len(qualifying)
@@ -427,19 +463,27 @@ def refine_with_bounded_motion(
     c_bound = max_motion_m / float(np.sqrt(3.0))
     for i, anchor in enumerate(qualifying):
         K_i, R_i, t_i = sol.per_anchor_KRt[anchor.frame]
-        C_i = -R_i.astype(np.float64).T @ t_i.astype(np.float64)
-        dC_init = np.clip(C_i - C_seed, -c_bound, c_bound)
-        rv_i, _ = cv2.Rodrigues(R_i.astype(np.float64))
+        degenerate_i = _is_degenerate_solo(t_i.astype(np.float64), float(K_i[0, 0]))
+        fallback = _fallback_pose(anchor.frame) if degenerate_i else None
+        if fallback is not None:
+            rv_i, fx_i = fallback
+            dC_init = np.zeros(3)  # start exactly at the (good) C_seed
+        else:
+            C_i = -R_i.astype(np.float64).T @ t_i.astype(np.float64)
+            dC_init = np.clip(C_i - C_seed, -c_bound, c_bound)
+            rv_i, _ = cv2.Rodrigues(R_i.astype(np.float64))
+            rv_i = rv_i.reshape(3)
+            fx_i = float(K_i[0, 0])
         base = 3 + i * PER
-        p0[base : base + 3] = rv_i.reshape(3)
+        p0[base : base + 3] = rv_i
         p0[base + 3 : base + 6] = dC_init
-        p0[base + 6] = float(K_i[0, 0])
+        p0[base + 6] = fx_i
         lower[base : base + 3] = -np.pi
         upper[base : base + 3] = np.pi
         lower[base + 3 : base + 6] = -c_bound
         upper[base + 3 : base + 6] = c_bound
-        lower[base + 6] = float(K_i[0, 0]) * 0.5
-        upper[base + 6] = float(K_i[0, 0]) * 2.0
+        lower[base + 6] = fx_i * 0.5
+        upper[base + 6] = fx_i * 2.0
 
     obj_pts_per: list[np.ndarray] = []
     img_pts_per: list[np.ndarray] = []
@@ -1217,15 +1261,26 @@ def _solve_one_anchor_full(
     if primary is not None and not _is_degenerate_solo(primary[2], primary[3]):
         return primary
 
-    # Primary attempt was degenerate (or failed). Try alternative priors.
-    candidate_best = primary
-    candidate_res = (
-        reprojection_residual_for_anchor(
-            anchor, primary[0], primary[1], primary[2], distortion=distortion,
-        )
-        if primary is not None and not _is_degenerate_solo(primary[2], primary[3])
-        else float("inf")
-    )
+    # Primary attempt was degenerate (or failed). Try alternative fx
+    # priors, keeping only NON-DEGENERATE candidates. A solve that lands
+    # in a non-physical region (camera position more than a pitch-and-a-
+    # half away, or fx outside any realistic broadcast range) is not a
+    # valid result regardless of its local reprojection residual — this
+    # is the anchor-poisoning failure mode: a single mislabeled click can
+    # make the LM converge to a tiny-fx/huge-|t| basin with a deceptively
+    # LOW residual (the degenerate geometry "fits" by moving the camera
+    # to a nonsensical position). The historical bug here seeded
+    # ``candidate_best`` from ``primary`` regardless of degeneracy, so
+    # when every alternative was ALSO degenerate it returned that
+    # original degenerate candidate — silently poisoning any caller that
+    # seeds a median/shared estimate from it (this is exactly how
+    # gberch-2's frame 162, degenerate at fx≈50 / C≈(115, 26, −252) from
+    # one bad click, corrupted the first joint-pass t_world median).
+    # Returning None instead lets callers (the hybrid solve's rich-anchor
+    # seeding, lens estimators) exclude and log the anchor rather than
+    # seed from garbage.
+    candidate_best: tuple[np.ndarray, np.ndarray, np.ndarray, float] | None = None
+    candidate_res = float("inf")
     for mult in (1.1, 0.9, 1.2, 0.8, 1.5, 0.7, 2.0, 0.5, 3.0, 0.3):
         alt = _try(fx_init * mult)
         if alt is None:
@@ -1864,6 +1919,12 @@ def solve_anchors_jointly(
             a, cx, cy, fx_init, K_init, distortion=prior_distortion,
         )
         if result is None:
+            logger.warning(
+                "anchor at frame %d: solo solve degenerate, excluded from "
+                "seeding (every fx-prior attempt landed in a non-physical "
+                "region — check its landmark clicks for a mislabeled point)",
+                a.frame,
+            )
             continue
         K, R, t, fx = result
         per_anchor_KRt[a.frame] = (K, R, t)

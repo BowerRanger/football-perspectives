@@ -2322,9 +2322,13 @@ function buildShotInfoCard({ id, track, anchors, color }) {
 }
 
 // One canvas, one pitch, every shot's camera marker drawn at its
-// t_world in the shot's colour. The camera body is fixed in the
-// broadcast-mono setup so position is constant per shot — only the
-// bearing animates as you scrub the shared timeline below the map.
+// per-frame recovered centre (-R^T @ t, falling back to t_world only
+// when a frame has no per-frame t) in the shot's colour. For a static
+// broadcast rig that position is constant per shot and only the
+// bearing visibly animates; for a moving-camera shot (spidercam/
+// wirecam, camera.static_camera=auto diagnosed "moving") the marker
+// genuinely translates as you scrub — this draw path already recomputes
+// C per frame below, it doesn't assume a fixed body.
 // Shots that don't cover the current frame hold at their nearest end
 // (so the marker stays visible rather than blinking out).
 function buildOverlaidPitchMap(perShot) {

@@ -225,10 +225,68 @@ camera:
   # quality report (soft threshold, not a hard fail).
   anchor_max_reprojection_px: 2.0
   # Stadium-mounted broadcast cameras don't translate — only pan, tilt,
-  # zoom. Locking t prevents the LM from finding K/R/t combinations that
-  # reproject anchors well but jump the camera body around in pitch
-  # metres between anchors. Set false for moving rigs (steadicam, dolly).
-  static_camera: true
+  # zoom. Locking a shared camera centre C prevents the LM from finding
+  # K/R/t combinations that reproject anchors well but jump the camera
+  # body around in pitch metres between anchors. Tri-state:
+  #   auto   - (default) fits a shared C, then GATES it: re-solves every
+  #            rich anchor with C clamped and compares against its own
+  #            free solve (camera.static_gate.*). If every anchor
+  #            survives the clamp, takes the static path (below);
+  #            otherwise the camera genuinely moved (spidercam/wirecam —
+  #            see docs/superpowers/specs/2026-09-09-moving-camera-
+  #            support.md for the gberch-2 diagnosis) and it falls back
+  #            to a per-anchor moving-centre model bounded by
+  #            camera.motion.max_speed_m_s.
+  #   true   - back-compat escape hatch: always locks one shared C, no
+  #            gate (today's pre-auto behaviour, unconditionally).
+  #   false  - back-compat escape hatch: always uses the raw per-anchor
+  #            free solve, no gate, no moving-centre smoothing prior.
+  # Legacy bool configs (`true`/`false` written before this feature)
+  # keep working unchanged — they map onto the same true/false paths.
+  static_camera: auto
+  # Consistency gate for static_camera: auto. Static holds iff every
+  # rich anchor's C-clamped residual stays under
+  # max(residual_ratio x its own solo residual, residual_floor_px).
+  static_gate:
+    residual_ratio: 3.0
+    residual_floor_px: 8.0
+  # Moving-path smoothness prior: the per-anchor centre budget
+  # (max_motion_m passed to refine_with_bounded_motion) is
+  # max(5.0, max_speed_m_s x anchor-span-seconds) — generous enough to
+  # cover a real spidercam/wirecam translation (~10-15m across a few
+  # seconds) while still bounding a genuinely-degenerate solo solve.
+  # max_speed_m_s ALSO bounds frame-to-frame centre steps in the
+  # per-frame line-extraction refinement (below); max_corridor_
+  # deviation_m bounds how far any single under-determined (1-2 line)
+  # frame's solve may sit from the anchor-interpolated corridor —
+  # without this, such a frame is free to wander tens-to-hundreds of
+  # metres to a spurious low-RMS local minimum while reporting HIGH
+  # confidence (real-clip regression: gberch-2, 10/181 frames up to
+  # 212m off the corridor at confidence 0.95-1.00 — see
+  # docs/superpowers/specs/2026-09-09-moving-camera-support.md's
+  # corridor-drift addendum).
+  motion:
+    max_speed_m_s: 6.0
+    max_corridor_deviation_m: 5.0
+  # Leave-one-out click triage (reporting only, camera.static_camera:
+  # auto or explicit): an anchor whose residual under the chosen model
+  # exceeds anchor_max_reprojection_px AND is far above its neighbours'
+  # gets each landmark dropped in turn. A drop that collapses the
+  # residual by >= min_collapse_ratio AND leaves it <= accept_below_px
+  # is reported by click label in the stage warnings + camera summary
+  # sidecar ("anchor fN: click 'X' looks mislabeled ..."). Never drops
+  # or edits a click itself — operator input always wins.
+  click_triage:
+    min_collapse_ratio: 5.0
+    accept_below_px: 15.0
+  # Anchor-gap surfacing (moving-camera shots only): a between-anchor
+  # span longer than max_gap_frames whose mean per-frame confidence
+  # stays below weak_confidence_below (line-extraction, if enabled,
+  # didn't already rescue it) gets one warning line naming the span and
+  # suggesting an anchor near its midpoint.
+  moving_gap:
+    max_gap_frames: 60
+    weak_confidence_below: 0.6
   # Lens model: when true, the camera stage runs a 9-DOF LM (rvec, tvec,
   # fx, cx, cy, k1, k2) on the highest-coverage anchor (≥10 landmarks,
   # ≥12% image-area span) to recover principal point and radial
@@ -249,12 +307,16 @@ camera:
   # a strip around each projected catalogue line, locates the painted
   # line's sub-pixel centreline (bright-ridge convolution + parabolic
   # peak), and an LM re-solves against those lines.
-  # With static_camera=true the camera stage runs the static-camera line
+  # Keyed off the RESOLVED static/moving decision (true for an explicit
+  # static_camera: true, or auto once the consistency gate confirms it).
+  # When resolved static, the camera stage runs the static-camera line
   # solve: detect -> C-profile -> bundle-adjust one shared camera centre
   # -> iteratively re-detect. The output track has a single fixed
-  # camera_centre (zero body motion). With static_camera=false it runs
+  # camera_centre (zero body motion). When resolved moving (explicit
+  # false, or auto once the gate diagnoses genuine translation) it runs
   # the legacy independent per-frame line refinement instead (per-frame
-  # solves are locally under-determined and the body can wander).
+  # solves are locally under-determined and the body can wander) — this
+  # is also why that path never relocks a single C for a moving shot.
   # See docs/superpowers/notes/2026-05-14-camera-1px-experiment.md.
   line_extraction: true
   line_extraction_strip_px: 25       # search-strip half-width (px) around projected line

@@ -231,7 +231,14 @@ class PlayerTrackingStage(BaseStage):
         manifest = ShotsManifest.load(self.output_dir / "shots" / "shots_manifest.json")
         backfill_cfg = BackfillConfig.from_dict(cfg.get("backfill", {}))
 
+        # Honour the runner's per-shot filter (dashboard /api/run-shot):
+        # a filtered run must never rewrite other shots' tracks files —
+        # they carry operator annotations (player names/teams).
+        shot_filter = getattr(self, "shot_filter", None)
+
         for shot in manifest.active_shots():
+            if shot_filter is not None and shot.id != shot_filter:
+                continue
             # TODO(Phase 1c): once CameraStage produces camera_track.json,
             # load it here so per-frame pitch_position can be filled in.
             calibration = None

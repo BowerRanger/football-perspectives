@@ -123,6 +123,68 @@ def test_tracking_stage_fits_team_classifier_before_classify(tiny_shot_dir):
     assert result.tracks[0].team == "A"
 
 
+@pytest.fixture()
+def two_shot_dir(tmp_path) -> Path:
+    """Output directory with a two-shot manifest, tiny clips for both,
+    and a pre-existing (operator-annotated) tracks file for shot_001."""
+    shots_dir = tmp_path / "shots"
+    shots_dir.mkdir()
+
+    shots = []
+    for shot_id in ("shot_001", "shot_002"):
+        clip_path = shots_dir / f"{shot_id}.mp4"
+        writer = cv2.VideoWriter(
+            str(clip_path), cv2.VideoWriter_fourcc(*"mp4v"), 10, (320, 240)
+        )
+        for _ in range(10):
+            writer.write(np.full((240, 320, 3), [50, 200, 50], dtype=np.uint8))
+        writer.release()
+        shots.append(Shot(
+            id=shot_id,
+            start_frame=0,
+            end_frame=9,
+            start_time=0.0,
+            end_time=1.0,
+            clip_file=f"shots/{shot_id}.mp4",
+        ))
+    ShotsManifest(
+        source_file="test.mp4", fps=10.0, total_frames=20, shots=shots
+    ).save(shots_dir / "shots_manifest.json")
+
+    tracks_dir = tmp_path / "tracks"
+    tracks_dir.mkdir()
+    annotated = Track(
+        track_id="T001", class_name="player", team="A",
+        player_id="P001", player_name="Annotated Keeper",
+        frames=[TrackFrame(frame=0, bbox=[1.0, 2.0, 3.0, 4.0], confidence=0.9, pitch_position=None)],
+    )
+    TracksResult(shot_id="shot_001", tracks=[annotated]).save(
+        tracks_dir / "shot_001_tracks.json"
+    )
+    return tmp_path
+
+
+def test_shot_filter_processes_only_matching_shot(two_shot_dir):
+    """With ``shot_filter`` set, the stage tracks ONLY that shot and
+    never rewrites the other shots' tracks files — a full-loop run
+    would clobber operator annotations (player names/teams) stored in
+    them, which is exactly what /api/run-shot must not do."""
+    before = (two_shot_dir / "tracks" / "shot_001_tracks.json").read_bytes()
+    stage = PlayerTrackingStage(
+        config=_test_cfg(),
+        output_dir=two_shot_dir,
+        player_detector=FakePlayerDetector([[_one_player_det()]]),
+        team_classifier=FakeTeamClassifier("A"),
+    )
+    stage.shot_filter = "shot_002"
+
+    stage.run()
+
+    assert (two_shot_dir / "tracks" / "shot_002_tracks.json").exists()
+    after = (two_shot_dir / "tracks" / "shot_001_tracks.json").read_bytes()
+    assert after == before, "shot_filter run must not touch other shots' tracks"
+
+
 def test_backfill_disabled_by_default_in_config():
     """tracking.backfill.enabled must default to False — the in-stage
     backfill path is opt-in so existing tracks.json outputs stay stable

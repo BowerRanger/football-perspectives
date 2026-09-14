@@ -2,6 +2,10 @@
 camera track. The manual TRACK can be wrong (bad solo anchors), but the
 clicked pixels are user ground truth wherever they exist.
 
+Scoring lives in src.utils.anchor_click_eval.score_track — the same
+path the camera regression gate uses (tests/test_camera_regression.py),
+so the two can never drift apart.
+
 Usage:
   .venv/bin/python scripts/eval_anchor_clicks.py ANCHORS.json TRACK.json
 e.g.
@@ -17,37 +21,35 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.utils.camera_projection import project_world_to_image  # noqa: E402
+from src.utils.anchor_click_eval import score_track  # noqa: E402
 
 
 def main() -> None:
     anchors = json.load(open(sys.argv[1]))
     track = json.load(open(sys.argv[2]))
-    cams = {f["frame"]: f for f in track["frames"]}
-    dist = tuple(track.get("distortion", (0, 0))[:2])
 
-    all_res = []
-    print(f"track span {min(cams)}..{max(cams)}  dist={np.round(dist, 4).tolist()}")
-    for a in anchors["anchors"]:
-        f = a["frame"]
-        lm = a.get("landmarks", [])
-        if f not in cams:
-            print(f"  anchor f{f:>3}: NOT COVERED ({len(lm)} clicks)")
+    frames = [f["frame"] for f in track["frames"]]
+    dist = tuple(track.get("distortion", (0, 0))[:2])
+    print(f"track span {min(frames)}..{max(frames)}  "
+          f"dist={np.round(dist, 4).tolist()}")
+
+    metrics = score_track(anchors, track)
+    scored = {a["frame"]: a for a in metrics["per_anchor"]}
+    for anchor in anchors["anchors"]:
+        f = anchor["frame"]
+        if f not in scored:
+            print(f"  anchor f{f:>3}: NOT COVERED "
+                  f"({len(anchor.get('landmarks', []))} clicks)")
             continue
-        K = np.array(cams[f]["K"]); R = np.array(cams[f]["R"])
-        t = np.array(cams[f]["t"])
-        res = []
-        for ob in lm:
-            w = np.array([ob["world_xyz"]], dtype=float)
-            p = project_world_to_image(K, R, t, dist, w)[0]
-            res.append(float(np.linalg.norm(p - np.array(ob["image_xy"]))))
-        if res:
-            all_res += res
-            print(f"  anchor f{f:>3}: {len(res)} clicks  reproj "
-                  f"med {np.median(res):6.1f}px  max {max(res):6.1f}px")
-    if all_res:
-        print(f"\nALL: {len(all_res)} clicks  med {np.median(all_res):.1f}px  "
-              f"p90 {np.percentile(all_res, 90):.1f}px  max {max(all_res):.1f}px")
+        a = scored[f]
+        print(f"  anchor f{f:>3}: {a['clicks']} clicks  reproj "
+              f"med {a['med_px']:6.1f}px  max {a['max_px']:6.1f}px")
+
+    if metrics["clicks"]:
+        print(f"\nALL: {metrics['clicks']} clicks  "
+              f"med {metrics['med_px']:.1f}px  "
+              f"p90 {metrics['p90_px']:.1f}px  "
+              f"max {metrics['max_px']:.1f}px")
 
 
 if __name__ == "__main__":

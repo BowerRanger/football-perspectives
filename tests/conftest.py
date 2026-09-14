@@ -14,8 +14,23 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
 from src.utils.virtual_cameras import look_at_view
+
+
+def pytest_collection_modifyitems(config, items):
+    """``regression``-marked tests are strictly opt-in: they re-solve
+    real clips (minutes of local wall-clock) so the media being present
+    on this machine must not pull them into the default suite. They run
+    only when the marker is explicitly selected via ``-m``."""
+    if "regression" in (config.getoption("-m") or ""):
+        return
+    skip = pytest.mark.skip(
+        reason="opt-in golden-clip regression: run with -m regression")
+    for item in items:
+        if "regression" in item.keywords:
+            item.add_marker(skip)
 
 
 def _write_min_fixture(root):

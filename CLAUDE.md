@@ -60,7 +60,7 @@ python recon.py serve --output ./output/ --port 8001
 
 Known failures on `main` as of 2026-07-05 (pre-existing — do not attribute to your change; remove this note when fixed): `test_ball_stage.py::test_aerial_arc_promotes_grounded_run_to_flight` (linear trajectory wrongly promoted to flight) and `test_blender_export_smpl_skeleton.py::test_player_fbx_has_24_bones_and_full_keyframes` (Blender snapshot not written on this Mac).
 
-Markers (`pyproject.toml`): `unit`, `integration`, `e2e` (real fixtures/GPU, skipped by default), `fbx` (needs Blender on PATH). Tests follow `tests/test_<module>.py` naming — when you change `src/utils/foo.py`, run `tests/test_foo*.py` plus any `test_<stage>_stage*.py` that wires it in. Heavy ML stages (GVHMR, real WASB detector) RUN LOCALLY on this Mac (CPU/MPS hybrid — hmr_world is ~35-60 min for a full shot, see `hmr_world.extractor_device`); there is no separate GPU box. Validate them locally; just budget the wall-clock and run them in the background.
+Markers (`pyproject.toml`): `unit`, `integration`, `e2e` (real fixtures/GPU, skipped by default), `fbx` (needs Blender on PATH), `regression` (golden-clip quality gates — strictly opt-in via `-m regression`, a conftest hook skips them otherwise even when local media exists). Tests follow `tests/test_<module>.py` naming — when you change `src/utils/foo.py`, run `tests/test_foo*.py` plus any `test_<stage>_stage*.py` that wires it in. Heavy ML stages (GVHMR, real WASB detector) RUN LOCALLY on this Mac (CPU/MPS hybrid — hmr_world is ~35-60 min for a full shot, see `hmr_world.extractor_device`); there is no separate GPU box. Validate them locally; just budget the wall-clock and run them in the background.
 
 ## Repo Map
 
@@ -78,6 +78,7 @@ Evaluation output dirs live at the repo root, one per clip: `output/` (**gberch*
 - **Touch recall** (ball stage): `scripts/run_touch_recall_validation.py --output <dir> --shot <shot>` (stage runs execute locally — budget wall-clock; `--report-only` reprints from snapshots). Manual anchors are the pseudo-ground-truth.
 - **Ball anchor accuracy without a detector**: `tests/test_ball_anchor_accuracy.py` — the no-op-detector harness; a no-op detector opts out of second-pass redetection.
 - **Camera quality**: judge by anchor-click reprojection (`scripts/eval_anchor_clicks.py`), not by eyeballing a single run — PnLCalib on MPS is nondeterministic across runs.
+- **Camera regression gate**: `pytest tests/test_camera_regression.py -m regression` re-solves each golden clip in `tests/regression/camera/<clip_id>/` (~13 min/clip) and fails if anchor-click reprojection/coverage/confidence regress beyond the baseline's tolerances. Scoring is shared with `eval_anchor_clicks.py` via `src/utils/anchor_click_eval.py`. Add a clip (or re-baseline after an intentional improvement) with `scripts/capture_camera_regression_baseline.py --output <dir> --shot <id> --runs 3` and commit the fixture dir — the `baseline.json` diff makes rebaselining visible in review. Run it after any change to the camera solve family (`anchor_solver.py`, `line_camera_refine.py`, `feature_propagator.py`, `bundle_adjust.py`, `src/stages/camera.py`).
 
 ## Conventions & Gotchas
 

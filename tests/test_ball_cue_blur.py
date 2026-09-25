@@ -108,3 +108,45 @@ def test_compute_blur_cues_respects_max_frame_gap():
     events = compute_blur_cues(detections, lambda f: frames.get(f), fps=30.0,
                                 crop_radius=39, max_frame_gap=3)
     assert events == []
+
+
+def test_compute_blur_cues_speed_ratio_path_fires_without_angle_change():
+    # Same orientation both frames (angle_delta == 0) but the streak
+    # quadruples in length -- a dead-on reversal/hard deceleration the
+    # angle-only gate structurally cannot see (PCA orientation has no
+    # direction sense).
+    frames = {
+        0: _draw_streak((100, 100), (50, 50), length=10, angle_deg=45.0),
+        1: _draw_streak((100, 100), (50, 50), length=40, angle_deg=45.0),
+    }
+    detections = [(0, (50.0, 50.0)), (1, (50.0, 50.0))]
+    events = compute_blur_cues(
+        detections, lambda f: frames.get(f), fps=30.0, crop_radius=59,
+        angle_change_deg=90.0,  # angle path can never fire (delta == 0)
+        speed_ratio_threshold=2.0)
+    assert len(events) == 1
+    assert events[0].frame == 1
+
+
+def test_compute_blur_cues_speed_path_disabled_by_default():
+    frames = {
+        0: _draw_streak((100, 100), (50, 50), length=10, angle_deg=45.0),
+        1: _draw_streak((100, 100), (50, 50), length=40, angle_deg=45.0),
+    }
+    detections = [(0, (50.0, 50.0)), (1, (50.0, 50.0))]
+    events = compute_blur_cues(
+        detections, lambda f: frames.get(f), fps=30.0, crop_radius=59,
+        angle_change_deg=90.0)  # speed_ratio_threshold defaults to inf
+    assert events == []
+
+
+def test_compute_blur_cues_speed_ratio_below_threshold_does_not_fire():
+    frames = {
+        0: _draw_streak((100, 100), (50, 50), length=20, angle_deg=45.0),
+        1: _draw_streak((100, 100), (50, 50), length=24, angle_deg=45.0),  # 1.2x, mild
+    }
+    detections = [(0, (50.0, 50.0)), (1, (50.0, 50.0))]
+    events = compute_blur_cues(
+        detections, lambda f: frames.get(f), fps=30.0, crop_radius=59,
+        angle_change_deg=90.0, speed_ratio_threshold=2.0)
+    assert events == []

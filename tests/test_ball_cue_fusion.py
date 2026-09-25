@@ -1,10 +1,19 @@
-"""Tests for the fusion policy: no single cue mints an event alone,
->= 2 distinct cues within the frame tolerance do, and a single cue near
-an existing auto/kinematic anchor does too."""
+"""Tests for the fusion policies: no single unsupported cue mints an
+event alone (any2), the net_blur_combo policy's specific-pairing gate,
+the weighted policy's threshold behaviour, and the cfg dispatcher."""
 
 from __future__ import annotations
 
-from src.utils.ball_cue_fusion import fuse_cues
+import pytest
+
+from src.utils.ball_cue_config import CueCfg
+from src.utils.ball_cue_fusion import (
+    CueReliability,
+    fuse_cues,
+    fuse_cues_combo,
+    fuse_cues_weighted,
+    fuse_cues_with_cfg,
+)
 from src.utils.ball_hybrid_types import CueEvidence
 
 
@@ -80,3 +89,119 @@ def test_fused_conf_rises_with_more_corroborating_cues():
 
 def test_empty_evidence_returns_empty():
     assert fuse_cues({}, auto_event_frames=[1, 2, 3]) == []
+
+
+# -- fuse_cues_combo ("net_blur_combo") --
+
+def test_combo_accepts_net_plus_blur():
+    evidence = {
+        "net": [_ce(10, "goal_impact", "net_energy", 0.6)],
+        "blur": [_ce(11, "contact", "blur_direction_change", 0.5)],
+    }
+    fused = fuse_cues_combo(evidence, auto_event_frames=[])
+    assert len(fused) == 1
+    assert fused[0].support == "cues"
+
+
+def test_combo_accepts_audio_plus_blur():
+    evidence = {
+        "audio": [_ce(10, "contact", "audio_onset", 0.6)],
+        "blur": [_ce(11, "contact", "blur_direction_change", 0.5)],
+    }
+    fused = fuse_cues_combo(evidence, auto_event_frames=[])
+    assert len(fused) == 1
+
+
+def test_combo_accepts_blur_plus_auto():
+    evidence = {"blur": [_ce(50, "contact", "blur_direction_change", 0.6)]}
+    fused = fuse_cues_combo(evidence, auto_event_frames=[51])
+    assert len(fused) == 1
+    assert fused[0].support == "cue+auto"
+
+
+def test_combo_rejects_audio_plus_net_without_blur():
+    # 2 distinct cues, but blur isn't one of them -- net_blur_combo
+    # requires blur in every accepted cluster, unlike any2.
+    evidence = {
+        "audio": [_ce(10, "contact", "audio_onset", 0.6)],
+        "net": [_ce(11, "goal_impact", "net_energy", 0.6)],
+    }
+    assert fuse_cues_combo(evidence, auto_event_frames=[]) == []
+
+
+def test_combo_rejects_net_alone_near_auto():
+    evidence = {"net": [_ce(50, "goal_impact", "net_energy", 0.6)]}
+    assert fuse_cues_combo(evidence, auto_event_frames=[51]) == []
+
+
+# -- fuse_cues_weighted --
+
+def test_weighted_mints_when_score_clears_threshold():
+    reliability = CueReliability(
+        weights={"audio_onset": 0.3, "blur_direction_change": 0.3},
+        auto_weight=1.0, threshold=0.5)
+    evidence = {
+        "audio": [_ce(10, "contact", "audio_onset", 0.9)],
+        "blur": [_ce(11, "contact", "blur_direction_change", 0.9)],
+    }
+    fused = fuse_cues_weighted(evidence, auto_event_frames=[], reliability=reliability)
+    assert len(fused) == 1
+    assert fused[0].conf == pytest.approx(0.6)
+
+
+def test_weighted_drops_below_threshold():
+    reliability = CueReliability(
+        weights={"audio_onset": 0.1}, auto_weight=0.2, threshold=0.5)
+    evidence = {"audio": [_ce(10, "contact", "audio_onset", 0.9)]}
+    assert fuse_cues_weighted(evidence, auto_event_frames=[], reliability=reliability) == []
+
+
+def test_weighted_auto_bonus_can_clear_threshold_alone():
+    reliability = CueReliability(
+        weights={"audio_onset": 0.1}, auto_weight=1.0, threshold=1.0)
+    evidence = {"audio": [_ce(50, "contact", "audio_onset", 0.9)]}
+    fused = fuse_cues_weighted(evidence, auto_event_frames=[51], reliability=reliability)
+    assert len(fused) == 1
+    assert fused[0].conf == pytest.approx(1.1)
+
+
+# -- fuse_cues_with_cfg dispatch --
+
+def test_dispatch_any2():
+    cfg = CueCfg(fusion_policy="any2")
+    evidence = {
+        "audio": [_ce(10, "contact", "audio_onset", 0.5)],
+        "net": [_ce(11, "goal_impact", "net_energy", 0.5)],
+    }
+    fused = fuse_cues_with_cfg(evidence, auto_event_frames=[], cfg=cfg)
+    assert len(fused) == 1  # any2 allows audio+net, unlike combo
+
+
+def test_dispatch_net_blur_combo():
+    cfg = CueCfg(fusion_policy="net_blur_combo")
+    evidence = {
+        "audio": [_ce(10, "contact", "audio_onset", 0.5)],
+        "net": [_ce(11, "goal_impact", "net_energy", 0.5)],
+    }
+    fused = fuse_cues_with_cfg(evidence, auto_event_frames=[], cfg=cfg)
+    assert fused == []  # no blur present
+
+
+def test_dispatch_weighted():
+    cfg = CueCfg(
+        fusion_policy="weighted",
+        fusion_weights={"audio_onset": 0.6, "blur_direction_change": 0.6},
+        fusion_auto_weight=1.0, fusion_threshold=1.0,
+    )
+    evidence = {
+        "audio": [_ce(10, "contact", "audio_onset", 0.9)],
+        "blur": [_ce(11, "contact", "blur_direction_change", 0.9)],
+    }
+    fused = fuse_cues_with_cfg(evidence, auto_event_frames=[], cfg=cfg)
+    assert len(fused) == 1
+
+
+def test_dispatch_unknown_policy_raises():
+    cfg = CueCfg(fusion_policy="not_a_real_policy")
+    with pytest.raises(ValueError):
+        fuse_cues_with_cfg({}, auto_event_frames=[], cfg=cfg)

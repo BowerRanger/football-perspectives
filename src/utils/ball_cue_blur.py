@@ -102,13 +102,23 @@ def compute_blur_cues(
     min_streak_px: float = 4.0,
     angle_change_deg: float = 25.0,
     max_frame_gap: int = 3,
+    speed_ratio_threshold: float = float("inf"),
 ) -> list[CueEvidence]:
     """``detections`` is ``(frame, uv)`` pairs (typically the real
     detector's dense observation track). ``frame_lookup(frame)`` returns
     a grayscale frame or ``None`` when unavailable (e.g. not decoded /
     not cached by the caller). Emits a ``CueEvidence`` at the later frame
     of any consecutive streaky-detection pair (gap <= ``max_frame_gap``)
-    whose blob orientation changes by >= ``angle_change_deg``.
+    whose blob orientation changes by >= ``angle_change_deg`` OR whose
+    implied speed (``implied_speed_px_s``) changes by a factor of >=
+    ``speed_ratio_threshold`` between the two frames.
+
+    The OR is deliberate: a dead-on reversal (ball bounces straight back
+    the way it came) barely moves the streak's orientation -- PCA angle
+    has no direction sense, mod 180 -- so an angle-only gate misses it;
+    a sharp deceleration/acceleration shows up in the speed ratio
+    instead. The default ``speed_ratio_threshold=inf`` disables that
+    path entirely (pre-2026-09-25-tuning, angle-only behaviour).
     """
     shapes: list[tuple[int, BlobShape]] = []
     for frame, uv in sorted(detections, key=lambda d: d[0]):
@@ -126,9 +136,18 @@ def compute_blur_cues(
         if f_cur - f_prev > max_frame_gap:
             continue
         delta = angle_delta_deg(s_prev.angle_deg, s_cur.angle_deg)
-        if delta < angle_change_deg:
+        v_prev = implied_speed_px_s(s_prev.length_px, fps)
+        v_cur = implied_speed_px_s(s_cur.length_px, fps)
+        speed_ratio = (max(v_prev, v_cur) / min(v_prev, v_cur)
+                       if min(v_prev, v_cur) > 1e-6 else 1.0)
+        angle_fires = delta >= angle_change_deg
+        speed_fires = speed_ratio >= speed_ratio_threshold
+        if not (angle_fires or speed_fires):
             continue
-        conf = float(np.clip(delta / 90.0, 0.0, 1.0))
+        conf = float(np.clip(
+            max(delta / 90.0, (speed_ratio - 1.0) / max(1e-6, speed_ratio_threshold - 1.0)
+                if np.isfinite(speed_ratio_threshold) else 0.0),
+            0.0, 1.0))
         events.append(CueEvidence(
             frame=f_cur, kind="contact", cue="blur_direction_change", conf=conf,
             xyz=None, uv=s_cur.centroid_px,

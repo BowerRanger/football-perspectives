@@ -72,7 +72,6 @@ DET_CACHE_FALLBACK_DIR = (
     Path(M) / "docs" / "superpowers" / "notes" / "ball-accuracy" / "det_cache"
 )
 
-DEFAULT_TRAJECTORY = "reference"
 N_FOLDS = 2
 
 # Overlay build: top-level entries never linked in (ball outputs are
@@ -115,6 +114,17 @@ def load_base_config() -> dict:
     """Fresh copy of ``config/default.yaml`` — never mutated in place by
     the module-level constant, so every caller gets an independent dict."""
     return yaml.safe_load(CONFIG_PATH.read_text())
+
+
+def shipped_trajectory() -> str:
+    """The ``ball.trajectory`` the pipeline ships (``config/default.yaml``).
+
+    The regression gate and its capture script measure this value, so the
+    gate always tracks the default rather than a hard-coded mode."""
+    return str(load_base_config().get("ball", {}).get("trajectory", "reference"))
+
+
+DEFAULT_TRAJECTORY = shipped_trajectory()
 
 
 def _set_dotted(config: dict, dotted_key: str, value) -> None:

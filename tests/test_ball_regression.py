@@ -5,7 +5,7 @@ Mirrors ``tests/test_camera_regression.py``'s pattern. Each dir under
 anchor set + frozen synthetic ``mismatch``-scenario truth/evidence (the
 pseudo-ground-truth) plus a ``baseline.json`` captured by
 ``scripts/capture_ball_regression_baseline.py``. The test re-runs the real
-ball stage (``ball.trajectory=reference``) against that frozen synthetic
+ball stage (the shipped ``ball.trajectory``) against that frozen synthetic
 evidence AND the real detector's 2-fold held-out anchor evaluation, and
 fails if accuracy regresses beyond the baseline's measured-spread-aware
 tolerances.
@@ -78,11 +78,19 @@ def test_ball_stage_has_not_regressed(clip_id: str, tmp_path: Path):
             f"local clip {video_path} differs from the one the baseline "
             "was captured against — re-capture the baseline")
 
+    trajectory = BR.shipped_trajectory()
+    baseline_trajectory = baseline.get("trajectory", "reference")
+    if baseline_trajectory != trajectory:
+        pytest.fail(
+            f"baseline for {clip_id!r} was captured with ball.trajectory="
+            f"{baseline_trajectory!r} but the pipeline ships {trajectory!r} — "
+            "re-capture it with scripts/capture_ball_regression_baseline.py")
+
     clip_ctx = load_clip(clip_id)
     clip_ctx = dataclasses.replace(clip_ctx, anchors=frozen_anchors)
 
-    # --- synthetic mismatch scenario, ball.trajectory=reference ---------
-    track = BR.run_synthetic(clip_ctx, synth, "mismatch", "reference")
+    # --- synthetic mismatch scenario, shipped ball.trajectory -----------
+    track = BR.run_synthetic(clip_ctx, synth, "mismatch", trajectory)
     side_cam = BM.build_side_camera([f.xyz for f in truth.frames])
     synth_flat, _detail = BM.compute_scenario_metrics(
         clip_ctx, track, truth, side_camera=side_cam)
@@ -91,7 +99,7 @@ def test_ball_stage_has_not_regressed(clip_id: str, tmp_path: Path):
     det_cache = BR.det_cache_path(clip_id, bench_root=tmp_path)
     combined_errs: list[float] = []
     for fold in range(BR.N_FOLDS):
-        real_track = BR.run_real(clip_ctx, "reference", fold=fold,
+        real_track = BR.run_real(clip_ctx, trajectory, fold=fold,
                                   det_cache=det_cache, bench_root=tmp_path)
         held = BR.anchor_heldout_error(clip_ctx, real_track, fold,
                                         bench_root=tmp_path)

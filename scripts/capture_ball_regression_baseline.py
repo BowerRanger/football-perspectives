@@ -3,8 +3,9 @@ regression gate (``tests/test_ball_regression.py``).
 
 Builds (once) the frozen ``mismatch``-scenario synthetic truth/evidence
 from the clip's CURRENT manual anchors, then re-runs the real ball stage
-N times — against that frozen synthetic evidence (``ball.trajectory=
-reference``) AND the real detector's 2-fold held-out anchor evaluation —
+N times with the shipped ``ball.trajectory`` (``config/default.yaml``;
+override with ``--trajectory``) — against that frozen synthetic evidence
+AND the real detector's 2-fold held-out anchor evaluation —
 to measure run-to-run spread (the gate's nondeterminism allowance; the
 ball stage should be near-deterministic once its detection cache is
 warm, but this is measured, not assumed). Writes the committed fixture
@@ -80,7 +81,11 @@ def main() -> None:
     parser.add_argument("--fixture-root", type=Path,
                         default=REPO_ROOT / "tests" / "regression" / "ball")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--trajectory", default=BR.shipped_trajectory(),
+                        help="ball.trajectory to baseline (default: the "
+                        "shipped value in config/default.yaml)")
     args = parser.parse_args()
+    trajectory = args.trajectory
 
     clip_ctx = load_clip(args.clip)
     video_relpath = str(
@@ -112,7 +117,7 @@ def main() -> None:
     real_runs: list[dict] = []
     for i in range(args.runs):
         print(f"-- run {i + 1}/{args.runs} --")
-        track = BR.run_synthetic(clip_ctx, synth, SCENARIO, "reference")
+        track = BR.run_synthetic(clip_ctx, synth, SCENARIO, trajectory)
         flat, _detail = BM.compute_scenario_metrics(
             clip_ctx, track, truth, side_camera=side_cam)
         synth_runs.append(flat)
@@ -123,7 +128,7 @@ def main() -> None:
 
         combined_errs: list[float] = []
         for fold in range(BR.N_FOLDS):
-            real_track = BR.run_real(clip_ctx, "reference", fold=fold,
+            real_track = BR.run_real(clip_ctx, trajectory, fold=fold,
                                      det_cache=det_cache, bench_root=bench_root)
             held = BR.anchor_heldout_error(clip_ctx, real_track, fold,
                                            bench_root=bench_root)
@@ -144,6 +149,7 @@ def main() -> None:
     baseline = {
         "clip_id": args.clip,
         "scenario": SCENARIO,
+        "trajectory": trajectory,
         "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "git_commit": _git_commit(),
         "runs": args.runs,

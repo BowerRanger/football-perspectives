@@ -440,7 +440,12 @@ already copies the `cross_replay` block verbatim).
 
 ## Default decision (T6)
 
-**Decision: `ball.trajectory` stays `reference`; `hybrid` ships opt-in.** The flip rule
+**Update (same day): the user switched the default to `hybrid`**, accepting the
+origi01/kroupi01 real held-out regression below for the gains on gberch, s013 and every
+synthetic scenario. `reference` remains available per clip. The regression gate now
+follows the shipped value, and its baselines were re-captured with `hybrid`.
+
+**Original benchmark decision: `ball.trajectory` stays `reference`; `hybrid` ships opt-in.** The flip rule
 was "synthetic improves on all four clips AND real held-out p50 is no worse than
 `reference` on any clip". Synthetic passed everywhere; real held-out did not.
 

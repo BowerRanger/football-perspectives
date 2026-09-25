@@ -1162,16 +1162,18 @@ ball:
     min_pairs_for_refine: 8
     # Weight of each 3D fix residual in the LM fitters (px per metre of 3D error).
     fix_weight_px_per_m: 30.0
-  # Trajectory layer: reference (default) keeps the existing solve_piecewise
-  # / solve_modes / events dense track untouched. hybrid replaces
+  # Trajectory layer: hybrid (default since 2026-09-25) replaces
   # world_by_frame/state_by_frame (before the C4 ray-faithful block) with
   # src/utils/ball_hybrid_trajectory.py's physics-fit + broadcast/physics
   # delta-blend track — see docs/superpowers/notes/ball-accuracy/ and
   # prototypes/ball_hybrid_poc/CONTRACT.md for the PoC this was promoted
   # from. touch_attribution/keyframe-building/export schemas are unchanged
   # either way (the hybrid layer only replaces the dense per-frame track
-  # the rest of the stage already consumed).
-  trajectory: reference
+  # the rest of the stage already consumed). reference keeps the older
+  # solve_piecewise / solve_modes / events dense track; it still wins on the
+  # flight-heavy origi01/kroupi01 clips (real held-out p50 0.36 vs 0.56 m,
+  # 2.97 vs 3.54 m) — see docs/superpowers/specs/2026-09-25-ball-hybrid-trajectory.md.
+  trajectory: hybrid
   hybrid:
     cd: 0.25
     fit_cd: true

@@ -962,3 +962,66 @@ def finalize_track(
         "anchor_not_honoured": anchor_not_honoured,
     }
     return out, diagnostics
+
+
+# ---------------------------------------------------------------------------
+# Single orchestrating entry point (resolve manual + gate auto + finalize)
+# ---------------------------------------------------------------------------
+
+def run_trajectory(
+    ctx: HybridShotCtx,
+    observations: Sequence[Any],
+    anchors: Sequence[Any],
+    *,
+    auto_anchors: Sequence[Any] = (),
+    fixes: Sequence[Any] = (),
+    cues: Sequence[Any] = (),
+    cfg: Mapping[str, Any] | None = None,
+    gating_cfg: Mapping[str, Any] | None = None,
+    player_context: Any = None,
+) -> tuple[dict[int, dict], dict]:
+    """Convenience one-call entry point: resolve manual ``anchors``/
+    ``fixes`` into knots, gate ``auto_anchors`` through
+    ``ball_hybrid_gating.gate_auto_events`` (``cues`` is passed through
+    as that gate's ``corroboration``), and build the final track. This is
+    what ``ball.py``'s ``_solve_shot`` wiring and any other single-shot
+    caller (bench harnesses, hold-out eval scripts) should reach for
+    instead of re-deriving the resolve -> gate -> finalize sequence
+    themselves. ``cfg`` is this module's own cfg (``DEFAULT_CFG``
+    overrides); ``gating_cfg`` is ``ball_hybrid_gating.DEFAULT_GATING_CFG``
+    overrides.
+
+    Returns ``(frames, diagnostics)`` — same shape as ``finalize_track``,
+    with an added ``diagnostics["gate"]`` block from the auto-event gate.
+    A lazy import avoids a module-level circular dependency (``ball_
+    hybrid_gating`` imports this module for ``solve_span``/
+    ``resolve_knots``).
+    """
+    from src.utils.ball_hybrid_gating import gate_auto_events as _gate_auto_events
+
+    tcfg = full_cfg(cfg)
+    hard, ray = resolve_knots(ctx, anchors, fixes, source="manual",
+                               player_context=player_context)
+
+    gate_result = _gate_auto_events(
+        ctx, hard, ray, auto_anchors, observations,
+        cfg=gating_cfg, trajectory_cfg=tcfg,
+        player_context=player_context, corroboration=cues)
+
+    all_hard = sorted(list(hard) + list(gate_result.accepted_hard),
+                       key=lambda k: k.frame)
+    all_ray = sorted(list(ray) + list(gate_result.accepted_ray),
+                      key=lambda k: k.frame)
+
+    frames, diagnostics = finalize_track(ctx, all_hard, all_ray, observations, tcfg)
+    diagnostics["gate"] = {
+        "n_candidates": gate_result.n_candidates,
+        "n_accepted_hard": len(gate_result.accepted_hard),
+        "n_accepted_ray": len(gate_result.accepted_ray),
+        "n_rejected_kind": gate_result.n_rejected_kind,
+        "n_rejected_confidence": gate_result.n_rejected_confidence,
+        "n_rejected_near_manual": gate_result.n_rejected_near_manual,
+        "n_rejected_consistency": gate_result.n_rejected_consistency,
+        "n_rejected_residual": gate_result.n_rejected_residual,
+    }
+    return frames, diagnostics

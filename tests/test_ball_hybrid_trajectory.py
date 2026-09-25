@@ -26,6 +26,7 @@ from src.utils.ball_hybrid_trajectory import (
     full_cfg,
     is_sharp_knot,
     resolve_knots,
+    run_trajectory,
 )
 from src.utils.ball_hybrid_types import HybridShotCtx
 
@@ -369,3 +370,48 @@ def test_inconsistent_airborne_ray_does_not_blow_up_flight_depth():
     # The ray anchor may still nudge the fit a little (it IS evidence),
     # but must not cause an order-of-magnitude depth blowup nearby.
     assert with_ray_err < base_err + 0.5
+
+
+# ---------------------------------------------------------------------------
+# run_trajectory: the single orchestrating entry point (resolve -> gate ->
+# finalize) other callers (ball.py's wiring, bench/hold-out eval scripts)
+# should use instead of re-deriving the sequence themselves.
+# ---------------------------------------------------------------------------
+
+def test_run_trajectory_matches_manual_resolve_gate_finalize_sequence():
+    ctx, anchors, obs, p_a, p_b, v0_true, cd, frame_a, frame_b, _T = (
+        _synthetic_drag_kick_scenario())
+    frames, diag = run_trajectory(ctx, obs, anchors, cfg={"cd": cd, "fit_cd": True})
+    assert frames[frame_a]["mode"] == "anchor"
+    assert np.allclose(frames[frame_a]["xyz"], p_a, atol=1e-6)
+    assert "gate" in diag
+    assert diag["gate"]["n_candidates"] == 0
+
+
+def test_run_trajectory_folds_in_auto_anchors_via_the_gate():
+    ctx, anchors, obs, p_a, p_b, v0_true, cd, frame_a, frame_b, _T = (
+        _synthetic_drag_kick_scenario())
+    mid_frame = (frame_a + frame_b) // 2
+    if mid_frame - frame_a <= 2 or frame_b - mid_frame <= 2:
+        mid_frame = frame_a + max(3, (frame_b - frame_a) // 2)
+    t_s = (mid_frame - frame_a) / ctx.fps
+    p_mid = simulate(p_a, v0_true, [t_s], cd=cd)[0]
+    uv_mid = tuple(float(x) for x in ctx.project(mid_frame, p_mid))
+    C, d_hat = ctx.ray(mid_frame, uv_mid)
+    _, along = point_ray_distance(p_mid, C, d_hat)
+    joint = C + (along + BALL_R) * d_hat
+    pc = SimpleNamespace(joint_world=lambda frame, pid, bone: joint)
+
+    @dataclass
+    class _ScoredAnchor(_FakeAnchor):
+        score: float = 0.9
+
+    candidate = _ScoredAnchor(frame=mid_frame, image_xy=uv_mid, state="player_touch",
+                               player_id="P099", bone="right_foot")
+    frames, diag = run_trajectory(ctx, obs, anchors, auto_anchors=[candidate],
+                                   cfg={"cd": cd, "fit_cd": False},
+                                   player_context=pc)
+    assert diag["gate"]["n_candidates"] == 1
+    assert diag["gate"]["n_accepted_hard"] == 1
+    assert frames[mid_frame]["mode"] == "anchor"
+    assert np.allclose(frames[mid_frame]["xyz"], p_mid, atol=1e-3)

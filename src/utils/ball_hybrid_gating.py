@@ -48,6 +48,26 @@ knot — a ray-only candidate has no span-boundary role to test):
    becomes ``new_worst <= base_worst * (1 - residual_improve_frac)``,
    with no inlier-tolerance cushion — the candidate must demonstrably
    help, not just avoid hurting.
+5. **Physical plausibility** (hard candidates only) — neither resulting
+   half-span may imply a flight launch speed above
+   ``max_launch_speed_m_s`` (default
+   ``ball_hybrid_trajectory.MAX_LAUNCH_SPEED_M_S``, the SAME bound the
+   trajectory layer's own free-end fit already enforces — see that
+   module's ``_open_end_plausible``). Found via a real origi01 fold0
+   bench run (2026-09-25, after fixing the confidence-floor bug below):
+   several accepted auto ``player_touch`` knots landed only 1-3 frames
+   apart with wildly inconsistent positions (bad SMPL-FK bone/player
+   attribution on at least one of each close pair), and the interior
+   two-knot ``shoot_arc`` boundary-value solve between them — which
+   ALWAYS lands exactly on both points by construction, however far
+   apart — implied launch speeds of hundreds of m/s. The residual-
+   improvement test alone cannot catch this: reprojection is evaluated
+   only at evidence points, which are often sparse or absent between two
+   closely-spaced touches, so an unphysical inter-knot velocity sails
+   through untested. This gate closes that hole directly, reusing
+   ``solve_span``'s own ``v0`` (carried in each flight span's
+   diagnostics since T5's spin-wiring addition) rather than re-deriving
+   it.
 """
 
 from __future__ import annotations
@@ -59,6 +79,7 @@ import numpy as np
 
 from src.utils.ball_anchor_heights import EVENT_STATES
 from src.utils.ball_hybrid_trajectory import (
+    MAX_LAUNCH_SPEED_M_S,
     anchor_kind,
     resolve_knots,
     solve_span,
@@ -74,6 +95,7 @@ DEFAULT_GATING_CFG: dict[str, Any] = {
     "consistency_max_px": 20.0,
     "residual_improve_frac": 0.0,
     "min_frame_gap_from_manual": 2,
+    "max_launch_speed_m_s": MAX_LAUNCH_SPEED_M_S,
 }
 
 
@@ -94,13 +116,39 @@ class GateResult:
     n_rejected_near_manual: int
     n_rejected_consistency: int
     n_rejected_residual: int
+    n_rejected_implausible_velocity: int = 0
     diagnostics: dict = field(default_factory=dict)
 
 
 def _candidate_conf(a: Any) -> float:
+    """A candidate's own confidence/score. ``src.schemas.ball_anchor.
+    BallAnchor`` — what ``auto_anchors`` actually are once
+    ``generate_auto_anchors`` mints them — carries this as
+    ``.confidence`` ("the detector's score for an auto-generated anchor
+    ... clamped to [0, 1]", per that schema's docstring), NOT
+    ``.score``/``.conf``. Checking ``.confidence`` first is load-bearing:
+    an earlier version of this function checked only ``.score``/``.conf``
+    (matching the PoC's own ``_FakeAnchor`` test fixture, which happened
+    to use ``.score``) and silently read 0.0 for every real ``BallAnchor``
+    candidate -- confirmed via a real origi01 fold0 bench run where ALL
+    54 auto-anchor candidates were rejected on confidence
+    (n_rejected_confidence == n_candidates - n_rejected_kind -
+    n_rejected_near_manual, i.e. every survivor of the other two gates
+    failed confidence, even ones scored 0.75-0.92) -- silently starving
+    the hybrid trajectory of every real touch/bounce knot the reference
+    solver uses. ``.score``/``.conf`` remain as fallbacks for other
+    duck-typed candidate shapes (e.g. this module's own test fixtures)."""
     if isinstance(a, Mapping):
-        return float(a.get("score", a.get("conf", 0.0)) or 0.0)
-    return float(getattr(a, "score", getattr(a, "conf", 0.0)) or 0.0)
+        for key in ("confidence", "score", "conf"):
+            val = a.get(key)
+            if val is not None:
+                return float(val)
+        return 0.0
+    for attr in ("confidence", "score", "conf"):
+        val = getattr(a, attr, None)
+        if val is not None:
+            return float(val)
+    return 0.0
 
 
 def _candidate_frame(a: Any) -> int:
@@ -229,6 +277,7 @@ def gate_auto_events(
     combined_rays = list(ray_knots) + accepted_ray
     accepted_hard: list[Knot] = []
     n_rej_residual = 0
+    n_rej_implausible = 0
     probe_cfg = dict(tcfg)
     probe_cfg["max_splits_per_span"] = 0  # cheap probe, no recursive splitting
     # A residual probe only cares about reprojection, not the spin-fitted
@@ -284,11 +333,29 @@ def gate_auto_events(
             # IMPROVE the span's fit by at least this fraction — no
             # inlier-tolerance cushion.
             allowed = base_worst * (1.0 - frac)
-        if new_worst <= allowed:
-            knots.append(cand)
-            accepted_hard.append(cand)
-        else:
+        if new_worst > allowed:
             n_rej_residual += 1
+            continue
+
+        worst_v0 = max(
+            (float(np.linalg.norm(i["v0"])) for i in (info1 + info2)
+             if i.get("model") == "flight" and i.get("v0") is not None),
+            default=0.0)
+        # ``fallback_from_flight``: solve_span itself already caught an
+        # implausible launch speed and substituted the roll model — that
+        # substitution can look deceptively low-residual (a roll fit
+        # always finds SOME straight-ish line between two points), which
+        # would otherwise let the residual-improvement gate above accept
+        # a candidate whose TRUE (flight) fit correctly disagreed with
+        # it. Treat the fallback itself as disqualifying, not just a
+        # directly-observed high v0.
+        any_fallback = any(i.get("fallback_from_flight") for i in (info1 + info2))
+        if worst_v0 > g["max_launch_speed_m_s"] or any_fallback:
+            n_rej_implausible += 1
+            continue
+
+        knots.append(cand)
+        accepted_hard.append(cand)
 
     return GateResult(
         accepted_hard=tuple(sorted(accepted_hard, key=lambda k: k.frame)),
@@ -299,6 +366,7 @@ def gate_auto_events(
         n_rejected_near_manual=n_rej_near,
         n_rejected_consistency=n_rej_consistency,
         n_rejected_residual=n_rej_residual,
+        n_rejected_implausible_velocity=n_rej_implausible,
         diagnostics={
             "n_accepted_hard": len(accepted_hard),
             "n_accepted_ray": len(accepted_ray),

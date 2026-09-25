@@ -27,6 +27,7 @@ from src.utils.ball_hybrid_trajectory import (
     is_sharp_knot,
     resolve_knots,
     run_trajectory,
+    solve_span,
 )
 from src.utils.ball_hybrid_types import HybridShotCtx
 
@@ -481,3 +482,51 @@ def test_spin_enabled_fits_omega_on_a_genuinely_spun_trajectory():
     # Knots must still be exact even with spin applied.
     assert np.allclose(frames[frame_a]["xyz"], p_a, atol=1e-6)
     assert np.allclose(frames[frame_b]["xyz"], p_b, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Implausible-launch-speed fallback (found via a real origi01 fold0 bench
+# run: two hard knots correctly resolved individually but implying an
+# unreachable flight speed between them -- e.g. a dense burst of accepted
+# auto player_touch knots a few frames apart -- must not be trusted as a
+# flight arc; both knots stay exact, only the interior model changes.
+# ---------------------------------------------------------------------------
+
+def test_flight_span_falls_back_to_roll_when_launch_speed_implausible():
+    ctx = _make_ctx()
+    # Two knots 40m apart in 2 frames (1/15s) -- ~600 m/s, far beyond any
+    # real launch speed -- but each knot's OWN position is a perfectly
+    # ordinary "kick"/"bounce" ground-level click (as if two independent,
+    # individually-correct-looking touches were wrongly paired as one
+    # flight span).
+    p_a = np.array([0.0, 0.0, 0.11])
+    p_b = np.array([40.0, 0.0, 0.11])
+    frame_a, frame_b = 20, 22
+    anchors = [
+        _FakeAnchor(frame=frame_a, image_xy=tuple(float(x) for x in ctx.project(frame_a, p_a)),
+                    state="kick"),
+        _FakeAnchor(frame=frame_b, image_xy=tuple(float(x) for x in ctx.project(frame_b, p_b)),
+                    state="bounce"),
+    ]
+    hard, ray = resolve_knots(ctx, anchors)
+    pts, span_info = solve_span(ctx, hard[0], hard[1], [], [], full_cfg())
+    assert len(span_info) == 1
+    info = span_info[0]
+    assert info["model"] == "roll", (
+        f"expected the implausible flight fit to fall back to roll, got {info}")
+    assert info["fallback_from_flight"] is True
+    # Both knots stay exact even under the fallback.
+    assert np.allclose(pts[frame_a], p_a, atol=1e-6)
+    assert np.allclose(pts[frame_b], p_b, atol=1e-6)
+
+
+def test_flight_span_keeps_flight_model_for_plausible_speed():
+    """Sanity check: a genuinely reachable flight span (well under the
+    plausibility bound) must NOT be forced into the fallback."""
+    ctx, anchors, obs, p_a, p_b, v0_true, cd, frame_a, frame_b, _T = (
+        _synthetic_drag_kick_scenario())
+    hard, ray = resolve_knots(ctx, anchors)
+    pts, span_info = solve_span(ctx, hard[0], hard[1], obs, ray,
+                                 full_cfg({"cd": cd, "fit_cd": False}))
+    assert any(i["model"] == "flight" and not i.get("fallback_from_flight")
+               for i in span_info)

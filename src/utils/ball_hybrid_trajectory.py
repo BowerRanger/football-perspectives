@@ -111,6 +111,14 @@ _OPEN_END_PITCH_LENGTH_M = 105.0
 _OPEN_END_PITCH_WIDTH_M = 68.0
 _OPEN_END_MAX_HEIGHT_M = 50.0
 _OPEN_END_MAX_LAUNCH_SPEED_M_S = 45.0
+# Public alias: ball_hybrid_gating.py's auto-knot acceptance gate reuses
+# this SAME bound (not a new arbitrary number) to reject an interior
+# flight span whose implied two-knot launch speed is physically absurd
+# -- see that module's plausibility check for why "both ends are hard
+# knots, so shoot_arc can't run away" (this constant's original
+# rationale, true for a genuinely-correct pair of knots) breaks down
+# when one of the knots itself is a bad auto-generated candidate.
+MAX_LAUNCH_SPEED_M_S = _OPEN_END_MAX_LAUNCH_SPEED_M_S
 
 DEFAULT_CFG: dict[str, Any] = {
     "cd": CD_DEFAULT,
@@ -141,6 +149,11 @@ DEFAULT_CFG: dict[str, Any] = {
     "hermite_k_ref_speed_m_s": 2.0,
     "blend_max_delta_step_frac": 0.5,
     "blend_max_delta_step_floor_m_s": 1.0,
+    # An interior flight span whose fitted launch speed exceeds this
+    # falls back to the roll model instead (see solve_span's flight
+    # branch docstring comment) — reuses the SAME bound the free-end fit
+    # already enforces (_open_end_plausible), not a new arbitrary number.
+    "max_launch_speed_m_s": MAX_LAUNCH_SPEED_M_S,
     # Bounded 2-dof Magnus (spin) refinement per flight span (IC-E,
     # ball_hybrid_spin.fit_span_spin) — see solve_span's flight branch.
     # Default OFF until the benchmark decision (~0.3-1.5s/span cost).
@@ -507,7 +520,7 @@ def solve_span(
 
     model = _choose_model(ctx, a_knot, b_knot, observations, ray_knots, cfg)
 
-    if model == "roll":
+    def _roll_branch(fallback: bool = False) -> tuple[dict[int, np.ndarray], list[dict]]:
         z_level = 0.5 * (float(a_knot.xyz[2]) + float(b_knot.xyz[2]))
 
         def _ground_project(frame: int, uv: tuple[float, float]) -> np.ndarray | None:
@@ -553,6 +566,17 @@ def solve_span(
         info = {"span": (a_knot.frame, b_knot.frame), "model": "roll",
                 "n_obs": len(ground_obs),
                 "max_residual_px": worst_roll[2] if worst_roll else None}
+        if fallback:
+            # This span was originally classified "flight" by
+            # _choose_model but fell back to roll because the flight fit
+            # implied an unreachable launch speed — ball_hybrid_gating's
+            # acceptance gate treats this as a hard reject regardless of
+            # how low the roll fit's OWN residual looks: a roll model
+            # can always find SOME low-residual straight-ish line between
+            # two points, which would otherwise silently launder a
+            # candidate whose true (flight) fit correctly showed it
+            # didn't belong here.
+            info["fallback_from_flight"] = True
 
         if (worst_roll is not None
                 and worst_roll[2] > cfg["inlier_px"] * cfg["split_residual_factor"]
@@ -573,6 +597,9 @@ def solve_span(
                 return {**pts1, **pts2}, [*info1, *info2]
 
         return pts, [info]
+
+    if model == "roll":
+        return _roll_branch()
 
     # --- flight ---------------------------------------------------------
     evid_all = _span_evidence(observations, ray_knots, a_knot.frame, b_knot.frame,
@@ -614,6 +641,30 @@ def solve_span(
         if {f for f, _, _ in new_active} == {f for f, _, _ in active_evid}:
             break
         active_evid = new_active
+
+    # Physical-plausibility fallback: an interior span's shoot_arc is a
+    # boundary-value solve between two HARD knots, so (unlike the free-
+    # end fit) it was assumed safe from ever running away — that holds
+    # for two genuinely-correct knots, but breaks down when either one
+    # is a data-driven point (an accepted auto knot, or a knot pair only
+    # 1-3 frames apart) whose true separation implies an unreachable
+    # speed. Found via a real origi01 fold0 bench run (2026-09-25): a
+    # dense burst of accepted auto player_touch knots at low-but-not-
+    # exactly-ground height (_is_ground_knot's _LAUNCH_STATES/height
+    # check correctly forced flight for them) produced launch speeds of
+    # hundreds of m/s on some pairs despite each knot's OWN position
+    # being reasonable — a flight (gravity+drag) model simply cannot
+    # explain near-ground short-hop motion between two close points as
+    # cleanly as a friction-clamped roll can, and shoot_arc will always
+    # find *some* v0 that connects them exactly regardless of how
+    # physically absurd. Falling back to the roll fit (which can never
+    # explode — its acceleration is Coulomb-clamped) is strictly safer
+    # than trusting an unreachable launch speed; this also protects
+    # split-and-retry recursion below, whose internal-split knots are
+    # exactly where the wild speeds were observed (never visible to
+    # ball_hybrid_gating's own probe, which disables splitting).
+    if float(np.linalg.norm(v0)) > cfg["max_launch_speed_m_s"]:
+        return _roll_branch(fallback=True)
 
     # Optional bounded spin (Magnus) refinement — IC-E's
     # ball_hybrid_spin.fit_span_spin, gated off by default
@@ -1101,5 +1152,6 @@ def run_trajectory(
         "n_rejected_near_manual": gate_result.n_rejected_near_manual,
         "n_rejected_consistency": gate_result.n_rejected_consistency,
         "n_rejected_residual": gate_result.n_rejected_residual,
+        "n_rejected_implausible_velocity": gate_result.n_rejected_implausible_velocity,
     }
     return frames, diagnostics

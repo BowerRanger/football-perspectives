@@ -153,6 +153,37 @@ def test_low_confidence_candidate_rejected_without_corroboration():
     assert result.accepted_hard == ()
 
 
+def test_real_ball_anchor_confidence_field_is_read_correctly():
+    """Regression test (found via a real origi01 fold0 bench run, 2026-09-25):
+    a real ``src.schemas.ball_anchor.BallAnchor`` -- what
+    ``generate_auto_anchors`` actually mints, and what ``ball.py``'s
+    ``_run_hybrid_trajectory`` passes as ``auto_anchors`` -- carries its
+    detector score as ``.confidence``, NOT ``.score``/``.conf``. An
+    earlier version of ``_candidate_conf`` only checked ``.score``/
+    ``.conf`` (matching this test file's own fixture convention, which
+    happened to use ``.score``), silently reading 0.0 confidence for
+    EVERY real auto-anchor candidate -- on origi01 fold0 this rejected
+    all 54 auto-anchor candidates on confidence (0 accepted), starving
+    the hybrid trajectory of every real touch/bounce knot the reference
+    solver uses. A confidently-scored real BallAnchor must clear the
+    default floor and be considered a genuine candidate."""
+    from src.schemas.ball_anchor import BallAnchor
+
+    ctx, anchors, obs, p_a, p_b, v0_true, cd, frame_a, frame_b, _T = _scenario()
+    hard, ray = resolve_knots(ctx, anchors)
+    mid_frame = _mid_frame(frame_a, frame_b)
+    t_s = (mid_frame - frame_a) / ctx.fps
+    p_mid = simulate(p_a, v0_true, [t_s], cd=cd)[0]
+    uv_mid = tuple(float(x) for x in ctx.project(mid_frame, p_mid))
+    # A real BallAnchor, confidently scored (0.85 clears the 0.5 default
+    # floor by a wide margin) -- must NOT be rejected on confidence.
+    candidate = BallAnchor(frame=mid_frame, image_xy=uv_mid, state="bounce",
+                            confidence=0.85)
+    result = gate_auto_events(ctx, hard, ray, [candidate], obs,
+                               trajectory_cfg={"cd": cd, "fit_cd": False})
+    assert result.n_rejected_confidence == 0
+
+
 def test_corroborated_low_confidence_candidate_passes_the_relaxed_floor():
     ctx, anchors, obs, p_a, p_b, v0_true, cd, frame_a, frame_b, _T = _scenario()
     hard, ray = resolve_knots(ctx, anchors)
@@ -264,9 +295,15 @@ def test_inconsistent_candidate_rejected_by_consistency_or_residual_gate():
 
     # A "bounce" click resolves onto the GROUND plane, far from the true
     # (airborne) arc -- consistent with real detector observations near
-    # it is impossible, so it should fail consistency or residual.
+    # it is impossible, so it should fail consistency, residual, or the
+    # implausible-launch-speed gate (a "kick" -> ground "bounce" pairing
+    # this close together implies a speed solve_span's own flight model
+    # can't reach, so it falls back to roll -- which the gate treats as
+    # disqualifying, not a free pass; see ball_hybrid_gating.py's module
+    # docstring, gate 5).
     candidate = _ScoredAnchor(frame=mid_frame, image_xy=uv_mid, state="bounce")
     result = gate_auto_events(ctx, hard, ray, [candidate], obs,
                                trajectory_cfg={"cd": cd, "fit_cd": False})
     assert result.accepted_hard == ()
-    assert result.n_rejected_consistency + result.n_rejected_residual == 1
+    assert (result.n_rejected_consistency + result.n_rejected_residual
+            + result.n_rejected_implausible_velocity) == 1

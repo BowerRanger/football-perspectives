@@ -298,6 +298,13 @@ def _physically_possible(xyz: tuple[float, float, float]) -> bool:
             and _COURT_Z[0] <= z <= _COURT_Z[1])
 
 
+# Public alias: other modules (e.g. ball_replay_knots.fixes_to_knots, which
+# gates individual BallFix records against the same court volume before
+# they become trajectory Knots) need this check without depending on a
+# leading-underscore name.
+physically_possible = _physically_possible
+
+
 def filter_physical_fixes(
     fixes: list[PairFix],
 ) -> tuple[list[PairFix], int]:

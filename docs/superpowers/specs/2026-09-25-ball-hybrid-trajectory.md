@@ -440,4 +440,27 @@ already copies the `cross_replay` block verbatim).
 
 ## Default decision (T6)
 
-PENDING — filled after the 4-clip benchmark
+**Decision: `ball.trajectory` stays `reference`; `hybrid` ships opt-in.** The flip rule
+was "synthetic improves on all four clips AND real held-out p50 is no worse than
+`reference` on any clip". Synthetic passed everywhere; real held-out did not.
+
+Final code (commits through `a8ea91a`), real 2-fold held-out anchors pooled so each
+anchor is graded once, cached WASB detections:
+
+| clip | real held-out p50, reference → hybrid | p95 | synthetic `mismatch` %≤20 cm | synthetic `hidden` %≤20 cm |
+|---|---|---|---|---|
+| gberch (58) | 0.158 → **0.105 m** | 1.54 → 2.38 m | 0.70 → 0.75 | 0.49 → 0.61 |
+| s013 (13) | 0.615 → **0.178 m** | 2.21 → 2.09 m | 0.22 → 0.60 | 0.10 → 0.29 |
+| origi01 (59) | 0.361 → 0.559 m | 4.54 → 8.33 m | 0.58 → 0.76 | 0.23 → 0.33 |
+| kroupi01 (12) | 2.97 → 3.54 m | 5.59 → 10.6 m | 0.40 → 0.77 | 0.16 → 0.36 |
+
+Reference synthetic numbers for gberch/origi01 `mismatch`/`hidden` come from the same
+harness (spike + regression-baseline captures); `hybrid` from `t6_*` / `ica_postfix` runs.
+
+The hybrid wins every synthetic comparison and the real footage on gberch and s013. It
+regresses on origi01 and kroupi01 — the flight-heavy, sparse-anchor clips. On origi01
+the auto-event gate is not the cause (persisted diag, fold 0: 54 candidates, 2 accepted,
+23 rejected on evidence consistency with the fold's fresh detections); the open lead is
+how `reference` treats touch-dense spans compared with the hybrid's flight split-and-retry
+(interior "bounce" knots on spans with 200-800 px residuals). Use `hybrid` per clip where
+the anchors are dense and the play is ground-heavy; revisit the default after that fix.

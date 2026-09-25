@@ -26,7 +26,7 @@
   </ul>
 
   <h3>Synthetic truth, all anchors given ("mismatch" scenario)</h3>
-  <p>The truth ball is simulated from the operator's anchors with physics the solvers don't share: randomised drag, drag crisis and spin. Both methods see the same synthetic detections, which carry realistic noise, misses and replayed junk detections.</p>
+  <p>The truth ball is simulated from the operator's anchors with physics the solvers don't share: randomised drag, drag crisis and spin. Both methods see the same synthetic detections, which carry realistic noise, misses and replayed junk detections. "Hybrid" here uses operator anchors only.</p>
   <div class="tbl"><table>
     <thead><tr><th>Clip</th><th>≤ 20 cm, current</th><th>≤ 20 cm, hybrid</th><th>p95, current</th><th>p95, hybrid</th><th>Float/sink, current</th><th>Float/sink, hybrid</th></tr></thead>
     <tbody>
@@ -41,7 +41,7 @@
   <p>This is the situation real footage is always in: events between anchors have to be found from the evidence. Frames within 20 cm, current → hybrid with auto events: gberch 49% → 61%, origi01 23% → 32%, kroupi01 16% → 41%, s013 10% → 17%. The hybrid is better everywhere but nowhere near the goal. This is the main finding: from a single camera, missing events limit accuracy, not the solver.</p>
 
   <h3>Real footage (held-out operator anchors)</h3>
-  <p>Median 3-D error at withheld grounded/touch anchors, current → hybrid with auto events: gberch 0.158 → <span class="up">0.114 m</span>, s013 0.615 → <span class="up">0.227 m</span>, kroupi01 2.97 → <span class="up">1.78 m</span>, origi01 0.36 → <span class="down">1.70 m</span>. origi01 regresses: its flight-heavy spans have many mid-air anchors, which fix only the ray, not the depth. On origi01's replay-triangulated 3-D positions (real absolute truth) the error drops from 4.16 m to 0.55 m. That comes from feeding the <em>other half</em> of those positions in as fixed points, so it measures the value of replay angles, not the solver alone.</p>
+  <p>Median 3-D error at withheld grounded/touch anchors, current → hybrid with auto events: gberch 0.158 → <span class="up">0.114 m</span>, s013 0.615 → <span class="up">0.227 m</span>, kroupi01 2.97 → <span class="up">1.78 m</span>, origi01 0.36 → <span class="down">1.70 m</span>. origi01 regresses: its flight-heavy spans have many mid-air anchors, which fix only the ray, not the depth. On origi01's replay-triangulated 3-D positions (real absolute truth) the error drops from 4.16 m to 0.55 m. That comes from feeding the <em>other half</em> of those positions in as fixed points, so it measures the value of replay angles, not the solver alone. The anchors-only hybrid that wins the synthetic table is not a clean win here: it's worse on origi01 (1.89 m vs 0.36 m) and roughly level on gberch and s013. On real footage the hybrid needs the event layer.</p>
 
   <h3>Air drag</h3>
   <p>When the drag coefficient matches the truth ("base"), drag helps consistently: kroupi01 78% → 99% of frames within 20 cm, and origi01's p95 halves (3.0 → 1.4 m). Against randomised drag and spin ("mismatch") the fitted drag is mixed: s013 65% → 86%, but gberch and kroupi01 are slightly better without it. Drag belongs in the flight model, but a real gain needs spin (Magnus) fitting as well, and that isn't wired into the span search yet.</p>
@@ -49,7 +49,8 @@
   <h3>Caveats</h3>
   <ul>
     <li>In synthetic runs the current stage loses two passes that read real pixels: the foot-guided zoom and the appearance bridge. That handicaps it somewhat at touch moments.</li>
-    <li>Using the current stage's auto events inside the hybrid helps on real footage but hurts on s013's synthetic runs, where those events are poor. Auto events need stricter gating before they're used as fixed points.</li>
+    <li>"Hybrid with auto events" takes the current stage's own detected events as extra fixed points. That helps on real footage but hurts on s013's synthetic runs, where those events are poor, so auto events need stricter gating before they're used as fixed points.</li>
+    <li>On origi01 the hybrid gets half of the replay-triangulated positions as fixed points and the current stage gets none. Grading always uses the other half.</li>
     <li>Mid-air held-out anchors have no 3-D truth (depth unknown), so they're excluded from the real-footage error; that's 15 of gberch's 59.</li>
     <li>Four clips, one seed per scenario. These are spike numbers, not a regression gate.</li>
   </ul>

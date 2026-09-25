@@ -1,3 +1,7 @@
+**SUPERSEDED** by the production ball hybrid trajectory
+(`src/utils/ball_hybrid_*`, `scripts/run_ball_bench.py`); kept for the
+spike record.
+
 # Ball hybrid-extraction PoC — shared contract (SPIKE, throwaway-labelled)
 
 Goal: prove (or disprove) that a **hybrid extractor** — broadcast-faithful where

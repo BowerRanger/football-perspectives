@@ -1,0 +1,37 @@
+{
+  "clip_id": "kroupi01",
+  "scenario": "mismatch",
+  "captured_at": "2026-09-25T10:42:34+00:00",
+  "git_commit": "406daa0",
+  "runs": 2,
+  "synth_metrics": {
+    "p50": 0.811494274859734,
+    "p95": 17.42021549630527,
+    "pct_le_20cm": 0.3986013986013986,
+    "ground_float_sink": 0.31793096363268986,
+    "naturalness_violations_minus_truth": 9.0
+  },
+  "synth_spread": {
+    "p50": 0.0,
+    "p95": 0.0,
+    "pct_le_20cm": 0.0,
+    "ground_float_sink": 0.0,
+    "naturalness_violations_minus_truth": 0.0
+  },
+  "real_metrics": {
+    "p50": 2.9724950773175935,
+    "p95": 5.590921799897945,
+    "n": 12
+  },
+  "real_spread": {
+    "p50": 0.0,
+    "p95": 0.0
+  },
+  "tolerances": {
+    "pct_le_20cm_abs": 0.05,
+    "p95_rel": 0.2,
+    "ground_float_sink_rel": 0.2,
+    "naturalness_violations_abs": 2.0,
+    "real_p50_rel": 0.2
+  }
+}

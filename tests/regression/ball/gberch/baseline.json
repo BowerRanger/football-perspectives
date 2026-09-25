@@ -1,0 +1,37 @@
+{
+  "clip_id": "gberch",
+  "scenario": "mismatch",
+  "captured_at": "2026-09-25T17:02:01+00:00",
+  "git_commit": "602683a",
+  "runs": 1,
+  "synth_metrics": {
+    "p50": 0.10860440179683566,
+    "p95": 4.345743396887746,
+    "pct_le_20cm": 0.7016317016317016,
+    "ground_float_sink": 0.11664705785391137,
+    "naturalness_violations_minus_truth": 7.0
+  },
+  "synth_spread": {
+    "p50": 0.0,
+    "p95": 0.0,
+    "pct_le_20cm": 0.0,
+    "ground_float_sink": 0.0,
+    "naturalness_violations_minus_truth": 0.0
+  },
+  "real_metrics": {
+    "p50": 0.15815176393118952,
+    "p95": 1.5420579480662904,
+    "n": 57
+  },
+  "real_spread": {
+    "p50": 0.0,
+    "p95": 0.0
+  },
+  "tolerances": {
+    "pct_le_20cm_abs": 0.05,
+    "p95_rel": 0.2,
+    "ground_float_sink_rel": 0.2,
+    "naturalness_violations_abs": 2.0,
+    "real_p50_rel": 0.2
+  }
+}

@@ -157,11 +157,19 @@ SYNTH_CONFIG_OVERRIDES_APPLIED = (
 )
 
 
-def _normalize_frame_keyed(d: dict | None) -> dict[int, list]:
-    """``{frame(str|int): [[u,v,score], ...]}`` -> ``{int: [tuple, ...]}``,
-    tolerant of either key type (JSON round-trip always yields str keys;
-    an in-memory stand-in may use int)."""
+def _normalize_frame_keyed(d: dict | list | None) -> dict[int, list]:
+    """Frame-keyed candidates -> ``{int: [(u, v, score), ...]}``.
+
+    Accepts ``{frame(str|int): [[u,v,score], ...]}`` (JSON round-trip
+    yields str keys; an in-memory stand-in may use int) or the flat list
+    ``[{frame, uv, score}, ...]`` that ``synth_detector`` writes."""
     out: dict[int, list] = {}
+    if isinstance(d, list):
+        for c in d:
+            u, v = c["uv"]
+            out.setdefault(int(c["frame"]), []).append(
+                (float(u), float(v), float(c["score"])))
+        return out
     for k, v in (d or {}).items():
         out[int(k)] = [tuple(c) for c in v]
     return out

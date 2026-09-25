@@ -1,0 +1,37 @@
+{
+  "clip_id": "origi01",
+  "scenario": "mismatch",
+  "captured_at": "2026-09-25T17:41:21+00:00",
+  "git_commit": "336c6ca",
+  "runs": 1,
+  "synth_metrics": {
+    "p50": 0.1686356016689645,
+    "p95": 67.81456089672831,
+    "pct_le_20cm": 0.5758241758241758,
+    "ground_float_sink": 6.701199878688279e-16,
+    "naturalness_violations_minus_truth": 20.0
+  },
+  "synth_spread": {
+    "p50": 0.0,
+    "p95": 0.0,
+    "pct_le_20cm": 0.0,
+    "ground_float_sink": 0.0,
+    "naturalness_violations_minus_truth": 0.0
+  },
+  "real_metrics": {
+    "p50": 0.3613201181946937,
+    "p95": 4.541264461960076,
+    "n": 59
+  },
+  "real_spread": {
+    "p50": 0.0,
+    "p95": 0.0
+  },
+  "tolerances": {
+    "pct_le_20cm_abs": 0.05,
+    "p95_rel": 0.2,
+    "ground_float_sink_rel": 0.2,
+    "naturalness_violations_abs": 2.0,
+    "real_p50_rel": 0.2
+  }
+}

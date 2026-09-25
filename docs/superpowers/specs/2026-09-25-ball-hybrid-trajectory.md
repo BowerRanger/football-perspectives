@@ -456,6 +456,8 @@ anchor is graded once, cached WASB detections:
 
 Reference synthetic numbers for gberch/origi01 `mismatch`/`hidden` come from the same
 harness (spike + regression-baseline captures); `hybrid` from `t6_*` / `ica_postfix` runs.
+Anchor counts are the hybrid run's; gberch's reference run graded 57 of the 58 (one
+held-out anchor had no reference estimate).
 
 The hybrid wins every synthetic comparison and the real footage on gberch and s013. It
 regresses on origi01 and kroupi01 — the flight-heavy, sparse-anchor clips. On origi01

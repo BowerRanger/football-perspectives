@@ -1,0 +1,66 @@
+<style>
+.fnd { display: grid; gap: 14px; }
+.fnd h3 { font-family: var(--font-head); font-size: 15px; letter-spacing: .04em; text-transform: uppercase; margin: 0; text-wrap: balance; }
+.fnd p, .fnd li { line-height: 1.5; margin: 0; }
+.fnd > p, .fnd > ul { max-width: 78ch; }
+.fnd ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.fnd .verdict { border-left: 3px solid var(--accent); padding: 4px 0 4px 12px; }
+.fnd .tbl { overflow-x: auto; }
+.fnd table { border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12.5px; width: auto; min-width: 560px; max-width: 900px; }
+.fnd th, .fnd td { padding-left: 18px; }
+.fnd th:first-child, .fnd td:first-child { padding-left: 0; }
+.fnd th, .fnd td { border-bottom: 1px solid var(--line); padding: 4px 10px 4px 0; text-align: right; }
+.fnd th:first-child, .fnd td:first-child { text-align: left; }
+.fnd th { font-family: var(--font-head); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.fnd .up { color: var(--good); font-weight: 600; }
+.fnd .down { color: var(--bad); font-weight: 600; }
+.fnd .mono { font-family: var(--font-mono); }
+</style>
+<div class="fnd">
+  <p class="verdict"><strong>Status:</strong> all four follow-ups from the spike are in the production ball stage. The new trajectory is switchable with <span class="mono">ball.trajectory: hybrid</span> and ships <strong>opt-in</strong>. It clearly improves gberch and s013 and every synthetic test, but real-footage error gets worse on the two flight-heavy clips (origi01, kroupi01), so the default stays <span class="mono">reference</span>. On this page, "current" means the default reference trajectory.</p>
+
+  <h3>Real footage: error at held-out operator anchors</h3>
+  <p>Two folds, each withheld anchor graded once, same cached detections for both methods.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Clip</th><th>Anchors</th><th>Median, current</th><th>Median, hybrid</th><th>p95, current</th><th>p95, hybrid</th></tr></thead>
+    <tbody>
+      <tr><td>gberch</td><td>58</td><td>0.158 m</td><td class="up">0.105 m</td><td>1.54 m</td><td class="down">2.38 m</td></tr>
+      <tr><td>s013</td><td>13</td><td>0.615 m</td><td class="up">0.178 m</td><td>2.21 m</td><td>2.09 m</td></tr>
+      <tr><td>origi01</td><td>59</td><td>0.361 m</td><td class="down">0.559 m</td><td>4.54 m</td><td class="down">8.33 m</td></tr>
+      <tr><td>kroupi01</td><td>12</td><td>2.97 m</td><td class="down">3.54 m</td><td>5.59 m</td><td class="down">10.6 m</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Synthetic truth: frames within 20 cm</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Clip</th><th>All anchors, current</th><th>All anchors, hybrid</th><th>Half withheld, current</th><th>Half withheld, hybrid</th></tr></thead>
+    <tbody>
+      <tr><td>gberch</td><td>70%</td><td class="up">75%</td><td>49%</td><td class="up">61%</td></tr>
+      <tr><td>origi01</td><td>58%</td><td class="up">76%</td><td>23%</td><td class="up">33%</td></tr>
+      <tr><td>kroupi01</td><td>40%</td><td class="up">77%</td><td>16%</td><td class="up">36%</td></tr>
+      <tr><td>s013</td><td>22%</td><td class="up">60%</td><td>10%</td><td class="up">29%</td></tr>
+    </tbody>
+  </table></div>
+  <p>"All anchors" is the <span class="mono">mismatch</span> scenario; "half withheld" is <span class="mono">hidden</span>. The production hybrid scores lower than the spike on gberch and s013. Part of that is accepting the stage's auto-detected events as fixed points, which real footage needs but which adds noisy knots here; the rest isn't broken down yet.</p>
+
+  <h3>The four follow-ups</h3>
+  <ul>
+    <li><strong>Trajectory layer in the stage.</strong> Ported to <span class="mono">src/utils/ball_hybrid_*</span> and wired behind <span class="mono">ball.trajectory</span>. Auto events pass a stricter gate (kind, confidence, agreement with nearby detections, span-residual and launch-speed checks). Two integration bugs found by per-anchor analysis are fixed: the gate had been reading the wrong confidence field, so no auto event was ever accepted, and implausibly fast flights between close-together touches now fall back to a roll.</li>
+    <li><strong>Replay angles as fixed points.</strong> Replay-triangulated positions become depth-hard knots after a check that operator clicks win and a physical-volume check. On origi01 the error at held-out replay positions is 0.62 m (target ≤ 0.8 m). When every position from a replay angle is rejected, the stage now proposes reviewing that angle's camera in the anchor editor, which is the fix s013's six replays need.</li>
+    <li><strong>Single-camera event cues.</strong> Audio, goal-net motion and motion blur are all built and measured with train/test clip splits. Blur is the only cue whose tuned thresholds held up on unseen clips. A weighted fusion that looked best on the tuning clips was the worst on held-out clips. No fusion rule beat the auto events on held-out F1, so cues ship off (<span class="mono">ball.hybrid.cues.enabled: false</span>); only audio is wired into the stage so far.</li>
+    <li><strong>Spin.</strong> A bounded two-axis spin fit (topspin/backspin and sidespin, up to 10 rev/s) that keeps both endpoints exact. It recovers known spin to within 20% and 15°, with no false detections in 50 spin-free trials, and never makes in-air accuracy worse on the four clips (kroupi01 improves from 61% to 68% within 20 cm). It's off by default until real clips are checked; when on, the fitted spin drives the ball's rotation in the export.</li>
+  </ul>
+
+  <h3>Regression gate</h3>
+  <p>The ball stage now has a golden-clip gate like the camera stage: <span class="mono">pytest tests/test_ball_regression.py -m regression</span>. It checks synthetic accuracy, ground float/sink, naturalness and real held-out error against committed baselines. Baselines were captured with one run per clip to save time, so run-to-run spread isn't measured yet; the gate uses fixed tolerances (5 points on % within 20 cm, 20% relative on p95 and real median).</p>
+
+  <h3>What's still open</h3>
+  <ul>
+    <li><strong>origi01 and kroupi01 real regression.</strong> It isn't the auto-event gate: the stage's diagnostics show 54 candidates, 2 accepted and 23 rejected for disagreeing with the detections. The next lead is how the reference solver handles touch-dense spans compared with the hybrid's flight split, which leaves some spans at 200–800 px.</li>
+    <li>Net and blur cues need a shared video-decode pass before they can run inside the stage.</li>
+    <li>Audio noise suppression needs a re-tune on more clips that have usable match audio.</li>
+  </ul>
+
+  <h3>How to read this page</h3>
+  <p>Pick a clip and scenario, then compare "current" and "hybrid" in the <span class="mono">Side-on</span> view, where depth errors are visible. The Real footage tab plots error at each held-out anchor.</p>
+</div>

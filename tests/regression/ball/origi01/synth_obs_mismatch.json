@@ -1,0 +1,2683 @@
+{
+  "clip_id": "origi01",
+  "scenario": "mismatch",
+  "observations": [
+    {
+      "frame": 1,
+      "uv": [
+        804.2191785198145,
+        390.2287588542503
+      ],
+      "conf": 0.6655517717031609,
+      "source": "detector"
+    },
+    {
+      "frame": 2,
+      "uv": [
+        796.0017260834568,
+        389.5352927447287
+      ],
+      "conf": 0.4709963070433399,
+      "source": "detector"
+    },
+    {
+      "frame": 8,
+      "uv": [
+        771.3245513324453,
+        397.8790215546993
+      ],
+      "conf": 0.776423414816406,
+      "source": "detector"
+    },
+    {
+      "frame": 15,
+      "uv": [
+        817.5526697918253,
+        403.49681380696353
+      ],
+      "conf": 0.9661961843839351,
+      "source": "detector"
+    },
+    {
+      "frame": 16,
+      "uv": [
+        816.6596960177782,
+        392.2209742032083
+      ],
+      "conf": 0.74946550402559,
+      "source": "detector"
+    },
+    {
+      "frame": 21,
+      "uv": [
+        826.003472082311,
+        367.55190570484183
+      ],
+      "conf": 0.6706166373821737,
+      "source": "detector"
+    },
+    {
+      "frame": 24,
+      "uv": [
+        827.1724605227832,
+        361.4792182859996
+      ],
+      "conf": 0.5966783800336071,
+      "source": "detector"
+    },
+    {
+      "frame": 25,
+      "uv": [
+        830.4940646481649,
+        364.11763279613507
+      ],
+      "conf": 0.6594473050488083,
+      "source": "detector"
+    },
+    {
+      "frame": 26,
+      "uv": [
+        831.821344533217,
+        364.1124032854515
+      ],
+      "conf": 0.6980656983380884,
+      "source": "detector"
+    },
+    {
+      "frame": 27,
+      "uv": [
+        835.45186289559,
+        363.3866709194648
+      ],
+      "conf": 0.7693211492058414,
+      "source": "detector"
+    },
+    {
+      "frame": 28,
+      "uv": [
+        835.8584540820752,
+        360.29595706860607
+      ],
+      "conf": 0.8103219419849839,
+      "source": "detector"
+    },
+    {
+      "frame": 29,
+      "uv": [
+        839.9561014638663,
+        361.77767471586674
+      ],
+      "conf": 0.8547650583146048,
+      "source": "detector"
+    },
+    {
+      "frame": 30,
+      "uv": [
+        842.1059924642354,
+        365.9288000723176
+      ],
+      "conf": 0.479983059171049,
+      "source": "detector"
+    },
+    {
+      "frame": 40,
+      "uv": [
+        873.2928245529342,
+        410.7456246297724
+      ],
+      "conf": 0.4661635312467631,
+      "source": "detector"
+    },
+    {
+      "frame": 45,
+      "uv": [
+        931.3655400421248,
+        438.41578303758575
+      ],
+      "conf": 0.7860822137153527,
+      "source": "detector"
+    },
+    {
+      "frame": 50,
+      "uv": [
+        991.5224979268289,
+        476.4098593453118
+      ],
+      "conf": 0.8235826893430808,
+      "source": "detector"
+    },
+    {
+      "frame": 51,
+      "uv": [
+        999.2341019986409,
+        483.98842258753507
+      ],
+      "conf": 0.5178048436068352,
+      "source": "detector"
+    },
+    {
+      "frame": 55,
+      "uv": [
+        1026.7594606101738,
+        497.1994200295442
+      ],
+      "conf": 0.7160249921184558,
+      "source": "detector"
+    },
+    {
+      "frame": 56,
+      "uv": [
+        1029.1359136261312,
+        500.16336886962455
+      ],
+      "conf": 0.693289478788982,
+      "source": "detector"
+    },
+    {
+      "frame": 61,
+      "uv": [
+        1059.304895046019,
+        520.7310042416201
+      ],
+      "conf": 0.7265393006600277,
+      "source": "detector"
+    },
+    {
+      "frame": 62,
+      "uv": [
+        1066.3445629165728,
+        522.9030817087238
+      ],
+      "conf": 0.6458859882813957,
+      "source": "detector"
+    },
+    {
+      "frame": 63,
+      "uv": [
+        1072.1157406825334,
+        524.6426823528935
+      ],
+      "conf": 0.6721679270515999,
+      "source": "detector"
+    },
+    {
+      "frame": 65,
+      "uv": [
+        1082.5457586940356,
+        534.3337597281222
+      ],
+      "conf": 0.5732228310401251,
+      "source": "detector"
+    },
+    {
+      "frame": 66,
+      "uv": [
+        1092.4366970899116,
+        536.9800218830379
+      ],
+      "conf": 0.6081980429176244,
+      "source": "detector"
+    },
+    {
+      "frame": 67,
+      "uv": [
+        1094.5430126151855,
+        538.558263460105
+      ],
+      "conf": 0.6129265252041697,
+      "source": "detector"
+    },
+    {
+      "frame": 69,
+      "uv": [
+        1107.5885078794904,
+        554.0645993914858
+      ],
+      "conf": 0.7739061579616628,
+      "source": "detector"
+    },
+    {
+      "frame": 71,
+      "uv": [
+        1119.265866983079,
+        559.7370204166647
+      ],
+      "conf": 0.7453397953730304,
+      "source": "detector"
+    },
+    {
+      "frame": 73,
+      "uv": [
+        1135.1735227592874,
+        566.5765045593644
+      ],
+      "conf": 0.7695892806867213,
+      "source": "detector"
+    },
+    {
+      "frame": 78,
+      "uv": [
+        1168.2336134346756,
+        587.6727781346293
+      ],
+      "conf": 0.6507117327880614,
+      "source": "detector"
+    },
+    {
+      "frame": 79,
+      "uv": [
+        1178.2137061012083,
+        594.0308552043059
+      ],
+      "conf": 0.589512331016605,
+      "source": "detector"
+    },
+    {
+      "frame": 80,
+      "uv": [
+        1184.5120617973384,
+        600.3581863809994
+      ],
+      "conf": 0.6606767278882972,
+      "source": "detector"
+    },
+    {
+      "frame": 85,
+      "uv": [
+        1225.5867779899418,
+        623.8496212261567
+      ],
+      "conf": 0.598684766392136,
+      "source": "detector"
+    },
+    {
+      "frame": 88,
+      "uv": [
+        1250.4672228259915,
+        635.4766140086148
+      ],
+      "conf": 0.7812755698880328,
+      "source": "detector"
+    },
+    {
+      "frame": 89,
+      "uv": [
+        1257.5147806210523,
+        629.4571626780872
+      ],
+      "conf": 0.7566437969896265,
+      "source": "detector"
+    },
+    {
+      "frame": 94,
+      "uv": [
+        1287.365817566439,
+        610.255758332655
+      ],
+      "conf": 0.8002023001067068,
+      "source": "detector"
+    },
+    {
+      "frame": 96,
+      "uv": [
+        1295.4729688766897,
+        606.8568680327238
+      ],
+      "conf": 0.8273028627827627,
+      "source": "detector"
+    },
+    {
+      "frame": 100,
+      "uv": [
+        1315.383941622583,
+        611.4058226468541
+      ],
+      "conf": 0.5789891828108082,
+      "source": "detector"
+    },
+    {
+      "frame": 104,
+      "uv": [
+        1334.8575901256008,
+        629.1373081112773
+      ],
+      "conf": 0.7044958725584218,
+      "source": "detector"
+    },
+    {
+      "frame": 110,
+      "uv": [
+        1357.4841066509318,
+        672.4477842349693
+      ],
+      "conf": 0.6194145925057083,
+      "source": "detector"
+    },
+    {
+      "frame": 113,
+      "uv": [
+        1346.1974503432482,
+        677.6620731456313
+      ],
+      "conf": 0.6294255337208406,
+      "source": "detector"
+    },
+    {
+      "frame": 119,
+      "uv": [
+        1321.2810413765794,
+        667.1540707467402
+      ],
+      "conf": 0.8603768712677986,
+      "source": "detector"
+    },
+    {
+      "frame": 120,
+      "uv": [
+        1317.7294161336852,
+        662.0135137588871
+      ],
+      "conf": 0.7690107488594653,
+      "source": "detector"
+    },
+    {
+      "frame": 124,
+      "uv": [
+        1307.5126044006709,
+        645.3580496822931
+      ],
+      "conf": 0.8799664200128181,
+      "source": "detector"
+    },
+    {
+      "frame": 128,
+      "uv": [
+        1295.6899258960066,
+        635.9468761166459
+      ],
+      "conf": 0.8796639574461309,
+      "source": "detector"
+    },
+    {
+      "frame": 135,
+      "uv": [
+        1286.9750281669403,
+        647.8484240453735
+      ],
+      "conf": 0.8906941472815588,
+      "source": "detector"
+    },
+    {
+      "frame": 138,
+      "uv": [
+        1280.1289040740053,
+        665.5856849897914
+      ],
+      "conf": 0.7142687424241281,
+      "source": "detector"
+    },
+    {
+      "frame": 149,
+      "uv": [
+        1238.485944495666,
+        663.2652285066941
+      ],
+      "conf": 0.6688521532830047,
+      "source": "detector"
+    },
+    {
+      "frame": 151,
+      "uv": [
+        1236.65698244919,
+        652.2943623932401
+      ],
+      "conf": 0.7933504498372053,
+      "source": "detector"
+    },
+    {
+      "frame": 152,
+      "uv": [
+        1235.1141945142567,
+        649.0631191748503
+      ],
+      "conf": 0.6626165967077702,
+      "source": "detector"
+    },
+    {
+      "frame": 162,
+      "uv": [
+        1150.4184518967968,
+        622.4795872978384
+      ],
+      "conf": 0.923911162215775,
+      "source": "detector"
+    },
+    {
+      "frame": 163,
+      "uv": [
+        1153.1325395744311,
+        622.1942486278502
+      ],
+      "conf": 0.96767827366713,
+      "source": "detector"
+    },
+    {
+      "frame": 169,
+      "uv": [
+        1134.3845305197578,
+        624.5320450143803
+      ],
+      "conf": 0.8464894749743848,
+      "source": "detector"
+    },
+    {
+      "frame": 174,
+      "uv": [
+        1147.0813030538125,
+        627.4919389723499
+      ],
+      "conf": 0.9309491381216568,
+      "source": "detector"
+    },
+    {
+      "frame": 208,
+      "uv": [
+        687.0358085632324,
+        20.374537110328674
+      ],
+      "conf": 0.5541568994522095,
+      "source": "detector"
+    },
+    {
+      "frame": 221,
+      "uv": [
+        971.2897585958585,
+        218.58962836145608
+      ],
+      "conf": 0.4480392341995739,
+      "source": "detector"
+    },
+    {
+      "frame": 235,
+      "uv": [
+        919.7385925935811,
+        84.22303515328967
+      ],
+      "conf": 0.5763739784932219,
+      "source": "detector"
+    },
+    {
+      "frame": 236,
+      "uv": [
+        916.9766312942639,
+        80.5855660020884
+      ],
+      "conf": 0.8132106918199713,
+      "source": "detector"
+    },
+    {
+      "frame": 241,
+      "uv": [
+        904.3595686499326,
+        63.224769599172596
+      ],
+      "conf": 0.7510633593130221,
+      "source": "detector"
+    },
+    {
+      "frame": 242,
+      "uv": [
+        897.3667930306242,
+        67.82906787892894
+      ],
+      "conf": 0.8386091524479278,
+      "source": "detector"
+    },
+    {
+      "frame": 243,
+      "uv": [
+        885.5866562489496,
+        72.69729986180658
+      ],
+      "conf": 0.7079713980212288,
+      "source": "detector"
+    },
+    {
+      "frame": 247,
+      "uv": [
+        881.6791410184818,
+        59.259322816114576
+      ],
+      "conf": 0.9204959811468076,
+      "source": "detector"
+    },
+    {
+      "frame": 251,
+      "uv": [
+        862.7829373442416,
+        62.83280896928065
+      ],
+      "conf": 0.7464693692861636,
+      "source": "detector"
+    },
+    {
+      "frame": 252,
+      "uv": [
+        860.7257388398242,
+        66.14371419209817
+      ],
+      "conf": 0.7391192237871862,
+      "source": "detector"
+    },
+    {
+      "frame": 255,
+      "uv": [
+        861.92108560233,
+        82.53284404912587
+      ],
+      "conf": 0.8124715701841324,
+      "source": "detector"
+    },
+    {
+      "frame": 260,
+      "uv": [
+        815.8024025626701,
+        219.13487623050696
+      ],
+      "conf": 0.6833371351785807,
+      "source": "detector"
+    },
+    {
+      "frame": 264,
+      "uv": [
+        814.1045330430698,
+        177.6835694851733
+      ],
+      "conf": 0.8464509095930026,
+      "source": "detector"
+    },
+    {
+      "frame": 266,
+      "uv": [
+        813.4488950278355,
+        162.96596528758386
+      ],
+      "conf": 0.7351406632291294,
+      "source": "detector"
+    },
+    {
+      "frame": 277,
+      "uv": [
+        851.3691131161418,
+        251.64192292379983
+      ],
+      "conf": 0.8150326505601648,
+      "source": "detector"
+    },
+    {
+      "frame": 286,
+      "uv": [
+        804.2417343874571,
+        291.550942890463
+      ],
+      "conf": 0.8413516512615795,
+      "source": "detector"
+    },
+    {
+      "frame": 301,
+      "uv": [
+        597.4896649237787,
+        318.4831959028648
+      ],
+      "conf": 0.7161185844286511,
+      "source": "detector"
+    },
+    {
+      "frame": 302,
+      "uv": [
+        595.2865713006241,
+        319.40435236426356
+      ],
+      "conf": 0.70912500770448,
+      "source": "detector"
+    },
+    {
+      "frame": 303,
+      "uv": [
+        592.9168910199863,
+        323.98493644588905
+      ],
+      "conf": 0.7891917807100749,
+      "source": "detector"
+    },
+    {
+      "frame": 304,
+      "uv": [
+        591.5738891277465,
+        328.9258535935684
+      ],
+      "conf": 0.66111898253675,
+      "source": "detector"
+    },
+    {
+      "frame": 313,
+      "uv": [
+        581.2335607182197,
+        364.6279153064555
+      ],
+      "conf": 0.6702789490655947,
+      "source": "detector"
+    },
+    {
+      "frame": 328,
+      "uv": [
+        632.3198990713468,
+        425.25652908672777
+      ],
+      "conf": 0.5292337673732858,
+      "source": "detector"
+    },
+    {
+      "frame": 330,
+      "uv": [
+        629.0285425934079,
+        443.77603810817135
+      ],
+      "conf": 0.7775037575483097,
+      "source": "detector"
+    },
+    {
+      "frame": 339,
+      "uv": [
+        361.4596939086914,
+        153.75065803527832
+      ],
+      "conf": 0.5705764293670654,
+      "source": "detector"
+    },
+    {
+      "frame": 349,
+      "uv": [
+        714.046743310474,
+        400.72114657854
+      ],
+      "conf": 0.7749378544771277,
+      "source": "detector"
+    },
+    {
+      "frame": 358,
+      "uv": [
+        748.2968817912346,
+        438.48662672139983
+      ],
+      "conf": 0.7315705084499389,
+      "source": "detector"
+    },
+    {
+      "frame": 378,
+      "uv": [
+        716.0127142121465,
+        462.65858289971123
+      ],
+      "conf": 0.5660063426700206,
+      "source": "detector"
+    },
+    {
+      "frame": 380,
+      "uv": [
+        715.9355969621096,
+        457.99629427591725
+      ],
+      "conf": 0.6919746034436217,
+      "source": "detector"
+    },
+    {
+      "frame": 388,
+      "uv": [
+        725.1807880666462,
+        461.9177917962451
+      ],
+      "conf": 0.9350669290708314,
+      "source": "detector"
+    },
+    {
+      "frame": 431,
+      "uv": [
+        558.0503920358962,
+        487.12722587914135
+      ],
+      "conf": 0.5172147708265427,
+      "source": "detector"
+    },
+    {
+      "frame": 436,
+      "uv": [
+        641.6376246525944,
+        507.49216762269805
+      ],
+      "conf": 0.8293261026146661,
+      "source": "detector"
+    },
+    {
+      "frame": 451,
+      "uv": [
+        387.51070370877824,
+        484.22154323945745
+      ],
+      "conf": 0.60524861344245,
+      "source": "detector"
+    }
+  ],
+  "anchors": [
+    {
+      "frame": 0,
+      "image_xy": [
+        806.5211047605719,
+        385.5981436001586
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 51,
+      "image_xy": [
+        1001.4056987409194,
+        484.8386947271779
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 88,
+      "image_xy": [
+        1256.5015958329893,
+        633.945676053778
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 193,
+      "image_xy": [
+        1188.8821409803531,
+        621.4527126775769
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 203,
+      "image_xy": [
+        1186.35705407883,
+        563.7459142097854
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 206,
+      "image_xy": [
+        1128.130001753768,
+        486.6241306649559
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 209,
+      "image_xy": [
+        1075.2584961215123,
+        413.3421903440528
+      ],
+      "state": "airborne_mid",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 218,
+      "image_xy": [
+        975.2859421005054,
+        261.95875470587504
+      ],
+      "state": "airborne_mid",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 224,
+      "image_xy": [
+        952.378734261038,
+        174.12208470158458
+      ],
+      "state": "airborne_high",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 234,
+      "image_xy": [
+        924.8080382668699,
+        87.01178316596403
+      ],
+      "state": "airborne_high",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 249,
+      "image_xy": [
+        872.141405660739,
+        61.14146311097353
+      ],
+      "state": "airborne_high",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 260,
+      "image_xy": [
+        817.4993761403973,
+        219.70132001946524
+      ],
+      "state": "airborne_high",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 266,
+      "image_xy": [
+        814.4735138279557,
+        160.34947241156604
+      ],
+      "state": "airborne_mid",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 278,
+      "image_xy": [
+        847.0097134921913,
+        258.27108760756
+      ],
+      "state": "airborne_mid",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 287,
+      "image_xy": [
+        800.8807228917149,
+        284.9900942062343
+      ],
+      "state": "airborne_mid",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 297,
+      "image_xy": [
+        617.2756953980821,
+        304.28629486500824
+      ],
+      "state": "airborne_mid",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 304,
+      "image_xy": [
+        594.4947838056611,
+        329.3513528799
+      ],
+      "state": "airborne_mid",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 330,
+      "image_xy": [
+        631.1054084410241,
+        444.0791285788181
+      ],
+      "state": "bounce",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 343,
+      "image_xy": [
+        685.4585796731853,
+        403.67768835290065
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 355,
+      "image_xy": [
+        731.8582202489896,
+        420.7089001765121
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 363,
+      "image_xy": [
+        761.3888771004537,
+        484.5825653211265
+      ],
+      "state": "bounce",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 375,
+      "image_xy": [
+        731.1089744645966,
+        478.73550367333974
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 397,
+      "image_xy": [
+        745.8052542465879,
+        442.1880690153622
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 418,
+      "image_xy": [
+        613.5341651595741,
+        483.68354709933027
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 445,
+      "image_xy": [
+        553.2001954037326,
+        503.6375190815314
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 449,
+      "image_xy": [
+        428.1057181378031,
+        486.2948493687903
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 452,
+      "image_xy": [
+        368.67928697519807,
+        482.1696511944772
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 457,
+      "image_xy": [
+        324.79295154185024,
+        446.8965517241379
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 462,
+      "image_xy": [
+        389.0748898678414,
+        399.4984326018809
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 474,
+      "image_xy": [
+        595.453744493392,
+        350.40752351097177
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 484,
+      "image_xy": [
+        715.5594713656388,
+        406.26959247648904
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 200,
+      "image_xy": [
+        1230.6166527839287,
+        621.8408252479767
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 309,
+      "image_xy": [
+        579.7090280941496,
+        355.44970938194996
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 404,
+      "image_xy": [
+        771.7789926263802,
+        447.8682435773243
+      ],
+      "state": "airborne_low",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 506,
+      "image_xy": [
+        614.0616740088105,
+        493.65987460815046
+      ],
+      "state": "catch",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 488,
+      "image_xy": [
+        739.2422907488987,
+        451.34012539184954
+      ],
+      "state": "catch",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 7,
+      "image_xy": [
+        767.081466029569,
+        401.5761422342456
+      ],
+      "state": "player_touch",
+      "player_id": "P008",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 40,
+      "image_xy": [
+        871.6609545748046,
+        407.74007097208073
+      ],
+      "state": "player_touch",
+      "player_id": "P008",
+      "bone": "l_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 111,
+      "image_xy": [
+        1363.595961335956,
+        677.8273878485552
+      ],
+      "state": "player_touch",
+      "player_id": "P004",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 140,
+      "image_xy": [
+        1282.0425133406147,
+        679.8422084630134
+      ],
+      "state": "player_touch",
+      "player_id": "P004",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 155,
+      "image_xy": [
+        1227.6059966371388,
+        647.1095235546552
+      ],
+      "state": "player_touch",
+      "player_id": "P004",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 201,
+      "image_xy": [
+        1236.695495461188,
+        619.7365197523073
+      ],
+      "state": "player_touch",
+      "player_id": "P004",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 282,
+      "image_xy": [
+        832.1576646867168,
+        310.4053725680914
+      ],
+      "state": "player_touch",
+      "player_id": "P009",
+      "bone": "head",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 310,
+      "image_xy": [
+        575.6187025401616,
+        363.1319370217534
+      ],
+      "state": "player_touch",
+      "player_id": "P019",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 338,
+      "image_xy": [
+        675.616659051247,
+        425.45274435481355
+      ],
+      "state": "player_touch",
+      "player_id": "P019",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 366,
+      "image_xy": [
+        782.3970724777369,
+        465.66787952653357
+      ],
+      "state": "player_touch",
+      "player_id": "P014",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 390,
+      "image_xy": [
+        721.7454506670489,
+        469.8112438532876
+      ],
+      "state": "player_touch",
+      "player_id": "P014",
+      "bone": "l_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 411,
+      "image_xy": [
+        790.1762930438015,
+        487.4358500769784
+      ],
+      "state": "player_touch",
+      "player_id": "P014",
+      "bone": "l_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 425,
+      "image_xy": [
+        467.6512061391676,
+        471.8477253215164
+      ],
+      "state": "player_touch",
+      "player_id": "P025",
+      "bone": "r_hand",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 440,
+      "image_xy": [
+        684.1922460562683,
+        527.1838915758367
+      ],
+      "state": "player_touch",
+      "player_id": "P023",
+      "bone": "r_foot",
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 15,
+      "image_xy": [
+        814.6660981531585,
+        399.2967842960086
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 48,
+      "image_xy": [
+        969.2645743638777,
+        464.79224648813704
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 117,
+      "image_xy": [
+        1325.6346119157383,
+        681.1656300810309
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 149,
+      "image_xy": [
+        1235.7123693136991,
+        663.130848211376
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 165,
+      "image_xy": [
+        1160.725456909921,
+        623.8938152880811
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 195,
+      "image_xy": [
+        1205.8641640762644,
+        618.7656784385068
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 433,
+      "image_xy": [
+        595.5549201209234,
+        496.95385441236874
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 415,
+      "image_xy": [
+        713.9830429148477,
+        487.9367390962784
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 417,
+      "image_xy": [
+        650.5570119439299,
+        484.6260664766594
+      ],
+      "state": "grounded",
+      "player_id": null,
+      "bone": null,
+      "goal_element": null,
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    },
+    {
+      "frame": 454,
+      "image_xy": [
+        319.6585924510529,
+        478.80815941278536
+      ],
+      "state": "goal_impact",
+      "player_id": null,
+      "bone": null,
+      "goal_element": "back_net",
+      "touch_type": null,
+      "spin": null,
+      "confidence": 1.0,
+      "end_frame": null
+    }
+  ],
+  "noise_model": {
+    "sigma_px": 1.5,
+    "sigma_px_floor": 1.5,
+    "real_coverage_reference": 0.16043956043956045,
+    "target_coverage": 0.16043956043956045,
+    "base_miss_p": 0.6652331631397831,
+    "speed_scale": 0.35,
+    "speed_ref_px_frame": 25.0,
+    "occlusion_bonus": 0.25,
+    "occlusion_available": true,
+    "n_frames": 455,
+    "n_missed": 372,
+    "n_detected": 83,
+    "achieved_coverage": 0.1824175824175824,
+    "n_junk_candidates": 4,
+    "anchor_veto_px": 60.0,
+    "fp_inclusion_prob": 0.5,
+    "n_fp_inserted": 2,
+    "n_fp_as_sole_observation": 2,
+    "n_fp_as_extra_alternative": 0,
+    "weak_candidate_prob": 0.35,
+    "weak_candidates": [
+      {
+        "frame": 0,
+        "uv": [
+          809.7893909137761,
+          388.1209533485055
+        ],
+        "score": 0.26265404784005447
+      },
+      {
+        "frame": 5,
+        "uv": [
+          783.7095330869909,
+          393.68716210916205
+        ],
+        "score": 0.1248566552999128
+      },
+      {
+        "frame": 11,
+        "uv": [
+          788.7240759510388,
+          395.41787387265305
+        ],
+        "score": 0.28680870319124996
+      },
+      {
+        "frame": 17,
+        "uv": [
+          818.7404788598332,
+          390.00542208676495
+        ],
+        "score": 0.2592648540574588
+      },
+      {
+        "frame": 18,
+        "uv": [
+          816.1242837579491,
+          377.3254750033266
+        ],
+        "score": 0.11815060912382438
+      },
+      {
+        "frame": 19,
+        "uv": [
+          818.8642322338269,
+          384.82828043085664
+        ],
+        "score": 0.28842262210129954
+      },
+      {
+        "frame": 20,
+        "uv": [
+          822.2671176076212,
+          376.5282204103088
+        ],
+        "score": 0.1880754309431568
+      },
+      {
+        "frame": 35,
+        "uv": [
+          862.5278786912313,
+          384.32209753638557
+        ],
+        "score": 0.2124463684456914
+      },
+      {
+        "frame": 36,
+        "uv": [
+          859.7104481698111,
+          382.0280964735509
+        ],
+        "score": 0.1249109411670567
+      },
+      {
+        "frame": 39,
+        "uv": [
+          870.4495110213946,
+          408.4278846921147
+        ],
+        "score": 0.2253012924839507
+      },
+      {
+        "frame": 41,
+        "uv": [
+          885.1770707764795,
+          416.23533383032
+        ],
+        "score": 0.10861337771364084
+      },
+      {
+        "frame": 43,
+        "uv": [
+          903.6423351306598,
+          431.61898486482056
+        ],
+        "score": 0.23052291526732768
+      },
+      {
+        "frame": 48,
+        "uv": [
+          968.2412689233742,
+          473.0565868750322
+        ],
+        "score": 0.27626143454753793
+      },
+      {
+        "frame": 49,
+        "uv": [
+          986.9726927772084,
+          474.0505571713406
+        ],
+        "score": 0.13654247578531248
+      },
+      {
+        "frame": 53,
+        "uv": [
+          1012.3132648571168,
+          487.861467301328
+        ],
+        "score": 0.2122801535100446
+      },
+      {
+        "frame": 54,
+        "uv": [
+          1020.7404676293963,
+          491.41748901329936
+        ],
+        "score": 0.1177871280492544
+      },
+      {
+        "frame": 57,
+        "uv": [
+          1034.174165435741,
+          497.63304086617023
+        ],
+        "score": 0.2924846186248762
+      },
+      {
+        "frame": 59,
+        "uv": [
+          1049.4766846862212,
+          506.4621763222538
+        ],
+        "score": 0.24517617275515535
+      },
+      {
+        "frame": 64,
+        "uv": [
+          1084.2428782758418,
+          536.1063951751039
+        ],
+        "score": 0.2014939721089054
+      },
+      {
+        "frame": 82,
+        "uv": [
+          1198.9904758126554,
+          607.0311883549941
+        ],
+        "score": 0.11876903068666125
+      },
+      {
+        "frame": 83,
+        "uv": [
+          1203.6818073366244,
+          613.152428697271
+        ],
+        "score": 0.18474748859408946
+      },
+      {
+        "frame": 84,
+        "uv": [
+          1219.8225132803962,
+          623.0552263224201
+        ],
+        "score": 0.2647562716785543
+      },
+      {
+        "frame": 90,
+        "uv": [
+          1261.5164260474753,
+          630.8040624592086
+        ],
+        "score": 0.21288256422411883
+      },
+      {
+        "frame": 93,
+        "uv": [
+          1282.1327324546814,
+          610.5231037191141
+        ],
+        "score": 0.16597916649878716
+      },
+      {
+        "frame": 99,
+        "uv": [
+          1302.595092369894,
+          605.5982310135505
+        ],
+        "score": 0.1788373532057795
+      },
+      {
+        "frame": 101,
+        "uv": [
+          1320.2291270879207,
+          623.6303702291473
+        ],
+        "score": 0.2802216186845673
+      },
+      {
+        "frame": 102,
+        "uv": [
+          1321.3349469854143,
+          615.2581533088347
+        ],
+        "score": 0.1953176843411541
+      },
+      {
+        "frame": 103,
+        "uv": [
+          1328.4284954590175,
+          626.930546188307
+        ],
+        "score": 0.13822205469201496
+      },
+      {
+        "frame": 109,
+        "uv": [
+          1347.5203560437615,
+          659.3928974027666
+        ],
+        "score": 0.27041046649255507
+      },
+      {
+        "frame": 115,
+        "uv": [
+          1333.7710493647587,
+          681.5308832245524
+        ],
+        "score": 0.10097988299771513
+      },
+      {
+        "frame": 122,
+        "uv": [
+          1309.0070175295182,
+          652.3964812838891
+        ],
+        "score": 0.21543958979731814
+      },
+      {
+        "frame": 127,
+        "uv": [
+          1297.435710966509,
+          646.3543388063696
+        ],
+        "score": 0.13909650259531928
+      },
+      {
+        "frame": 130,
+        "uv": [
+          1290.6823212949162,
+          632.9699753844515
+        ],
+        "score": 0.2355597556191918
+      },
+      {
+        "frame": 133,
+        "uv": [
+          1285.4075636026264,
+          635.3129825771167
+        ],
+        "score": 0.10965311900037907
+      },
+      {
+        "frame": 137,
+        "uv": [
+          1277.8610003310703,
+          665.9829395091369
+        ],
+        "score": 0.11348474409685393
+      },
+      {
+        "frame": 144,
+        "uv": [
+          1265.662612025124,
+          667.8137246029174
+        ],
+        "score": 0.22246834780037014
+      },
+      {
+        "frame": 154,
+        "uv": [
+          1235.0654375117258,
+          645.6641654848199
+        ],
+        "score": 0.12860041685285611
+      },
+      {
+        "frame": 160,
+        "uv": [
+          1151.1182467067447,
+          625.6766472289497
+        ],
+        "score": 0.20242982392418007
+      },
+      {
+        "frame": 166,
+        "uv": [
+          1150.159799250349,
+          625.4735401214617
+        ],
+        "score": 0.27245510412860946
+      },
+      {
+        "frame": 173,
+        "uv": [
+          1138.8484996834202,
+          634.6448994753863
+        ],
+        "score": 0.15636562126694514
+      },
+      {
+        "frame": 178,
+        "uv": [
+          1149.973017584535,
+          608.0191385610365
+        ],
+        "score": 0.2855117618931925
+      },
+      {
+        "frame": 183,
+        "uv": [
+          1156.4299607896558,
+          611.4509137795255
+        ],
+        "score": 0.2313802899851354
+      },
+      {
+        "frame": 186,
+        "uv": [
+          1178.9394408131352,
+          614.3886749870375
+        ],
+        "score": 0.12379303248290352
+      },
+      {
+        "frame": 189,
+        "uv": [
+          1196.8027508622272,
+          615.9023443174128
+        ],
+        "score": 0.1858741386589525
+      },
+      {
+        "frame": 191,
+        "uv": [
+          1181.8151440662195,
+          615.3990213278244
+        ],
+        "score": 0.2830237229779366
+      },
+      {
+        "frame": 192,
+        "uv": [
+          1185.6314447855355,
+          619.3300755727862
+        ],
+        "score": 0.13696480289567964
+      },
+      {
+        "frame": 196,
+        "uv": [
+          1208.0660503445256,
+          611.0216288785501
+        ],
+        "score": 0.27536354731992174
+      },
+      {
+        "frame": 198,
+        "uv": [
+          1215.2360631822148,
+          622.8140510341224
+        ],
+        "score": 0.1944934048955061
+      },
+      {
+        "frame": 199,
+        "uv": [
+          1225.7588714437502,
+          617.3130381035168
+        ],
+        "score": 0.11510380711221953
+      },
+      {
+        "frame": 200,
+        "uv": [
+          1231.2316723368494,
+          617.8929644410915
+        ],
+        "score": 0.11428171941069656
+      },
+      {
+        "frame": 203,
+        "uv": [
+          1183.586722680369,
+          559.4058161769511
+        ],
+        "score": 0.29245227898295084
+      },
+      {
+        "frame": 205,
+        "uv": [
+          1142.5112835291745,
+          507.9645378671292
+        ],
+        "score": 0.14404653822275904
+      },
+      {
+        "frame": 207,
+        "uv": [
+          1104.5365092888296,
+          467.06234851221984
+        ],
+        "score": 0.12984202920986013
+      },
+      {
+        "frame": 210,
+        "uv": [
+          1057.0728224003383,
+          388.1969370561673
+        ],
+        "score": 0.2703714747211227
+      },
+      {
+        "frame": 211,
+        "uv": [
+          1049.084412528621,
+          373.2743982454295
+        ],
+        "score": 0.2965527890388331
+      },
+      {
+        "frame": 224,
+        "uv": [
+          952.9505778533955,
+          171.74311228625803
+        ],
+        "score": 0.25800306359616
+      },
+      {
+        "frame": 228,
+        "uv": [
+          938.9479529281201,
+          129.9066389236127
+        ],
+        "score": 0.2131509461670112
+      },
+      {
+        "frame": 229,
+        "uv": [
+          930.5018826444887,
+          114.31378519575405
+        ],
+        "score": 0.26347802861558123
+      },
+      {
+        "frame": 231,
+        "uv": [
+          938.679516827689,
+          110.46029872834538
+        ],
+        "score": 0.2691914687864081
+      },
+      {
+        "frame": 233,
+        "uv": [
+          921.9230247164851,
+          88.05200271030085
+        ],
+        "score": 0.16449215151263452
+      },
+      {
+        "frame": 240,
+        "uv": [
+          900.0769247142827,
+          67.03866033684211
+        ],
+        "score": 0.10238194766820358
+      },
+      {
+        "frame": 248,
+        "uv": [
+          876.4346462875336,
+          59.45724363435592
+        ],
+        "score": 0.21408626452229335
+      },
+      {
+        "frame": 249,
+        "uv": [
+          875.378296646717,
+          57.96471824692183
+        ],
+        "score": 0.10317052784547483
+      },
+      {
+        "frame": 250,
+        "uv": [
+          866.8839271645772,
+          57.36314030801758
+        ],
+        "score": 0.18766100765989477
+      },
+      {
+        "frame": 256,
+        "uv": [
+          832.1891642021013,
+          189.9562578992035
+        ],
+        "score": 0.25333213647604685
+      },
+      {
+        "frame": 261,
+        "uv": [
+          809.7036572791011,
+          208.61777476953827
+        ],
+        "score": 0.22642404228772747
+      },
+      {
+        "frame": 263,
+        "uv": [
+          812.4082265137948,
+          182.08480186372717
+        ],
+        "score": 0.13745613766180637
+      },
+      {
+        "frame": 275,
+        "uv": [
+          834.8331847835425,
+          219.40337570656808
+        ],
+        "score": 0.20557700893276803
+      },
+      {
+        "frame": 276,
+        "uv": [
+          843.814777817663,
+          235.53612792122803
+        ],
+        "score": 0.2539640623001638
+      },
+      {
+        "frame": 279,
+        "uv": [
+          855.2806295482503,
+          277.17903242107576
+        ],
+        "score": 0.2933757238530169
+      },
+      {
+        "frame": 284,
+        "uv": [
+          818.5273095391725,
+          296.2928961123023
+        ],
+        "score": 0.22160013301608805
+      },
+      {
+        "frame": 285,
+        "uv": [
+          815.9132067702627,
+          289.6275041256663
+        ],
+        "score": 0.17754665085407292
+      },
+      {
+        "frame": 288,
+        "uv": [
+          791.0389487309484,
+          285.8913353358828
+        ],
+        "score": 0.24124706267227483
+      },
+      {
+        "frame": 290,
+        "uv": [
+          772.8292385968647,
+          278.54773445295723
+        ],
+        "score": 0.20070056114668283
+      },
+      {
+        "frame": 291,
+        "uv": [
+          759.4920255350521,
+          274.9450536719743
+        ],
+        "score": 0.23627489236680702
+      },
+      {
+        "frame": 297,
+        "uv": [
+          622.5054712810173,
+          307.89790564704396
+        ],
+        "score": 0.2647308270033255
+      },
+      {
+        "frame": 299,
+        "uv": [
+          605.867641676166,
+          305.0493561964395
+        ],
+        "score": 0.24237765950501525
+      },
+      {
+        "frame": 306,
+        "uv": [
+          579.7169810737602,
+          338.9532835549712
+        ],
+        "score": 0.1760015793266513
+      },
+      {
+        "frame": 310,
+        "uv": [
+          571.6173851017184,
+          366.2319816080056
+        ],
+        "score": 0.11324236964095258
+      },
+      {
+        "frame": 312,
+        "uv": [
+          574.911602908274,
+          362.4662308066254
+        ],
+        "score": 0.11896615814479357
+      },
+      {
+        "frame": 316,
+        "uv": [
+          596.3772750501116,
+          360.1473696753003
+        ],
+        "score": 0.20373710854921584
+      },
+      {
+        "frame": 319,
+        "uv": [
+          596.002653596496,
+          368.84142912308886
+        ],
+        "score": 0.18822420598640793
+      },
+      {
+        "frame": 320,
+        "uv": [
+          611.1110153483368,
+          370.06366748086344
+        ],
+        "score": 0.23687533161418853
+      },
+      {
+        "frame": 322,
+        "uv": [
+          612.9929609365622,
+          381.18032690191967
+        ],
+        "score": 0.1994329930145307
+      },
+      {
+        "frame": 327,
+        "uv": [
+          632.3164215430633,
+          419.5341105303978
+        ],
+        "score": 0.28649589861175717
+      },
+      {
+        "frame": 329,
+        "uv": [
+          632.5192676833011,
+          437.2392931296701
+        ],
+        "score": 0.12711308809046087
+      },
+      {
+        "frame": 332,
+        "uv": [
+          629.450835772155,
+          431.55541658687997
+        ],
+        "score": 0.1936567163428293
+      },
+      {
+        "frame": 333,
+        "uv": [
+          659.9319169719765,
+          426.67833759739653
+        ],
+        "score": 0.2896707005469452
+      },
+      {
+        "frame": 336,
+        "uv": [
+          660.8759982801053,
+          415.1826144193003
+        ],
+        "score": 0.16449967526931858
+      },
+      {
+        "frame": 337,
+        "uv": [
+          673.929261063744,
+          418.96477867932856
+        ],
+        "score": 0.1283204675646247
+      },
+      {
+        "frame": 338,
+        "uv": [
+          677.1367988815263,
+          419.5384735770551
+        ],
+        "score": 0.12930003120413597
+      },
+      {
+        "frame": 341,
+        "uv": [
+          682.1122178528103,
+          413.2746537845101
+        ],
+        "score": 0.1989160328934353
+      },
+      {
+        "frame": 350,
+        "uv": [
+          713.2424055401328,
+          397.27657216621503
+        ],
+        "score": 0.10683071550713659
+      },
+      {
+        "frame": 354,
+        "uv": [
+          723.8504896014492,
+          415.7262532094094
+        ],
+        "score": 0.12133063990302054
+      },
+      {
+        "frame": 356,
+        "uv": [
+          740.5789605091164,
+          423.10826626254527
+        ],
+        "score": 0.22198148324479505
+      },
+      {
+        "frame": 359,
+        "uv": [
+          743.2510006678076,
+          445.37767434006423
+        ],
+        "score": 0.26484048816578587
+      },
+      {
+        "frame": 362,
+        "uv": [
+          750.982940433236,
+          476.87006297910193
+        ],
+        "score": 0.15203899532453574
+      },
+      {
+        "frame": 364,
+        "uv": [
+          763.3311409080807,
+          480.05553362685515
+        ],
+        "score": 0.10038347150555403
+      },
+      {
+        "frame": 365,
+        "uv": [
+          765.4546826990041,
+          474.45691103792666
+        ],
+        "score": 0.11231970897947857
+      },
+      {
+        "frame": 366,
+        "uv": [
+          786.1889763959197,
+          462.35543544453986
+        ],
+        "score": 0.1492498887841053
+      },
+      {
+        "frame": 367,
+        "uv": [
+          775.7764867206737,
+          463.8143406932592
+        ],
+        "score": 0.16150334144341266
+      },
+      {
+        "frame": 371,
+        "uv": [
+          745.5985791331387,
+          472.3825230220275
+        ],
+        "score": 0.2755354515528553
+      },
+      {
+        "frame": 374,
+        "uv": [
+          727.3108800343298,
+          471.43555475164084
+        ],
+        "score": 0.11767354355170133
+      },
+      {
+        "frame": 384,
+        "uv": [
+          703.4400033899451,
+          451.6506899949857
+        ],
+        "score": 0.10509321796544156
+      },
+      {
+        "frame": 385,
+        "uv": [
+          712.5037323249608,
+          453.69370275190346
+        ],
+        "score": 0.16799001339428493
+      },
+      {
+        "frame": 395,
+        "uv": [
+          743.9985347050678,
+          446.33121950571115
+        ],
+        "score": 0.20719839164333803
+      },
+      {
+        "frame": 401,
+        "uv": [
+          747.5241941995803,
+          436.52245764110967
+        ],
+        "score": 0.1162063040058241
+      },
+      {
+        "frame": 406,
+        "uv": [
+          780.0465134594334,
+          459.6491123502865
+        ],
+        "score": 0.16206806728571121
+      },
+      {
+        "frame": 410,
+        "uv": [
+          790.6879785928857,
+          488.6439880594323
+        ],
+        "score": 0.14751720999491585
+      },
+      {
+        "frame": 411,
+        "uv": [
+          800.467867687963,
+          482.21095705257227
+        ],
+        "score": 0.1301262490431073
+      },
+      {
+        "frame": 413,
+        "uv": [
+          742.7819439446613,
+          478.0308945269711
+        ],
+        "score": 0.14902889670902458
+      },
+      {
+        "frame": 418,
+        "uv": [
+          609.6009975705914,
+          483.57282317168534
+        ],
+        "score": 0.23540380548439335
+      },
+      {
+        "frame": 419,
+        "uv": [
+          580.142483963462,
+          486.82718038703456
+        ],
+        "score": 0.21183118284517322
+      },
+      {
+        "frame": 421,
+        "uv": [
+          536.1494012899642,
+          479.2950938863084
+        ],
+        "score": 0.1250616778992775
+      },
+      {
+        "frame": 425,
+        "uv": [
+          470.62453981053255,
+          466.90512072652837
+        ],
+        "score": 0.27483756949247806
+      },
+      {
+        "frame": 426,
+        "uv": [
+          492.04076156804064,
+          476.72423725962165
+        ],
+        "score": 0.29302615772238993
+      },
+      {
+        "frame": 429,
+        "uv": [
+          543.4209586439639,
+          482.34080177260574
+        ],
+        "score": 0.12294311714587661
+      },
+      {
+        "frame": 441,
+        "uv": [
+          652.809889071124,
+          522.6226634222801
+        ],
+        "score": 0.29125917529775347
+      },
+      {
+        "frame": 446,
+        "uv": [
+          517.1487642888429,
+          505.5657848198636
+        ],
+        "score": 0.16791134191774726
+      },
+      {
+        "frame": 449,
+        "uv": [
+          429.20245677207225,
+          488.0559697913232
+        ],
+        "score": 0.12160031539003671
+      },
+      {
+        "frame": 452,
+        "uv": [
+          373.5538246782622,
+          491.7071041283755
+        ],
+        "score": 0.2150780949667379
+      },
+      {
+        "frame": 453,
+        "uv": [
+          345.48785666207317,
+          482.4665543261591
+        ],
+        "score": 0.20656067928951635
+      },
+      {
+        "frame": 454,
+        "uv": [
+          323.7335318828595,
+          474.42171617562065
+        ],
+        "score": 0.2993007730854649
+      }
+    ],
+    "scenario": "mismatch",
+    "seed": 0
+  }
+}

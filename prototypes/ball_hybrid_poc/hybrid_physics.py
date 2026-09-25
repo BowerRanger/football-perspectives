@@ -216,16 +216,23 @@ def fit_roll_segment(
     a_xy: Sequence[float],
     b_xy: Sequence[float],
     duration_s: float,
-    obs: Sequence[tuple[float, Sequence[float]]] = (),
+    obs: Sequence[tuple[float, Sequence[float]] | tuple[float, Sequence[float], float]] = (),
     mu_max: float = 0.9,
     g: float = 9.81,
 ) -> RollFit:
-    """Least-squares constant-deceleration roll through both endpoints.
+    """Weighted least-squares constant-deceleration roll through both
+    endpoints.
 
-    ``obs`` are ``(time_s, xy)`` interior ground observations (world xy).
-    With no observations the roll degenerates to constant velocity
-    (accel=0). ``|accel|`` is clamped to ``mu_max*g`` (Coulomb friction
-    envelope on natural turf).
+    ``obs`` entries are ``(time_s, xy)`` or ``(time_s, xy, weight)``
+    interior ground observations (world xy); an omitted weight defaults
+    to 1.0. Manual anchor clicks are typically weighted far above real
+    detector observations here (see ``hybrid.py``'s ``anchor_fit_weight``)
+    so the WHOLE event-free chain stays one smooth path while still
+    landing close to every click, instead of being pinned exactly (which
+    is what used to create a velocity kink at every anchor). With no
+    observations the roll degenerates to constant velocity (accel=0).
+    ``|accel|`` is clamped to ``mu_max*g`` (Coulomb friction envelope on
+    natural turf).
     """
     if duration_s <= 0:
         raise ValueError("fit_roll_segment needs a positive duration")
@@ -235,11 +242,16 @@ def fit_roll_segment(
     if obs:
         num = np.zeros(2)
         den = 0.0
-        for t_s, xy in obs:
+        for item in obs:
+            if len(item) == 3:
+                t_s, xy, w = item
+            else:
+                t_s, xy = item
+                w = 1.0
             phi = 0.5 * (t_s ** 2 - t_s * duration_s)
             line = a + (b - a) * (t_s / duration_s)
-            num += phi * (np.asarray(xy, dtype=float) - line)
-            den += phi * phi
+            num += w * phi * (np.asarray(xy, dtype=float) - line)
+            den += w * phi * phi
         if den > 1e-12:
             accel = num / den
     amax = mu_max * g
@@ -272,3 +284,35 @@ def bounce_velocity(
     v_out[2] = -restitution_e * v_in[2]
     v_out[:2] = v_in[:2] * tangential_retention
     return v_out
+
+
+# ---------------------------------------------------------------------------
+# Cubic Hermite blend (local C1 join, used by the hybrid extractor to
+# smooth the velocity transition at a non-event knot over a small window
+# without moving the knot's own position)
+# ---------------------------------------------------------------------------
+
+def hermite_blend(
+    p0: Vec3, m0: Vec3, p1: Vec3, m1: Vec3, frac,
+) -> np.ndarray:
+    """Standard two-point cubic Hermite interpolation: passes exactly
+    through ``p0`` at ``frac=0`` (derivative ``m0``) and ``p1`` at
+    ``frac=1`` (derivative ``m1``); ``frac`` may be a scalar or array in
+    ``[0, 1]``. ``m0``/``m1`` must already be scaled by the interval's own
+    duration (i.e. ``dp/dfrac``, not ``dp/dt`` — a caller integrating in
+    seconds over an interval of duration ``T`` passes ``velocity * T``).
+    Shape ``(len(frac), 3)``.
+    """
+    f = np.atleast_1d(np.asarray(frac, dtype=float))
+    f2 = f * f
+    f3 = f2 * f
+    h00 = 2 * f3 - 3 * f2 + 1
+    h10 = f3 - 2 * f2 + f
+    h01 = -2 * f3 + 3 * f2
+    h11 = f3 - f2
+    p0 = np.asarray(p0, dtype=float)
+    m0 = np.asarray(m0, dtype=float)
+    p1 = np.asarray(p1, dtype=float)
+    m1 = np.asarray(m1, dtype=float)
+    return (h00[:, None] * p0 + h10[:, None] * m0
+            + h01[:, None] * p1 + h11[:, None] * m1)

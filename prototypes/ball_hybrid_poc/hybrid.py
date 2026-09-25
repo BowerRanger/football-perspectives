@@ -2,54 +2,106 @@
 
 ``run_hybrid(ctx, observations, anchors, fixes=(), auto_anchors=(), cfg=None) -> Track``
 
-Pipeline (see CONTRACT.md and the task brief):
+## Knot taxonomy and the local-join fix (iteration 3.1)
 
-  a. Resolve hard 3-D knots (manual anchors via the same semantics as
-     ``src.utils.ball_eval.anchor_gt_world`` — ground_exact/joint_depth —
-     PLUS ``goal_impact`` resolved via goal-frame geometry
-     (``src.utils.goal_geometry.resolve_goal_impact_world``, post/
-     crossbar/net intersection) and ``catch`` resolved via the same
-     "joint one ball-radius back along the sight-line" convention
-     ``anchor_gt_world`` uses for ``player_touch`` (a keeper's hand
-     joint), plus cross-replay fixes) and hard RAY constraints (states
-     that still can't be resolved to a 3-D point — airborne_*, or a
-     goal_impact/catch that missed geometry/had no joint — lateral-exact,
-     depth free); sort by frame.
+Every RESOLVED anchor (any state that ``ball_eval.anchor_gt_world`` /
+goal geometry / the joint-depth convention can pin to a real 3-D point)
+is a hard SPAN-BOUNDARY KNOT — this is the iteration-2 per-anchor span
+structure, restored. Knots split into two kinds for how their velocity
+is treated:
+
+* **Sharp** (``_is_sharp_knot``: ``EVENT_STATES`` — player_touch, kick,
+  bounce, header, volley, chest, catch, goal_impact — plus cross-replay
+  ``fixes`` and any data-discovered internal split). A real velocity
+  break belongs here — exact 3-D re-snap, raw per-span fit kink kept
+  as-is.
+* **Non-sharp** (everything else — in practice almost always a
+  "grounded" click). Still an exact-position span boundary for FITTING
+  (recovering per-anchor accuracy), but its velocity is smoothed
+  LOCALLY over a small window (``_smooth_non_event_knot_windows``, k~3-5
+  frames scaled to speed): a two-piece cubic Hermite blend, each piece
+  running from the window EDGE (that span's own position+velocity there,
+  so it joins smoothly with the untouched path outside the window) in to
+  the knot's own exact position, sharing one tangent AT the knot (the
+  average of the incoming/outgoing velocities). The knot's position is
+  unchanged; only the velocity direction either side of it turns
+  smoothly instead of kinking.
+
+**History**: the first iteration-3 attempt made every non-event anchor
+permanently SOFT evidence inside one continuous fit per event-free
+chain (chains between rare touches/bounces, potentially 50+ frames).
+That removed the kink but chains between real events span genuinely
+curved real motion (a dribble with several direction changes) that a
+single rigid roll/flight model badly underfit — measured regression on
+gberch/base: %<=20cm 0.91->0.36, ground-truth floating >1m, held-out p50
+0.21->1.67m. Reverted to per-anchor knots + local Hermite join instead:
+keeps the accuracy, still eliminates the kink (validated: gberch/base
+heading_break count now matches truth's own count exactly, down from 35
+vs. 8 pre-fix).
+
+**This is a documented, narrowly-scoped relaxation of "operator input
+always wins"**: a non-sharp knot's reported position may deviate from
+its literal click by the Hermite window's own small pass-through
+tolerance (tracked per-anchor in ``diagnostics["anchor_residuals"]``,
+``>4px`` flagged as ``"anchor_not_honoured"``); its velocity is NEVER
+exactly what a naive per-span fit would give, by design. Manual anchors
+still always win over auto/detector evidence. EVENT anchors (and fixes)
+are pinned exactly with zero relaxation.
+
+## Pipeline (see CONTRACT.md and the task brief)
+
+  a. Resolve knots + ray evidence (``resolve_knots``, taxonomy above). A
+     state that can't be pinned to a 3-D point without extra context
+     (airborne_*, off_screen_flight, or an EVENT anchor missing its
+     joint/goal-geometry hit) becomes a lateral-exact ray constraint,
+     depth free.
   a2. Auto-event knots: ``auto_anchors`` (the CURRENT ball stage's own
-     auto-generated events — kinematic touches, velocity-break bounces,
+     auto-generated EVENTS — kinematic touches, velocity-break bounces,
      auto goal impacts) are resolved the same way and folded in as
-     extra, SOFT-ish knots on top of the manual event layer — this PoC's
+     extra, SOFT-ish knots on top of the manual layer — this PoC's
      hybrid is a new TRAJECTORY layer over the existing EVENT layer, not
-     a replacement for it. Manual anchors always win: an auto knot/ray
-     within ``auto_anchor_min_frame_gap`` frames of any manual knot/ray
-     is dropped. A surviving auto knot is accepted only if inserting it
-     doesn't make its bracketing span's own worst-evidence-residual gate
-     any worse (``_integrate_auto_knots``); accepted/rejected counts are
-     in ``diagnostics["auto_anchors"]``.
+     a replacement for it. Only auto anchors whose state is itself an
+     EVENT state are considered at all (an auto "grounded"/"airborne_*"
+     entry is a synthetic interpolation of evidence already in the fit,
+     not new information, so it's ignored outright). Manual anchors
+     always win: an auto knot/ray within ``auto_anchor_min_frame_gap``
+     frames of any manual knot/ray is dropped. A surviving auto knot is
+     accepted only if inserting it doesn't make its bracketing span's
+     own worst-evidence-residual gate any worse (``_integrate_auto_
+     knots``); accepted/rejected counts are in
+     ``diagnostics["auto_anchors"]``.
   b. Robust evidence: real detector observations are graded per-span
      against that span's own physics fit, ITERATED (fit -> gate outliers
      by reprojection residual -> refit) up to ``robust_gate_max_iters``
      times or until the inlier set stabilises; low-confidence/high-
      residual detections never move the knot-exact fit.
-  c. Per span between consecutive hard knots: pick roll (both ends
+  c. Per span between consecutive knots: pick roll (both ends
      ground-level, no launch state) or flight (gravity + drag, optional
      Cd fit bounded to ``cd_bounds``, both endpoints always hit exactly
      via boundary-value shooting); split-and-retry (up to
-     ``max_splits_per_span``) at the worst-residual evidence frame when
-     a single arc can't explain the span (treated as an internal bounce
-     knot, recursed).
+     ``max_splits_per_span``, both roll and flight) at the
+     worst-residual evidence frame when a single fit can't explain the
+     span (treated as an internal, sharp knot — a genuine
+     data-discovered event — recursed).
   d. Physics track P_phys(frame) for every frame in [first knot/evidence,
-     last knot/evidence]. The clip head/tail (before the first knot or
-     after the last) gets a genuine free-end fit anchored at that one
-     knot — a ground-roll (linear ray-fit velocity) or drag-flight
-     (LM-fit v0 against reprojection) model — covering exactly out to
-     where the evidence in that direction ends (``_fit_open_end``);
-     falls back to holding the knot only when there's too little
-     evidence to fit (``min_evid_for_open_end_fit``).
+     last knot/evidence]. The clip head/tail gets a genuine free-end fit
+     anchored at that one knot (ground-roll or drag-flight, bounded +
+     plausibility-checked) covering exactly out to where the evidence in
+     that direction ends (``_fit_open_end``); falls back to holding the
+     knot only when there's too little evidence or the fit is
+     implausible. Every non-sharp knot's local kink is then smoothed
+     (``_smooth_non_event_knot_windows``, above).
   e. Hybrid blend: delta = faithful_point - P_phys at confident inlier
-     evidence (and exactly at hard ray anchors), smoothed by
-     ``blend.blend_deltas`` and added back; final = P_phys + delta_s,
-     with knot/ray-anchor frames re-snapped exactly afterwards.
+     evidence and at ray constraints (gated: a ray whose implied pull
+     would move the baseline more than ``anchor_delta_max_m`` is left
+     unpulled — see ``_delta_evidence`` — rather than yanking a whole
+     smoothing-kernel window off course), smoothed by ``blend.
+     blend_deltas`` (a C-infinity Gaussian-family kernel — no corner at
+     an evidence frame) and rate-limited by ``blend.clamp_delta_rate``
+     (delta's own frame-to-frame change capped to a fraction of local
+     physics-track speed) so the smoothing pass itself can't introduce a
+     kink either. Final = P_phys + delta_s; sharp knots re-snapped
+     exactly afterwards.
 """
 
 from __future__ import annotations
@@ -65,13 +117,14 @@ from src.utils.ball_anchor_heights import GROUND_LEVEL_STATES
 from src.utils.ball_eval import anchor_gt_world, point_ray_distance, ray_plane_z
 from src.utils.goal_geometry import GoalGeometry, resolve_goal_impact_world
 
-from .blend import blend_deltas
+from .blend import blend_deltas, clamp_delta_rate
 from .hybrid_physics import (
     BALL_RADIUS_M,
     CD_BOUNDS,
     CD_DEFAULT,
     DEFAULT_MAGNUS_COEFF,
     fit_roll_segment,
+    hermite_blend,
     shoot_arc,
     simulate,
 )
@@ -79,7 +132,33 @@ from .types import Observation, Track, TrackFrame
 
 GROUND_EXACT_STATES = frozenset(GROUND_LEVEL_STATES) | {"bounce"}
 _LAUNCH_STATES = frozenset({
-    "kick", "header", "volley", "chest", "goal_impact", "player_touch",
+    "kick", "header", "volley", "chest", "goal_impact",
+})
+# NOTE: "player_touch" is deliberately NOT here. It's a generic catch-all
+# contact state (dribble touch, ground pass, reception -- not necessarily
+# a launch), unlike kick/header/volley/chest/goal_impact which genuinely
+# almost always send the ball into the air. Iteration 3's chains span
+# between rare EVENT knots (potentially 50+ frames), so unconditionally
+# treating every player_touch as airborne forced long, purely-grounded
+# dribble sequences bracketed by two grounded touches into a single
+# flight-arc fit -- discovered on gberch/base: a (209, 310) chain whose
+# both endpoints resolved at z=0.11m still got model="flight" purely from
+# state membership, producing a wildly-elevated internal split knot and a
+# ~4m error blip. A player_touch's RESOLVED HEIGHT (the height check in
+# _is_ground_knot below) is the correct signal for whether it was
+# actually a ground-level contact.
+
+# The knot taxonomy (see module docstring): only these states are real
+# physical events (a velocity break there is expected) and become hard
+# span-boundary knots. Every other anchor state (grounded, airborne_*,
+# off_screen_flight) is a non-event waypoint that becomes weighted pixel
+# evidence inside one continuous chain fit instead. Matches
+# run_all.py's ``_CONTACT_ANCHOR_STATES`` (kept as an independent
+# constant here rather than imported, to avoid a reverse dependency on
+# run_all.py from the core extractor module).
+EVENT_STATES = frozenset({
+    "player_touch", "kick", "bounce", "header", "volley", "chest",
+    "catch", "goal_impact",
 })
 
 # Plausibility envelope for the free-end (open-head/open-tail) fit: an
@@ -108,13 +187,14 @@ DEFAULT_CFG: dict[str, Any] = {
     "inlier_px": 15.0,
     "roll_mu_max": 0.9,
     "max_splits_per_span": 3,
-    # Deliberately modest: high enough to saturate confidence exactly at
-    # a ray anchor's own frame (which gets force-snapped to "anchor" mode
-    # regardless) without inflating "faithful" confidence for several
-    # frames around it purely from the anchor's pull rather than actual
-    # detector evidence (a wide window there previously mislabelled
-    # anchor-dominated frames as "faithful" and made the CLI's faithful-
-    # frame-vs-observation reprojection stat misleading — see report).
+    # Governs the DELTA-BLEND pull/confidence around a non-event anchor
+    # (how far the "this frame is anchor-backed" halo extends and how
+    # much it can nudge nearby frames) -- NOT how tightly the underlying
+    # chain FIT itself honours the click (that's anchor_fit_weight,
+    # below). Deliberately modest: a wide/heavy value here previously
+    # (iteration 1) inflated "faithful" confidence for several frames
+    # around a manual click purely from the anchor's pull rather than
+    # actual detector evidence.
     "ray_anchor_weight": 1.2,
     "min_obs_for_cd_fit": 5,
     "split_residual_factor": 2.5,
@@ -123,6 +203,39 @@ DEFAULT_CFG: dict[str, Any] = {
     "auto_anchor_min_frame_gap": 2,  # drop an auto anchor within this many
                                      # frames of any manual knot/ray anchor
     "min_evid_for_open_end_fit": 2,
+    # iteration 3 additions (knot taxonomy: non-event anchors are soft
+    # evidence inside one continuous chain fit, not hard knots -- see
+    # module docstring)
+    "anchor_fit_weight": 20.0,       # weight of a non-event anchor click in
+                                      # the CHAIN fit (roll/flight/open-end)
+                                      # relative to a conf~1.0 detector obs;
+                                      # tuned so anchors land within ~2px
+                                      # despite being outnumbered by noisier
+                                      # real detections in a long chain.
+    "anchor_not_honoured_px": 4.0,   # diagnostics flag threshold
+    "anchor_delta_max_m": 1.5,       # skip a ray anchor's delta-blend pull
+                                      # when the physics baseline is already
+                                      # farther than this from its ray (see
+                                      # _delta_evidence) -- prevents an
+                                      # isolated bad/mislabelled anchor from
+                                      # yanking a whole smoothing-kernel
+                                      # window several metres off course
+    # iteration 3.1: local C1 fix at non-event knots (_smooth_non_event_
+    # knot_windows), replacing the whole-chain-soft-evidence redesign that
+    # cost too much accuracy. k = hermite_k_ref_frames * hermite_k_ref_
+    # speed_m_s / local_speed, clamped to [hermite_k_min, hermite_k_max]
+    # -- "~3-5 frames, scaled to speed" (slower motion needs a slightly
+    # wider window to blend the same amount of curvature away).
+    "hermite_k_min": 3,
+    "hermite_k_max": 5,
+    "hermite_k_ref_frames": 4,
+    "hermite_k_ref_speed_m_s": 2.0,
+    "blend_max_delta_step_frac": 0.5,  # cap on delta's own frame-to-frame
+                                        # change, as a fraction of local
+                                        # physics-track speed (C1 delta)
+    "blend_max_delta_step_floor_m_s": 1.0,  # speed floor so a near-
+                                             # stationary span still has
+                                             # SOME correction headroom
 }
 
 # Default FIFA pitch dims (matches CLAUDE.md / run_all.py's "pitch" block):
@@ -196,10 +309,30 @@ def resolve_knots(
     anchors: Sequence[Any],
     fixes: Sequence[Any] = (),
 ) -> tuple[list[_Knot], list[_RayAnchor]]:
-    """Split ``anchors`` (+ ``fixes``) into hard 3-D knots and hard ray
-    constraints, exactly mirroring ``ball_eval.anchor_gt_world``'s own
-    classification (``ground_exact``/``joint_depth`` -> hard knot,
-    ``ray_only``/``none`` -> ray constraint or dropped)."""
+    """Split ``anchors`` (+ ``fixes``) into hard 3-D span-boundary knots
+    and soft ray evidence, restoring the iteration-2 PER-ANCHOR span
+    density: every anchor that resolves to a genuine 3-D point (event or
+    non-event state — ``ground_exact``/``joint_depth`` via
+    ``ball_eval.anchor_gt_world``, goal geometry, or the catch/
+    player_touch joint convention) becomes its own span boundary. Only
+    states that genuinely can't be pinned to a 3-D point without a second
+    constraint (airborne_*, off_screen_flight, or an EVENT anchor that
+    failed 3-D resolution) become ray evidence.
+
+    Iteration 3 first tried making NON-EVENT anchors (module docstring
+    history) permanently soft, one continuous fit per event-free chain —
+    it removed the per-anchor velocity kink, but chains between real
+    events can span 50+ frames of a genuinely curved real dribble/roll, and
+    a single rigid physical model badly underfit that (gberch/base %<=20cm
+    0.91->0.36, ground-truth-vs-track floating up to 1m+). Reverted here:
+    every resolved anchor is a knot again (iteration-2 accuracy), and the
+    velocity kink at a NON-EVENT knot specifically is fixed LOCALLY
+    instead — see ``_smooth_non_event_knot_windows`` — over a small
+    (~3-5 frame) window around it, not by giving up per-anchor precision
+    everywhere. ``_is_sharp_knot`` (state in ``EVENT_STATES``, ``"fix"``,
+    or a data-discovered internal split) marks which knots keep their
+    raw, physically-real velocity break.
+    """
     by_frame: dict[int, _Knot] = {}
     ray_anchors: list[_RayAnchor] = []
 
@@ -207,6 +340,7 @@ def resolve_knots(
         frame, image_xy, state, player_id, bone, goal_element = _anchor_attrs(a)
         if image_xy is None or frame not in ctx.per_frame_K:
             continue
+
         K = ctx.per_frame_K[frame]
         R = ctx.per_frame_R[frame]
         t = ctx.per_frame_t[frame]
@@ -260,6 +394,11 @@ def resolve_knots(
             if frame not in by_frame:
                 by_frame[frame] = knot
         else:
+            # Couldn't resolve to hard 3-D (airborne_*/off_screen_flight
+            # by nature, or an EVENT anchor missing the extra context it
+            # needed -- e.g. a goal_impact ray that missed all goal
+            # geometry, or a player_touch/catch with no player_id/bone):
+            # lateral-exact ray constraint, depth free.
             C, d_hat = ctx.ray(frame, image_xy)
             ray_anchors.append(_RayAnchor(frame=frame, C=C, d_hat=d_hat,
                                            uv=image_xy, state=state))
@@ -312,24 +451,113 @@ def _is_ground_knot(knot: "_Knot") -> bool:
     return knot.state in GROUND_EXACT_STATES or knot.xyz[2] <= BALL_RADIUS_M + 0.05
 
 
-def _choose_model(a_knot: _Knot, b_knot: _Knot,
-                   span_rays: Sequence[_RayAnchor]) -> str:
+def _is_sharp_knot(knot: "_Knot") -> bool:
+    """True when a real velocity break belongs at this knot: an EVENT
+    anchor (touch/kick/bounce/header/volley/chest/catch/goal_impact), a
+    cross-replay fix, or a data-discovered internal split (a genuine
+    hidden bounce/direction-change the residual gate found, not click
+    noise). Everything else (a NON-EVENT anchor — almost always a
+    "grounded" click) is exact-position for FITTING but gets its velocity
+    smoothed locally rather than left kinked — see
+    ``_smooth_non_event_knot_windows``.
+    """
+    return (knot.state in EVENT_STATES or knot.state == "fix"
+            or knot.kind == "internal")
+
+
+_AMBIGUOUS_GROUND_STATES = frozenset({"player_touch", "catch"})
+
+
+def _quick_roll_worst_px(ctx, a_knot, b_knot, evid, z_level, duration_s, cfg) -> float:
+    ground_obs = []
+    for frame, uv, w in evid:
+        C, d = ctx.ray(frame, uv)
+        dz = float(d[2])
+        if abs(dz) < 1e-9:
+            continue
+        s = (z_level - float(C[2])) / dz
+        if s <= 0:
+            continue
+        ground_obs.append(((frame - a_knot.frame) / ctx.fps, (C + s * d)[:2], w))
+    roll = fit_roll_segment(a_knot.xyz[:2], b_knot.xyz[:2], duration_s,
+                             ground_obs, mu_max=cfg["roll_mu_max"])
+    worst = 0.0
+    for frame, uv, _w in evid:
+        t_s = (frame - a_knot.frame) / ctx.fps
+        p = roll.eval([t_s], z_level)[0]
+        worst = max(worst, _reproj_px(ctx, frame, p, uv))
+    return worst
+
+
+def _quick_flight_worst_px(ctx, a_knot, b_knot, evid, duration_s, cfg) -> float:
+    v0 = shoot_arc(a_knot.xyz, 0.0, b_knot.xyz, duration_s, cd=cfg["cd"])
+    worst = 0.0
+    for frame, uv, _w in evid:
+        t_s = (frame - a_knot.frame) / ctx.fps
+        p = simulate(a_knot.xyz, v0, [t_s], cd=cfg["cd"])[0]
+        worst = max(worst, _reproj_px(ctx, frame, p, uv))
+    return worst
+
+
+def _choose_model(ctx: Any, a_knot: _Knot, b_knot: _Knot,
+                   observations: Sequence[Observation],
+                   ray_anchors: Sequence[_RayAnchor],
+                   cfg: Mapping[str, Any]) -> str:
+    """Roll needs both endpoints at ground level; ANY ``airborne_*`` ray
+    inside the span forces flight instead.
+
+    NOTE: iteration 3.0 (briefly) required >=2 airborne rays here for its
+    long event-only CHAINS; reverted to the iteration-1/2 "any" rule now
+    that spans are per-anchor again (iteration 3.1).
+
+    ``player_touch``/``catch`` are genuinely ambiguous even by resolved
+    HEIGHT: contact happens at ground/hand level whether the touch is a
+    grounded dribble or a launching chip/lob — the knot's own z can't
+    tell those apart, only what happens in BETWEEN the knots can. When
+    both endpoints are one of these ambiguous states, both ground-level,
+    AND there's no airborne ray to settle it, this runs a cheap one-shot
+    roll fit and one-shot flight fit and picks whichever already explains
+    the span's real evidence better (lower worst-point reprojection),
+    instead of guessing. (A pure ground/bounce/kick pair skips this —
+    those states are unambiguous, and the check isn't free.) Discovered
+    via a real regression: defaulting player_touch to ground-by-height
+    fixed gberch's mostly-grounded dribbles but broke s013, whose
+    player_touch-bracketed spans are mostly lofted passes.
+    """
+    span_rays = [r for r in ray_anchors if a_knot.frame < r.frame < b_knot.frame]
     if any(r.state.startswith("airborne") for r in span_rays):
         return "flight"
-    if _is_ground_knot(a_knot) and _is_ground_knot(b_knot):
+    if not (_is_ground_knot(a_knot) and _is_ground_knot(b_knot)):
+        return "flight"
+    if not (a_knot.state in _AMBIGUOUS_GROUND_STATES
+            or b_knot.state in _AMBIGUOUS_GROUND_STATES):
         return "roll"
-    return "flight"
+
+    duration_s = (b_knot.frame - a_knot.frame) / ctx.fps
+    evid = _span_evidence(observations, ray_anchors, a_knot.frame, b_knot.frame,
+                           cfg["anchor_fit_weight"])
+    if not evid:
+        return "roll"
+    z_level = 0.5 * (float(a_knot.xyz[2]) + float(b_knot.xyz[2]))
+    roll_worst = _quick_roll_worst_px(ctx, a_knot, b_knot, evid, z_level, duration_s, cfg)
+    flight_worst = _quick_flight_worst_px(ctx, a_knot, b_knot, evid, duration_s, cfg)
+    return "roll" if roll_worst <= flight_worst else "flight"
 
 
-def _fit_roll_iterative(a_xy, b_xy, duration_s: float,
-                         ground_obs: list[tuple[float, np.ndarray]],
-                         cfg: Mapping[str, Any]):
-    """Endpoint-exact roll fit with the same iterative fit->gate->refit
-    robust-gating idea as the flight branch: drop ground observations
-    whose residual from the current fit is a clear outlier (> 3x the
-    fit's own median residual, floored at 0.5m so a tight, well-behaved
-    fit isn't destabilised by refitting on near-nothing), refit, repeat
-    up to ``robust_gate_max_iters`` times."""
+def _fit_roll_iterative(
+    a_xy, b_xy, duration_s: float,
+    ground_obs: list[tuple[float, np.ndarray, float]],
+    cfg: Mapping[str, Any],
+):
+    """Endpoint-exact WEIGHTED roll fit with the same iterative
+    fit->gate->refit robust-gating idea as the flight branch: drop ground
+    observations whose residual from the current fit is a clear outlier
+    (> 3x the fit's own median residual, floored at 0.5m so a tight,
+    well-behaved fit isn't destabilised by refitting on near-nothing),
+    refit, repeat up to ``robust_gate_max_iters`` times. ``ground_obs``
+    entries are ``(t_s, xy, weight)`` -- weight lets a non-event manual
+    anchor click dominate real detector observations in the SAME chain
+    fit (see ``anchor_fit_weight``) without ever being pinned exactly."""
     active = list(ground_obs)
     roll = fit_roll_segment(a_xy, b_xy, duration_s, active,
                              mu_max=cfg["roll_mu_max"])
@@ -337,7 +565,7 @@ def _fit_roll_iterative(a_xy, b_xy, duration_s: float,
         if not active:
             break
         resid = [float(np.linalg.norm(roll.eval([t_s], z=0.0)[0][:2] - xy))
-                  for t_s, xy in active]
+                  for t_s, xy, _w in active]
         thresh = max(0.5, 3.0 * float(np.median(resid)))
         new_active = [ob for ob, r in zip(active, resid) if r <= thresh]
         if len(new_active) == len(active):
@@ -469,24 +697,41 @@ def _solve_span(
         return {}, []
     duration_s = duration_frames / ctx.fps
 
-    span_rays = [r for r in ray_anchors if a_knot.frame < r.frame < b_knot.frame]
-    model = _choose_model(a_knot, b_knot, span_rays)
+    model = _choose_model(ctx, a_knot, b_knot, observations, ray_anchors, cfg)
 
     if model == "roll":
         z_level = 0.5 * (float(a_knot.xyz[2]) + float(b_knot.xyz[2]))
-        ground_obs: list[tuple[float, np.ndarray]] = []
+
+        def _ground_project(frame: int, uv: tuple[float, float]) -> np.ndarray | None:
+            C, d = ctx.ray(frame, uv)
+            dz = float(d[2])
+            if abs(dz) < 1e-9:
+                return None
+            s = (z_level - float(C[2])) / dz
+            if s <= 0:
+                return None
+            return C + s * d
+
+        # ground_obs mixes real detector observations (weight = their own
+        # confidence) with non-event manual anchor clicks (weight =
+        # anchor_fit_weight, tuned much higher -- see DEFAULT_CFG -- so
+        # the WHOLE chain stays one smooth roll while still landing close
+        # to every click, instead of pinning each one exactly).
+        ground_obs: list[tuple[float, np.ndarray, float]] = []
         for o in observations:
             if not (a_knot.frame < o.frame < b_knot.frame):
                 continue
-            C, d = ctx.ray(o.frame, o.uv)
-            dz = float(d[2])
-            if abs(dz) < 1e-9:
+            P = _ground_project(o.frame, o.uv)
+            if P is not None:
+                ground_obs.append(((o.frame - a_knot.frame) / ctx.fps, P[:2], float(o.conf)))
+        for r in ray_anchors:
+            if not (a_knot.frame < r.frame < b_knot.frame):
                 continue
-            s = (z_level - float(C[2])) / dz
-            if s <= 0:
-                continue
-            P = C + s * d
-            ground_obs.append(((o.frame - a_knot.frame) / ctx.fps, P[:2]))
+            P = _ground_project(r.frame, r.uv)
+            if P is not None:
+                ground_obs.append(((r.frame - a_knot.frame) / ctx.fps, P[:2],
+                                    float(cfg["anchor_fit_weight"])))
+
         roll = _fit_roll_iterative(a_knot.xyz[:2], b_knot.xyz[:2], duration_s,
                                     ground_obs, cfg)
         frames = list(range(a_knot.frame, b_knot.frame + 1))
@@ -501,23 +746,54 @@ def _solve_span(
         # auto-knot accept/reject gate (_integrate_auto_knots) and the
         # split-and-retry trigger to a badly-fitting roll.
         roll_evid = _span_evidence(observations, ray_anchors, a_knot.frame,
-                                    b_knot.frame, cfg["ray_anchor_weight"])
-        worst_roll: tuple[int, float] | None = None
+                                    b_knot.frame, cfg["anchor_fit_weight"])
+        worst_roll: tuple[int, tuple[float, float], float] | None = None
         for frame, uv, _w in roll_evid:
             err = _reproj_px(ctx, frame, pts[frame], uv)
-            if worst_roll is None or err > worst_roll[1]:
-                worst_roll = (frame, err)
+            if worst_roll is None or err > worst_roll[2]:
+                worst_roll = (frame, uv, err)
 
         info = {"span": (a_knot.frame, b_knot.frame), "model": "roll",
                 "n_obs": len(ground_obs),
-                "max_residual_px": worst_roll[1] if worst_roll else None}
+                "max_residual_px": worst_roll[2] if worst_roll else None}
+
+        # Split-and-retry, same mechanism as flight: a REAL football chain
+        # between two rare events (e.g. a long uninterrupted dribble) can
+        # have genuine direction changes a single straight-line+friction
+        # roll can't capture. This is data-driven (only fires when the
+        # residual demands it, bounded by max_splits_per_span) and thus
+        # fundamentally different from the pre-iteration-3 bug: it never
+        # fires just because a click exists, only when the single-model
+        # fit demonstrably fails -- discovered on real evidence (gberch/
+        # kroupi01/origi01 synthetic scenarios all regressed ~3-10x on
+        # plain "hybrid" without this, because a chain with dozens of
+        # non-event anchors along a genuinely curved real path was being
+        # forced through one rigid quadratic).
+        if (worst_roll is not None
+                and worst_roll[2] > cfg["inlier_px"] * cfg["split_residual_factor"]
+                and splits_used < cfg["max_splits_per_span"]):
+            split_frame, split_uv, _err = worst_roll
+            split_xy = _ground_project(split_frame, split_uv)
+            if split_xy is not None:
+                split_xyz = np.array([split_xy[0], split_xy[1], z_level])
+                split_knot = _Knot(frame=split_frame, xyz=split_xyz,
+                                    state="waypoint", kind="internal", is_manual=False)
+                internal_knot_frames.append(split_frame)
+                pts1, info1 = _solve_span(ctx, a_knot, split_knot, observations,
+                                           ray_anchors, cfg, splits_used + 1,
+                                           internal_knot_frames)
+                pts2, info2 = _solve_span(ctx, split_knot, b_knot, observations,
+                                           ray_anchors, cfg, splits_used + 1,
+                                           internal_knot_frames)
+                return {**pts1, **pts2}, [*info1, *info2]
+
         return pts, [info]
 
     # --- flight (iterative robust gating: fit -> gate outliers by
     # reprojection residual -> refit, up to robust_gate_max_iters times or
     # until the inlier set stabilises) --------------------------------
     evid_all = _span_evidence(observations, ray_anchors, a_knot.frame, b_knot.frame,
-                               cfg["ray_anchor_weight"])
+                               cfg["anchor_fit_weight"])
     cd = cfg["cd"]
     active_evid = list(evid_all)
     v0 = shoot_arc(a_knot.xyz, 0.0, b_knot.xyz, duration_s, cd=cd,
@@ -622,7 +898,7 @@ def _build_physics_track(
             head_start = min(head_candidates)
             head_evid = _span_evidence(observations, ray_anchors,
                                         head_start - 1, first_frame,
-                                        cfg["ray_anchor_weight"])
+                                        cfg["anchor_fit_weight"])
             fitted = _fit_open_end(ctx, hard_knots[0], head_evid, -1, cfg)
             for f in range(head_start, first_frame):
                 pts[f] = fitted.get(f, hard_knots[0].xyz)
@@ -635,7 +911,7 @@ def _build_physics_track(
             tail_end = max(tail_candidates)
             tail_evid = _span_evidence(observations, ray_anchors,
                                         last_frame, tail_end + 1,
-                                        cfg["ray_anchor_weight"])
+                                        cfg["anchor_fit_weight"])
             fitted = _fit_open_end(ctx, hard_knots[-1], tail_evid, 1, cfg)
             for f in range(last_frame + 1, tail_end + 1):
                 pts[f] = fitted.get(f, hard_knots[-1].xyz)
@@ -646,6 +922,90 @@ def _build_physics_track(
             })
 
     return pts, diagnostics, internal_knot_frames
+
+
+def _smooth_non_event_knot_windows(
+    ctx: Any,
+    pts: Mapping[int, np.ndarray],
+    hard_knots: Sequence[_Knot],
+    cfg: Mapping[str, Any],
+) -> dict[int, np.ndarray]:
+    """Local C1 fix for every NON-EVENT knot's velocity kink (see
+    ``resolve_knots``'s docstring for why this replaced iteration 3's
+    event-only chains): over a small window (``+/-k`` frames, k scaled
+    down for faster motion) centred on the knot, replace the raw
+    per-span-fit path with a two-piece cubic Hermite blend. Each piece
+    runs from the window EDGE — using that edge's own position and
+    velocity from the untouched per-span fit, so it joins smoothly with
+    everything outside the window — in to the knot's own exact position,
+    with a SHARED tangent AT the knot (the average of the incoming and
+    outgoing velocities there). The knot's own position is therefore
+    unchanged (still the exact click, or exactly the internal-split
+    position); only the velocity DIRECTION either side of it is turned
+    smoothly instead of kinking.
+    """
+    frames_sorted = sorted(pts)
+    if len(frames_sorted) < 3:
+        return dict(pts)
+    idx_of = {f: i for i, f in enumerate(frames_sorted)}
+    out: dict[int, np.ndarray] = dict(pts)
+
+    def _tangent(i: int) -> np.ndarray:
+        i_a = max(0, i - 1)
+        i_b = min(len(frames_sorted) - 1, i + 1)
+        fa, fb = frames_sorted[i_a], frames_sorted[i_b]
+        dt = (fb - fa) / ctx.fps
+        return (pts[fb] - pts[fa]) / dt if dt > 1e-9 else np.zeros(3)
+
+    for knot in hard_knots:
+        if _is_sharp_knot(knot):
+            continue
+        f0 = knot.frame
+        if f0 not in idx_of:
+            continue
+        i0 = idx_of[f0]
+        if i0 == 0 or i0 == len(frames_sorted) - 1:
+            continue  # clip edge -- nothing on one side to blend with
+
+        f_before, f_after = frames_sorted[i0 - 1], frames_sorted[i0 + 1]
+        dt_in = (f0 - f_before) / ctx.fps
+        dt_out = (f_after - f0) / ctx.fps
+        v_in = (pts[f0] - pts[f_before]) / dt_in if dt_in > 1e-9 else np.zeros(3)
+        v_out = (pts[f_after] - pts[f0]) / dt_out if dt_out > 1e-9 else np.zeros(3)
+        speed = 0.5 * (float(np.linalg.norm(v_in)) + float(np.linalg.norm(v_out)))
+
+        k = int(np.clip(
+            round(cfg["hermite_k_ref_frames"] * cfg["hermite_k_ref_speed_m_s"]
+                  / max(speed, 0.5)),
+            cfg["hermite_k_min"], cfg["hermite_k_max"]))
+
+        i_lo = max(0, i0 - k)
+        i_hi = min(len(frames_sorted) - 1, i0 + k)
+        f_lo, f_hi = frames_sorted[i_lo], frames_sorted[i_hi]
+        if f_lo == f0 or f_hi == f0:
+            continue
+
+        m_lo, m_hi = _tangent(i_lo), _tangent(i_hi)
+        m_avg = 0.5 * (v_in + v_out)
+        p_lo, p_knot, p_hi = pts[f_lo], pts[f0], pts[f_hi]
+
+        frames_a = frames_sorted[i_lo:i0 + 1]
+        if len(frames_a) >= 2:
+            T_a = (f0 - f_lo) / ctx.fps
+            fracs_a = np.array([(f - f_lo) / (f0 - f_lo) for f in frames_a])
+            pos_a = hermite_blend(p_lo, m_lo * T_a, p_knot, m_avg * T_a, fracs_a)
+            for f, p in zip(frames_a, pos_a):
+                out[f] = p
+
+        frames_b = frames_sorted[i0:i_hi + 1]
+        if len(frames_b) >= 2:
+            T_b = (f_hi - f0) / ctx.fps
+            fracs_b = np.array([(f - f0) / (f_hi - f0) for f in frames_b])
+            pos_b = hermite_blend(p_knot, m_avg * T_b, p_hi, m_hi * T_b, fracs_b)
+            for f, p in zip(frames_b, pos_b):
+                out[f] = p
+
+    return out
 
 
 def _delta_evidence(
@@ -674,7 +1034,24 @@ def _delta_evidence(
         p_phys = pts.get(r.frame)
         if p_phys is None:
             continue
-        _, along = point_ray_distance(p_phys, r.C, r.d_hat)
+        perp, along = point_ray_distance(p_phys, r.C, r.d_hat)
+        # Unlike an observation (gated above by px reprojection error), a
+        # ray anchor's faithful point sits ON its ray BY CONSTRUCTION, so
+        # its own reprojection is always ~0px regardless of how far the
+        # physics baseline actually is from that ray -- pixel error can't
+        # gate it. Gate on the baseline-to-ray PERPENDICULAR distance
+        # (metres) instead: when the physics fit is already far from an
+        # anchor's ray (a genuinely mislabelled click, or a chain the fit
+        # can't fully honour), forcing the blend to jump onto that ray
+        # anyway created a large, spatially-isolated delta spike that
+        # leaked into several neighbouring frames via the smoothing
+        # kernel (observed: a single inconsistent anchor costing ~4m of
+        # error across a ~15-frame window). Such an anchor is left
+        # unpulled here -- it's already visible in
+        # diagnostics["anchor_not_honoured"] instead of silently
+        # distorting nearby frames.
+        if perp > cfg["anchor_delta_max_m"]:
+            continue
         faithful = r.C + max(along, 0.0) * r.d_hat
         delta = faithful - p_phys
         evidence[r.frame] = (tuple(float(x) for x in delta), float(cfg["ray_anchor_weight"]))
@@ -797,7 +1174,13 @@ def _run_hybrid_full(
     auto_diag = {"n_candidates": 0, "n_accepted": 0, "n_rejected": 0,
                  "n_dropped_near_manual": 0, "n_auto_rays_added": 0}
     if auto_anchors:
-        auto_hard, auto_rays = resolve_knots(ctx, auto_anchors, fixes=())
+        # Only auto EVENTS are candidate knots at all -- an auto
+        # "grounded"/"airborne_*" entry is a synthetic interpolation of
+        # evidence already folded into the chain fit as soft evidence, so
+        # it carries no new information and is ignored outright rather
+        # than even being considered.
+        auto_events = [a for a in auto_anchors if _anchor_attrs(a)[2] in EVENT_STATES]
+        auto_hard, auto_rays = resolve_knots(ctx, auto_events, fixes=())
         hard_knots, accepted, rejected, n_dropped, extra_rays = _integrate_auto_knots(
             ctx, hard_knots, ray_anchors, auto_hard, auto_rays, obs_sorted, full_cfg)
         ray_anchors = sorted(list(ray_anchors) + extra_rays, key=lambda r: r.frame)
@@ -815,14 +1198,41 @@ def _run_hybrid_full(
     if not pts:
         empty = Track(clip_id=ctx.clip_id, method="hybrid", frames=())
         return empty, {"spans": [], "n_knots": 0, "n_ray_anchors": 0,
-                        "auto_anchors": auto_diag}
+                        "auto_anchors": auto_diag, "anchor_residuals": [],
+                        "anchor_not_honoured": []}
+
+    # Local C1 fix at every NON-EVENT knot (see resolve_knots' docstring):
+    # smooths the velocity kink over a small window without moving the
+    # knot's own position or touching the (physically real) breaks at
+    # EVENT/fix/internal-split knots.
+    pts = _smooth_non_event_knot_windows(ctx, pts, hard_knots, full_cfg)
 
     evidence = _delta_evidence(ctx, pts, obs_sorted, ray_anchors, full_cfg)
-    event_frames = ([k.frame for k in hard_knots] + internal_knot_frames)
+    sharp_frames = [k.frame for k in hard_knots if _is_sharp_knot(k)]
+    event_frames = sharp_frames + internal_knot_frames
     frames_sorted = sorted(pts)
     blended = blend_deltas(frames_sorted, evidence,
                             halflife_frames=full_cfg["blend_halflife_frames"],
                             event_frames=event_frames)
+
+    # delta must be C1 too: cap its own frame-to-frame change to a
+    # fraction of the physics track's local speed (centred finite
+    # difference), independent of blend_deltas' kernel smoothness. A
+    # smooth kernel alone can still respond quickly when evidence is
+    # dense; this is the second, direct guard.
+    max_step_by_frame: dict[int, float] = {}
+    frac = full_cfg["blend_max_delta_step_frac"]
+    speed_floor = full_cfg["blend_max_delta_step_floor_m_s"]
+    for i, f in enumerate(frames_sorted):
+        f_prev = frames_sorted[max(i - 1, 0)]
+        f_next = frames_sorted[min(i + 1, len(frames_sorted) - 1)]
+        dt = (f_next - f_prev) / ctx.fps
+        speed = (float(np.linalg.norm(pts[f_next] - pts[f_prev])) / dt
+                 if dt > 1e-9 else 0.0)
+        max_step_by_frame[f] = frac * max(speed, speed_floor) / ctx.fps
+    blended = clamp_delta_rate(frames_sorted, blended,
+                                max_step_m=max_step_by_frame,
+                                event_frames=event_frames)
 
     knot_by_frame = {k.frame: k for k in hard_knots}
     ray_by_frame = {r.frame: r for r in ray_anchors}
@@ -836,20 +1246,51 @@ def _run_hybrid_full(
         mode = "faithful" if conf >= 0.5 else "simulated"
         out_conf: float | None = conf
 
-        if f in knot_by_frame:
+        if f in knot_by_frame and _is_sharp_knot(knot_by_frame[f]):
+            # EVENT/fix/internal-split knot: exact re-snap, as always --
+            # a real velocity break is expected here.
             final = np.array(knot_by_frame[f].xyz, dtype=float)
             mode, out_conf = "anchor", 1.0
+        elif f in knot_by_frame:
+            # NON-EVENT knot: position is already exact (or within
+            # click-noise tolerance) via _smooth_non_event_knot_windows'
+            # Hermite pass-through, so no re-snap is needed here; mode is
+            # still reported as "anchor". Residual is recorded below
+            # (diagnostics["anchor_residuals"]) instead of forcing it to
+            # exactly zero, which is this iteration's documented,
+            # narrowly-scoped relaxation of "operator input always wins".
+            mode = "anchor"
         elif f in ray_by_frame:
-            r = ray_by_frame[f]
-            _, along = point_ray_distance(final, r.C, r.d_hat)
-            final = r.C + max(along, 0.0) * r.d_hat
-            mode, out_conf = "anchor", 1.0
+            mode = "anchor"
 
         final[2] = max(float(final[2]), BALL_RADIUS_M)
         mode_counts[mode] = mode_counts.get(mode, 0) + 1
         out_frames.append(TrackFrame(
             frame=f, xyz=(float(final[0]), float(final[1]), float(final[2])),
             mode=mode, conf=out_conf))
+
+    by_frame_final = {tf.frame: tf.xyz for tf in out_frames if tf.xyz is not None}
+    not_honoured_px = full_cfg["anchor_not_honoured_px"]
+    anchor_residuals = []
+    for r in ray_anchors:
+        xyz = by_frame_final.get(r.frame)
+        if xyz is None:
+            continue
+        res_px = _reproj_px(ctx, r.frame, np.asarray(xyz), r.uv)
+        anchor_residuals.append({"frame": r.frame, "state": r.state,
+                                  "residual_px": res_px})
+    for k in hard_knots:
+        if _is_sharp_knot(k):
+            continue  # trivially ~0px by exact re-snap; not informative
+        xyz = by_frame_final.get(k.frame)
+        if xyz is None:
+            continue
+        uv = ctx.project(k.frame, k.xyz)
+        res_px = _reproj_px(ctx, k.frame, np.asarray(xyz), (float(uv[0]), float(uv[1])))
+        anchor_residuals.append({"frame": k.frame, "state": k.state,
+                                  "residual_px": res_px})
+    anchor_not_honoured = [a["frame"] for a in anchor_residuals
+                            if a["residual_px"] > not_honoured_px]
 
     track = Track(clip_id=ctx.clip_id, method="hybrid", frames=tuple(out_frames))
     diagnostics = {
@@ -859,6 +1300,8 @@ def _run_hybrid_full(
         "n_internal_bounces": len(internal_knot_frames),
         "mode_counts": mode_counts,
         "auto_anchors": auto_diag,
+        "anchor_residuals": anchor_residuals,
+        "anchor_not_honoured": anchor_not_honoured,
     }
     return track, diagnostics
 
@@ -934,6 +1377,13 @@ def _print_clip_report(clip_id: str, ctx: Any, track: Track, diagnostics: dict,
         f"{k}={100.0 * v / n:.1f}%" for k, v in sorted(mode_counts.items())))
     print("segment models: " + ", ".join(
         f"{k}={v}" for k, v in sorted(model_counts.items())))
+    anchor_res = diagnostics.get("anchor_residuals", [])
+    if anchor_res:
+        arr = np.array([a["residual_px"] for a in anchor_res])
+        not_honoured = diagnostics.get("anchor_not_honoured", [])
+        print(f"non-event anchor residual px: median={np.median(arr):.2f}  "
+              f"p95={np.percentile(arr, 95):.2f}  (n={len(arr)}, "
+              f"not_honoured>4px={len(not_honoured)})")
     print(f"runtime: {runtime_s:.1f}s")
 
 

@@ -22,9 +22,9 @@ from dataclasses import dataclass, field
 import numpy as np
 import pytest
 
-from src.utils.ball_eval import point_ray_distance
+from src.utils.ball_eval import naturalness_violations, point_ray_distance
 
-from ..blend import blend_deltas, exponential_kernel, segment_frames
+from ..blend import blend_deltas, clamp_delta_rate, segment_frames, smooth_kernel
 from ..hybrid import DEFAULT_CFG, _run_hybrid_full, resolve_knots, run_hybrid
 from ..hybrid_physics import (
     BALL_RADIUS_M,
@@ -108,10 +108,50 @@ def test_bounce_velocity_flips_vertical_scales_by_restitution():
 # 2. blend
 # ---------------------------------------------------------------------------
 
-def test_exponential_kernel_decays_and_halves():
-    assert exponential_kernel(0.0, 5.0) == 1.0
-    assert exponential_kernel(5.0, 5.0) == pytest.approx(0.5)
-    assert exponential_kernel(10.0, 5.0) == pytest.approx(0.25)
+def test_smooth_kernel_decays_and_halves():
+    # Gaussian-family (2**-(dt/h)**2): kernel(0)=1, kernel(h)=0.5 exactly
+    # (by construction, same "halflife" contract as the old exponential
+    # kernel), but it decays FASTER beyond one halflife (no long Laplace
+    # tail) and, unlike the old |dt|-based kernel, has no corner in its
+    # derivative at dt=0 -- see blend.py's module docstring.
+    assert smooth_kernel(0.0, 5.0) == 1.0
+    assert smooth_kernel(5.0, 5.0) == pytest.approx(0.5)
+    assert smooth_kernel(10.0, 5.0) == pytest.approx(0.0625)
+    assert smooth_kernel(-5.0, 5.0) == pytest.approx(0.5)  # symmetric
+
+
+def test_clamp_delta_rate_bounds_step_and_passes_through_conf():
+    frames = list(range(6))
+    # A delta series with one big jump between frame 2 and 3.
+    blended = {
+        0: ((0.0, 0.0, 0.0), 0.9),
+        1: ((0.0, 0.0, 0.0), 0.9),
+        2: ((0.0, 0.0, 0.0), 0.9),
+        3: ((1.0, 0.0, 0.0), 0.8),
+        4: ((1.0, 0.0, 0.0), 0.8),
+        5: ((1.0, 0.0, 0.0), 0.8),
+    }
+    out = clamp_delta_rate(frames, blended, max_step_m=0.1)
+    # conf passes through unchanged
+    assert out[3][1] == 0.8
+    # the jump is spread out at <= 0.1 m/frame instead of landing all at once
+    for f in range(1, 6):
+        step = np.linalg.norm(np.array(out[f][0]) - np.array(out[f - 1][0]))
+        assert step <= 0.1 + 1e-9
+    # it's still walking steadily toward the full jump (3 steps * 0.1 cap)
+    assert out[5][0][0] == pytest.approx(0.3, abs=1e-6)
+    assert out[5][0][0] > out[4][0][0] > out[3][0][0] > 0.0
+
+
+def test_clamp_delta_rate_respects_event_walls():
+    frames = list(range(4))
+    blended = {0: ((0.0, 0.0, 0.0), 1.0), 1: ((5.0, 0.0, 0.0), 1.0),
+               2: ((0.0, 0.0, 0.0), 1.0), 3: ((0.0, 0.0, 0.0), 1.0)}
+    # Without a wall, the big jump at frame 1 would still be getting
+    # walked back down at frame 2; with an event wall at frame 1, frame 2
+    # starts a fresh segment with no `prev` and is untouched.
+    out = clamp_delta_rate(frames, blended, max_step_m=0.5, event_frames=[1])
+    assert out[2][0] == (0.0, 0.0, 0.0)
 
 
 def test_segment_frames_splits_at_events():
@@ -275,10 +315,12 @@ def _find_landing_time(p0, v0, cd, t_max=5.0, n=4000):
 
 def _synthetic_drag_kick_scenario(fps=30.0, cd=0.30):
     """A single kick: ball launched from a player's foot, flies under
-    gravity+drag, lands at a grounded manual anchor when it actually
-    returns to ground level. Manual anchors at both ends; a scatter of
-    confident 'detector' observations along the flight (each projected
-    from the true trajectory plus a little pixel noise)."""
+    gravity+drag, and BOUNCES (a real EVENT -- both ends of this scenario
+    are EVENT-state anchors, so they stay hard span-boundary knots under
+    the iteration-3 taxonomy) when it actually returns to ground level.
+    Manual anchors at both ends; a scatter of confident 'detector'
+    observations along the flight (each projected from the true
+    trajectory plus a little pixel noise)."""
     ctx = _make_camera()
     p_a = np.array([0.0, 0.0, BALL_R])
     v0_true = np.array([13.0, 0.0, 8.5])
@@ -293,7 +335,7 @@ def _synthetic_drag_kick_scenario(fps=30.0, cd=0.30):
         _FakeAnchor(frame=frame_a, image_xy=tuple(ctx.project(frame_a, p_a)),
                     state="kick", player_id="P001", bone="right_foot"),
         _FakeAnchor(frame=frame_b, image_xy=tuple(ctx.project(frame_b, p_b)),
-                    state="grounded"),
+                    state="bounce"),
     ]
 
     rng = np.random.default_rng(11)
@@ -314,9 +356,29 @@ def test_resolve_knots_splits_hard_vs_ray():
     anchors = anchors + [_FakeAnchor(frame=50, image_xy=(500.0, 500.0), state="airborne_mid")]
     hard, rays = resolve_knots(ctx, anchors)
     assert len(hard) == 2
-    assert {k.state for k in hard} == {"kick", "grounded"}
+    assert {k.state for k in hard} == {"kick", "bounce"}
     assert len(rays) == 1
     assert rays[0].state == "airborne_mid"
+
+
+def test_resolve_knots_non_event_grounded_anchor_is_hard_but_not_sharp():
+    """Iteration 3.1 taxonomy: a 'grounded' anchor (non-event) IS still a
+    hard span-boundary knot (restored iteration-2 per-anchor accuracy —
+    see resolve_knots' docstring), but it's not a "sharp" knot
+    (_is_sharp_knot): no physically-real velocity break belongs there, so
+    its kink is fixed locally (_smooth_non_event_knot_windows) instead of
+    it being excluded from knot-hood entirely."""
+    from ..hybrid import _is_sharp_knot
+    ctx = _make_camera()
+    p_mid_ground = np.array([9.0, 1.0, BALL_R])
+    uv = tuple(float(x) for x in ctx.project(20, p_mid_ground))
+    anchor = _FakeAnchor(frame=20, image_xy=uv, state="grounded")
+    hard, rays = resolve_knots(ctx, [anchor])
+    assert rays == []
+    assert len(hard) == 1
+    assert hard[0].state == "grounded"
+    assert hard[0].frame == 20
+    assert not _is_sharp_knot(hard[0])
 
 
 def test_run_hybrid_manual_anchors_never_move():
@@ -478,12 +540,32 @@ def test_run_hybrid_auto_anchor_near_manual_is_dropped():
     auto_anchor = _FakeAnchor(
         frame=near_frame,
         image_xy=tuple(float(x) for x in ctx.project(near_frame, p_near)),
-        state="grounded")
+        state="bounce")  # EVENT state -- a non-event state wouldn't even
+                          # reach the candidate pool (see the dedicated
+                          # ignore-non-event-auto-anchors test below)
     track, diag = _run_hybrid_full(ctx, obs, anchors, auto_anchors=[auto_anchor],
                                     cfg={"cd": cd, "fit_cd": False})
     assert diag["auto_anchors"]["n_candidates"] == 1
     assert diag["auto_anchors"]["n_accepted"] == 0
     assert diag["auto_anchors"]["n_dropped_near_manual"] == 1
+
+
+def test_run_hybrid_auto_anchor_non_event_state_is_ignored_outright():
+    """A non-event auto anchor (e.g. 'grounded', 'airborne_*') never even
+    becomes a candidate -- it's a synthetic interpolation of evidence
+    already folded into the chain fit, not new information (item 3)."""
+    ctx, anchors, obs, p_a, p_b, v0_true, cd, frame_a, frame_b, _T = (
+        _synthetic_drag_kick_scenario())
+    mid_frame = _mid_span_frame(frame_a, frame_b)
+    t_s = (mid_frame - frame_a) / ctx.fps
+    p_mid = simulate(p_a, v0_true, [t_s], cd=cd)[0]
+    uv_mid = tuple(float(x) for x in ctx.project(mid_frame, p_mid))
+    auto_anchor = _FakeAnchor(frame=mid_frame, image_xy=uv_mid, state="airborne_mid")
+    track, diag = _run_hybrid_full(ctx, obs, anchors, auto_anchors=[auto_anchor],
+                                    cfg={"cd": cd, "fit_cd": False})
+    assert diag["auto_anchors"]["n_candidates"] == 0
+    assert diag["auto_anchors"]["n_accepted"] == 0
+    assert diag["auto_anchors"]["n_rejected"] == 0
 
 
 def _mid_span_frame(frame_a: int, frame_b: int, gap: int = 2) -> int:
@@ -522,10 +604,10 @@ def test_run_hybrid_auto_anchor_consistent_with_evidence_is_accepted():
 
 
 def test_run_hybrid_auto_anchor_inconsistent_with_evidence_is_rejected():
-    """An auto anchor resolved WAY off the actual arc (a 'grounded' click
-    on a point that's actually mid-air, so it resolves onto the ground
-    plane far from the true trajectory) must be rejected, not silently
-    bend the trajectory."""
+    """An auto EVENT anchor resolved WAY off the actual arc (a 'bounce'
+    click on a point that's actually mid-air, so it resolves onto the
+    ground plane far from the true trajectory) must be rejected, not
+    silently bend the trajectory."""
     ctx, anchors, obs, p_a, p_b, v0_true, cd, frame_a, frame_b, T = (
         _synthetic_drag_kick_scenario())
     mid_frame = _mid_span_frame(frame_a, frame_b)
@@ -533,10 +615,86 @@ def test_run_hybrid_auto_anchor_inconsistent_with_evidence_is_rejected():
     p_mid = simulate(p_a, v0_true, [t_s], cd=cd)[0]
     assert p_mid[2] > 1.0, "test assumes the true arc is well off the ground here"
     uv_mid = tuple(float(x) for x in ctx.project(mid_frame, p_mid))
-    auto_anchor = _FakeAnchor(frame=mid_frame, image_xy=uv_mid, state="grounded")
+    auto_anchor = _FakeAnchor(frame=mid_frame, image_xy=uv_mid, state="bounce")
 
     track, diag = _run_hybrid_full(ctx, obs, anchors, auto_anchors=[auto_anchor],
                                     cfg={"cd": cd, "fit_cd": False})
     assert diag["auto_anchors"]["n_candidates"] == 1
     assert diag["auto_anchors"]["n_accepted"] == 0
     assert diag["auto_anchors"]["n_rejected"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 5. iteration 3 regression test: non-event anchors must not create kinks
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _NatFrame:
+    """Minimal ``BallTrack.frames``-like shim for
+    ``ball_eval.naturalness_violations`` (wants ``.frame``/``.world_xyz``/
+    ``.state``); this whole synthetic scenario is a ground roll, so
+    ``state`` is fixed at ``"grounded"`` (never ``"flight"``, which is the
+    only value ``naturalness_violations`` special-cases)."""
+    frame: int
+    world_xyz: tuple | None
+    state: str = "grounded"
+
+
+def test_straight_roll_with_noisy_anchors_produces_no_heading_breaks():
+    """The core iteration-3 regression test. A straight, constant-
+    deceleration roll bracketed by two EVENT knots (bounce -> bounce,
+    so _choose_model picks 'roll') with 4 NON-EVENT 'grounded' anchor
+    clicks in between, each perturbed by +/-2px click noise. Under the
+    pre-iteration-3 behaviour every one of those 4 clicks became an
+    independent hard knot and a velocity-discontinuous span boundary --
+    exactly the mechanism diagnosed on gberch/mismatch (35 heading
+    breaks vs. 8 in truth, every one on a non-event anchor frame). Under
+    the new taxonomy they're weighted evidence inside ONE continuous
+    roll fit, so the reconstructed path must have zero heading-break
+    violations and every anchor must land within 3px reprojection."""
+    ctx = _make_camera()
+    fps = ctx.fps
+    p_a_xy = np.array([0.0, 0.0])
+    v0_true = np.array([-8.0, 3.0])
+    accel_true = np.array([2.0, -0.75])  # roughly opposes v0 (friction-like)
+    duration_s = 2.0
+    frame_a = 10
+    frame_b = frame_a + int(round(duration_s * fps))
+    duration_s = (frame_b - frame_a) / fps
+
+    def true_xy(t_s: float) -> np.ndarray:
+        return p_a_xy + v0_true * t_s + 0.5 * accel_true * t_s ** 2
+
+    p_a = np.array([p_a_xy[0], p_a_xy[1], BALL_R])
+    p_b_xy = true_xy(duration_s)
+    p_b = np.array([p_b_xy[0], p_b_xy[1], BALL_R])
+
+    anchors = [
+        _FakeAnchor(frame=frame_a, image_xy=tuple(float(x) for x in ctx.project(frame_a, p_a)),
+                    state="bounce"),
+        _FakeAnchor(frame=frame_b, image_xy=tuple(float(x) for x in ctx.project(frame_b, p_b)),
+                    state="bounce"),
+    ]
+
+    rng = np.random.default_rng(42)
+    for frac in (0.2, 0.4, 0.6, 0.8):
+        t_s = frac * duration_s
+        frame = frame_a + int(round(t_s * fps))
+        xy = true_xy(t_s)
+        p_true = np.array([xy[0], xy[1], BALL_R])
+        uv = ctx.project(frame, p_true) + rng.uniform(-2.0, 2.0, size=2)
+        anchors.append(_FakeAnchor(frame=frame, image_xy=(float(uv[0]), float(uv[1])),
+                                    state="grounded"))
+
+    track, diag = _run_hybrid_full(ctx, [], anchors, cfg={"cd": 0.0, "fit_cd": False})
+
+    assert diag["anchor_residuals"], "expected non-event anchor residuals to be reported"
+    for a in diag["anchor_residuals"]:
+        assert a["residual_px"] < 3.0, (
+            f"anchor at frame {a['frame']} residual {a['residual_px']:.2f}px >= 3px")
+    assert diag["anchor_not_honoured"] == []
+
+    nat_frames = [_NatFrame(frame=tf.frame, world_xyz=tf.xyz) for tf in track.frames]
+    violations = naturalness_violations(nat_frames, [frame_a, frame_b], fps)
+    heading_breaks = [v for v in violations if v.kind == "heading_break"]
+    assert heading_breaks == [], f"unexpected heading breaks: {heading_breaks}"

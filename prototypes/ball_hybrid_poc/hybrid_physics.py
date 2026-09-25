@@ -74,24 +74,52 @@ def simulate(
     magnus_coeff: float = DEFAULT_MAGNUS_COEFF,
     dt_max: float = 1.0 / 60.0,
 ) -> np.ndarray:
-    """Positions at ``times_s`` (>= 0, need not be sorted) of the ball
-    launched from ``p0`` with velocity ``v0`` at t=0, under gravity +
-    quadratic drag (``cd``) + optional Magnus (``omega``, world-frame
-    angular velocity rad/s). Fixed-step RK4 integration, linearly
-    interpolated onto the requested sample times. Shape ``(N, 3)``.
+    """Positions at ``times_s`` (need not be sorted, MAY be negative) of
+    the ball at ``p0``/``v0`` at t=0, under gravity + quadratic drag
+    (``cd``) + optional Magnus (``omega``, world-frame angular velocity
+    rad/s). Fixed-step RK4 integration, linearly interpolated onto the
+    requested sample times. Shape ``(N, 3)``.
+
+    A negative time integrates *backward* from ``p0``/``v0`` (used by the
+    hybrid extractor's free-end head-span fit, where a knot's position is
+    known but frames before it need extrapolating). RK4 is time-symmetric
+    — stepping with a negative ``h`` numerically solves the same ODE
+    backward — so the forward and backward branches share one stepper;
+    they're just integrated as two separate one-directional passes from
+    t=0 (positive times forward, negative times' magnitudes backward)
+    since a single monotonically-increasing substep grid can't cover
+    both directions at once.
     """
     p0 = np.asarray(p0, dtype=float)
     v0 = np.asarray(v0, dtype=float)
     times_s = np.atleast_1d(np.asarray(times_s, dtype=float))
-    if np.any(times_s < -1e-9):
-        raise ValueError("simulate does not support negative times")
-    t_end = float(np.max(times_s))
+    out = np.empty((len(times_s), 3))
+    fwd = times_s >= 0
+    bwd = ~fwd
+    if fwd.any():
+        out[fwd] = _integrate_direction(p0, v0, times_s[fwd], cd, omega,
+                                         magnus_coeff, dt_max, direction=1.0)
+    if bwd.any():
+        out[bwd] = _integrate_direction(p0, v0, -times_s[bwd], cd, omega,
+                                         magnus_coeff, dt_max, direction=-1.0)
+    return out
+
+
+def _integrate_direction(
+    p0: np.ndarray, v0: np.ndarray, abs_times_s: np.ndarray,
+    cd: float, omega: Vec3 | None, magnus_coeff: float, dt_max: float,
+    direction: float,
+) -> np.ndarray:
+    """RK4 from t=0 to ``direction * max(abs_times_s)``, sampled (via
+    linear interpolation) at ``direction * abs_times_s``. ``abs_times_s``
+    are all >= 0; ``direction`` is +1.0 (forward) or -1.0 (backward)."""
+    t_end = float(np.max(abs_times_s))
     if t_end <= 0:
-        return np.tile(p0, (len(times_s), 1))
+        return np.tile(p0, (len(abs_times_s), 1))
 
     n = max(1, int(math.ceil(t_end / dt_max)))
-    h = t_end / n
-    ts = np.linspace(0.0, t_end, n + 1)
+    h = direction * (t_end / n)
+    ts = np.linspace(0.0, t_end, n + 1)  # magnitudes, for interpolation
     ps = np.empty((n + 1, 3))
     ps[0] = p0
     p, v = p0.copy(), v0.copy()
@@ -108,9 +136,9 @@ def simulate(
         p = p + (h / 6.0) * (k1p + 2 * k2p + 2 * k3p + k4p)
         ps[i + 1] = p
 
-    out = np.empty((len(times_s), 3))
+    out = np.empty((len(abs_times_s), 3))
     for ax in range(3):
-        out[:, ax] = np.interp(times_s, ts, ps[:, ax])
+        out[:, ax] = np.interp(abs_times_s, ts, ps[:, ax])
     return out
 
 

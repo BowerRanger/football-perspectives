@@ -22,8 +22,10 @@ from dataclasses import dataclass, field
 import numpy as np
 import pytest
 
+from src.utils.ball_eval import point_ray_distance
+
 from ..blend import blend_deltas, exponential_kernel, segment_frames
-from ..hybrid import DEFAULT_CFG, resolve_knots, run_hybrid
+from ..hybrid import DEFAULT_CFG, _run_hybrid_full, resolve_knots, run_hybrid
 from ..hybrid_physics import (
     BALL_RADIUS_M,
     CD_DEFAULT,
@@ -177,6 +179,7 @@ class _FakeAnchor:
     player_id: str | None = None
     bone: str | None = None
     end_frame: int | None = None
+    goal_element: str | None = None
 
 
 @dataclass
@@ -207,6 +210,7 @@ class _FakeClipContext:
     per_frame_K: dict = field(default_factory=dict)
     per_frame_R: dict = field(default_factory=dict)
     per_frame_t: dict = field(default_factory=dict)
+    joints: dict = field(default_factory=dict)  # (frame,pid,bone) -> xyz
 
     def __post_init__(self):
         t = -self.R @ self.C
@@ -226,6 +230,11 @@ class _FakeClipContext:
     def ray(self, frame, uv):
         from src.utils.ball_eval import pixel_ray
         return pixel_ray(uv, self.K, self.R, self.per_frame_t[frame], self.distortion)
+
+    def player_context(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            joint_world=lambda frame, pid, bone: self.joints.get((frame, pid, bone)))
 
 
 def _make_camera(n_frames=90, fps=30.0):
@@ -373,3 +382,161 @@ def test_run_hybrid_empty_inputs_returns_empty_track():
     ctx = _make_camera()
     track = run_hybrid(ctx, [], [])
     assert track.frames == ()
+
+
+# ---------------------------------------------------------------------------
+# 4. iteration 2: goal_impact/catch knots, free-end head/tail, auto anchors
+# ---------------------------------------------------------------------------
+
+def test_resolve_knots_goal_impact_uses_goal_geometry():
+    """A goal_impact anchor with a goal_element resolves to a genuine hard
+    3-D knot via goal-frame geometry (post/crossbar/net intersection),
+    not a ray constraint — ``anchor_gt_world`` itself can't do this."""
+    ctx = _make_camera()
+    target = np.array([0.0, 34.0, 2.44])  # near-goal crossbar midpoint
+    uv = tuple(float(x) for x in ctx.project(20, target))
+    anchor = _FakeAnchor(frame=20, image_xy=uv, state="goal_impact",
+                          goal_element="crossbar")
+    hard, rays = resolve_knots(ctx, [anchor])
+    assert rays == []
+    assert len(hard) == 1
+    assert hard[0].kind == "goal_geometry"
+    assert np.linalg.norm(hard[0].xyz - target) < 1e-3
+
+
+def test_resolve_knots_catch_uses_hand_joint_like_touch():
+    """A catch anchor with a player_id/bone resolves via the same
+    joint-one-radius-along-the-sight-line convention as player_touch —
+    but anchor_gt_world only special-cases the literal string
+    'player_touch', so this exercises hybrid.py's own extension."""
+    ctx = _make_camera()
+    joint = np.array([5.0, 1.0, 1.8])
+    ctx.joints[(30, "KEEPER", "right_hand")] = joint
+    uv = tuple(float(x) for x in ctx.project(30, joint))
+    anchor = _FakeAnchor(frame=30, image_xy=uv, state="catch",
+                          player_id="KEEPER", bone="right_hand")
+    hard, rays = resolve_knots(ctx, [anchor])
+    assert rays == []
+    assert len(hard) == 1
+    assert hard[0].kind == "joint_depth"
+    C, d = ctx.ray(30, uv)
+    dist_to_joint = float(np.linalg.norm(joint - C))
+    dist_to_resolved = float(np.linalg.norm(hard[0].xyz - C))
+    # the ball sits one radius CLOSER to camera than the hand along the
+    # sight-line (it occludes the hand, not the other way round).
+    assert dist_to_resolved == pytest.approx(dist_to_joint - BALL_R, abs=1e-6)
+
+
+def test_fit_open_end_tail_flight_beats_holding_the_knot():
+    """A tail span with no landing knot (just a 'kick' launch + a handful
+    of confident post-kick detections) should fit a moving arc, not just
+    hold the kick point — checked against the true drag-free trajectory
+    used to generate the synthetic evidence."""
+    ctx = _make_camera()
+    cd = 0.0  # gravity-only true arc, so cfg cd=0/fit_cd=False matches exactly
+    p_a = np.array([0.0, 0.0, BALL_R])
+    v0_true = np.array([12.0, 1.0, 7.0])
+    frame_a = 5
+    fps = ctx.fps
+
+    rng = np.random.default_rng(5)
+    obs = []
+    for frac in np.linspace(0.1, 0.6, 6):
+        t_s = frac * 1.0
+        frame = int(round(frame_a + t_s * fps))
+        p_true = simulate(p_a, v0_true, [t_s], cd=cd)[0]
+        uv = ctx.project(frame, p_true) + rng.normal(scale=0.5, size=2)
+        obs.append(Observation(frame=frame, uv=(float(uv[0]), float(uv[1])),
+                                conf=0.9, source="detector"))
+
+    anchors = [_FakeAnchor(frame=frame_a,
+                            image_xy=tuple(float(x) for x in ctx.project(frame_a, p_a)),
+                            state="kick")]
+    track = run_hybrid(ctx, obs, anchors, cfg={"cd": 0.0, "fit_cd": False})
+    by_frame = {tf.frame: tf for tf in track.frames}
+
+    check_t = 0.35
+    check_frame = int(round(frame_a + check_t * fps))
+    true_p = simulate(p_a, v0_true, [check_t], cd=cd)[0]
+    assert check_frame in by_frame
+    got = np.array(by_frame[check_frame].xyz)
+    held_err = float(np.linalg.norm(p_a - true_p))
+    fit_err = float(np.linalg.norm(got - true_p))
+    assert fit_err < held_err, (
+        f"free-end fit error {fit_err:.3f}m should beat holding the knot "
+        f"({held_err:.3f}m)")
+    assert fit_err < 0.5
+
+
+def test_run_hybrid_auto_anchor_near_manual_is_dropped():
+    """An auto anchor within auto_anchor_min_frame_gap frames of a manual
+    knot never becomes an extra knot -- manual anchors always win."""
+    ctx, anchors, obs, p_a, p_b, v0_true, cd, frame_a, frame_b, _T = (
+        _synthetic_drag_kick_scenario())
+    near_frame = frame_a + 1  # within the default gap of 2
+    p_near = simulate(p_a, v0_true, [1.0 / ctx.fps], cd=cd)[0]
+    auto_anchor = _FakeAnchor(
+        frame=near_frame,
+        image_xy=tuple(float(x) for x in ctx.project(near_frame, p_near)),
+        state="grounded")
+    track, diag = _run_hybrid_full(ctx, obs, anchors, auto_anchors=[auto_anchor],
+                                    cfg={"cd": cd, "fit_cd": False})
+    assert diag["auto_anchors"]["n_candidates"] == 1
+    assert diag["auto_anchors"]["n_accepted"] == 0
+    assert diag["auto_anchors"]["n_dropped_near_manual"] == 1
+
+
+def _mid_span_frame(frame_a: int, frame_b: int, gap: int = 2) -> int:
+    mid = (frame_a + frame_b) // 2
+    if mid - frame_a <= gap or frame_b - mid <= gap:
+        mid = frame_a + max(gap + 1, (frame_b - frame_a) // 2)
+    return mid
+
+
+def test_run_hybrid_auto_anchor_consistent_with_evidence_is_accepted():
+    """An auto (current-stage) player_touch anchor whose click, combined
+    with a joint one ball-radius further along the same sight-line,
+    resolves to a point already exactly ON the well-fit arc should be
+    accepted as an extra knot (it can't make the fit any worse)."""
+    ctx, anchors, obs, p_a, p_b, v0_true, cd, frame_a, frame_b, T = (
+        _synthetic_drag_kick_scenario())
+    mid_frame = _mid_span_frame(frame_a, frame_b)
+    t_s = (mid_frame - frame_a) / ctx.fps
+    p_mid = simulate(p_a, v0_true, [t_s], cd=cd)[0]
+    uv_mid = tuple(float(x) for x in ctx.project(mid_frame, p_mid))
+    C, d_hat = ctx.ray(mid_frame, uv_mid)
+    _, along = point_ray_distance(p_mid, C, d_hat)
+    joint = C + (along + BALL_R) * d_hat  # -> _resolve joint_depth recovers p_mid exactly
+    ctx.joints[(mid_frame, "P099", "right_foot")] = joint
+
+    auto_anchor = _FakeAnchor(frame=mid_frame, image_xy=uv_mid, state="player_touch",
+                               player_id="P099", bone="right_foot")
+    track, diag = _run_hybrid_full(ctx, obs, anchors, auto_anchors=[auto_anchor],
+                                    cfg={"cd": cd, "fit_cd": False})
+    assert diag["auto_anchors"]["n_candidates"] == 1
+    assert diag["auto_anchors"]["n_accepted"] == 1
+    assert diag["auto_anchors"]["n_rejected"] == 0
+    by_frame = {tf.frame: tf for tf in track.frames}
+    assert by_frame[mid_frame].mode == "anchor"
+    assert np.allclose(by_frame[mid_frame].xyz, p_mid, atol=1e-3)
+
+
+def test_run_hybrid_auto_anchor_inconsistent_with_evidence_is_rejected():
+    """An auto anchor resolved WAY off the actual arc (a 'grounded' click
+    on a point that's actually mid-air, so it resolves onto the ground
+    plane far from the true trajectory) must be rejected, not silently
+    bend the trajectory."""
+    ctx, anchors, obs, p_a, p_b, v0_true, cd, frame_a, frame_b, T = (
+        _synthetic_drag_kick_scenario())
+    mid_frame = _mid_span_frame(frame_a, frame_b)
+    t_s = (mid_frame - frame_a) / ctx.fps
+    p_mid = simulate(p_a, v0_true, [t_s], cd=cd)[0]
+    assert p_mid[2] > 1.0, "test assumes the true arc is well off the ground here"
+    uv_mid = tuple(float(x) for x in ctx.project(mid_frame, p_mid))
+    auto_anchor = _FakeAnchor(frame=mid_frame, image_xy=uv_mid, state="grounded")
+
+    track, diag = _run_hybrid_full(ctx, obs, anchors, auto_anchors=[auto_anchor],
+                                    cfg={"cd": cd, "fit_cd": False})
+    assert diag["auto_anchors"]["n_candidates"] == 1
+    assert diag["auto_anchors"]["n_accepted"] == 0
+    assert diag["auto_anchors"]["n_rejected"] == 1

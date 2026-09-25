@@ -30,6 +30,8 @@ _WORKTREE_ROOT = _THIS_DIR.parents[1]
 if str(_WORKTREE_ROOT) not in sys.path:
     sys.path.insert(0, str(_WORKTREE_ROOT))
 
+from src.schemas.ball_anchor import BallAnchorSet  # noqa: E402
+from src.schemas.ball_track import BallTrack  # noqa: E402
 from src.utils import ball_eval as BE  # noqa: E402
 
 from prototypes.ball_hybrid_poc import ctx as poc_ctx  # noqa: E402
@@ -49,6 +51,10 @@ try:
     from prototypes.ball_hybrid_poc import hybrid  # type: ignore
 except Exception:  # noqa: BLE001 — B may not have landed yet
     hybrid = None
+try:
+    from prototypes.ball_hybrid_poc import run_current  # type: ignore
+except Exception:  # noqa: BLE001 — A2's module; used only for its
+    run_current = None  # BallTrack -> contract Track converter (shipped-track fallback)
 
 DEFAULT_CLIPS = ("gberch", "origi01", "kroupi01", "s013")
 DEFAULT_SCENARIOS = ("base", "mismatch", "sparse")
@@ -57,6 +63,16 @@ _CONTACT_ANCHOR_STATES = frozenset({
     "player_touch", "bounce", "kick", "header", "volley", "chest", "catch",
     "goal_impact",
 })
+# Real-mode methods beyond "current": (cfg_override, is_events) — an
+# "events" method also folds in the current stage's own auto-anchor
+# sidecar (kinematic touches / velocity-break bounces / auto goal
+# impacts) as extra, softly-gated knots on top of the manual anchors
+# (see hybrid._integrate_auto_knots); "hybrid" alone stays manual-only.
+_HYBRID_REAL_METHODS: dict[str, tuple[Optional[dict], bool]] = {
+    "hybrid": (None, False),
+    "hybrid_events": (None, True),
+    "hybrid_events_nodrag": ({"cd": 0.0, "fit_cd": False}, True),
+}
 
 
 def _out_root() -> Path:
@@ -131,16 +147,66 @@ def _nodrag_cfg():
     return {"cd": 0.0, "fit_cd": False}
 
 
-def _run_hybrid_track(clip_ctx, observations, anchors, fixes, cfg=None):
+def _run_hybrid_track(clip_ctx, observations, anchors, fixes,
+                       auto_anchors=(), cfg=None):
     """Returns ``(Track|None, status)``. Never raises."""
     if hybrid is None:
         return None, "PENDING (hybrid.py not present yet)"
     try:
         track = hybrid.run_hybrid(clip_ctx, observations, anchors,
-                                   fixes=fixes, cfg=cfg)
+                                   fixes=fixes, auto_anchors=auto_anchors, cfg=cfg)
     except Exception as exc:  # noqa: BLE001
         return None, f"error: {exc!r}"
     return track, "ok"
+
+
+def _load_auto_anchors(path: Path) -> tuple[tuple, str]:
+    """The current stage's auto-event sidecar (same ``BallAnchorSet``
+    schema as the manual anchors file) -> its ``.anchors`` tuple, for
+    ``hybrid.run_hybrid``'s ``auto_anchors`` param. These files appear as
+    A2's runs (``run_current.py``) complete; PENDING until then."""
+    if not path.exists():
+        return (), "PENDING (auto-anchor sidecar not found)"
+    try:
+        aset = BallAnchorSet.load(path)
+        return tuple(aset.anchors), "loaded"
+    except Exception as exc:  # noqa: BLE001
+        return (), f"error loading {path.name}: {exc!r}"
+
+
+def _track_from_shipped_ball_track(clip_ctx) -> tuple[Any, str]:
+    """Fallback for the real 'current' full track when A2's own
+    ``track_current_real_full.json`` isn't there yet: convert the
+    shipped main-repo ``ball/<shot>_ball_track.json`` (the current
+    method's actual production output) into the contract ``Track``.
+    Reuses A2's own ``_track_to_contract`` converter when importable, so
+    this can't silently drift from how A2 does the same conversion."""
+    path = clip_ctx.output_dir / "ball" / f"{clip_ctx.shot_id}_ball_track.json"
+    if not path.exists():
+        return None, "PENDING (no track_current_real_full.json or shipped ball_track.json)"
+    try:
+        bt = BallTrack.load(path)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"error loading shipped ball_track.json: {exc!r}"
+    if run_current is not None:
+        try:
+            return run_current._track_to_contract(clip_ctx.clip_id, bt), "shipped track"
+        except Exception as exc:  # noqa: BLE001
+            return None, f"error converting shipped ball_track.json: {exc!r}"
+    # run_current.py not importable: replicate its (trivial) conversion inline.
+    track = types.Track(
+        clip_id=clip_ctx.clip_id, method="current",
+        frames=tuple(types.TrackFrame(frame=f.frame, xyz=f.world_xyz,
+                                       mode=f.state, conf=f.confidence)
+                     for f in bt.frames))
+    return track, "shipped track"
+
+
+def _load_current_full_with_fallback(clip_ctx, clip_dir: Path):
+    track, status = _load_track_file(clip_dir / "track_current_real_full.json")
+    if track is not None:
+        return track, status
+    return _track_from_shipped_ball_track(clip_ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -201,8 +267,34 @@ def process_scenario(clip_ctx, clip_dir: Path, scenario: str,
         status["hybrid_nodrag"] = nstatus
         if nodrag_track is not None:
             _record("hybrid_nodrag", nodrag_track)
+
+        # hybrid_events{,_nodrag}: manual anchors + the current stage's
+        # OWN auto events for this same scenario (auto_anchors_current_
+        # <scenario>.json, written by run_current.run_synthetic).
+        auto_anchors, auto_status = _load_auto_anchors(
+            clip_dir / f"auto_anchors_current_{scenario}.json")
+        status["auto_anchors"] = auto_status
+        if auto_anchors:
+            ev_track, evstatus = _run_hybrid_track(
+                clip_ctx, list(synth.observations), list(synth.anchors), (),
+                auto_anchors=auto_anchors)
+            status["hybrid_events"] = evstatus
+            if ev_track is not None:
+                _record("hybrid_events", ev_track)
+
+            ev_nodrag_track, evnstatus = _run_hybrid_track(
+                clip_ctx, list(synth.observations), list(synth.anchors), (),
+                auto_anchors=auto_anchors, cfg=_nodrag_cfg())
+            status["hybrid_events_nodrag"] = evnstatus
+            if ev_nodrag_track is not None:
+                _record("hybrid_events_nodrag", ev_nodrag_track)
+        else:
+            status["hybrid_events"] = status["hybrid_events_nodrag"] = (
+                f"PENDING (no auto anchors: {auto_status})")
     else:
         status["hybrid"] = status["hybrid_nodrag"] = (
+            f"PENDING (no synth run: {sstatus})")
+        status["hybrid_events"] = status["hybrid_events_nodrag"] = (
             f"PENDING (no synth run: {sstatus})")
 
     return {
@@ -308,22 +400,31 @@ def process_real(clip_ctx, clip_dir: Path, *, skip_current: bool) -> dict[str, A
     anchors_heldout: list[dict] = []
     fixes_rows: list[dict] = []
 
-    for method in ("current", "hybrid"):
+    for method in ("current", *_HYBRID_REAL_METHODS):
         held_rows_all: list = []
         fix_err_vals: list[float] = []
         per_fold_info: dict[str, Any] = {}
+        hyb_cfg, use_events = _HYBRID_REAL_METHODS.get(method, (None, False))
 
         # --- full run (all anchors as knots; faithfulness + naturalness) ---
         if method == "current":
             if skip_current:
                 full_track, fstatus = None, "skipped (--skip-current)"
             else:
-                full_track, fstatus = _load_track_file(
-                    clip_dir / "track_current_real_full.json")
+                full_track, fstatus = _load_current_full_with_fallback(clip_ctx, clip_dir)
         else:
             full_fixes = clip_ctx.fixes if is_origi01 else ()
-            full_track, fstatus = _run_hybrid_track(
-                clip_ctx, observations, list(all_anchors), full_fixes)
+            full_auto: tuple = ()
+            if use_events:
+                full_auto, auto_status = _load_auto_anchors(
+                    clip_dir / "auto_anchors_current_real_full.json")
+                status[f"{method}_full_auto"] = auto_status
+            if use_events and not full_auto:
+                full_track, fstatus = None, f"PENDING (no auto anchors: {auto_status})"
+            else:
+                full_track, fstatus = _run_hybrid_track(
+                    clip_ctx, observations, list(all_anchors), full_fixes,
+                    auto_anchors=full_auto, cfg=hyb_cfg)
         status[f"{method}_full"] = fstatus
 
         if full_track is not None:
@@ -347,8 +448,17 @@ def process_real(clip_ctx, clip_dir: Path, *, skip_current: bool) -> dict[str, A
                     _load_track_file(
                         clip_dir / f"track_current_real_fold{fold}.json"))
             else:
-                fold_track, tstatus = _run_hybrid_track(
-                    clip_ctx, observations, list(kept), knot_fixes)
+                fold_auto: tuple = ()
+                if use_events:
+                    fold_auto, fold_auto_status = _load_auto_anchors(
+                        clip_dir / f"auto_anchors_current_real_fold{fold}.json")
+                    status[f"{method}_fold{fold}_auto"] = fold_auto_status
+                if use_events and not fold_auto:
+                    fold_track, tstatus = None, f"PENDING (no auto anchors: {fold_auto_status})"
+                else:
+                    fold_track, tstatus = _run_hybrid_track(
+                        clip_ctx, observations, list(kept), knot_fixes,
+                        auto_anchors=fold_auto, cfg=hyb_cfg)
             status[f"{method}_fold{fold}"] = tstatus
             per_fold_info[f"fold{fold}"] = {"status": tstatus}
 

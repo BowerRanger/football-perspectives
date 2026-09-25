@@ -1,0 +1,59 @@
+<style>
+.fnd { display: grid; gap: 14px; }
+.fnd h3 { font-family: var(--font-head); font-size: 15px; letter-spacing: .04em; text-transform: uppercase; margin: 0; text-wrap: balance; }
+.fnd p, .fnd li { line-height: 1.5; margin: 0; }
+.fnd > p, .fnd > ul { max-width: 78ch; }
+.fnd ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.fnd .verdict { border-left: 3px solid var(--accent); padding: 4px 0 4px 12px; }
+.fnd .tbl { overflow-x: auto; }
+.fnd table { border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12.5px; min-width: 520px; }
+.fnd th, .fnd td { border-bottom: 1px solid var(--line); padding: 4px 10px 4px 0; text-align: right; }
+.fnd th:first-child, .fnd td:first-child { text-align: left; }
+.fnd th { font-family: var(--font-head); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.fnd .up { color: var(--good); font-weight: 600; }
+.fnd .down { color: var(--bad); font-weight: 600; }
+.fnd .mono { font-family: var(--font-mono); }
+</style>
+<div class="fnd">
+  <p class="verdict"><strong>Verdict:</strong> the hybrid trajectory layer is a clear upgrade where it has fixed points to work with. It removes the floating ball, the multi-metre tails and most depth error on anchored plays. It does <em>not</em> reach 20&nbsp;cm on every frame. Once half the anchors are withheld, every method falls well short, so the next gains have to come from more fixed points (replay angles, event cues), not a better solver.</p>
+
+  <h3>What the hybrid does</h3>
+  <ul>
+    <li>Fixed points: operator anchors, the current stage's auto-detected events, and on origi01 half of the replay-triangulated positions.</li>
+    <li>Between events it simulates the ball physically: gravity plus air drag (Cd fitted per flight when it has at least 5 detections, 0.25 otherwise) for flights, friction for rolls. When a span sits between two touches, it tries both a roll and a flight and keeps whichever fits the detections better.</li>
+    <li>Where detections are confident it pulls the ball onto the detection's line of sight, so the broadcast view stays honest. Depth still comes from physics.</li>
+    <li>Anchors that aren't events (a click mid-roll) are joined with a smooth curve instead of a kink.</li>
+  </ul>
+
+  <h3>Synthetic truth, all anchors given ("mismatch" scenario)</h3>
+  <p>The truth ball is simulated from the operator's anchors with physics the solvers don't share: randomised drag, drag crisis and spin. Both methods see the same synthetic detections, which carry realistic noise, misses and replayed junk detections.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Clip</th><th>≤ 20 cm, current</th><th>≤ 20 cm, hybrid</th><th>p95, current</th><th>p95, hybrid</th><th>Float/sink, current</th><th>Float/sink, hybrid</th></tr></thead>
+    <tbody>
+      <tr><td>gberch</td><td>70%</td><td class="up">88%</td><td>4.35 m</td><td class="up">0.57 m</td><td>0.12 m</td><td class="up">0.01 m</td></tr>
+      <tr><td>origi01</td><td>58%</td><td class="up">79%</td><td>67.8 m</td><td class="up">3.01 m</td><td>0.00 m</td><td>0.01 m</td></tr>
+      <tr><td>kroupi01</td><td>40%</td><td class="up">77%</td><td>17.4 m</td><td class="up">0.73 m</td><td>0.32 m</td><td class="up">0.01 m</td></tr>
+      <tr><td>s013</td><td>22%</td><td class="up">86%</td><td>6.36 m</td><td>5.70 m</td><td>0.63 m</td><td class="up">0.00 m</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Half the anchors withheld ("hidden" scenario)</h3>
+  <p>This is the situation real footage is always in: events between anchors have to be found from the evidence. Frames within 20 cm, current → hybrid with auto events: gberch 49% → 61%, origi01 23% → 32%, kroupi01 16% → 41%, s013 10% → 17%. The hybrid is better everywhere but nowhere near the goal. This is the main finding: from a single camera, missing events limit accuracy, not the solver.</p>
+
+  <h3>Real footage (held-out operator anchors)</h3>
+  <p>Median 3-D error at withheld grounded/touch anchors, current → hybrid with auto events: gberch 0.158 → <span class="up">0.114 m</span>, s013 0.615 → <span class="up">0.227 m</span>, kroupi01 2.97 → <span class="up">1.78 m</span>, origi01 0.36 → <span class="down">1.70 m</span>. origi01 regresses: its flight-heavy spans have many mid-air anchors, which fix only the ray, not the depth. On origi01's replay-triangulated 3-D positions (real absolute truth) the error drops from 4.16 m to 0.55 m. That comes from feeding the <em>other half</em> of those positions in as fixed points, so it measures the value of replay angles, not the solver alone.</p>
+
+  <h3>Air drag</h3>
+  <p>When the drag coefficient matches the truth ("base"), drag helps consistently: kroupi01 78% → 99% of frames within 20 cm, and origi01's p95 halves (3.0 → 1.4 m). Against randomised drag and spin ("mismatch") the fitted drag is mixed: s013 65% → 86%, but gberch and kroupi01 are slightly better without it. Drag belongs in the flight model, but a real gain needs spin (Magnus) fitting as well, and that isn't wired into the span search yet.</p>
+
+  <h3>Caveats</h3>
+  <ul>
+    <li>In synthetic runs the current stage loses two passes that read real pixels: the foot-guided zoom and the appearance bridge. That handicaps it somewhat at touch moments.</li>
+    <li>Using the current stage's auto events inside the hybrid helps on real footage but hurts on s013's synthetic runs, where those events are poor. Auto events need stricter gating before they're used as fixed points.</li>
+    <li>Mid-air held-out anchors have no 3-D truth (depth unknown), so they're excluded from the real-footage error; that's 15 of gberch's 59.</li>
+    <li>Four clips, one seed per scenario. These are spike numbers, not a regression gate.</li>
+  </ul>
+
+  <h3>How to read this page</h3>
+  <p>Pick a clip and scenario. Switch the 3-D view between <span class="mono">Broadcast</span> and <span class="mono">Side-on</span>: depth errors that are invisible from the broadcast camera show up side-on. The error chart shades frames where the hybrid is simulating rather than following detections; click it to jump to a frame.</p>
+</div>

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.utils.ball_cue_types import CueEvidence
+from src.utils.ball_hybrid_types import CueEvidence
 
 _FRAME_TOL = 2
 

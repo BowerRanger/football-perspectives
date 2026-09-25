@@ -17,7 +17,7 @@ from typing import Iterable, Iterator
 import cv2
 import numpy as np
 
-from src.utils.ball_cue_types import CueEvidence
+from src.utils.ball_hybrid_types import CueEvidence
 from src.utils.ball_motion_flow import frame_homography, warp_to_reference
 from src.utils.camera_projection import project_world_to_image
 from src.utils.goal_geometry import GoalGeometry, goal_element_candidates

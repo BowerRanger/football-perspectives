@@ -233,7 +233,7 @@ def _print_result(res: dict) -> None:
 
 
 def _load_cached_cue(cache_dir: Path, clip_id: str, name: str) -> list:
-    from src.utils.ball_cue_types import CueEvidence
+    from src.utils.ball_hybrid_types import CueEvidence
     path = cache_dir / clip_id / f"cues_{name}.json"
     data = json.loads(path.read_text())
     events = data["events"] if isinstance(data, dict) else data

@@ -5,7 +5,7 @@ an existing auto/kinematic anchor does too."""
 from __future__ import annotations
 
 from src.utils.ball_cue_fusion import fuse_cues
-from src.utils.ball_cue_types import CueEvidence
+from src.utils.ball_hybrid_types import CueEvidence
 
 
 def _ce(frame, kind, cue, conf, uv=None, xyz=None):

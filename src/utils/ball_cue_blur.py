@@ -19,7 +19,7 @@ from typing import Callable
 import cv2
 import numpy as np
 
-from src.utils.ball_cue_types import CueEvidence
+from src.utils.ball_hybrid_types import CueEvidence
 
 _SHUTTER_FRACTION = 0.5
 

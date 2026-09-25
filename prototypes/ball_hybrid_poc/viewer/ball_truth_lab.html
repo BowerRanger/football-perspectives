@@ -13,6 +13,8 @@
   --series-current: #C8472F;
   --series-hybrid: #178A5C;
   --threshold: #B7791F;
+  --good: #1E7A45;
+  --bad: #B23A2E;
   --pitch-green: #6E9A78;
   --pitch-line: #FFFFFF;
   --focus: var(--accent);
@@ -34,6 +36,8 @@
     --series-current: #FF8A68;
     --series-hybrid: #4FD69C;
     --threshold: #E0A94A;
+    --good: #57D68D;
+    --bad: #FF9178;
     --pitch-green: #35513E;
     color-scheme: dark;
   }
@@ -50,6 +54,8 @@
   --series-current: #FF8A68;
   --series-hybrid: #4FD69C;
   --threshold: #E0A94A;
+  --good: #57D68D;
+  --bad: #FF9178;
   --pitch-green: #35513E;
   color-scheme: dark;
 }
@@ -65,6 +71,8 @@
   --series-current: #C8472F;
   --series-hybrid: #178A5C;
   --threshold: #B7791F;
+  --good: #1E7A45;
+  --bad: #B23A2E;
   --pitch-green: #6E9A78;
   color-scheme: light;
 }
@@ -149,6 +157,11 @@ select {
   min-width: 140px;
 }
 .btn {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
   font-family: var(--font-head);
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -170,6 +183,7 @@ select {
 
 .summary-strip {
   flex-basis: 100%;
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -179,15 +193,36 @@ select {
   border: 1px solid var(--line);
   border-radius: 6px;
 }
-.summary-strip .headline {
+.summary-strip .headline-line {
+  display: block;
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-family: var(--font-head);
   font-size: 15px;
   letter-spacing: 0.02em;
   text-transform: uppercase;
 }
-.summary-strip .headline .val-current { color: var(--series-current); font-weight: 700; }
-.summary-strip .headline .val-hybrid { color: var(--series-hybrid); font-weight: 700; }
-.summary-strip .note { color: var(--muted); font-size: 12px; }
+.summary-strip .headline-line + .headline-line { margin-top: 4px; }
+.summary-strip .cur { font-weight: 600; }
+.summary-strip .arrow, .summary-strip .val { font-weight: 700; }
+.summary-strip .good { color: var(--good); }
+.summary-strip .bad { color: var(--bad); }
+.summary-strip .neutral { color: var(--ink); }
+.summary-strip .note { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+/* ---- findings ---- */
+.findings-panel { margin-bottom: 16px; }
+.findings-panel summary {
+  cursor: pointer;
+  font-family: var(--font-head);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 13px;
+  color: var(--muted);
+}
+.findings-body { margin-top: 10px; font-size: 13px; }
+.findings-body > :first-child { margin-top: 0; }
 
 /* ---- main grid ---- */
 .main-grid {
@@ -196,8 +231,12 @@ select {
   gap: 16px;
   align-items: start;
 }
-@media (max-width: 860px) {
-  .main-grid { grid-template-columns: 1fr; }
+@media (max-width: 1279.98px) {
+  .main-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (min-width: 1280px) {
+  .main-grid { align-items: stretch; }
+  .scene-panel { display: flex; flex-direction: column; }
 }
 
 .panel {
@@ -217,6 +256,7 @@ select {
 .scene-toolbar {
   display: flex;
   flex-wrap: wrap;
+  min-width: 0;
   gap: 8px 14px;
   margin-bottom: 10px;
   align-items: center;
@@ -224,6 +264,8 @@ select {
 .cam-presets, .method-toggles {
   display: flex;
   flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
   gap: 6px;
 }
 .toggle-pill {
@@ -247,16 +289,21 @@ select {
   position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
+  min-height: 420px;
   background: var(--ground);
   border: 1px solid var(--line);
   border-radius: 6px;
   overflow: hidden;
+}
+@media (min-width: 1280px) {
+  #scene-canvas-wrap { flex: 1 1 auto; aspect-ratio: auto; }
 }
 #scene-canvas { display: block; width: 100%; height: 100%; }
 
 .legend {
   display: flex;
   flex-wrap: wrap;
+  min-width: 0;
   gap: 10px 16px;
   margin-top: 10px;
   font-size: 12px;
@@ -300,6 +347,18 @@ td {
 td.num { text-align: right; }
 td.best { color: var(--accent); font-weight: 700; }
 tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
+
+.metrics-more { margin-top: 12px; }
+.metrics-more summary {
+  cursor: pointer;
+  font-family: var(--font-head);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 4px 0;
+}
+.metrics-more[open] summary { margin-bottom: 6px; }
 
 /* ---- timeline ---- */
 .timeline-panel { margin-top: 16px; }
@@ -357,6 +416,8 @@ tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
     <div class="summary-strip" id="summary-strip"></div>
   </header>
 
+  
+
   <main class="main-grid">
     <section class="panel scene-panel">
       <h2>3-D reconstruction</h2>
@@ -386,6 +447,15 @@ tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
           <tbody id="metrics-tbody"></tbody>
         </table>
       </div>
+      <details class="metrics-more" id="metrics-more">
+        <summary>More metrics</summary>
+        <div class="table-scroll">
+          <table id="metrics-table-more">
+            <thead id="metrics-thead-more"></thead>
+            <tbody id="metrics-tbody-more"></tbody>
+          </table>
+        </div>
+      </details>
     </aside>
   </main>
 
@@ -438,7 +508,8 @@ tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
       ground: v("--ground"), surface: v("--surface"), ink: v("--ink"),
       muted: v("--muted"), line: v("--line"), accent: v("--accent"),
       truth: v("--series-truth"), current: v("--series-current"), hybrid: v("--series-hybrid"),
-      threshold: v("--threshold"), pitchGreen: v("--pitch-green"), pitchLine: v("--pitch-line")
+      threshold: v("--threshold"), pitchGreen: v("--pitch-green"), pitchLine: v("--pitch-line"),
+      good: v("--good"), bad: v("--bad")
     };
   }
 
@@ -526,6 +597,25 @@ tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
   }
 
   function fps() { return currentClip().fps || 25; }
+
+  // Which non-truth, non-current method is "the" headline comparison for a
+  // clip: an explicit top-level `headline_method` wins; otherwise prefer
+  // "hybrid_events" (the latest hybrid iteration) if this clip has it
+  // anywhere, else fall back to plain "hybrid".
+  function clipHasMethod(clip, method) {
+    var names = Object.keys(clip.scenarios || {});
+    for (var i = 0; i < names.length; i++) {
+      var sc = clip.scenarios[names[i]];
+      if ((sc.tracks && sc.tracks[method]) || (sc.metrics && sc.metrics[method])) return true;
+    }
+    if (clip.real && ((clip.real.tracks && clip.real.tracks[method]) || (clip.real.metrics && clip.real.metrics[method]))) return true;
+    return false;
+  }
+
+  function headlineMethodFor(clip) {
+    if (clip.headline_method) return clip.headline_method;
+    return clipHasMethod(clip, "hybrid_events") ? "hybrid_events" : "hybrid";
+  }
 
   function initialFrameFor(clip, key) {
     if (key === REAL_KEY) return 0;
@@ -912,40 +1002,91 @@ tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
   // ---------------------------------------------------------------------
   var ROW_ORDER = [
     "p50", "p95", "max", "pct_le_20cm", "contact_gap", "ground_float_sink",
-    "broadcast_px_error", "side_px_error", "naturalness_violations",
-    "anchor_heldout_err_m", "fix_err_m"
+    "broadcast_px_error", "side_px_error", "naturalness_violations_minus_truth",
+    "naturalness_violations", "jitter_p95", "anchor_heldout_err_m", "fix_err_m"
   ];
   var ROW_LABEL = {
     p50: "P50 error (m)", p95: "P95 error (m)", max: "Max error (m)",
     pct_le_20cm: "% frames ≤ 20 cm", contact_gap: "Contact gap (m)",
     ground_float_sink: "Ground float/sink (m)", broadcast_px_error: "Broadcast error (px)",
     side_px_error: "Side-cam error (px)", naturalness_violations: "Naturalness violations",
-    anchor_heldout_err_m: "Held-out anchor error (m)", fix_err_m: "Replay-fix error (m)"
+    naturalness_violations_minus_truth: "Unnatural bends (vs truth)",
+    naturalness_violations_truth: "Naturalness violations (truth)",
+    jitter_p95: "Jitter P95 (m/frame)", jitter_p95_truth: "Jitter P95 (truth)",
+    anchor_heldout_err_m: "Held-out anchor error (m)",
+    anchor_heldout_err_p95_m: "Held-out anchor error P95 (m)",
+    anchor_heldout_n: "Held-out anchors (n)",
+    fix_err_m: "Replay-fix error (m)", fix_err_n: "Replay fixes (n)",
+    coverage: "Coverage", n_frames: "N frames", n_valid: "N valid",
+    p50_ground: "P50 (ground)", p50_air: "P50 (air)", p50_contact: "P50 (contact)",
+    pct_le_20cm_ground: "% ≤ 20cm (ground)", pct_le_20cm_air: "% ≤ 20cm (air)",
+    pct_le_20cm_contact: "% ≤ 20cm (contact)",
+    contact_gap_min_pm1: "Contact gap (±1 frame min, m)",
+    ground_float_sink_p95: "Ground float/sink P95 (m)",
+    ground_n_sink: "Ground sinks (n)", ground_n_float: "Ground floats (n)",
+    broadcast_px_error_p95: "Broadcast error P95 (px)", side_px_error_p95: "Side-cam error P95 (px)"
   };
-  var HIGHER_BETTER = { pct_le_20cm: true };
+  var HIGHER_BETTER = { pct_le_20cm: true, pct_le_20cm_ground: true, pct_le_20cm_air: true, pct_le_20cm_contact: true, coverage: true };
+  // The headline block: p50, p95, %<=20cm, contact gap, ground float/sink,
+  // broadcast px, side-cam px, naturalness delta-vs-truth, jitter p95.
+  // Everything else present in the data lands in the collapsed "more" table.
+  var HEADLINE_KEYS = [
+    "p50", "p95", "pct_le_20cm", "contact_gap", "ground_float_sink",
+    "broadcast_px_error", "side_px_error", "naturalness_violations_minus_truth", "jitter_p95"
+  ];
+  // If a headline key is missing (e.g. simpler mock/older data), show this
+  // key in its place instead.
+  var HEADLINE_FALLBACK = { naturalness_violations_minus_truth: "naturalness_violations" };
+  // Bookkeeping rows: never highlighted as "best", and always integer-formatted.
+  var NO_HIGHLIGHT_RE = /truth/i;
+  var NO_HIGHLIGHT_KEYS = { coverage: true, n_frames: true, n_valid: true };
+  var COUNT_KEY_RE = /^n_|violations|^ground_n_|_n$/i;
 
   function prettifyKey(k) {
     return k.replace(/_/g, " ").replace(/\b\w/g, function (c) { return c.toUpperCase(); });
   }
 
+  function isCountKey(key) { return COUNT_KEY_RE.test(key); }
+  function isNoHighlightKey(key) { return !!NO_HIGHLIGHT_KEYS[key] || NO_HIGHLIGHT_RE.test(key); }
+
   function formatMetric(key, value) {
     if (value === null || value === undefined) return "—";
-    if (key === "pct_le_20cm") return (value * 100).toFixed(1) + "%";
-    if (key === "naturalness_violations") return String(Math.round(value));
+    if (key === "coverage" || key.indexOf("pct_le_20cm") === 0) return (value * 100).toFixed(1) + "%";
+    if (isCountKey(key)) return String(Math.round(value));
     var decimals = key.indexOf("px") !== -1 ? 1 : 2;
     return value.toFixed(decimals);
   }
 
-  function renderMetricsTable(sd) {
+  function orderedPresentKeys(sd) {
     var methods = Object.keys(sd.metrics || {});
-    var thead = document.getElementById("metrics-thead");
-    var tbody = document.getElementById("metrics-tbody");
+    var keySet = {};
+    methods.forEach(function (m) { Object.keys(sd.metrics[m] || {}).forEach(function (k) { keySet[k] = true; }); });
+    var rowKeys = ROW_ORDER.filter(function (k) { return keySet[k]; });
+    Object.keys(keySet).sort().forEach(function (k) { if (rowKeys.indexOf(k) === -1) rowKeys.push(k); });
+    return { methods: methods, keySet: keySet, rowKeys: rowKeys };
+  }
+
+  function splitHeadlineRows(info) {
+    var headline = [];
+    var used = {};
+    HEADLINE_KEYS.forEach(function (k) {
+      if (info.keySet[k]) { headline.push(k); used[k] = true; }
+      else if (HEADLINE_FALLBACK[k] && info.keySet[HEADLINE_FALLBACK[k]] && !used[HEADLINE_FALLBACK[k]]) {
+        headline.push(HEADLINE_FALLBACK[k]); used[HEADLINE_FALLBACK[k]] = true;
+      }
+    });
+    var more = info.rowKeys.filter(function (k) { return !used[k]; });
+    return { headline: headline, more: more };
+  }
+
+  function fillMetricsTable(theadId, tbodyId, methods, metrics, rowKeys) {
+    var thead = document.getElementById(theadId);
+    var tbody = document.getElementById(tbodyId);
     thead.innerHTML = "";
     tbody.innerHTML = "";
 
     var headRow = document.createElement("tr");
-    var thBlank = document.createElement("th");
-    headRow.appendChild(thBlank);
+    headRow.appendChild(document.createElement("th"));
     methods.forEach(function (m) {
       var th = document.createElement("th");
       th.textContent = m;
@@ -953,61 +1094,103 @@ tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
     });
     thead.appendChild(headRow);
 
-    var keySet = {};
-    methods.forEach(function (m) { Object.keys(sd.metrics[m] || {}).forEach(function (k) { keySet[k] = true; }); });
-    var rowKeys = ROW_ORDER.filter(function (k) { return keySet[k]; });
-    Object.keys(keySet).forEach(function (k) { if (rowKeys.indexOf(k) === -1) rowKeys.push(k); });
-
     rowKeys.forEach(function (key) {
       var tr = document.createElement("tr");
       var th = document.createElement("th");
       th.textContent = ROW_LABEL[key] || prettifyKey(key);
       tr.appendChild(th);
 
-      var values = methods.map(function (m) { return (sd.metrics[m] || {})[key]; });
+      var values = methods.map(function (m) { return (metrics[m] || {})[key]; });
+      var highlightable = !isNoHighlightKey(key);
       var higherBetter = !!HIGHER_BETTER[key];
       var bestVal = null;
-      values.forEach(function (v) {
-        if (v === null || v === undefined) return;
-        if (bestVal === null || (higherBetter ? v > bestVal : v < bestVal)) bestVal = v;
-      });
+      if (highlightable) {
+        values.forEach(function (v) {
+          if (v === null || v === undefined) return;
+          if (bestVal === null || (higherBetter ? v > bestVal : v < bestVal)) bestVal = v;
+        });
+      }
 
       methods.forEach(function (m, i) {
         var td = document.createElement("td");
         td.className = "num metric-cell";
         var v = values[i];
         td.textContent = formatMetric(key, v);
-        if (v !== null && v !== undefined && bestVal !== null && v === bestVal) td.classList.add("best");
+        if (highlightable && v !== null && v !== undefined && bestVal !== null && v === bestVal) td.classList.add("best");
         tr.appendChild(td);
       });
       tbody.appendChild(tr);
     });
   }
 
+  function renderMetricsTable(sd) {
+    var info = orderedPresentKeys(sd);
+    var split = splitHeadlineRows(info);
+    fillMetricsTable("metrics-thead", "metrics-tbody", info.methods, sd.metrics || {}, split.headline);
+
+    var moreDetails = document.getElementById("metrics-more");
+    if (split.more.length) {
+      moreDetails.style.display = "";
+      fillMetricsTable("metrics-thead-more", "metrics-tbody-more", info.methods, sd.metrics || {}, split.more);
+    } else {
+      moreDetails.style.display = "none";
+    }
+  }
+
   // ---------------------------------------------------------------------
   // Summary strip (per selected clip, pooled across scenarios)
   // ---------------------------------------------------------------------
+  function cmpClass(current, headline, higherBetter) {
+    if (current === null || current === undefined || headline === null || headline === undefined) return "neutral";
+    if (headline === current) return "neutral";
+    var better = higherBetter ? headline > current : headline < current;
+    return better ? "good" : "bad";
+  }
+
   function renderSummaryStrip() {
     var clip = currentClip();
-    var pooled = { current: [], hybrid: [] };
+    var headlineMethod = headlineMethodFor(clip);
+    var pooled = {};
+    pooled.current = [];
+    pooled[headlineMethod] = [];
     scenarioNames(clip).forEach(function (name) {
       var pfe = clip.scenarios[name].per_frame_err || {};
-      ["current", "hybrid"].forEach(function (m) {
+      ["current", headlineMethod].forEach(function (m) {
         (pfe[m] || []).forEach(function (e) { if (e !== null) pooled[m].push(e); });
       });
     });
-    var el = document.getElementById("summary-strip");
     function pct(arr) {
-      if (!arr.length) return null;
+      if (!arr || !arr.length) return null;
       return arr.filter(function (e) { return e <= 0.20; }).length / arr.length;
     }
-    var pc = pct(pooled.current), ph = pct(pooled.hybrid);
+    var pc = pct(pooled.current), ph = pct(pooled[headlineMethod]);
     var pcTxt = pc === null ? "—" : (pc * 100).toFixed(0) + "%";
     var phTxt = ph === null ? "—" : (ph * 100).toFixed(0) + "%";
-    el.innerHTML =
-      '<span class="headline">% frames ≤ 20 cm: <span class="val-current">' + pcTxt +
-      '</span> → <span class="val-hybrid">' + phTxt + '</span></span>' +
-      '<span class="note">pooled across ' + scenarioNames(clip).length + ' synthetic scenario(s) for ' + clip.clip_id + '</span>';
+    var cls1 = cmpClass(pc, ph, true);
+
+    var lines = [
+      '<span class="headline-line">% frames ≤ 20 cm: <span class="cur">current ' + pcTxt +
+      '</span> <span class="arrow ' + cls1 + '">→</span> <span class="val ' + cls1 + '">' +
+      headlineMethod + ' ' + phTxt + '</span></span>'
+    ];
+
+    var realMetrics = clip.real && clip.real.metrics;
+    if (realMetrics) {
+      var curReal = (realMetrics.current || {}).anchor_heldout_err_m;
+      var headReal = (realMetrics[headlineMethod] || {}).anchor_heldout_err_m;
+      var curTxt = (curReal === null || curReal === undefined) ? "—" : curReal.toFixed(2) + "m";
+      var headTxt = (headReal === null || headReal === undefined) ? "—" : headReal.toFixed(2) + "m";
+      var cls2 = cmpClass(curReal, headReal, false);
+      lines.push(
+        '<span class="headline-line">Real footage held-out anchor P50: <span class="cur">current ' + curTxt +
+        '</span> <span class="arrow ' + cls2 + '">→</span> <span class="val ' + cls2 + '">' +
+        headlineMethod + ' ' + headTxt + '</span></span>'
+      );
+    }
+
+    var el = document.getElementById("summary-strip");
+    el.innerHTML = lines.join("") +
+      '<span class="note">synthetic figure pooled across ' + scenarioNames(clip).length + ' scenario(s) for ' + clip.clip_id + '</span>';
   }
 
   // ---------------------------------------------------------------------
@@ -1063,10 +1246,13 @@ tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
 
   function renderMethodToggles(sd) {
     var tokens = getTokens();
+    var headlineMethod = headlineMethodFor(currentClip());
     var el = document.getElementById("method-toggles");
     el.innerHTML = "";
     methodsOf(sd).forEach(function (m) {
-      if (state.visible[m] === undefined) state.visible[m] = true;
+      if (state.visible[m] === undefined) {
+        state.visible[m] = (m === "truth" || m === "current" || m === headlineMethod);
+      }
       var label = document.createElement("label");
       label.className = "toggle-pill";
       label.setAttribute("for", "toggle-" + m);
@@ -1192,19 +1378,34 @@ tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
     if (!tr) return pts;
     (sd.anchors_heldout || []).forEach(function (a) {
       var mf = tr.frames[a.frame];
-      if (mf && mf.xyz) {
+      if (mf && mf.xyz && a.xyz_gt) {
         var d = Math.sqrt(Math.pow(mf.xyz[0] - a.xyz_gt[0], 2) + Math.pow(mf.xyz[1] - a.xyz_gt[1], 2) + Math.pow(mf.xyz[2] - a.xyz_gt[2], 2));
         pts.push({ frame: a.frame, err: d });
       }
     });
     (sd.fixes || []).forEach(function (fx) {
       var mf = tr.frames[fx.frame];
-      if (mf && mf.xyz) {
+      if (mf && mf.xyz && fx.xyz) {
         var d = Math.sqrt(Math.pow(mf.xyz[0] - fx.xyz[0], 2) + Math.pow(mf.xyz[1] - fx.xyz[1], 2) + Math.pow(mf.xyz[2] - fx.xyz[2], 2));
         pts.push({ frame: fx.frame, err: d });
       }
     });
     return pts;
+  }
+
+  function niceStep(rough) {
+    if (!(rough > 0)) return 0.1;
+    var exp = Math.floor(Math.log10(rough));
+    var base = Math.pow(10, exp);
+    var frac = rough / base;
+    var niceFrac = frac <= 1 ? 1 : (frac <= 2 ? 2 : (frac <= 5 ? 5 : 10));
+    return niceFrac * base;
+  }
+
+  function percentile(sortedArr, q) {
+    if (!sortedArr.length) return 0;
+    var idx = Math.min(sortedArr.length - 1, Math.max(0, Math.round(q * (sortedArr.length - 1))));
+    return sortedArr[idx];
   }
 
   function drawChart() {
@@ -1221,24 +1422,44 @@ tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
     var tokens = getTokens();
     var sd = getScenarioData(currentClip(), state.scenarioKey);
     var n = frameCount(sd);
-    var marginLeft = 42, marginRight = 10, marginTop = 10, marginBottom = 20;
+    var marginLeft = 46, marginRight = 14, marginTop = 16, marginBottom = 20;
     var plotW = Math.max(1, w - marginLeft - marginRight);
     var plotH = Math.max(1, h - marginTop - marginBottom);
 
-    var maxErr = 0.4;
+    // Unify line (scenario) and scatter (real) data into {method: [{frame,err}|null,...]}
+    // and gather the currently-VISIBLE errors to size the y-axis.
+    var allErrs = [];
+    var seriesData = {};
     if (sd.per_frame_err) {
       Object.keys(sd.per_frame_err).forEach(function (m) {
-        (sd.per_frame_err[m] || []).forEach(function (e) { if (e !== null) maxErr = Math.max(maxErr, e); });
+        var series = sd.per_frame_err[m] || [];
+        var pts = [];
+        for (var i = 0; i < series.length; i++) {
+          if (series[i] === null) { pts.push(null); continue; }
+          pts.push({ frame: i, err: series[i] });
+          if (state.visible[m] !== false) allErrs.push(series[i]);
+        }
+        seriesData[m] = pts;
       });
     } else {
-      ["current", "hybrid"].forEach(function (m) {
-        computeRealScatterErr(sd, m).forEach(function (p) { maxErr = Math.max(maxErr, p.err); });
+      Object.keys(sd.tracks).forEach(function (m) {
+        var pts = computeRealScatterErr(sd, m);
+        seriesData[m] = pts;
+        if (state.visible[m] !== false) pts.forEach(function (p) { allErrs.push(p.err); });
       });
     }
-    maxErr *= 1.1;
+    allErrs.sort(function (a, b) { return a - b; });
+
+    // Clamp the visible y-range to max(1.0m, p90 of what's plotted) so one
+    // multi-metre spike can't flatten the 0-1m band; spikes above the
+    // clamp get an off-scale marker instead of stretching the axis.
+    var rawMax = Math.max(1.0, percentile(allErrs, 0.90));
+    var step = niceStep(rawMax / 3.5);
+    var axisMax = Math.ceil((rawMax / step) - 1e-9) * step;
+    if (!(axisMax > 0)) axisMax = step;
 
     function xOf(frame) { return marginLeft + (n <= 1 ? 0 : frame / (n - 1) * plotW); }
-    function yOf(err) { return marginTop + plotH - (err / maxErr) * plotH; }
+    function yOf(err) { return marginTop + plotH - (Math.min(err, axisMax) / axisMax) * plotH; }
     chartLayout = { marginLeft: marginLeft, plotW: plotW, n: n };
 
     // shading bands where hybrid mode === "simulated"
@@ -1262,52 +1483,72 @@ tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
       }
     }
 
-    // grid + axis labels
+    // grid: 3-4 clean ticks in metres, spaced by a "nice" step
     ctx.strokeStyle = tokens.line;
     ctx.fillStyle = tokens.muted;
-    ctx.font = "11px " + "JetBrains Mono, monospace";
+    ctx.font = "11px JetBrains Mono, monospace";
     ctx.lineWidth = 1;
-    [0, 0.2, 0.4].forEach(function (g) {
-      if (g > maxErr) return;
+    for (var g = 0; g <= axisMax + step * 1e-6; g += step) {
       var y = yOf(g);
       ctx.beginPath(); ctx.moveTo(marginLeft, y); ctx.lineTo(marginLeft + plotW, y); ctx.stroke();
       ctx.fillText(g.toFixed(2), 2, y + 4);
-    });
+    }
 
-    // threshold line
-    ctx.strokeStyle = tokens.threshold;
-    ctx.setLineDash([5, 4]);
-    var yThresh = yOf(0.20);
-    ctx.beginPath(); ctx.moveTo(marginLeft, yThresh); ctx.lineTo(marginLeft + plotW, yThresh); ctx.stroke();
-    ctx.setLineDash([]);
+    // threshold line, explicitly labelled
+    if (0.20 < axisMax) {
+      ctx.strokeStyle = tokens.threshold;
+      ctx.setLineDash([5, 4]);
+      var yThresh = yOf(0.20);
+      ctx.beginPath(); ctx.moveTo(marginLeft, yThresh); ctx.lineTo(marginLeft + plotW, yThresh); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = tokens.threshold;
+      ctx.textAlign = "right";
+      ctx.fillText("20 cm", marginLeft + plotW - 2, yThresh - 4);
+      ctx.textAlign = "left";
+    }
 
+    var offscale = []; // {x, method}
     if (sd.per_frame_err) {
-      Object.keys(sd.per_frame_err).forEach(function (m) {
+      Object.keys(seriesData).forEach(function (m) {
         if (state.visible[m] === false) return;
-        var series = sd.per_frame_err[m] || [];
+        var pts = seriesData[m];
         ctx.strokeStyle = methodColor(tokens, m);
         ctx.lineWidth = 1.6;
         ctx.beginPath();
         var started = false;
-        for (var i = 0; i < series.length; i++) {
-          var e = series[i];
-          if (e === null) { started = false; continue; }
-          var x = xOf(i), y = yOf(e);
-          if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }
+        for (var i = 0; i < pts.length; i++) {
+          var p = pts[i];
+          if (!p) { started = false; continue; }
+          if (p.err > axisMax) offscale.push({ x: xOf(p.frame), method: m });
+          var x = xOf(p.frame), yy = yOf(p.err);
+          if (!started) { ctx.moveTo(x, yy); started = true; } else { ctx.lineTo(x, yy); }
         }
         ctx.stroke();
       });
     } else {
-      ["current", "hybrid"].forEach(function (m) {
+      Object.keys(seriesData).forEach(function (m) {
         if (state.visible[m] === false) return;
-        var pts = computeRealScatterErr(sd, m);
+        var pts = seriesData[m];
         ctx.fillStyle = methodColor(tokens, m);
         pts.forEach(function (p) {
+          if (p.err > axisMax) { offscale.push({ x: xOf(p.frame), method: m }); return; }
           ctx.beginPath();
           ctx.arc(xOf(p.frame), yOf(p.err), 3.5, 0, Math.PI * 2);
           ctx.fill();
         });
       });
+    }
+
+    if (offscale.length) {
+      ctx.font = "11px JetBrains Mono, monospace";
+      offscale.forEach(function (o) {
+        ctx.fillStyle = methodColor(tokens, o.method);
+        ctx.fillText("▲", o.x - 4, marginTop + 10);
+      });
+      ctx.fillStyle = tokens.muted;
+      ctx.textAlign = "right";
+      ctx.fillText("▲ off-scale (" + offscale.length + ")", marginLeft + plotW, marginTop - 4);
+      ctx.textAlign = "left";
     }
 
     // playhead

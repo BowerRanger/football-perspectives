@@ -42,6 +42,9 @@ REQUIRED_IDS = [
     "metrics-table",
     "metrics-thead",
     "metrics-tbody",
+    "metrics-more",
+    "metrics-thead-more",
+    "metrics-tbody-more",
     "frame-scrubber",
     "play-btn",
     "frame-readout",
@@ -115,3 +118,62 @@ def test_build_viewer_cli_roundtrip(tmp_path):
     assert html.startswith("<title>Ball Truth Lab</title>")
     assert '"gberch"' in html
     assert out_path.stat().st_size < 8 * 1024 * 1024
+
+
+def test_findings_omitted_when_not_provided(tmp_path):
+    _write_mock_clip(tmp_path, "gberch", seed=5)
+    clips = build_viewer.load_clip_results([str(tmp_path)])
+    html = build_viewer.build_html(clips)
+    assert 'id="findings-panel"' not in html
+
+
+def test_findings_included_when_provided(tmp_path):
+    _write_mock_clip(tmp_path, "gberch", seed=6)
+    clips = build_viewer.load_clip_results([str(tmp_path)])
+    fragment = "<p>The hybrid method wins on depth accuracy.</p>"
+    html = build_viewer.build_html(clips, fragment)
+
+    assert 'id="findings-panel"' in html
+    assert 'id="findings-details" open' in html
+    assert fragment in html
+    # inserted directly under the summary strip, before the main 3-D/metrics grid
+    assert html.index('id="findings-panel"') > html.index('id="summary-strip"')
+    assert html.index('id="findings-panel"') < html.index('class="main-grid"')
+
+
+def test_findings_cli_flag(tmp_path):
+    mock_dir = tmp_path / "mock"
+    mock_dir.mkdir()
+    _write_mock_clip(mock_dir, "gberch", seed=7)
+    findings_file = tmp_path / "findings.html"
+    findings_file.write_text("<p>Headline: hybrid wins.</p>")
+
+    out_path = tmp_path / "out" / "viewer.html"
+    sys.argv = [
+        "build_viewer.py",
+        "--results", str(mock_dir),
+        "--findings", str(findings_file),
+        "--out", str(out_path),
+    ]
+    build_viewer.main()
+
+    html = out_path.read_text()
+    assert "Headline: hybrid wins." in html
+    assert 'id="findings-panel"' in html
+
+
+def test_real_tab_tolerates_null_ground_truth_points(tmp_path):
+    """Real anchors_heldout/fixes entries may have a null xyz_gt/xyz (engine
+    couldn't resolve ground truth for that held-out point) -- the build must
+    still succeed and embed them, since the viewer JS is responsible for
+    skipping them rather than the build script filtering them out."""
+    results = make_mock_results.build_clip_results("gberch", fps=30, image_size=(1920, 1080), seed=8)
+    results["real"]["anchors_heldout"].append({"frame": 0, "xyz_gt": None})
+    results["real"]["fixes"].append({"frame": 0, "xyz": None})
+    clip_dir = tmp_path / "gberch"
+    clip_dir.mkdir()
+    (clip_dir / "results.json").write_text(json.dumps(results))
+
+    clips = build_viewer.load_clip_results([str(tmp_path)])
+    html = build_viewer.build_html(clips)
+    assert '"xyz_gt":null' in html.replace(" ", "")

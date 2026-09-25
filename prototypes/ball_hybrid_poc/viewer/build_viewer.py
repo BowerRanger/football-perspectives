@@ -11,6 +11,10 @@ Usage:
 or ``*_results.json`` files), a single file, or a list of files. Data is
 rounded (1 cm for 3-D positions, 0.1 px for pixel-space values) before being
 embedded, to keep the output file small.
+
+``--findings <file.html>`` optionally inserts that trusted, author-written
+HTML fragment as a collapsible "Findings" section (open by default) directly
+under the summary strip. Omit it to leave the section out entirely.
 """
 from __future__ import annotations
 
@@ -21,17 +25,27 @@ from typing import Any
 
 TEMPLATE_PATH = Path(__file__).with_name("template.html")
 DATA_PLACEHOLDER = "/*__BALL_TRUTH_LAB_DATA__*/"
+FINDINGS_PLACEHOLDER = "<!--__BALL_TRUTH_LAB_FINDINGS__-->"
 
 # Field-name -> decimal-places rounding table. Applied to any bare float
 # found under a matching key while walking the JSON tree. `None` keys use a
 # length-based fallback (see `_precision_for`).
-_PX_KEYS = {"uv", "image_xy", "u", "v", "broadcast_px_error", "side_px_error"}
+_PX_KEYS = {
+    "uv", "image_xy", "u", "v", "broadcast_px_error", "side_px_error",
+    "broadcast_px_error_p95", "side_px_error_p95",
+}
 _METRE_KEYS = {
     "xyz", "xyz_gt", "x", "y", "z", "centre_xyz_per_frame",
     "p50", "p95", "max", "contact_gap", "ground_float_sink",
     "anchor_heldout_err_m", "fix_err_m",
+    "p50_ground", "p50_air", "p50_contact", "contact_gap_min_pm1",
+    "ground_float_sink_p95", "anchor_heldout_err_p95_m",
+    "jitter_p95", "jitter_p95_truth",
 }
-_FRACTION_KEYS = {"pct_le_20cm", "conf"}
+_FRACTION_KEYS = {
+    "pct_le_20cm", "conf", "coverage",
+    "pct_le_20cm_ground", "pct_le_20cm_air", "pct_le_20cm_contact",
+}
 
 
 def _precision_for(key: str | None, length: int | None = None) -> int:
@@ -96,17 +110,37 @@ def load_clip_results(results_arg: list[str]) -> dict[str, Any]:
     return clips
 
 
-def build_html(clips: dict[str, Any]) -> str:
+def _findings_block(findings_html: str) -> str:
+    """Wrap a trusted, author-supplied HTML fragment in a collapsible,
+    open-by-default "Findings" section. The fragment is inserted verbatim
+    (not escaped) since it is our own authored HTML, not user input."""
+    return (
+        '<section class="panel findings-panel" id="findings-panel">'
+        '<details id="findings-details" open>'
+        "<summary>Findings</summary>"
+        f'<div class="findings-body">{findings_html}</div>'
+        "</details></section>"
+    )
+
+
+def build_html(clips: dict[str, Any], findings_html: str | None = None) -> str:
     template = TEMPLATE_PATH.read_text()
     if DATA_PLACEHOLDER not in template:
         raise ValueError(
             f"template.html is missing the data placeholder {DATA_PLACEHOLDER!r}"
         )
+    if FINDINGS_PLACEHOLDER not in template:
+        raise ValueError(
+            f"template.html is missing the findings placeholder {FINDINGS_PLACEHOLDER!r}"
+        )
     payload = json.dumps(clips, separators=(",", ":"))
     # Guard against a stray "</script>" inside the JSON breaking the inline
     # <script> block the payload is embedded in.
     payload = payload.replace("</script", "<\\/script")
-    return template.replace(DATA_PLACEHOLDER, payload, 1)
+    html = template.replace(DATA_PLACEHOLDER, payload, 1)
+    findings_block = _findings_block(findings_html) if findings_html is not None else ""
+    html = html.replace(FINDINGS_PLACEHOLDER, findings_block, 1)
+    return html
 
 
 def main() -> None:
@@ -116,10 +150,19 @@ def main() -> None:
         help="Directory (searched recursively) or file(s) of per-clip results.json.",
     )
     ap.add_argument("--out", required=True, help="Output HTML path.")
+    ap.add_argument(
+        "--findings",
+        help=(
+            "Path to a trusted, author-written HTML fragment inserted as a "
+            "collapsible 'Findings' section (open by default) directly "
+            "under the summary strip. Omit to leave the section out entirely."
+        ),
+    )
     args = ap.parse_args()
 
     clips = load_clip_results(args.results)
-    html = build_html(clips)
+    findings_html = Path(args.findings).read_text() if args.findings else None
+    html = build_html(clips, findings_html)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

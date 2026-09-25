@@ -231,6 +231,12 @@ def gate_auto_events(
     n_rej_residual = 0
     probe_cfg = dict(tcfg)
     probe_cfg["max_splits_per_span"] = 0  # cheap probe, no recursive splitting
+    # A residual probe only cares about reprojection, not the spin-fitted
+    # arc — running the (comparatively expensive, ~0.3-1.5s/span) Magnus
+    # refinement on every candidate*span probe would multiply the gate's
+    # cost for no accept/reject benefit, so it's always off here
+    # regardless of the caller's own trajectory_cfg.
+    probe_cfg["spin"] = {**(probe_cfg.get("spin") or {}), "enabled": False}
 
     for cand in sorted(auto_hard, key=lambda k: k.frame):
         c = _consistency_px(ctx, cand, observations, g["consistency_window_frames"],

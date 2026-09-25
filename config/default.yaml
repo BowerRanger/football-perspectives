@@ -1162,6 +1162,115 @@ ball:
     min_pairs_for_refine: 8
     # Weight of each 3D fix residual in the LM fitters (px per metre of 3D error).
     fix_weight_px_per_m: 30.0
+  # Trajectory layer: reference (default) keeps the existing solve_piecewise
+  # / solve_modes / events dense track untouched. hybrid replaces
+  # world_by_frame/state_by_frame (before the C4 ray-faithful block) with
+  # src/utils/ball_hybrid_trajectory.py's physics-fit + broadcast/physics
+  # delta-blend track — see docs/superpowers/notes/ball-accuracy/ and
+  # prototypes/ball_hybrid_poc/CONTRACT.md for the PoC this was promoted
+  # from. touch_attribution/keyframe-building/export schemas are unchanged
+  # either way (the hybrid layer only replaces the dense per-frame track
+  # the rest of the stage already consumed).
+  trajectory: reference
+  hybrid:
+    cd: 0.25
+    fit_cd: true
+    cd_bounds: [0.15, 0.40]
+    magnus: false
+    blend_halflife_frames: 5.0
+    faithful_conf_min: 0.5
+    inlier_px: 15.0
+    roll_mu_max: 0.9
+    max_splits_per_span: 3
+    ray_anchor_weight: 1.2
+    min_obs_for_cd_fit: 5
+    split_residual_factor: 2.5
+    robust_gate_max_iters: 3
+    min_evid_for_open_end_fit: 2
+    # Ray-evidence span-fit weight, split by whether the span externally
+    # pins depth (roll: ground plane -> grounded_ray_weight) or not
+    # (flight: depth-ambiguous by construction -> airborne_ray_weight,
+    # much smaller). See ball_hybrid_trajectory.py's module docstring
+    # ("the origi01 held-out fix") for why this split exists: weighting
+    # airborne ray evidence as heavily as grounded evidence let a single
+    # noisy click warp a flight span's Cd fit (hence its DEPTH) while
+    # still reprojecting perfectly — a depth-only error is invisible to
+    # 2-D reprojection by construction.
+    grounded_ray_weight: 20.0
+    airborne_ray_weight: 2.0
+    anchor_not_honoured_px: 4.0
+    anchor_delta_max_m: 1.5
+    hermite_k_min: 3
+    hermite_k_max: 5
+    hermite_k_ref_frames: 4
+    hermite_k_ref_speed_m_s: 2.0
+    blend_max_delta_step_frac: 0.5
+    blend_max_delta_step_floor_m_s: 1.0
+    # Auto-event acceptance gate (src/utils/ball_hybrid_gating.py) applied
+    # before the current stage's own auto-anchor events are folded into
+    # the hybrid trajectory as extra knots. Manual anchors always win —
+    # this only governs additions on top of them.
+    gating:
+      confidence_floor: 0.5
+      corroborated_confidence_floor: 0.3
+      corroboration_window_frames: 3
+      consistency_window_frames: 5
+      consistency_max_px: 20.0
+      # Default 0.0 = "must not make the bracketing span's fit worse"
+      # (matches the validated PoC gate exactly, with the ordinary
+      # inlier_px tolerance as slack for refit noise on shorter
+      # half-spans). A positive value opts into a stricter "candidate
+      # must demonstrably improve the fit" policy.
+      residual_improve_frac: 0.0
+      min_frame_gap_from_manual: 2
+    # Bounded 2-dof Magnus (spin) refinement per resolved flight span
+    # (src/utils/ball_hybrid_spin.py, IC-E). Both knots stay exact for
+    # every trial omega (shoot_arc re-solves v0, never a free parameter
+    # alongside spin); accepted only when it clears BOTH a BIC bar
+    # (min_delta_bic) and a minimum fractional reprojection-RSS
+    # improvement (min_resid_gain) over the plain drag-only arc.
+    # Validated (0/50 false accepts across 4 clips; mismatch airborne
+    # %<=20cm 0.605->0.679 on kroupi) but default OFF pending the
+    # benchmark decision — cost is ~0.3-1.5s per flight span.
+    spin:
+      enabled: false
+      bounds: [-62.8319, 62.8319]  # +/-10 rev/s, ball_hybrid_physics.MAGNUS_MAX_OMEGA_REV_S
+      min_obs: 8
+      min_delta_bic: 6.0
+      min_resid_gain: 0.10
+    # Single-camera event-cue corroboration (src/utils/ball_cue_audio.py,
+    # ball_cue_net.py, ball_cue_blur.py, ball_cue_fusion.py — IC-D).
+    # Fused cue events (CueEvidence) ONLY relax the auto-event gate's
+    # confidence_floor above (see ball_hybrid_gating.gate_auto_events'
+    # `corroboration` argument) — a cue alone NEVER mints a knot. Default
+    # OFF: the 2026-09-25 anti-overfit tuning round found no fusion
+    # policy beat auto-only by >=0.05 held-out F1 in both cross-validation
+    # folds (see src/utils/ball_cue_config.py's module docstring for the
+    # full per-cue evidence). Shape mirrors CueCfg.from_dict exactly —
+    # see that module's docstring for the full field list/rationale.
+    cues:
+      enabled: false
+      audio:
+        freq_lo_hz: 1500.0
+        freq_hi_hz: 6000.0
+        floor_window_s: 1.0
+        k_mad: 3.0
+        min_rise_ratio: 0.4
+        band_limit_enabled: true
+        search_window_ms: 150.0
+        min_matches: 4
+        max_std_ms: 60.0
+      blur:
+        angle_change_deg: 50.0
+        min_streak_px: 10.0
+        speed_ratio_threshold: 2.0
+        max_frame_gap: 3
+      fusion:
+        policy: any2   # any2 | net_blur_combo | weighted
+        frame_tol: 2
+        weights: {audio_onset: 0.12, net_energy: 0.32, blur_direction_change: 0.16}
+        auto_weight: 1.0
+        threshold: 1.0
 
 refined_poses:
   # Joint pose/root fitting with the calibrated camera held fixed. PhysPT is

@@ -91,6 +91,8 @@ from src.utils.ball_hybrid_physics import (
     simulate,
 )
 from src.utils.ball_hybrid_blend import blend_deltas, clamp_delta_rate
+from src.utils.ball_hybrid_spin import DEFAULT_BOUNDS as DEFAULT_SPIN_BOUNDS
+from src.utils.ball_hybrid_spin import fit_span_spin
 from src.utils.ball_hybrid_types import HybridShotCtx, Knot
 from src.utils.goal_geometry import GoalGeometry, resolve_goal_impact_world
 
@@ -138,6 +140,16 @@ DEFAULT_CFG: dict[str, Any] = {
     "hermite_k_ref_speed_m_s": 2.0,
     "blend_max_delta_step_frac": 0.5,
     "blend_max_delta_step_floor_m_s": 1.0,
+    # Bounded 2-dof Magnus (spin) refinement per flight span (IC-E,
+    # ball_hybrid_spin.fit_span_spin) — see solve_span's flight branch.
+    # Default OFF until the benchmark decision (~0.3-1.5s/span cost).
+    "spin": {
+        "enabled": False,
+        "bounds": DEFAULT_SPIN_BOUNDS,
+        "min_obs": 8,
+        "min_delta_bic": 6.0,
+        "min_resid_gain": 0.10,
+    },
 }
 
 _GOAL_GEOMETRY = GoalGeometry.from_pitch_config({})
@@ -602,6 +614,60 @@ def solve_span(
             break
         active_evid = new_active
 
+    # Optional bounded spin (Magnus) refinement — IC-E's
+    # ball_hybrid_spin.fit_span_spin, gated off by default
+    # (ball.hybrid.spin.enabled) until the benchmark decision. Runs right
+    # after robust gating converges, on the FINAL inlier set
+    # (active_evid) — the spin fit is judged against exactly the evidence
+    # the drag-only arc above was judged against. Both knots stay exact
+    # (fit_span_spin re-shoots v0 via shoot_arc for every trial omega);
+    # accepted only when it clears fit_span_spin's own BIC + residual-gain
+    # bars, so a spin-free or under-evidenced span is untouched.
+    spin_cfg = cfg.get("spin") or {}
+    span_omega_world: tuple[float, float, float] | None = None
+    span_omega_rad_s: float | None = None
+    if bool(spin_cfg.get("enabled", False)) and len(active_evid) >= int(
+            spin_cfg.get("min_obs", 8)):
+        obs_frames = np.array([f for f, _, _ in active_evid], dtype=float)
+        # Absolute clip-time base throughout (obs_times/t_a/t_b all
+        # frame/fps) — project_fn maps t_s straight to a frame via
+        # round(t_s * fps), matching scripts/eval_ball_spin.py's
+        # validated reference wiring exactly (mixing an absolute and a
+        # span-relative base across these three is the KeyError IC-E hit
+        # — never do that).
+        obs_times = obs_frames / ctx.fps
+        obs_uv = np.array([uv for _, uv, _ in active_evid], dtype=float)
+        obs_conf = np.array([w for _, _, w in active_evid], dtype=float)
+        t_a = a_knot.frame / ctx.fps
+        t_b = b_knot.frame / ctx.fps
+
+        def _spin_project_fn(t_s: float, xyz: np.ndarray, _ctx=ctx) -> np.ndarray:
+            return _ctx.project(int(round(t_s * _ctx.fps)), xyz)
+
+        try:
+            spin_result = fit_span_spin(
+                a_xyz, t_a, b_xyz, t_b, obs_times, obs_uv, _spin_project_fn,
+                cd=cd, bounds=tuple(spin_cfg.get("bounds", DEFAULT_SPIN_BOUNDS)),
+                magnus_coeff=cfg["magnus_coeff"], obs_conf=obs_conf,
+                min_obs=int(spin_cfg.get("min_obs", 8)),
+                min_delta_bic=float(spin_cfg.get("min_delta_bic", 6.0)),
+                min_resid_gain=float(spin_cfg.get("min_resid_gain", 0.10)),
+            )
+        except Exception:  # noqa: BLE001 — spin is best-effort enrichment
+            spin_result = None
+
+        if spin_result is not None:
+            omega = np.array(spin_result.omega_world, dtype=float)
+            v0 = shoot_arc(a_xyz, 0.0, b_xyz, duration_s, cd=cd, omega=omega,
+                            magnus_coeff=cfg["magnus_coeff"])
+            frames = list(range(a_knot.frame, b_knot.frame + 1))
+            times = [(f - a_knot.frame) / ctx.fps for f in frames]
+            positions = simulate(a_xyz, v0, times, cd=cd, omega=omega,
+                                  magnus_coeff=cfg["magnus_coeff"])
+            pts = {f: positions[i] for i, f in enumerate(frames)}
+            span_omega_world = spin_result.omega_world
+            span_omega_rad_s = spin_result.rad_s
+
     worst: tuple[int, tuple[float, float], float] | None = None
     for frame, uv, _w in evid_all:
         err = _reproj_px(ctx, frame, pts[frame], uv)
@@ -611,6 +677,9 @@ def solve_span(
     info = {"span": (a_knot.frame, b_knot.frame), "model": "flight", "cd": cd,
             "n_obs": len(evid_all), "n_inliers": len(active_evid),
             "max_residual_px": worst[2] if worst else None}
+    if span_omega_world is not None:
+        info["omega_world"] = span_omega_world
+        info["rad_s"] = span_omega_rad_s
 
     if (worst is not None
             and worst[2] > cfg["inlier_px"] * cfg["split_residual_factor"]

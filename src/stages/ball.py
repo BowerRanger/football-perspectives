@@ -102,6 +102,9 @@ from src.utils.ball_context_prior import (
     load_player_boxes,
 )
 from src.utils.ball_detection_cache import CachingBallDetector, wrap_if_enabled
+from src.utils.ball_hybrid_gating import gating_cfg as _hybrid_gating_cfg
+from src.utils.ball_hybrid_trajectory import run_trajectory as _run_hybrid_trajectory_core
+from src.utils.ball_hybrid_types import HybridShotCtx
 from src.utils.ball_cross_replay import (
     CrossReplayCfg,
     PairFix,
@@ -484,6 +487,115 @@ def _write_observations_sidecar(
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload))
+
+
+# Real detector evidence sources (matches scripts/eval_ball_accuracy.py's
+# _DENSE_EVAL_SOURCES and CONTRACT.md's evidence definition exactly — a
+# frame carrying one of these was an actual accepted detection this run,
+# not a gap-filled/IMM-predicted/anchor-sourced pixel). ball.py's own
+# ``_detect_loop`` already writes the LITERAL per-frame detector pixel
+# (not the IMM's smoothed estimate) into ``TrackerStep.uv`` at every
+# accepted-detection frame (see its "fits must see the raw measurement"
+# comment) — so filtering ``steps`` to these sources gives exactly the
+# "raw detections, not IMM-smoothed" observations the hybrid trajectory
+# layer needs, with no need to re-read the observations sidecar from disk.
+_HYBRID_EVIDENCE_SOURCES = frozenset(
+    {"detector", "second_pass", "foot_guided", "strike_window"})
+
+
+@dataclasses.dataclass(frozen=True)
+class _HybridObs:
+    frame: int
+    uv: "tuple[float, float]"
+    conf: float
+    source: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _HybridFix:
+    frame: int
+    xyz: "tuple[float, float, float]"
+
+
+def _hybrid_observations(
+    steps: "list[TrackerStep]",
+    sources: dict[int, str],
+    confidences: dict[int, float],
+) -> list[_HybridObs]:
+    out = []
+    for s in steps:
+        if s.uv is None or s.is_gap_fill:
+            continue
+        src = sources.get(s.frame)
+        if src not in _HYBRID_EVIDENCE_SOURCES:
+            continue
+        out.append(_HybridObs(
+            frame=s.frame, uv=(float(s.uv[0]), float(s.uv[1])),
+            conf=float(confidences.get(s.frame, 0.0)), source=src))
+    return out
+
+
+def _run_hybrid_trajectory(
+    *,
+    cfg: dict,
+    artifacts: "_DetectArtifacts",
+    manual_by_frame: dict[int, BallAnchor],
+    auto_by_frame: dict[int, BallAnchor],
+    fixes: "dict[int, tuple[np.ndarray, float]] | None",
+    player_ctx: PlayerContext,
+    steps: "list[TrackerStep]",
+    sources: dict[int, str],
+    raw_confidences: dict[int, float],
+    world_by_frame: dict,
+    state_by_frame: dict,
+) -> tuple[dict, dict, dict]:
+    """Replace ``world_by_frame``/``state_by_frame`` with the hybrid
+    trajectory layer's output where it has an answer (frames the hybrid
+    layer doesn't cover — e.g. no knot/evidence reaches that far in
+    either direction — keep the reference solve's value, so this is
+    additive-only relative to the existing solve, never a coverage
+    regression). Returns ``(world_by_frame, state_by_frame,
+    diagnostics)``; ``diagnostics`` is written to the shot's diag
+    sidecar under ``hybrid_trajectory``.
+
+    ``fixes`` is the pre-1.5 cross-replay triangulation map (``{frame:
+    (xyz_array, weight)}``); it becomes depth-hard ``source="fix"``
+    knots exactly as ``ball_hybrid_trajectory.resolve_knots`` treats a
+    ``BallFix``.
+    """
+    ctx = HybridShotCtx(
+        clip_id=artifacts.camera_clip_id, fps=artifacts.camera_fps,
+        image_size=artifacts.camera_image_size,
+        per_frame_K=artifacts.per_frame_K, per_frame_R=artifacts.per_frame_R,
+        per_frame_t=artifacts.per_frame_t, distortion=artifacts.distortion,
+    )
+    observations = _hybrid_observations(steps, sources, raw_confidences)
+    fix_objs = [_HybridFix(frame=int(f), xyz=(float(w[0]), float(w[1]), float(w[2])))
+                for f, (w, _wt) in (fixes or {}).items()]
+
+    # Single canonical resolve -> gate -> finalize entry point (shared with
+    # bench/hold-out eval scripts — see ball_hybrid_trajectory.run_trajectory's
+    # docstring); ball.py just adapts its own config shape / in-memory
+    # artifacts into this call.
+    hybrid_yaml_cfg = cfg.get("hybrid", {})
+    traj_cfg_overrides = {k: v for k, v in hybrid_yaml_cfg.items()
+                           if k not in ("gating", "cues")}
+    frames, diag = _run_hybrid_trajectory_core(
+        ctx, observations, list(manual_by_frame.values()),
+        auto_anchors=list(auto_by_frame.values()), fixes=fix_objs,
+        cfg=traj_cfg_overrides,
+        gating_cfg=_hybrid_gating_cfg(hybrid_yaml_cfg.get("gating", {})),
+        player_context=player_ctx,
+    )
+
+    new_world = dict(world_by_frame)
+    new_state = dict(state_by_frame)
+    for f, entry in frames.items():
+        new_world[f] = (np.asarray(entry["xyz"], dtype=float), float(entry["conf"]))
+        new_state[f] = entry["state"]
+
+    diag["n_frames_covered"] = len(frames)
+    return new_world, new_state, diag
 
 
 def _veto_flight_obs(
@@ -2490,6 +2602,32 @@ class BallStage(BaseStage):
         world_by_frame = dict(result.world_by_frame)
         state_by_frame = dict(result.state_by_frame)
 
+        # ball.trajectory: hybrid — replace the dense track with the
+        # physics-fit + broadcast/physics delta-blend trajectory layer
+        # (src/utils/ball_hybrid_trajectory.py), additive-only relative to
+        # the reference solve above (frames the hybrid layer doesn't reach
+        # keep their reference value). touch_attribution / keyframe
+        # building / export schemas downstream are unchanged either way.
+        hybrid_diag: dict | None = None
+        if str(cfg.get("trajectory", "reference")) == "hybrid":
+            try:
+                world_by_frame, state_by_frame, hybrid_diag = _run_hybrid_trajectory(
+                    cfg=cfg, artifacts=artifacts,
+                    manual_by_frame=manual_by_frame, auto_by_frame=auto_by_frame,
+                    fixes=fixes, player_ctx=player_ctx,
+                    steps=steps, sources=sources, raw_confidences=raw_confidences,
+                    world_by_frame=world_by_frame, state_by_frame=state_by_frame,
+                )
+            except Exception as exc:  # noqa: BLE001 — hybrid trajectory is opt-in
+                # enrichment; never let it take down the stage. Falls back
+                # to the reference world_by_frame/state_by_frame computed
+                # above.
+                logger.warning(
+                    "ball stage: hybrid trajectory failed (%s) — falling "
+                    "back to the reference solve", exc,
+                )
+                hybrid_diag = {"error": str(exc)}
+
         # C4 — ray-faithfulness for airborne-bucket anchors: the clicked
         # pixel is hard lateral ground truth; keep the solved depth but
         # snap onto the clicked ray when reprojection drifts.
@@ -2718,4 +2856,17 @@ class BallStage(BaseStage):
             diag["mode_search"] = result.diagnostics.get("mode_search", {})
         if n_flight_vetoed:
             diag["flight_vetoed"] = n_flight_vetoed
-        diag_path.write_text(json.dumps(diag, indent=2))
+        diag["trajectory"] = str(cfg.get("trajectory", "reference"))
+        if hybrid_diag is not None:
+            diag["hybrid_trajectory"] = hybrid_diag
+
+        def _json_default(o: object):
+            if isinstance(o, np.floating):
+                return float(o)
+            if isinstance(o, np.integer):
+                return int(o)
+            if isinstance(o, np.ndarray):
+                return o.tolist()
+            return str(o)
+
+        diag_path.write_text(json.dumps(diag, indent=2, default=_json_default))

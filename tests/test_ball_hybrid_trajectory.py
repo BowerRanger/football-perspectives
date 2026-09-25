@@ -415,3 +415,69 @@ def test_run_trajectory_folds_in_auto_anchors_via_the_gate():
     assert diag["gate"]["n_accepted_hard"] == 1
     assert frames[mid_frame]["mode"] == "anchor"
     assert np.allclose(frames[mid_frame]["xyz"], p_mid, atol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# IC-E's ball_hybrid_spin.fit_span_spin wiring (solve_span's flight branch,
+# gated behind cfg["spin"]["enabled"], default off).
+# ---------------------------------------------------------------------------
+
+def test_spin_disabled_by_default_no_omega_in_span_diag():
+    ctx, anchors, obs, *_ = _synthetic_drag_kick_scenario()
+    frames, diag, *_ = _run(ctx, obs, anchors, cfg={"cd": 0.30, "fit_cd": False})
+    for span in diag["spans"]:
+        assert "omega_world" not in span
+        assert "rad_s" not in span
+
+
+def test_spin_enabled_fits_omega_on_a_genuinely_spun_trajectory():
+    ctx = _make_ctx()
+    cd = 0.25
+    omega_true = np.array([0.0, 0.0, 25.0])  # pure sidespin, well inside bounds
+    p_a = np.array([0.0, 0.0, BALL_R])
+    v0_true = np.array([14.0, 0.0, 9.0])
+    frame_a = 5
+    fps = ctx.fps
+
+    duration_s = _find_landing_time(p_a, v0_true, cd)
+    frame_b = frame_a + int(round(duration_s * fps))
+    duration_s = (frame_b - frame_a) / fps
+    p_b = simulate(p_a, v0_true, [duration_s], cd=cd, omega=omega_true)[0]
+    p_b[2] = BALL_R
+
+    anchors = [
+        _FakeAnchor(frame=frame_a, image_xy=tuple(float(x) for x in ctx.project(frame_a, p_a)),
+                    state="kick", player_id="P001", bone="right_foot"),
+        _FakeAnchor(frame=frame_b, image_xy=tuple(float(x) for x in ctx.project(frame_b, p_b)),
+                    state="bounce"),
+    ]
+    obs = []
+    for frac in np.linspace(0.1, 0.9, 16):
+        t_s = frac * duration_s
+        frame = int(round(frame_a + t_s * fps))
+        if frame in (frame_a, frame_b):
+            continue
+        p_true = simulate(p_a, v0_true, [t_s], cd=cd, omega=omega_true)[0]
+        uv = ctx.project(frame, p_true)
+        obs.append(_FakeObs(frame=frame, uv=(float(uv[0]), float(uv[1])), conf=0.95))
+
+    spin_cfg = {
+        "enabled": True, "min_obs": 6, "min_delta_bic": 1.0, "min_resid_gain": 0.02,
+    }
+    frames, diag, *_ = _run(ctx, obs, anchors,
+                             cfg={"cd": cd, "fit_cd": False, "spin": spin_cfg,
+                                  # Keep the spin-perturbed points as robust-gate
+                                  # INLIERS (rather than discarding most of them
+                                  # as outliers against the drag-only arc) so
+                                  # fit_span_spin sees the full evidence set.
+                                  "inlier_px": 30.0})
+    flight_spans = [s for s in diag["spans"] if s["model"] == "flight"]
+    assert flight_spans, "expected at least one flight span"
+    assert any("omega_world" in s for s in flight_spans), (
+        "expected the spin fit to be accepted on a strongly, cleanly spun "
+        f"synthetic arc; spans={flight_spans}")
+    spun = next(s for s in flight_spans if "omega_world" in s)
+    assert spun["rad_s"] > 0.0
+    # Knots must still be exact even with spin applied.
+    assert np.allclose(frames[frame_a]["xyz"], p_a, atol=1e-6)
+    assert np.allclose(frames[frame_b]["xyz"], p_b, atol=1e-6)

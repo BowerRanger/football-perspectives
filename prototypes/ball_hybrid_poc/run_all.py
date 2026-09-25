@@ -126,16 +126,9 @@ def _nodrag_cfg():
     rather than crash the run."""
     if hybrid is None:
         return None
-    for ctor_name in ("HybridConfig", "HybridCfg", "Config", "Cfg"):
-        cls = getattr(hybrid, ctor_name, None)
-        if cls is None:
-            continue
-        for kwargs in ({"cd": 0}, {"cd": 0.0}):
-            try:
-                return cls(**kwargs)
-            except Exception:  # noqa: BLE001
-                continue
-    return {"cd": 0}
+    # fit_cd must be off too, or the span solver re-fits Cd whenever a span
+    # has enough evidence and the ablation silently becomes the drag model.
+    return {"cd": 0.0, "fit_cd": False}
 
 
 def _run_hybrid_track(clip_ctx, observations, anchors, fixes, cfg=None):

@@ -406,6 +406,8 @@ def run_synthetic(clip_id: str, scenario: str) -> Track:
                          config["ball"], detector)
         elapsed = time.time() - t0
         track = BallTrack.load(track_out)
+        _persist_auto_anchors(overlay, ctx.shot_id,
+                              out_dir / f"auto_anchors_current_{scenario}.json")
 
     logger.info(
         "run_synthetic(%s, %s): %d frames in %.1fs, hash_misses=%d "
@@ -427,6 +429,17 @@ def run_synthetic(clip_id: str, scenario: str) -> Track:
     out = _track_to_contract(clip_id, track)
     save_json(out_dir / f"track_current_{scenario}.json", out)
     return out
+
+
+def _persist_auto_anchors(overlay: Path, shot_id: str, dst: Path) -> None:
+    """Keep the stage's auto-event sidecar before the temp overlay is
+    deleted: the hybrid's ``+events`` variant consumes the current stage's
+    auto events (method evidence, never truth) as extra knots."""
+    src = Path(overlay) / "ball" / f"{shot_id}_ball_anchors_auto.json"
+    if src.exists():
+        shutil.copyfile(src, dst)
+    else:
+        logger.warning("no auto-anchor sidecar at %s", src)
 
 
 # ---------------------------------------------------------------------------
@@ -507,11 +520,13 @@ def run_real(clip_id: str, fold: Optional[int]) -> Track:
 
     t0 = time.time()
     with tempfile.TemporaryDirectory(prefix=f"ball_poc_real_{clip_id}_") as tmp:
-        _overlay, track_out = _run_fold(
+        overlay, track_out = _run_fold(
             ctx.output_dir, ctx.shot_id, config, "wasb", kept_set, Path(tmp),
             det_cache=det_cache,
         )
         track = BallTrack.load(track_out)
+        _persist_auto_anchors(overlay, ctx.shot_id,
+                              out_dir / f"auto_anchors_current_real_{label}.json")
     elapsed = time.time() - t0
 
     logger.info("run_real(%s, %s): %d frames in %.1fs", clip_id, label,

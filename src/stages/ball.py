@@ -42,11 +42,12 @@ import numpy as np
 from src.pipeline.base import BaseStage
 from src.schemas.ball_anchor import BallAnchor, BallAnchorSet
 from src.schemas.ball_keyframes import BallKeyframeSet
-from src.schemas.ball_track import BallFrame, BallTrack
+from src.schemas.ball_track import BallFrame, BallTrack, FlightSegment
 from src.schemas.camera_track import CameraTrack
 from src.schemas.shots import ShotsManifest
 from src.utils.ball_anchor_heights import (
     AIRBORNE_STATES,
+    EVENT_STATES,
     HARD_KNOT_STATES,
     airborne_bucket_range,
     state_to_height,
@@ -104,7 +105,13 @@ from src.utils.ball_context_prior import (
 from src.utils.ball_detection_cache import CachingBallDetector, wrap_if_enabled
 from src.utils.ball_hybrid_gating import gating_cfg as _hybrid_gating_cfg
 from src.utils.ball_hybrid_trajectory import run_trajectory as _run_hybrid_trajectory_core
-from src.utils.ball_hybrid_types import HybridShotCtx
+from src.utils.ball_hybrid_types import CueEvidence, HybridShotCtx
+from src.utils.ball_cue_audio import compute_audio_cues
+from src.utils.ball_cue_common import probe_speed_factor
+from src.utils.ball_cue_config import CueCfg
+from src.utils.ball_cue_fusion import fuse_cues_with_cfg
+from src.utils.ball_replay_knots import fixes_to_knots
+from src.utils.ball_replay_review import build_replay_review_proposals
 from src.utils.ball_cross_replay import (
     CrossReplayCfg,
     PairFix,
@@ -208,6 +215,37 @@ def _accepted_obs_and_cams(
 # behaviours they pin) exercise these directly.
 _project_point_onto_pixel_ray = project_point_onto_pixel_ray
 _snap_world_onto_pixel_ray = project_point_onto_pixel_ray
+
+
+def _record_nonproductive_b_side(
+    summaries_by_shot: dict[str, dict],
+    b_shot_id: str,
+    a_shot_id: str,
+    meta: dict,
+) -> None:
+    """Symmetric counterpart of the reference (A) side's ``a_partners``
+    bookkeeping: a partner (B) shot has exactly ONE partner (the
+    reference, A) per pairing, so when that single pairing fails
+    (geometry-rejected or zero inlier fixes), B would otherwise get no
+    ``summaries_by_shot`` entry at all — the productive path (further
+    down ``_triangulate_groups``) is the only place that currently
+    writes one. Builds B's own review proposal from the same failure
+    ``meta`` A just recorded, via ``ball_replay_review.
+    build_replay_review_proposals`` (see that module's docstring — this
+    mirrors its ``partners_meta`` shape exactly, one entry keyed by the
+    single partner A). Guarded with ``setdefault`` semantics so a LATER
+    successful pairing for the same B shot (a different reference in a
+    multi-way group) is never clobbered by an earlier failure record.
+    """
+    if b_shot_id in summaries_by_shot:
+        return
+    proposals = build_replay_review_proposals(b_shot_id, {a_shot_id: meta})
+    summaries_by_shot[b_shot_id] = {
+        "partner_shots": [a_shot_id],
+        "n_inlier_fixes": 0,
+        "partners": {a_shot_id: meta},
+        "review": proposals,
+    }
 
 
 def _build_detector(cfg: dict) -> BallDetector:
@@ -535,12 +573,126 @@ def _hybrid_observations(
     return out
 
 
+def _hybrid_fix_knots(
+    *,
+    fixes: "dict[int, tuple[np.ndarray, float]] | None",
+    manual_by_frame: dict[int, BallAnchor],
+    artifacts: "_DetectArtifacts",
+    fixes_cfg: dict,
+) -> tuple[list, list[dict]]:
+    """Gate cross-replay ``fixes`` through
+    ``ball_replay_knots.fixes_to_knots`` (physical-volume + operator-wins
+    checks — see that module's docstring) before they can become
+    depth-hard trajectory knots. ``ball.hybrid.fixes.enabled`` (default
+    ``true``) is a blunt kill switch; the two per-fix gates inside
+    ``fixes_to_knots`` run either way. Returns ``(knots, dropped)`` —
+    ``knots`` are already-built ``Knot`` objects (duck-typed as fix-like
+    ``.frame``/``.xyz`` objects, so they pass straight through
+    ``ball_hybrid_trajectory.resolve_knots``' fixes handling unchanged).
+    """
+    raw = [_HybridFix(frame=int(f), xyz=(float(w[0]), float(w[1]), float(w[2])))
+           for f, (w, _wt) in (fixes or {}).items()]
+    if not raw or not bool(fixes_cfg.get("enabled", True)):
+        return [], []
+    cams = {
+        f: (artifacts.per_frame_K[f], artifacts.per_frame_R[f], artifacts.per_frame_t[f])
+        for f in artifacts.per_frame_K
+    }
+    knots, dropped = fixes_to_knots(
+        raw, list(manual_by_frame.values()), cams,
+        tol_px=float(fixes_cfg.get("tol_px", 3.0)),
+        adjacent_frames=int(fixes_cfg.get("adjacent_frames", 1)),
+        weight=float(fixes_cfg.get("weight", 1.0)),
+        distortion=artifacts.distortion,
+    )
+    if dropped:
+        logger.info("ball: hybrid fixes gate dropped %d/%d cross-replay fix(es) "
+                    "(%s)", len(dropped), len(raw),
+                    ", ".join(sorted({d["reason"] for d in dropped})))
+    return knots, dropped
+
+
+def _hybrid_cue_corroboration(
+    *,
+    cues_cfg: dict,
+    output_dir: Path,
+    shot_id: str,
+    clip_path: Path,
+    fps: float,
+    contact_frames: list[int],
+    auto_event_frames: list[int],
+) -> tuple[CueEvidence, ...]:
+    """Single-camera event-cue corroboration (audio only in this wiring —
+    net/blur need a shared frame-decode pass with ``_detect_loop`` not
+    yet built; see ``ball_cue_config.py``'s module docstring for why
+    fusion is opt-in/default-off regardless). Fused events ONLY relax
+    ``ball_hybrid_gating.gate_auto_events``'s confidence floor
+    (``corroboration=``) — never minted as knots directly, so a cue-only
+    "false" event can at worst let a marginal auto candidate through the
+    SAME residual/consistency gates every other candidate must clear.
+    Best-effort: any failure returns no corroboration, never raises.
+    """
+    if not bool(cues_cfg.get("enabled", False)) or not contact_frames:
+        return ()
+    cue_cfg = CueCfg.from_dict(cues_cfg)
+    try:
+        speed_factor = probe_speed_factor(output_dir, shot_id)
+        _calib, audio_cues = compute_audio_cues(
+            clip_path, fps, contact_frames, cfg=cue_cfg, speed_factor=speed_factor)
+        if not audio_cues:
+            return ()
+        fused = fuse_cues_with_cfg({"audio": audio_cues}, auto_event_frames, cue_cfg)
+    except Exception as exc:  # noqa: BLE001 — cues are best-effort enrichment
+        logger.warning("ball: cue corroboration failed (%s) — continuing without it", exc)
+        return ()
+    return tuple(
+        CueEvidence(frame=fe.frame, kind=fe.kind, cue="+".join(fe.cues),
+                    conf=fe.conf, xyz=fe.xyz, uv=fe.uv)
+        for fe in fused
+    )
+
+
+def _hybrid_flight_segments(diag: dict, start_id: int = 0) -> tuple[FlightSegment, ...]:
+    """Build ``FlightSegment`` objects from the hybrid trajectory's own
+    flight-span diagnostics (``solve_span``'s ``p0``/``v0``/``g``,
+    ``max_residual_px``, and — when the bounded spin refinement accepted
+    one — ``omega_world``/``rad_s``). Keeps ``BallTrack.flight_segments``
+    (and hence ``ball_orientation.integrate_orientation``'s Magnus spin)
+    consistent with the hybrid dense track rather than the reference
+    solver's segments, which describe a DIFFERENT (reference) positional
+    fit once ``ball.trajectory: hybrid`` has replaced the frames."""
+    segments = []
+    for i, span in enumerate(s for s in diag.get("spans", []) if s.get("model") == "flight"):
+        if "p0" not in span or "v0" not in span:
+            continue  # an internal-split probe span or similar; skip defensively
+        parabola = {"p0": list(span["p0"]), "v0": list(span["v0"]), "g": span["g"]}
+        if "omega_world" in span:
+            omega = np.array(span["omega_world"], dtype=float)
+            n = float(np.linalg.norm(omega))
+            parabola["spin_axis_world"] = (omega / n).tolist() if n > 1e-9 else None
+            parabola["spin_omega_rad_s"] = span.get("rad_s")
+            parabola["spin_confidence"] = None
+        else:
+            parabola["spin_axis_world"] = None
+            parabola["spin_omega_rad_s"] = None
+            parabola["spin_confidence"] = None
+        segments.append(FlightSegment(
+            id=start_id + i,
+            frame_range=(int(span["span"][0]), int(span["span"][1])),
+            parabola=parabola,
+            fit_residual_px=float(span.get("max_residual_px") or 0.0),
+        ))
+    return tuple(segments)
+
+
 def _run_hybrid_trajectory(
     *,
     cfg: dict,
+    output_dir: Path,
     artifacts: "_DetectArtifacts",
     manual_by_frame: dict[int, BallAnchor],
     auto_by_frame: dict[int, BallAnchor],
+    anchor_by_frame: dict[int, BallAnchor],
     fixes: "dict[int, tuple[np.ndarray, float]] | None",
     player_ctx: PlayerContext,
     steps: "list[TrackerStep]",
@@ -548,20 +700,23 @@ def _run_hybrid_trajectory(
     raw_confidences: dict[int, float],
     world_by_frame: dict,
     state_by_frame: dict,
-) -> tuple[dict, dict, dict]:
+    clip_path: Path,
+) -> tuple[dict, dict, dict, tuple[FlightSegment, ...]]:
     """Replace ``world_by_frame``/``state_by_frame`` with the hybrid
     trajectory layer's output where it has an answer (frames the hybrid
     layer doesn't cover — e.g. no knot/evidence reaches that far in
     either direction — keep the reference solve's value, so this is
     additive-only relative to the existing solve, never a coverage
-    regression). Returns ``(world_by_frame, state_by_frame,
-    diagnostics)``; ``diagnostics`` is written to the shot's diag
-    sidecar under ``hybrid_trajectory``.
+    regression). Returns ``(world_by_frame, state_by_frame, diagnostics,
+    flight_segments)``; ``diagnostics`` is written to the shot's diag
+    sidecar under ``hybrid_trajectory``; ``flight_segments`` (see
+    ``_hybrid_flight_segments``) is what the caller should use in place
+    of the reference solver's ``result.flight_segments`` from here on.
 
     ``fixes`` is the pre-1.5 cross-replay triangulation map (``{frame:
-    (xyz_array, weight)}``); it becomes depth-hard ``source="fix"``
-    knots exactly as ``ball_hybrid_trajectory.resolve_knots`` treats a
-    ``BallFix``.
+    (xyz_array, weight)}``); gated through ``_hybrid_fix_knots``
+    (physical-volume + operator-wins) before becoming depth-hard
+    ``source="fix"`` knots.
     """
     ctx = HybridShotCtx(
         clip_id=artifacts.camera_clip_id, fps=artifacts.camera_fps,
@@ -570,19 +725,28 @@ def _run_hybrid_trajectory(
         per_frame_t=artifacts.per_frame_t, distortion=artifacts.distortion,
     )
     observations = _hybrid_observations(steps, sources, raw_confidences)
-    fix_objs = [_HybridFix(frame=int(f), xyz=(float(w[0]), float(w[1]), float(w[2])))
-                for f, (w, _wt) in (fixes or {}).items()]
+
+    hybrid_yaml_cfg = cfg.get("hybrid", {})
+    fix_knots, dropped_fixes = _hybrid_fix_knots(
+        fixes=fixes, manual_by_frame=manual_by_frame, artifacts=artifacts,
+        fixes_cfg=hybrid_yaml_cfg.get("fixes", {}),
+    )
+    contact_frames = sorted(f for f, a in anchor_by_frame.items() if a.state in EVENT_STATES)
+    cues = _hybrid_cue_corroboration(
+        cues_cfg=hybrid_yaml_cfg.get("cues", {}), output_dir=output_dir,
+        shot_id=artifacts.shot_id, clip_path=clip_path, fps=artifacts.camera_fps,
+        contact_frames=contact_frames, auto_event_frames=sorted(auto_by_frame),
+    )
 
     # Single canonical resolve -> gate -> finalize entry point (shared with
     # bench/hold-out eval scripts — see ball_hybrid_trajectory.run_trajectory's
     # docstring); ball.py just adapts its own config shape / in-memory
     # artifacts into this call.
-    hybrid_yaml_cfg = cfg.get("hybrid", {})
     traj_cfg_overrides = {k: v for k, v in hybrid_yaml_cfg.items()
-                           if k not in ("gating", "cues")}
+                           if k not in ("gating", "cues", "fixes")}
     frames, diag = _run_hybrid_trajectory_core(
         ctx, observations, list(manual_by_frame.values()),
-        auto_anchors=list(auto_by_frame.values()), fixes=fix_objs,
+        auto_anchors=list(auto_by_frame.values()), fixes=fix_knots, cues=cues,
         cfg=traj_cfg_overrides,
         gating_cfg=_hybrid_gating_cfg(hybrid_yaml_cfg.get("gating", {})),
         player_context=player_ctx,
@@ -595,7 +759,11 @@ def _run_hybrid_trajectory(
         new_state[f] = entry["state"]
 
     diag["n_frames_covered"] = len(frames)
-    return new_world, new_state, diag
+    diag["fixes_dropped"] = dropped_fixes
+    diag["n_fix_knots"] = len(fix_knots)
+    diag["n_cues"] = len(cues)
+    flight_segments = _hybrid_flight_segments(diag)
+    return new_world, new_state, diag, flight_segments
 
 
 def _veto_flight_obs(
@@ -1181,6 +1349,29 @@ class BallStage(BaseStage):
                 f"ball stage: no clip files found under {shots_dir}"
             )
         return candidates[0]
+
+    def _clip_path_for_shot(self, shot_id: str) -> Path:
+        """Resolve a shot's clip file for a SOLVE-time consumer (the
+        hybrid trajectory layer's audio-cue pass) that doesn't have it
+        threaded through ``_DetectArtifacts``. Mirrors the same
+        resolution ``_run_all_shots`` used at detect time (manifest
+        ``clip_file`` when present, else the legacy single-clip guess);
+        best-effort — a missing manifest entry falls back to the
+        ``shots/<shot_id>.mp4`` naming convention rather than raising,
+        since this is only ever consulted by opt-in enrichment."""
+        if not shot_id:
+            return self._guess_legacy_clip()
+        manifest_path = self.output_dir / "shots" / "shots_manifest.json"
+        if manifest_path.exists():
+            try:
+                manifest = ShotsManifest.load(manifest_path)
+                for shot in manifest.shots:
+                    if shot.id == shot_id:
+                        return self.output_dir / shot.clip_file
+            except Exception as exc:  # noqa: BLE001 — best-effort resolution
+                logger.warning("ball: failed to resolve clip path for %s via "
+                               "manifest (%s) — using naming convention", shot_id, exc)
+        return self.output_dir / "shots" / f"{shot_id}.mp4"
 
     # ------------------------------------------------------------------
 
@@ -1958,13 +2149,17 @@ class BallStage(BaseStage):
                         "fixes physically impossible (wild partner camera "
                         "or wrong offset)", align_a.shot_id, align_b.shot_id,
                         n_bad, len(pair_fixes))
-                    a_partners[align_b.shot_id] = {
+                    rejected_meta = {
                         "saved_offset": delta_saved,
                         "refined_offset": refined_offset,
                         "rejected": "implausible_geometry",
                         "n_impossible": n_bad,
                         "n_fixes": len(pair_fixes),
                     }
+                    a_partners[align_b.shot_id] = rejected_meta
+                    _record_nonproductive_b_side(
+                        summaries_by_shot, align_b.shot_id, align_a.shot_id,
+                        rejected_meta)
                     continue
                 pair_fixes, n_impossible = filter_physical_fixes(pair_fixes)
                 if n_impossible:
@@ -1977,6 +2172,23 @@ class BallStage(BaseStage):
                         "ball: cross-replay: no inlier fixes for pair %s / %s",
                         align_a.shot_id, align_b.shot_id,
                     )
+                    # Record the empty-result outcome too (not just a bare
+                    # continue) so ball_replay_review.py's "every partner
+                    # gated out" detection can see it — previously a shot
+                    # whose geometry passed but whose fixes were all
+                    # filtered out looked identical to "no partner had
+                    # overlapping evidence" (silent, per that module's
+                    # docstring).
+                    empty_meta = {
+                        "saved_offset": delta_saved,
+                        "refined_offset": refined_offset,
+                        "n_pairs": n_pairs,
+                        "n_fixes": 0,
+                    }
+                    a_partners[align_b.shot_id] = empty_meta
+                    _record_nonproductive_b_side(
+                        summaries_by_shot, align_b.shot_id, align_a.shot_id,
+                        empty_meta)
                     continue
 
                 # Per-partner metadata. median_ray_miss is over the accepted
@@ -2048,17 +2260,28 @@ class BallStage(BaseStage):
             if not a_partners:
                 continue  # no partner produced fixes for the reference
 
+            # "productive" requires BOTH not-rejected AND at least one
+            # inlier fix — an entry recorded by the empty-pair-fixes
+            # branch above (geometry passed, zero fixes survived) has no
+            # "rejected" key but also no n_inlier_fixes, so it must not
+            # be mistaken for a working pairing here.
             productive = {
                 sid: p for sid, p in a_partners.items()
-                if not p.get("rejected")
+                if not p.get("rejected") and p.get("n_inlier_fixes", 0) > 0
+            }
+            non_productive = {
+                sid: p for sid, p in a_partners.items() if sid not in productive
             }
             if not productive:
-                # Every partner's geometry was rejected: persist the reason
-                # in the diag summary, mint no fixes for the solve.
+                # Every partner was rejected or produced zero fixes: persist
+                # the reason in the diag summary (+ a review proposal per
+                # partner), mint no fixes for the solve.
                 summaries_by_shot[align_a.shot_id] = {
                     "partner_shots": sorted(a_partners.keys()),
                     "n_inlier_fixes": 0,
                     "partners": a_partners,
+                    "review": build_replay_review_proposals(
+                        align_a.shot_id, non_productive),
                 }
                 continue
 
@@ -2084,6 +2307,14 @@ class BallStage(BaseStage):
                 "median_parallax_deg": float(np.median(a_parallaxes)),
                 "partners": a_partners,
             }
+            if non_productive:
+                # Mixed group: some partners worked, some didn't — flag
+                # just the failed ones for review (per
+                # build_replay_review_proposals' docstring: only pass the
+                # gated-out subset when there's a productive/non-productive
+                # mix, so a working partner is never proposed for review).
+                a_summary["review"] = build_replay_review_proposals(
+                    align_a.shot_id, non_productive)
             summaries_by_shot[align_a.shot_id] = a_summary
             ball_dir.mkdir(parents=True, exist_ok=True)
             BallFixSet(
@@ -2609,19 +2840,31 @@ class BallStage(BaseStage):
         # keep their reference value). touch_attribution / keyframe
         # building / export schemas downstream are unchanged either way.
         hybrid_diag: dict | None = None
+        effective_flight_segments = result.flight_segments
         if str(cfg.get("trajectory", "reference")) == "hybrid":
             try:
-                world_by_frame, state_by_frame, hybrid_diag = _run_hybrid_trajectory(
-                    cfg=cfg, artifacts=artifacts,
-                    manual_by_frame=manual_by_frame, auto_by_frame=auto_by_frame,
-                    fixes=fixes, player_ctx=player_ctx,
-                    steps=steps, sources=sources, raw_confidences=raw_confidences,
-                    world_by_frame=world_by_frame, state_by_frame=state_by_frame,
+                world_by_frame, state_by_frame, hybrid_diag, hybrid_flight_segments = (
+                    _run_hybrid_trajectory(
+                        cfg=cfg, output_dir=self.output_dir, artifacts=artifacts,
+                        manual_by_frame=manual_by_frame, auto_by_frame=auto_by_frame,
+                        anchor_by_frame=anchor_by_frame,
+                        fixes=fixes, player_ctx=player_ctx,
+                        steps=steps, sources=sources, raw_confidences=raw_confidences,
+                        world_by_frame=world_by_frame, state_by_frame=state_by_frame,
+                        clip_path=self._clip_path_for_shot(shot_id),
+                    )
                 )
+                # BallTrack.flight_segments / ball_orientation's Magnus spin
+                # must describe the SAME positional fit as world_by_frame —
+                # once hybrid has replaced the frames, the reference
+                # solver's own segments (different p0/v0 per span) would be
+                # incoherent with them, so hybrid's own flight spans take
+                # over here too (see _hybrid_flight_segments).
+                effective_flight_segments = hybrid_flight_segments
             except Exception as exc:  # noqa: BLE001 — hybrid trajectory is opt-in
                 # enrichment; never let it take down the stage. Falls back
-                # to the reference world_by_frame/state_by_frame computed
-                # above.
+                # to the reference world_by_frame/state_by_frame/flight_
+                # segments computed above.
                 logger.warning(
                     "ball stage: hybrid trajectory failed (%s) — falling "
                     "back to the reference solve", exc,
@@ -2663,7 +2906,7 @@ class BallStage(BaseStage):
 
         # --- 6. Emit -----------------------------------------------------
         segment_by_frame: dict[int, int] = {}
-        for seg in result.flight_segments:
+        for seg in effective_flight_segments:
             for fi in range(seg.frame_range[0], seg.frame_range[1] + 1):
                 segment_by_frame[fi] = seg.id
 
@@ -2694,7 +2937,7 @@ class BallStage(BaseStage):
         # Magnus spin / rolling-consistent ground spin), never a measured
         # ball-spin observation; see ball_orientation.integrate_orientation.
         quat_by_frame = integrate_orientation(
-            per_frame_out, result.flight_segments,
+            per_frame_out, effective_flight_segments,
             artifacts.camera_fps, ball_radius,
         )
         per_frame_out = [
@@ -2706,7 +2949,7 @@ class BallStage(BaseStage):
             clip_id=artifacts.camera_clip_id,
             fps=artifacts.camera_fps,
             frames=tuple(per_frame_out),
-            flight_segments=result.flight_segments,
+            flight_segments=effective_flight_segments,
         )
         track.save(ball_out_path)
 
@@ -2733,7 +2976,7 @@ class BallStage(BaseStage):
                     per_frame_t=per_frame_t,
                     distortion=distortion,
                     ground_touch_frames=ground_touch_frames,
-                    flight_segments=result.flight_segments,
+                    flight_segments=effective_flight_segments,
                 )
         except Exception as exc:  # noqa: BLE001 — sidecar is enrichment, never block the stage
             logger.warning(

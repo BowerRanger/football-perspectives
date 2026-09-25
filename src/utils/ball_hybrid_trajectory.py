@@ -85,6 +85,7 @@ from src.utils.ball_hybrid_physics import (
     CD_BOUNDS,
     CD_DEFAULT,
     DEFAULT_MAGNUS_COEFF,
+    G,
     fit_roll_segment,
     hermite_blend,
     shoot_arc,
@@ -676,7 +677,15 @@ def solve_span(
 
     info = {"span": (a_knot.frame, b_knot.frame), "model": "flight", "cd": cd,
             "n_obs": len(evid_all), "n_inliers": len(active_evid),
-            "max_residual_px": worst[2] if worst else None}
+            "max_residual_px": worst[2] if worst else None,
+            # p0/v0/g fully determine this span's parabola (+ Magnus, via
+            # omega_world/rad_s below when present) — carried so a caller
+            # (ball.py's hybrid wiring) can build a FlightSegment for
+            # BallTrack.flight_segments / ball_orientation.integrate_
+            # orientation without re-deriving v0 via a second shoot_arc call.
+            "p0": tuple(float(x) for x in a_xyz),
+            "v0": tuple(float(x) for x in v0),
+            "g": float(G)}
     if span_omega_world is not None:
         info["omega_world"] = span_omega_world
         info["rad_s"] = span_omega_rad_s

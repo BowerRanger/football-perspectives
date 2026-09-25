@@ -171,3 +171,39 @@ def test_normalize_frame_keyed_accepts_list_and_dict_forms():
     assert out2 == {3: [(1.0, 2.0, 0.5)]}
 
     assert BR._normalize_frame_keyed(None) == {}
+
+
+# ---------------------------------------------------------------------------
+# _persist_diag: copy the overlay's ball_diag.json sidecar (the stage's
+# hybrid_trajectory diagnostics) out before the overlay's temp dir is
+# cleaned up, so a run's knot/gate counts survive the run -- previously
+# lost with the rest of the overlay every time.
+# ---------------------------------------------------------------------------
+
+def test_persist_diag_copies_the_sidecar(tmp_path):
+    overlay = tmp_path / "overlay"
+    (overlay / "ball").mkdir(parents=True)
+    diag_path = overlay / "ball" / "shot1_ball_diag.json"
+    diag_path.write_text('{"trajectory": "hybrid", "hybrid_trajectory": {"n_knots": 5}}')
+
+    diag_out = tmp_path / "runs" / "tag" / "diag_hybrid_real_fold0.json"
+    BR._persist_diag(overlay, "shot1", diag_out)
+
+    assert diag_out.exists()
+    assert diag_out.read_text() == diag_path.read_text()
+
+
+def test_persist_diag_noop_when_diag_out_is_none(tmp_path):
+    overlay = tmp_path / "overlay"
+    (overlay / "ball").mkdir(parents=True)
+    (overlay / "ball" / "shot1_ball_diag.json").write_text("{}")
+    # Must not raise, must not create anything.
+    BR._persist_diag(overlay, "shot1", None)
+
+
+def test_persist_diag_noop_when_sidecar_missing(tmp_path, caplog):
+    overlay = tmp_path / "overlay"
+    (overlay / "ball").mkdir(parents=True)
+    diag_out = tmp_path / "runs" / "tag" / "diag_hybrid_real_fold0.json"
+    BR._persist_diag(overlay, "shot1", diag_out)
+    assert not diag_out.exists()

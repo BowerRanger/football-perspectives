@@ -437,9 +437,14 @@ class SyntheticWorldViolation(RuntimeError):
 
 def run_synthetic(clip_ctx: ClipContext, synth: SynthRun, scenario: str,
                    trajectory: str = DEFAULT_TRAJECTORY,
-                   overrides: Optional[list[str]] = None) -> Track:
+                   overrides: Optional[list[str]] = None,
+                   diag_out: Optional[Path] = None) -> Track:
     """Run the real ball stage against ``synth`` for ``clip_ctx``'s clip
-    and convert its output into a bench ``Track`` named ``trajectory``."""
+    and convert its output into a bench ``Track`` named ``trajectory``.
+
+    ``diag_out``: see :func:`run_real`'s docstring — same sidecar,
+    persisted before the overlay's temp dir is cleaned up.
+    """
     config = build_config(trajectory=trajectory, synthetic=True,
                            overrides=overrides)
     anchors = synth_anchor_set(clip_ctx.clip_id, clip_ctx.image_size,
@@ -460,6 +465,7 @@ def run_synthetic(clip_ctx: ClipContext, synth: SynthRun, scenario: str,
                          config["ball"], detector)
         elapsed = time.time() - t0
         track = BallTrack.load(track_out)
+        _persist_diag(overlay, clip_ctx.shot_id, diag_out)
 
     logger.info(
         "run_synthetic(%s, %s, trajectory=%s): %d frames in %.1fs, "
@@ -562,11 +568,22 @@ def get_split(clip_ctx: ClipContext, fold: int, bench_root: Optional[Path] = Non
 def run_real(clip_ctx: ClipContext, trajectory: str = DEFAULT_TRAJECTORY,
              fold: Optional[int] = None, overrides: Optional[list[str]] = None,
              det_cache: Optional[Path] = None,
-             bench_root: Optional[Path] = None) -> Track:
+             bench_root: Optional[Path] = None,
+             diag_out: Optional[Path] = None) -> Track:
     """Run the real ball stage with the real (WASB) detector.
 
     ``fold=None`` uses every manual anchor ("operational"); ``fold in (0,
     1)`` uses the 2-fold holdout split from :func:`get_split`.
+
+    ``diag_out``: when given, copy the overlay's
+    ``ball/<shot>_ball_diag.json`` sidecar (the stage's OWN diagnostics —
+    for ``trajectory="hybrid"`` this includes the ``hybrid_trajectory``
+    block: knot/gate counts, span models, dropped fixes) there BEFORE
+    the overlay's temp dir is cleaned up. Without this the sidecar is
+    silently lost with the rest of the overlay every run — the bench
+    previously kept only the converted dense ``Track``, with no way to
+    see WHY the real stage's auto-knot gating differed from an
+    isolated ``ball_hybrid_trajectory`` reconstruction of the same fold.
     """
     config = build_config(trajectory=trajectory, synthetic=False,
                            overrides=overrides)
@@ -593,11 +610,27 @@ def run_real(clip_ctx: ClipContext, trajectory: str = DEFAULT_TRAJECTORY,
                          config["ball"], det)
         det.save()
         track = BallTrack.load(track_out)
+        _persist_diag(overlay, clip_ctx.shot_id, diag_out)
     elapsed = time.time() - t0
 
     logger.info("run_real(%s, trajectory=%s, fold=%s): %d frames in %.1fs",
                 clip_ctx.clip_id, trajectory, fold, len(track.frames), elapsed)
     return _track_to_contract(clip_ctx.clip_id, trajectory, track)
+
+
+def _persist_diag(overlay: Path, shot_id: str, diag_out: Optional[Path]) -> None:
+    """Copy ``overlay/ball/<shot_id>_ball_diag.json`` to ``diag_out``
+    (no-op when ``diag_out`` is ``None`` or the sidecar wasn't written —
+    e.g. an early stage failure)."""
+    if diag_out is None:
+        return
+    diag_path = overlay / "ball" / f"{shot_id}_ball_diag.json"
+    if not diag_path.exists():
+        logger.warning("run_real/run_synthetic(%s): no ball_diag.json in "
+                       "the overlay to persist to %s", shot_id, diag_out)
+        return
+    diag_out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(diag_path, diag_out)
 
 
 def anchor_heldout_error(clip_ctx: ClipContext, track: Track, fold: int,

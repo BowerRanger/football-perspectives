@@ -113,8 +113,9 @@ def process_scenario(clip_ctx: ClipContext, clip_dir: Path, run_dir: Path,
 
     for trajectory in trajectories:
         t0 = time.time()
-        track = BR.run_synthetic(clip_ctx, synth, scenario, trajectory,
-                                  overrides=overrides)
+        track = BR.run_synthetic(
+            clip_ctx, synth, scenario, trajectory, overrides=overrides,
+            diag_out=run_dir / f"diag_{trajectory}_{scenario}.json")
         elapsed = time.time() - t0
         save_json(run_dir / f"track_{trajectory}_{scenario}.json", track)
         flat, detail = BM.compute_scenario_metrics(
@@ -165,9 +166,10 @@ def process_real(clip_ctx: ClipContext, clip_dir: Path, run_dir: Path,
         per_fold: dict[str, Any] = {}
         for fold in range(BR.N_FOLDS):
             t0 = time.time()
-            track = BR.run_real(clip_ctx, trajectory, fold=fold,
-                                 overrides=overrides, det_cache=det_cache,
-                                 bench_root=BR.BENCH_OUT_ROOT)
+            track = BR.run_real(
+                clip_ctx, trajectory, fold=fold, overrides=overrides,
+                det_cache=det_cache, bench_root=BR.BENCH_OUT_ROOT,
+                diag_out=run_dir / f"diag_{trajectory}_real_fold{fold}.json")
             elapsed = time.time() - t0
             save_json(run_dir / f"track_{trajectory}_real_fold{fold}.json",
                       track)

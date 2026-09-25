@@ -35,6 +35,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -126,7 +128,6 @@ def main() -> None:
             held = BR.anchor_heldout_error(clip_ctx, real_track, fold,
                                            bench_root=bench_root)
             combined_errs.extend(held["errs"])
-        import numpy as np
         real_flat = {
             "p50": float(np.percentile(combined_errs, 50)) if combined_errs else None,
             "p95": float(np.percentile(combined_errs, 95)) if combined_errs else None,

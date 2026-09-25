@@ -34,6 +34,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.utils import ball_bench_metrics as BM  # noqa: E402
@@ -43,7 +45,6 @@ from src.utils import ball_bench_truth as BT  # noqa: E402
 from src.utils.ball_bench_clip import CLIPS, ClipContext, load_clip  # noqa: E402
 from src.utils.ball_bench_types import (  # noqa: E402
     SynthRun,
-    Track,
     TruthTrack,
     load_json,
     save_json,
@@ -183,7 +184,6 @@ def process_real(clip_ctx: ClipContext, clip_dir: Path, run_dir: Path,
             if fold == 0:
                 tracks[trajectory] = track.to_json()
 
-        import numpy as np
         p50 = float(np.percentile(combined_errs, 50)) if combined_errs else None
         p95 = float(np.percentile(combined_errs, 95)) if combined_errs else None
         metrics_flat[trajectory] = {

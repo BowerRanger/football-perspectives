@@ -1,0 +1,1450 @@
+<title>Ball Truth Lab</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Source+Sans+3:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  --ground: #F2F4F1;
+  --surface: #FFFFFF;
+  --ink: #16201B;
+  --muted: #5B6B63;
+  --line: #D5DDD8;
+  --accent: #2F5D50;
+  --series-truth: #2563C9;
+  --series-current: #C8472F;
+  --series-hybrid: #178A5C;
+  --threshold: #B7791F;
+  --pitch-green: #6E9A78;
+  --pitch-line: #FFFFFF;
+  --focus: var(--accent);
+  --font-head: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+  --font-body: 'Source Sans 3', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0F1512;
+    --surface: #17201B;
+    --ink: #E3EAE6;
+    --muted: #9AAAA2;
+    --line: #2A3630;
+    --accent: #7FB8A6;
+    --series-truth: #6EA8FF;
+    --series-current: #FF8A68;
+    --series-hybrid: #4FD69C;
+    --threshold: #E0A94A;
+    --pitch-green: #35513E;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --ground: #0F1512;
+  --surface: #17201B;
+  --ink: #E3EAE6;
+  --muted: #9AAAA2;
+  --line: #2A3630;
+  --accent: #7FB8A6;
+  --series-truth: #6EA8FF;
+  --series-current: #FF8A68;
+  --series-hybrid: #4FD69C;
+  --threshold: #E0A94A;
+  --pitch-green: #35513E;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --ground: #F2F4F1;
+  --surface: #FFFFFF;
+  --ink: #16201B;
+  --muted: #5B6B63;
+  --line: #D5DDD8;
+  --accent: #2F5D50;
+  --series-truth: #2563C9;
+  --series-current: #C8472F;
+  --series-hybrid: #178A5C;
+  --threshold: #B7791F;
+  --pitch-green: #6E9A78;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.4;
+}
+.wrap {
+  padding-inline: 16px;
+  padding-block: 16px 32px;
+  max-width: 1400px;
+  margin-inline: auto;
+}
+h1, h2, h3, label, button, th, .label {
+  font-family: var(--font-head);
+}
+.mono, td.num, .frame-readout, .metric-cell {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+a { color: var(--accent); }
+
+*:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---- top bar ---- */
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+  padding-block: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 16px;
+}
+.brand {
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.field label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+select, button, input[type="range"] {
+  font-family: inherit;
+  color: var(--ink);
+}
+select {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  min-width: 140px;
+}
+.btn {
+  font-family: var(--font-head);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.btn:hover { border-color: var(--accent); }
+.btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--surface);
+  border-color: var(--accent);
+}
+.spacer { flex: 1 1 auto; }
+
+.summary-strip {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 16px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.summary-strip .headline {
+  font-family: var(--font-head);
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.summary-strip .headline .val-current { color: var(--series-current); font-weight: 700; }
+.summary-strip .headline .val-hybrid { color: var(--series-hybrid); font-weight: 700; }
+.summary-strip .note { color: var(--muted); font-size: 12px; }
+
+/* ---- main grid ---- */
+.main-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 62%) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 860px) {
+  .main-grid { grid-template-columns: 1fr; }
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+.panel h2 {
+  margin: 0 0 10px 0;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.scene-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-bottom: 10px;
+  align-items: center;
+}
+.cam-presets, .method-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.toggle-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+  background: var(--surface);
+  user-select: none;
+}
+.toggle-pill .swatch {
+  width: 9px; height: 9px; border-radius: 50%; display: inline-block;
+}
+.toggle-pill input { margin: 0; }
+
+#scene-canvas-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+#scene-canvas { display: block; width: 100%; height: 100%; }
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.legend .item { display: inline-flex; align-items: center; gap: 6px; }
+.legend .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.legend .ring { width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 2px solid currentColor; background: transparent; }
+.legend .diamond { width: 9px; height: 9px; display: inline-block; transform: rotate(45deg); }
+
+/* ---- metrics table ---- */
+.table-scroll { overflow-x: auto; }
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+}
+thead th {
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  padding: 6px 8px;
+  white-space: nowrap;
+}
+tbody th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--ink);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+td.num { text-align: right; }
+td.best { color: var(--accent); font-weight: 700; }
+tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
+
+/* ---- timeline ---- */
+.timeline-panel { margin-top: 16px; }
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.transport input[type="range"] { flex: 1 1 auto; accent-color: var(--accent); }
+.frame-readout { min-width: 15ch; font-size: 12.5px; color: var(--muted); }
+.tick-row {
+  position: relative;
+  height: 12px;
+  margin: 0 0 6px 0;
+}
+.tick {
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 10px;
+  transform: translateX(-1px);
+  cursor: pointer;
+}
+#chart-wrap {
+  position: relative;
+  width: 100%;
+  height: 220px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+#error-chart { display: block; width: 100%; height: 100%; cursor: crosshair; }
+
+.footer-note { margin-top: 14px; font-size: 11.5px; color: var(--muted); }
+</style>
+
+<div class="wrap">
+  <header class="topbar">
+    <div class="brand">Ball Truth Lab</div>
+
+    <div class="field">
+      <label for="clip-select">Clip</label>
+      <select id="clip-select"></select>
+    </div>
+
+    <div class="field">
+      <label for="scenario-select">Scenario</label>
+      <select id="scenario-select"></select>
+    </div>
+
+    <div class="spacer"></div>
+    <button id="theme-toggle" class="btn" type="button" aria-label="Toggle colour theme">Theme: Auto</button>
+
+    <div class="summary-strip" id="summary-strip"></div>
+  </header>
+
+  <main class="main-grid">
+    <section class="panel scene-panel">
+      <h2>3-D reconstruction</h2>
+      <div class="scene-toolbar">
+        <div class="cam-presets" role="group" aria-label="Camera presets">
+          <button id="cam-broadcast" class="btn cam-btn" type="button" aria-pressed="true">Broadcast</button>
+          <button id="cam-side" class="btn cam-btn" type="button" aria-pressed="false">Side-on</button>
+          <button id="cam-top" class="btn cam-btn" type="button" aria-pressed="false">Top-down</button>
+          <button id="cam-behind" class="btn cam-btn" type="button" aria-pressed="false">Behind ball</button>
+          <button id="cam-free" class="btn cam-btn" type="button" aria-pressed="false">Free orbit</button>
+        </div>
+      </div>
+      <div class="scene-toolbar">
+        <div class="method-toggles" id="method-toggles" role="group" aria-label="Method visibility"></div>
+      </div>
+      <div id="scene-canvas-wrap">
+        <canvas id="scene-canvas"></canvas>
+      </div>
+      <div class="legend" id="scene-legend"></div>
+    </section>
+
+    <aside class="panel metrics-panel">
+      <h2>Metrics</h2>
+      <div class="table-scroll">
+        <table id="metrics-table">
+          <thead id="metrics-thead"></thead>
+          <tbody id="metrics-tbody"></tbody>
+        </table>
+      </div>
+    </aside>
+  </main>
+
+  <section class="panel timeline-panel">
+    <h2>Timeline &amp; error</h2>
+    <div class="tick-row" id="tick-row"></div>
+    <div class="transport">
+      <button id="play-btn" class="btn" type="button" aria-pressed="false">Play</button>
+      <input type="range" id="frame-scrubber" min="0" max="0" value="0" step="1" aria-label="Frame scrubber">
+      <span id="frame-readout" class="frame-readout mono"></span>
+    </div>
+    <div id="chart-wrap">
+      <canvas id="error-chart"></canvas>
+    </div>
+    <p class="footer-note">Ball hybrid-extraction PoC — synthetic scenarios are seeded from operator anchors only; the Real footage tab compares against held-out anchors and cross-replay fixes. Shaded chart bands mark frames where the hybrid method is in simulated (physics) mode.</p>
+  </section>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var CLIPS = /*__BALL_TRUTH_LAB_DATA__*/;
+
+  var REAL_KEY = "__real__";
+  var BALL_R = 0.11;
+  var REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var METHOD_TOKEN_VAR = { truth: "--series-truth", current: "--series-current", hybrid: "--series-hybrid" };
+  var FALLBACK_PALETTE = ["#8E5FD1", "#D18E5F", "#5FA8D1", "#B85FD1"];
+
+  var state = {
+    clipId: null,
+    scenarioKey: null,
+    frame: 0,
+    playing: false,
+    visible: {},           // method -> bool
+    camMode: "broadcast"
+  };
+
+  // ---------------------------------------------------------------------
+  // Token helpers (theme-aware colours)
+  // ---------------------------------------------------------------------
+  function getTokens() {
+    var cs = getComputedStyle(document.documentElement);
+    function v(name) { return cs.getPropertyValue(name).trim(); }
+    return {
+      ground: v("--ground"), surface: v("--surface"), ink: v("--ink"),
+      muted: v("--muted"), line: v("--line"), accent: v("--accent"),
+      truth: v("--series-truth"), current: v("--series-current"), hybrid: v("--series-hybrid"),
+      threshold: v("--threshold"), pitchGreen: v("--pitch-green"), pitchLine: v("--pitch-line")
+    };
+  }
+
+  function methodColor(tokens, method) {
+    var varName = METHOD_TOKEN_VAR[method];
+    if (varName) {
+      var cs = getComputedStyle(document.documentElement);
+      var val = cs.getPropertyValue(varName).trim();
+      if (val) return val;
+    }
+    if (tokens[method]) return tokens[method];
+    var idx = 0;
+    for (var i = 0; i < method.length; i++) idx = (idx + method.charCodeAt(i)) % FALLBACK_PALETTE.length;
+    return FALLBACK_PALETTE[idx];
+  }
+
+  // ---------------------------------------------------------------------
+  // Data helpers
+  // ---------------------------------------------------------------------
+  function currentClip() { return CLIPS[state.clipId]; }
+
+  function scenarioNames(clip) { return Object.keys(clip.scenarios || {}); }
+
+  function getScenarioData(clip, key) {
+    if (key === REAL_KEY) {
+      var real = clip.real || { tracks: {}, metrics: {}, anchors_heldout: [], fixes: [] };
+      return {
+        isReal: true,
+        truth: null,
+        tracks: real.tracks || {},
+        metrics: real.metrics || {},
+        per_frame_err: null,
+        anchors_heldout: real.anchors_heldout || [],
+        fixes: real.fixes || [],
+        events: []
+      };
+    }
+    var sc = clip.scenarios[key];
+    return {
+      isReal: false,
+      truth: sc.truth,
+      tracks: sc.tracks || {},
+      metrics: sc.metrics || {},
+      per_frame_err: sc.per_frame_err || {},
+      anchors_heldout: [],
+      fixes: [],
+      events: (sc.truth && sc.truth.events) || []
+    };
+  }
+
+  function frameCount(sd) {
+    if (sd.truth && sd.truth.frames) return sd.truth.frames.length;
+    var n = 0;
+    Object.keys(sd.tracks).forEach(function (m) {
+      n = Math.max(n, (sd.tracks[m].frames || []).length);
+    });
+    return n;
+  }
+
+  function methodsOf(sd) {
+    var methods = [];
+    if (sd.truth) methods.push("truth");
+    Object.keys(sd.tracks).forEach(function (m) { methods.push(m); });
+    return methods;
+  }
+
+  function xyzAt(sd, method, frame) {
+    if (method === "truth") {
+      if (!sd.truth) return null;
+      var tf = sd.truth.frames[frame];
+      return tf ? tf.xyz : null;
+    }
+    var tr = sd.tracks[method];
+    if (!tr) return null;
+    var mf = tr.frames[frame];
+    return mf ? mf.xyz : null;
+  }
+
+  function modeAt(sd, method, frame) {
+    if (method === "truth") return sd.truth ? sd.truth.frames[frame].state : null;
+    var tr = sd.tracks[method];
+    if (!tr) return null;
+    var mf = tr.frames[frame];
+    return mf ? mf.mode : null;
+  }
+
+  function fps() { return currentClip().fps || 25; }
+
+  function initialFrameFor(clip, key) {
+    if (key === REAL_KEY) return 0;
+    var errs = (clip.scenarios[key].per_frame_err || {}).current;
+    if (!errs || !errs.length) return 0;
+    var best = 0, bestVal = -1;
+    for (var i = 0; i < errs.length; i++) {
+      if (errs[i] !== null && errs[i] > bestVal) { bestVal = errs[i]; best = i; }
+    }
+    return best;
+  }
+
+  // ---------------------------------------------------------------------
+  // Coordinate conversion: pitch-metres (x:0..L along touchline, y:0..W
+  // across pitch, z up) -> three.js y-up, pitch centred at the origin.
+  // ---------------------------------------------------------------------
+  var pitchDims = { length: 105, width: 68 };
+  function toThree(xyz) {
+    if (!xyz) return null;
+    return new THREE.Vector3(
+      xyz[0] - pitchDims.length / 2,
+      xyz[2],
+      xyz[1] - pitchDims.width / 2
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // Three.js scene setup
+  // ---------------------------------------------------------------------
+  var renderer, scene, camera, controls, canvasWrap;
+  var pitchGroup, trajGroup, ballGroup, eventGroup, markerGroup, playerGroup;
+  var seriesObjects = {}; // method -> {line, ball, drop, shadow, material}
+  var pitchMesh, pitchLineMaterial, goalMaterial;
+
+  function initScene() {
+    canvasWrap = document.getElementById("scene-canvas-wrap");
+    var canvas = document.getElementById("scene-canvas");
+    renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(45, 16 / 9, 0.1, 500);
+    camera.position.set(0, 40, 60);
+
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = !REDUCED_MOTION;
+    controls.dampingFactor = 0.12;
+    controls.target.set(0, 0, 0);
+    controls.addEventListener("change", render);
+    controls.update();
+
+    pitchGroup = new THREE.Group(); scene.add(pitchGroup);
+    trajGroup = new THREE.Group(); scene.add(trajGroup);
+    ballGroup = new THREE.Group(); scene.add(ballGroup);
+    eventGroup = new THREE.Group(); scene.add(eventGroup);
+    markerGroup = new THREE.Group(); scene.add(markerGroup);
+    playerGroup = new THREE.Group(); scene.add(playerGroup);
+
+    var ro = new ResizeObserver(function () {
+      var w = canvasWrap.clientWidth, h = canvasWrap.clientHeight;
+      if (w < 1 || h < 1) return;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      render();
+    });
+    ro.observe(canvasWrap);
+
+    // OrbitControls damping only decays over time if update() is polled
+    // continuously; drive that here (skipped entirely under
+    // prefers-reduced-motion, where damping is also disabled above).
+    if (!REDUCED_MOTION) {
+      (function dampingLoop() {
+        requestAnimationFrame(dampingLoop);
+        controls.update();
+      })();
+    }
+  }
+
+  function circlePoints(cx, cz, r, segments, a0, a1) {
+    a0 = a0 === undefined ? 0 : a0;
+    a1 = a1 === undefined ? Math.PI * 2 : a1;
+    var pts = [];
+    for (var i = 0; i <= segments; i++) {
+      var a = a0 + (a1 - a0) * (i / segments);
+      pts.push(new THREE.Vector3(cx + r * Math.cos(a), 0.01, cz + r * Math.sin(a)));
+    }
+    return pts;
+  }
+
+  function rectPoints(x0, z0, x1, z1) {
+    return [
+      new THREE.Vector3(x0, 0.01, z0), new THREE.Vector3(x1, 0.01, z0),
+      new THREE.Vector3(x1, 0.01, z1), new THREE.Vector3(x0, 0.01, z1),
+      new THREE.Vector3(x0, 0.01, z0)
+    ];
+  }
+
+  function buildPitch(tokens) {
+    pitchGroup.clear();
+    var L = pitchDims.length, W = pitchDims.width;
+    var hx = L / 2, hz = W / 2;
+
+    var groundGeo = new THREE.PlaneGeometry(L + 6, W + 6);
+    var groundMat = new THREE.MeshBasicMaterial({ color: tokens.pitchGreen });
+    var groundMesh = new THREE.Mesh(groundGeo, groundMat);
+    groundMesh.rotation.x = -Math.PI / 2;
+    pitchMesh = groundMesh;
+    pitchGroup.add(groundMesh);
+
+    // grass stripes for readability
+    var stripeCount = 12;
+    for (var s = 0; s < stripeCount; s++) {
+      if (s % 2 !== 0) continue;
+      var sw = L / stripeCount;
+      var stripeGeo = new THREE.PlaneGeometry(sw, W + 6);
+      var stripeMat = new THREE.MeshBasicMaterial({ color: tokens.pitchGreen, transparent: true, opacity: 0.18 });
+      var stripe = new THREE.Mesh(stripeGeo, stripeMat);
+      stripe.rotation.x = -Math.PI / 2;
+      stripe.position.set(-hx + sw * s + sw / 2, 0.002, 0);
+      pitchGroup.add(stripe);
+    }
+
+    pitchLineMaterial = new THREE.LineBasicMaterial({ color: tokens.pitchLine, transparent: true, opacity: 0.7 });
+
+    function addLine(points) {
+      var geo = new THREE.BufferGeometry().setFromPoints(points);
+      pitchGroup.add(new THREE.Line(geo, pitchLineMaterial));
+    }
+
+    addLine(rectPoints(-hx, -hz, hx, hz));
+    addLine([new THREE.Vector3(0, 0.01, -hz), new THREE.Vector3(0, 0.01, hz)]);
+    addLine(circlePoints(0, 0, 9.15, 48));
+
+    [-1, 1].forEach(function (side) {
+      var goalX = side * hx;
+      var dir = -side;
+      addLine(rectPoints(goalX, -20.16, goalX + dir * 16.5, 20.16));
+      addLine(rectPoints(goalX, -9.16, goalX + dir * 5.5, 9.16));
+      var spotX = goalX + dir * 11;
+      addLine(circlePoints(spotX, 0, 0.15, 12));
+      var arcStart = side > 0 ? Math.PI * 0.63 : -Math.PI * 0.37;
+      var arcEnd = side > 0 ? Math.PI * 1.37 : Math.PI * 0.37;
+      addLine(circlePoints(spotX, 0, 9.15, 32, arcStart, arcEnd));
+    });
+
+    goalMaterial = new THREE.LineBasicMaterial({ color: tokens.pitchLine, transparent: true, opacity: 0.85 });
+    [-1, 1].forEach(function (side) {
+      var depth = 0.6, height = 2.44, width = 7.32;
+      var box = new THREE.BoxGeometry(depth, height, width);
+      var edges = new THREE.EdgesGeometry(box);
+      var frame = new THREE.LineSegments(edges, goalMaterial);
+      frame.position.set(side * (hx + depth / 2), height / 2, 0);
+      pitchGroup.add(frame);
+    });
+  }
+
+  function disposeGroupChildren(group) {
+    group.children.slice().forEach(function (child) {
+      group.remove(child);
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) child.material.dispose();
+    });
+  }
+
+  function buildTrajectoriesAndMarkers(sd, tokens) {
+    disposeGroupChildren(trajGroup);
+    disposeGroupChildren(ballGroup);
+    disposeGroupChildren(eventGroup);
+    disposeGroupChildren(markerGroup);
+    disposeGroupChildren(playerGroup);
+    seriesObjects = {};
+
+    var methods = methodsOf(sd);
+    methods.forEach(function (method) {
+      var color = methodColor(tokens, method);
+      var pts = [];
+      var segments = [];
+      var n = frameCount(sd);
+      for (var f = 0; f < n; f++) {
+        var xyz = xyzAt(sd, method, f);
+        var p = toThree(xyz);
+        if (p) { pts.push(p); }
+        else if (pts.length) { segments.push(pts); pts = []; }
+      }
+      if (pts.length) segments.push(pts);
+
+      var lineMat = new THREE.LineBasicMaterial({ color: color, transparent: true, opacity: 0.85 });
+      var lineObjs = segments.map(function (seg) {
+        var geo = new THREE.BufferGeometry().setFromPoints(seg);
+        var line = new THREE.Line(geo, lineMat);
+        trajGroup.add(line);
+        return line;
+      });
+
+      var ballMat = new THREE.MeshBasicMaterial({ color: color });
+      var ball = new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 12), ballMat);
+      ballGroup.add(ball);
+
+      var dropMat = new THREE.LineBasicMaterial({ color: color, transparent: true, opacity: 0.5 });
+      var dropGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+      var drop = new THREE.Line(dropGeo, dropMat);
+      ballGroup.add(drop);
+
+      var shadowMat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.35 });
+      var shadow = new THREE.Mesh(new THREE.CircleGeometry(0.32, 20), shadowMat);
+      shadow.rotation.x = -Math.PI / 2;
+      ballGroup.add(shadow);
+
+      seriesObjects[method] = { lines: lineObjs, lineMat: lineMat, ball: ball, ballMat: ballMat, drop: drop, dropMat: dropMat, shadow: shadow, shadowMat: shadowMat };
+    });
+
+    var eventColors = { touch: tokens.ink, bounce: tokens.threshold, net: tokens.accent, post: tokens.muted, rest: tokens.muted };
+    (sd.events || []).forEach(function (ev) {
+      var p = toThree(ev.xyz);
+      if (!p) return;
+      var mat = new THREE.MeshBasicMaterial({ color: eventColors[ev.kind] || tokens.ink });
+      var marker = new THREE.Mesh(new THREE.SphereGeometry(0.2, 10, 8), mat);
+      marker.position.copy(p);
+      eventGroup.add(marker);
+      var ring = new THREE.Mesh(new THREE.RingGeometry(0.35, 0.45, 20), new THREE.MeshBasicMaterial({ color: mat.color, side: THREE.DoubleSide, transparent: true, opacity: 0.6 }));
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.set(p.x, 0.02, p.z);
+      eventGroup.add(ring);
+    });
+
+    (sd.anchors_heldout || []).forEach(function (a) {
+      var p = toThree(a.xyz_gt);
+      if (!p) return;
+      var mat = new THREE.MeshBasicMaterial({ color: tokens.accent });
+      var marker = new THREE.Mesh(new THREE.OctahedronGeometry(0.24), mat);
+      marker.position.copy(p);
+      markerGroup.add(marker);
+    });
+    (sd.fixes || []).forEach(function (fx) {
+      var p = toThree(fx.xyz);
+      if (!p) return;
+      var mat = new THREE.MeshBasicMaterial({ color: tokens.threshold });
+      var marker = new THREE.Mesh(new THREE.OctahedronGeometry(0.24), mat);
+      marker.position.copy(p);
+      markerGroup.add(marker);
+    });
+  }
+
+  function updatePlayersAt(frame, tokens) {
+    disposeGroupChildren(playerGroup);
+    var clip = currentClip();
+    var pdata = clip.players && clip.players.frames;
+    if (!pdata || !pdata.length) return;
+    var best = null;
+    for (var i = 0; i < pdata.length; i++) {
+      if (pdata[i].frame <= frame) best = pdata[i]; else break;
+    }
+    if (!best) return;
+    Object.keys(best).forEach(function (k) {
+      if (k === "frame") return;
+      var xy = best[k];
+      var p = toThree([xy[0], xy[1], 0]);
+      var mat = new THREE.MeshBasicMaterial({ color: tokens.muted, transparent: true, opacity: 0.5 });
+      var dot = new THREE.Mesh(new THREE.CircleGeometry(0.35, 16), mat);
+      dot.rotation.x = -Math.PI / 2;
+      dot.position.set(p.x, 0.015, p.z);
+      playerGroup.add(dot);
+    });
+  }
+
+  function updateBallsAt(sd, frame) {
+    Object.keys(seriesObjects).forEach(function (method) {
+      var so = seriesObjects[method];
+      var xyz = xyzAt(sd, method, frame);
+      var visible = !!state.visible[method];
+      var p = toThree(xyz);
+      var show = visible && !!p;
+      so.ball.visible = show;
+      so.drop.visible = show;
+      so.shadow.visible = show;
+      so.lines.forEach(function (l) { l.visible = visible; });
+      if (show) {
+        so.ball.position.copy(p);
+        so.shadow.position.set(p.x, 0.02, p.z);
+        var geo = so.drop.geometry;
+        var arr = geo.attributes.position.array;
+        arr[0] = p.x; arr[1] = p.y; arr[2] = p.z;
+        arr[3] = p.x; arr[4] = 0.02; arr[5] = p.z;
+        geo.attributes.position.needsUpdate = true;
+      }
+    });
+  }
+
+  function applySceneTheme() {
+    var tokens = getTokens();
+    scene.background = new THREE.Color(tokens.ground);
+    if (pitchMesh) pitchMesh.material.color.set(tokens.pitchGreen);
+    if (pitchLineMaterial) pitchLineMaterial.color.set(tokens.pitchLine);
+    if (goalMaterial) goalMaterial.color.set(tokens.pitchLine);
+    Object.keys(seriesObjects).forEach(function (method) {
+      var color = methodColor(tokens, method);
+      var so = seriesObjects[method];
+      so.lineMat.color.set(color);
+      so.ballMat.color.set(color);
+      so.dropMat.color.set(color);
+      so.shadowMat.color.set(color);
+    });
+    render();
+  }
+
+  function render() {
+    if (!renderer) return;
+    renderer.render(scene, camera);
+  }
+
+  // ---------------------------------------------------------------------
+  // Camera presets
+  // ---------------------------------------------------------------------
+  function sceneBoundsCentroid(sd, frame) {
+    var pts = [];
+    methodsOf(sd).forEach(function (m) {
+      var xyz = xyzAt(sd, m, frame);
+      if (xyz) pts.push(toThree(xyz));
+    });
+    if (!pts.length) return new THREE.Vector3(0, 0, 0);
+    var c = new THREE.Vector3();
+    pts.forEach(function (p) { c.add(p); });
+    c.divideScalar(pts.length);
+    return c;
+  }
+
+  function primaryBallPoint(sd, frame) {
+    var order = ["hybrid", "truth", "current"];
+    for (var i = 0; i < order.length; i++) {
+      var xyz = xyzAt(sd, order[i], frame);
+      if (xyz) return toThree(xyz);
+    }
+    return new THREE.Vector3(0, 0, 0);
+  }
+
+  function applyCameraPreset(sd) {
+    var target, eye;
+    var frame = state.frame;
+    if (state.camMode === "broadcast") {
+      var clip = currentClip();
+      var camArr = (clip.camera && clip.camera.centre_xyz_per_frame) || [];
+      var camXyz = camArr[Math.min(frame, camArr.length - 1)] || [0, -20, 15];
+      eye = toThree(camXyz);
+      target = primaryBallPoint(sd, frame);
+    } else if (state.camMode === "side") {
+      var c = sceneBoundsCentroid(sd, frame);
+      target = c;
+      eye = new THREE.Vector3(c.x, 8, c.z + 40);
+    } else if (state.camMode === "top") {
+      var c2 = new THREE.Vector3(0, 0, 0);
+      target = c2;
+      eye = new THREE.Vector3(0.001, 95, 0.001);
+    } else if (state.camMode === "behind") {
+      var p0 = primaryBallPoint(sd, Math.max(0, frame - 1));
+      var p1 = primaryBallPoint(sd, frame);
+      var dir = new THREE.Vector3().subVectors(p1, p0);
+      if (dir.lengthSq() < 1e-6) dir.set(1, 0, 0);
+      dir.y = 0;
+      dir.normalize();
+      target = p1;
+      eye = new THREE.Vector3().copy(p1).addScaledVector(dir, -8);
+      eye.y += 3.5;
+    } else {
+      return; // free orbit: leave camera where the user left it
+    }
+    camera.position.copy(eye);
+    controls.target.copy(target);
+    controls.update();
+    render();
+  }
+
+  function setCamMode(mode) {
+    state.camMode = mode;
+    ["broadcast", "side", "top", "behind", "free"].forEach(function (m) {
+      var btn = document.getElementById("cam-" + m);
+      if (btn) btn.setAttribute("aria-pressed", String(m === mode));
+    });
+    applyCameraPreset(getScenarioData(currentClip(), state.scenarioKey));
+  }
+
+  // ---------------------------------------------------------------------
+  // Metrics table
+  // ---------------------------------------------------------------------
+  var ROW_ORDER = [
+    "p50", "p95", "max", "pct_le_20cm", "contact_gap", "ground_float_sink",
+    "broadcast_px_error", "side_px_error", "naturalness_violations",
+    "anchor_heldout_err_m", "fix_err_m"
+  ];
+  var ROW_LABEL = {
+    p50: "P50 error (m)", p95: "P95 error (m)", max: "Max error (m)",
+    pct_le_20cm: "% frames ≤ 20 cm", contact_gap: "Contact gap (m)",
+    ground_float_sink: "Ground float/sink (m)", broadcast_px_error: "Broadcast error (px)",
+    side_px_error: "Side-cam error (px)", naturalness_violations: "Naturalness violations",
+    anchor_heldout_err_m: "Held-out anchor error (m)", fix_err_m: "Replay-fix error (m)"
+  };
+  var HIGHER_BETTER = { pct_le_20cm: true };
+
+  function prettifyKey(k) {
+    return k.replace(/_/g, " ").replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+  }
+
+  function formatMetric(key, value) {
+    if (value === null || value === undefined) return "—";
+    if (key === "pct_le_20cm") return (value * 100).toFixed(1) + "%";
+    if (key === "naturalness_violations") return String(Math.round(value));
+    var decimals = key.indexOf("px") !== -1 ? 1 : 2;
+    return value.toFixed(decimals);
+  }
+
+  function renderMetricsTable(sd) {
+    var methods = Object.keys(sd.metrics || {});
+    var thead = document.getElementById("metrics-thead");
+    var tbody = document.getElementById("metrics-tbody");
+    thead.innerHTML = "";
+    tbody.innerHTML = "";
+
+    var headRow = document.createElement("tr");
+    var thBlank = document.createElement("th");
+    headRow.appendChild(thBlank);
+    methods.forEach(function (m) {
+      var th = document.createElement("th");
+      th.textContent = m;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+
+    var keySet = {};
+    methods.forEach(function (m) { Object.keys(sd.metrics[m] || {}).forEach(function (k) { keySet[k] = true; }); });
+    var rowKeys = ROW_ORDER.filter(function (k) { return keySet[k]; });
+    Object.keys(keySet).forEach(function (k) { if (rowKeys.indexOf(k) === -1) rowKeys.push(k); });
+
+    rowKeys.forEach(function (key) {
+      var tr = document.createElement("tr");
+      var th = document.createElement("th");
+      th.textContent = ROW_LABEL[key] || prettifyKey(key);
+      tr.appendChild(th);
+
+      var values = methods.map(function (m) { return (sd.metrics[m] || {})[key]; });
+      var higherBetter = !!HIGHER_BETTER[key];
+      var bestVal = null;
+      values.forEach(function (v) {
+        if (v === null || v === undefined) return;
+        if (bestVal === null || (higherBetter ? v > bestVal : v < bestVal)) bestVal = v;
+      });
+
+      methods.forEach(function (m, i) {
+        var td = document.createElement("td");
+        td.className = "num metric-cell";
+        var v = values[i];
+        td.textContent = formatMetric(key, v);
+        if (v !== null && v !== undefined && bestVal !== null && v === bestVal) td.classList.add("best");
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Summary strip (per selected clip, pooled across scenarios)
+  // ---------------------------------------------------------------------
+  function renderSummaryStrip() {
+    var clip = currentClip();
+    var pooled = { current: [], hybrid: [] };
+    scenarioNames(clip).forEach(function (name) {
+      var pfe = clip.scenarios[name].per_frame_err || {};
+      ["current", "hybrid"].forEach(function (m) {
+        (pfe[m] || []).forEach(function (e) { if (e !== null) pooled[m].push(e); });
+      });
+    });
+    var el = document.getElementById("summary-strip");
+    function pct(arr) {
+      if (!arr.length) return null;
+      return arr.filter(function (e) { return e <= 0.20; }).length / arr.length;
+    }
+    var pc = pct(pooled.current), ph = pct(pooled.hybrid);
+    var pcTxt = pc === null ? "—" : (pc * 100).toFixed(0) + "%";
+    var phTxt = ph === null ? "—" : (ph * 100).toFixed(0) + "%";
+    el.innerHTML =
+      '<span class="headline">% frames ≤ 20 cm: <span class="val-current">' + pcTxt +
+      '</span> → <span class="val-hybrid">' + phTxt + '</span></span>' +
+      '<span class="note">pooled across ' + scenarioNames(clip).length + ' synthetic scenario(s) for ' + clip.clip_id + '</span>';
+  }
+
+  // ---------------------------------------------------------------------
+  // Legend + method toggles
+  // ---------------------------------------------------------------------
+  function renderLegend(sd) {
+    var tokens = getTokens();
+    var el = document.getElementById("scene-legend");
+    el.innerHTML = "";
+    methodsOf(sd).forEach(function (m) {
+      var span = document.createElement("span");
+      span.className = "item";
+      var dot = document.createElement("span");
+      dot.className = "dot";
+      dot.style.background = methodColor(tokens, m);
+      span.appendChild(dot);
+      span.appendChild(document.createTextNode(m));
+      el.appendChild(span);
+    });
+    if (sd.events && sd.events.length) {
+      [["touch", tokens.ink], ["bounce", tokens.threshold], ["net", tokens.accent], ["rest", tokens.muted]].forEach(function (pair) {
+        var span = document.createElement("span");
+        span.className = "item";
+        var ring = document.createElement("span");
+        ring.className = "ring";
+        ring.style.color = pair[1];
+        span.appendChild(ring);
+        span.appendChild(document.createTextNode(pair[0]));
+        el.appendChild(span);
+      });
+    }
+    if (sd.isReal) {
+      var span1 = document.createElement("span");
+      span1.className = "item";
+      var d1 = document.createElement("span");
+      d1.className = "diamond";
+      d1.style.background = tokens.accent;
+      span1.appendChild(d1);
+      span1.appendChild(document.createTextNode("held-out anchor"));
+      el.appendChild(span1);
+      if (sd.fixes && sd.fixes.length) {
+        var span2 = document.createElement("span");
+        span2.className = "item";
+        var d2 = document.createElement("span");
+        d2.className = "diamond";
+        d2.style.background = tokens.threshold;
+        span2.appendChild(d2);
+        span2.appendChild(document.createTextNode("replay fix"));
+        el.appendChild(span2);
+      }
+    }
+  }
+
+  function renderMethodToggles(sd) {
+    var tokens = getTokens();
+    var el = document.getElementById("method-toggles");
+    el.innerHTML = "";
+    methodsOf(sd).forEach(function (m) {
+      if (state.visible[m] === undefined) state.visible[m] = true;
+      var label = document.createElement("label");
+      label.className = "toggle-pill";
+      label.setAttribute("for", "toggle-" + m);
+      var input = document.createElement("input");
+      input.type = "checkbox";
+      input.id = "toggle-" + m;
+      input.checked = state.visible[m];
+      input.addEventListener("change", function () {
+        state.visible[m] = input.checked;
+        updateBallsAt(getScenarioData(currentClip(), state.scenarioKey), state.frame);
+        render();
+        drawChart();
+      });
+      var swatch = document.createElement("span");
+      swatch.className = "swatch";
+      swatch.style.background = methodColor(tokens, m);
+      label.appendChild(input);
+      label.appendChild(swatch);
+      label.appendChild(document.createTextNode(m));
+      el.appendChild(label);
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Timeline / scrubber / ticks
+  // ---------------------------------------------------------------------
+  var playTimer = null;
+
+  function renderTicks(sd) {
+    var row = document.getElementById("tick-row");
+    row.innerHTML = "";
+    var n = frameCount(sd);
+    if (n < 2) return;
+    var tokens = getTokens();
+    var eventColors = { touch: tokens.ink, bounce: tokens.threshold, net: tokens.accent, post: tokens.muted, rest: tokens.muted };
+    (sd.events || []).forEach(function (ev) {
+      var tick = document.createElement("div");
+      tick.className = "tick";
+      tick.style.left = (ev.frame / (n - 1) * 100) + "%";
+      tick.style.background = eventColors[ev.kind] || tokens.ink;
+      tick.title = ev.kind + " @ frame " + ev.frame;
+      tick.addEventListener("click", function () { setFrame(ev.frame); });
+      row.appendChild(tick);
+    });
+    (sd.anchors_heldout || []).forEach(function (a) {
+      var tick = document.createElement("div");
+      tick.className = "tick";
+      tick.style.left = (a.frame / (n - 1) * 100) + "%";
+      tick.style.background = tokens.accent;
+      tick.title = "held-out anchor @ frame " + a.frame;
+      tick.addEventListener("click", function () { setFrame(a.frame); });
+      row.appendChild(tick);
+    });
+    (sd.fixes || []).forEach(function (fx) {
+      var tick = document.createElement("div");
+      tick.className = "tick";
+      tick.style.left = (fx.frame / (n - 1) * 100) + "%";
+      tick.style.background = tokens.threshold;
+      tick.title = "replay fix @ frame " + fx.frame;
+      tick.addEventListener("click", function () { setFrame(fx.frame); });
+      row.appendChild(tick);
+    });
+  }
+
+  function updateFrameReadout() {
+    var sd = getScenarioData(currentClip(), state.scenarioKey);
+    var n = frameCount(sd);
+    var t = state.frame / fps();
+    document.getElementById("frame-readout").textContent =
+      "Frame " + state.frame + " / " + Math.max(0, n - 1) + "  ·  t=" + t.toFixed(2) + "s";
+  }
+
+  function setFrame(f) {
+    var sd = getScenarioData(currentClip(), state.scenarioKey);
+    var n = frameCount(sd);
+    state.frame = Math.max(0, Math.min(n - 1, f));
+    document.getElementById("frame-scrubber").value = String(state.frame);
+    updateFrameReadout();
+    updateBallsAt(sd, state.frame);
+    updatePlayersAt(state.frame, getTokens());
+    if (state.camMode !== "free") applyCameraPreset(sd);
+    else render();
+    drawChart();
+  }
+
+  function togglePlay(force) {
+    var playing = force === undefined ? !state.playing : force;
+    state.playing = playing;
+    var btn = document.getElementById("play-btn");
+    btn.textContent = playing ? "Pause" : "Play";
+    btn.setAttribute("aria-pressed", String(playing));
+    if (playTimer) { cancelAnimationFrame(playTimer); playTimer = null; }
+    if (playing) {
+      var last = performance.now();
+      var acc = 0;
+      var step = function (now) {
+        var dt = (now - last) / 1000;
+        last = now;
+        acc += dt;
+        var frameDur = 1 / fps();
+        while (acc >= frameDur) {
+          acc -= frameDur;
+          var sd = getScenarioData(currentClip(), state.scenarioKey);
+          var n = frameCount(sd);
+          var next = state.frame + 1;
+          if (next >= n) next = 0;
+          setFrame(next);
+        }
+        if (state.playing) playTimer = requestAnimationFrame(step);
+      };
+      playTimer = requestAnimationFrame(step);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Error chart (2-D canvas)
+  // ---------------------------------------------------------------------
+  var chartLayout = null;
+
+  function computeRealScatterErr(sd, method) {
+    var tr = sd.tracks[method];
+    var pts = [];
+    if (!tr) return pts;
+    (sd.anchors_heldout || []).forEach(function (a) {
+      var mf = tr.frames[a.frame];
+      if (mf && mf.xyz) {
+        var d = Math.sqrt(Math.pow(mf.xyz[0] - a.xyz_gt[0], 2) + Math.pow(mf.xyz[1] - a.xyz_gt[1], 2) + Math.pow(mf.xyz[2] - a.xyz_gt[2], 2));
+        pts.push({ frame: a.frame, err: d });
+      }
+    });
+    (sd.fixes || []).forEach(function (fx) {
+      var mf = tr.frames[fx.frame];
+      if (mf && mf.xyz) {
+        var d = Math.sqrt(Math.pow(mf.xyz[0] - fx.xyz[0], 2) + Math.pow(mf.xyz[1] - fx.xyz[1], 2) + Math.pow(mf.xyz[2] - fx.xyz[2], 2));
+        pts.push({ frame: fx.frame, err: d });
+      }
+    });
+    return pts;
+  }
+
+  function drawChart() {
+    var canvas = document.getElementById("error-chart");
+    var wrap = document.getElementById("chart-wrap");
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var w = wrap.clientWidth, h = wrap.clientHeight;
+    if (w < 1 || h < 1) return;
+    canvas.width = w * dpr; canvas.height = h * dpr;
+    var ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    var tokens = getTokens();
+    var sd = getScenarioData(currentClip(), state.scenarioKey);
+    var n = frameCount(sd);
+    var marginLeft = 42, marginRight = 10, marginTop = 10, marginBottom = 20;
+    var plotW = Math.max(1, w - marginLeft - marginRight);
+    var plotH = Math.max(1, h - marginTop - marginBottom);
+
+    var maxErr = 0.4;
+    if (sd.per_frame_err) {
+      Object.keys(sd.per_frame_err).forEach(function (m) {
+        (sd.per_frame_err[m] || []).forEach(function (e) { if (e !== null) maxErr = Math.max(maxErr, e); });
+      });
+    } else {
+      ["current", "hybrid"].forEach(function (m) {
+        computeRealScatterErr(sd, m).forEach(function (p) { maxErr = Math.max(maxErr, p.err); });
+      });
+    }
+    maxErr *= 1.1;
+
+    function xOf(frame) { return marginLeft + (n <= 1 ? 0 : frame / (n - 1) * plotW); }
+    function yOf(err) { return marginTop + plotH - (err / maxErr) * plotH; }
+    chartLayout = { marginLeft: marginLeft, plotW: plotW, n: n };
+
+    // shading bands where hybrid mode === "simulated"
+    var hybridTrack = sd.tracks.hybrid;
+    if (hybridTrack) {
+      ctx.fillStyle = tokens.hybrid;
+      var globalAlpha = 0.10;
+      var runStart = null;
+      for (var f = 0; f < n; f++) {
+        var mf = hybridTrack.frames[f];
+        var sim = mf && mf.mode === "simulated";
+        if (sim && runStart === null) runStart = f;
+        if ((!sim || f === n - 1) && runStart !== null) {
+          var endF = sim ? f : f - 1;
+          ctx.save();
+          ctx.globalAlpha = globalAlpha;
+          ctx.fillRect(xOf(runStart), marginTop, xOf(endF) - xOf(runStart) || 2, plotH);
+          ctx.restore();
+          runStart = null;
+        }
+      }
+    }
+
+    // grid + axis labels
+    ctx.strokeStyle = tokens.line;
+    ctx.fillStyle = tokens.muted;
+    ctx.font = "11px " + "JetBrains Mono, monospace";
+    ctx.lineWidth = 1;
+    [0, 0.2, 0.4].forEach(function (g) {
+      if (g > maxErr) return;
+      var y = yOf(g);
+      ctx.beginPath(); ctx.moveTo(marginLeft, y); ctx.lineTo(marginLeft + plotW, y); ctx.stroke();
+      ctx.fillText(g.toFixed(2), 2, y + 4);
+    });
+
+    // threshold line
+    ctx.strokeStyle = tokens.threshold;
+    ctx.setLineDash([5, 4]);
+    var yThresh = yOf(0.20);
+    ctx.beginPath(); ctx.moveTo(marginLeft, yThresh); ctx.lineTo(marginLeft + plotW, yThresh); ctx.stroke();
+    ctx.setLineDash([]);
+
+    if (sd.per_frame_err) {
+      Object.keys(sd.per_frame_err).forEach(function (m) {
+        if (state.visible[m] === false) return;
+        var series = sd.per_frame_err[m] || [];
+        ctx.strokeStyle = methodColor(tokens, m);
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        var started = false;
+        for (var i = 0; i < series.length; i++) {
+          var e = series[i];
+          if (e === null) { started = false; continue; }
+          var x = xOf(i), y = yOf(e);
+          if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }
+        }
+        ctx.stroke();
+      });
+    } else {
+      ["current", "hybrid"].forEach(function (m) {
+        if (state.visible[m] === false) return;
+        var pts = computeRealScatterErr(sd, m);
+        ctx.fillStyle = methodColor(tokens, m);
+        pts.forEach(function (p) {
+          ctx.beginPath();
+          ctx.arc(xOf(p.frame), yOf(p.err), 3.5, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      });
+    }
+
+    // playhead
+    ctx.strokeStyle = tokens.ink;
+    ctx.lineWidth = 1;
+    var xp = xOf(state.frame);
+    ctx.beginPath(); ctx.moveTo(xp, marginTop); ctx.lineTo(xp, marginTop + plotH); ctx.stroke();
+
+    // x-axis frame labels
+    ctx.fillStyle = tokens.muted;
+    ctx.fillText("0", marginLeft, h - 6);
+    ctx.fillText(String(n - 1), marginLeft + plotW - 18, h - 6);
+  }
+
+  function chartClickToFrame(evt) {
+    if (!chartLayout) return null;
+    var canvas = document.getElementById("error-chart");
+    var rect = canvas.getBoundingClientRect();
+    var x = evt.clientX - rect.left;
+    var frac = (x - chartLayout.marginLeft) / chartLayout.plotW;
+    var frame = Math.round(frac * (chartLayout.n - 1));
+    return Math.max(0, Math.min(chartLayout.n - 1, frame));
+  }
+
+  // ---------------------------------------------------------------------
+  // Theme handling
+  // ---------------------------------------------------------------------
+  function applyTheme() {
+    applySceneTheme();
+    drawChart();
+    var sd = getScenarioData(currentClip(), state.scenarioKey);
+    renderLegend(sd);
+    renderMethodToggles(sd);
+    renderTicks(sd);
+  }
+
+  function cycleTheme() {
+    var current = document.documentElement.getAttribute("data-theme") || "auto";
+    var next = current === "auto" ? "light" : (current === "light" ? "dark" : "auto");
+    if (next === "auto") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", next);
+    document.getElementById("theme-toggle").textContent = "Theme: " + next.charAt(0).toUpperCase() + next.slice(1);
+  }
+
+  // ---------------------------------------------------------------------
+  // Selection wiring
+  // ---------------------------------------------------------------------
+  function populateClipSelect() {
+    var sel = document.getElementById("clip-select");
+    sel.innerHTML = "";
+    Object.keys(CLIPS).forEach(function (id) {
+      var opt = document.createElement("option");
+      opt.value = id; opt.textContent = id;
+      sel.appendChild(opt);
+    });
+  }
+
+  function populateScenarioSelect(clip) {
+    var sel = document.getElementById("scenario-select");
+    sel.innerHTML = "";
+    scenarioNames(clip).forEach(function (name) {
+      var opt = document.createElement("option");
+      opt.value = name; opt.textContent = name;
+      sel.appendChild(opt);
+    });
+    if (clip.real) {
+      var opt2 = document.createElement("option");
+      opt2.value = REAL_KEY; opt2.textContent = "Real footage";
+      sel.appendChild(opt2);
+    }
+  }
+
+  function loadScenario(key, initialFrame) {
+    state.scenarioKey = key;
+    state.visible = {};
+    var clip = currentClip();
+    var sd = getScenarioData(clip, key);
+    pitchDims.length = (clip.pitch && clip.pitch.length) || 105;
+    pitchDims.width = (clip.pitch && clip.pitch.width) || 68;
+    var tokens = getTokens();
+    buildPitch(tokens);
+    buildTrajectoriesAndMarkers(sd, tokens);
+    renderLegend(sd);
+    renderMethodToggles(sd);
+    renderMetricsTable(sd);
+    renderTicks(sd);
+    var n = frameCount(sd);
+    document.getElementById("frame-scrubber").max = String(Math.max(0, n - 1));
+    setCamMode(state.camMode);
+    setFrame(initialFrame !== undefined ? initialFrame : 0);
+  }
+
+  function loadClip(clipId) {
+    togglePlay(false);
+    state.clipId = clipId;
+    var clip = currentClip();
+    populateScenarioSelect(clip);
+    renderSummaryStrip();
+    var firstScenario = scenarioNames(clip)[0] || REAL_KEY;
+    document.getElementById("scenario-select").value = firstScenario;
+    loadScenario(firstScenario, initialFrameFor(clip, firstScenario));
+  }
+
+  function init() {
+    initScene();
+    populateClipSelect();
+
+    document.getElementById("clip-select").addEventListener("change", function (e) {
+      loadClip(e.target.value);
+    });
+    document.getElementById("scenario-select").addEventListener("change", function (e) {
+      loadScenario(e.target.value, 0);
+    });
+    document.getElementById("frame-scrubber").addEventListener("input", function (e) {
+      setFrame(parseInt(e.target.value, 10));
+    });
+    document.getElementById("play-btn").addEventListener("click", function () { togglePlay(); });
+    document.getElementById("theme-toggle").addEventListener("click", cycleTheme);
+    document.getElementById("error-chart").addEventListener("click", function (e) {
+      var f = chartClickToFrame(e);
+      if (f !== null) setFrame(f);
+    });
+    ["broadcast", "side", "top", "behind", "free"].forEach(function (m) {
+      document.getElementById("cam-" + m).addEventListener("click", function () { setCamMode(m); });
+    });
+
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+    new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+    var wrap = document.getElementById("chart-wrap");
+    new ResizeObserver(function () { drawChart(); }).observe(wrap);
+
+    var firstClip = Object.keys(CLIPS)[0];
+    if (firstClip) loadClip(firstClip);
+    applySceneTheme();
+  }
+
+  init();
+})();
+</script>

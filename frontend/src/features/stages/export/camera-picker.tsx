@@ -113,36 +113,38 @@ export function CameraPicker({ shotId }: { shotId: string }) {
       {players.length === 0 ? (
         <PanelEmpty title="No players with SMPL data for this shot" description="Run hmr_world for this shot, then pick the players you want POV or OTS cameras for." />
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Player</TableHead>
-              <TableHead className="w-20 text-center">POV</TableHead>
-              <TableHead className="w-20 text-center">OTS</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {players.map((p) => (
-              <TableRow key={p.player_id}>
-                <TableCell>
-                  <span className="font-medium">{p.display_name || p.player_id}</span>
-                  {p.display_name && p.display_name !== p.player_id ? (
-                    <span className="ml-2 font-mono text-xs text-muted-foreground">{p.player_id}</span>
-                  ) : null}
-                </TableCell>
-                {RIGS.map((rig) => (
-                  <TableCell key={rig} className="text-center">
-                    <Checkbox
-                      checked={chosen.get(p.player_id)?.has(rig) ?? false}
-                      onCheckedChange={(v) => void toggle(p.player_id, rig, v === true)}
-                      aria-label={`${rig.toUpperCase()} camera for ${p.display_name || p.player_id}`}
-                    />
-                  </TableCell>
-                ))}
+        <div className="max-h-[26rem] overflow-y-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Player</TableHead>
+                <TableHead className="w-20 text-center">POV</TableHead>
+                <TableHead className="w-20 text-center">OTS</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+            </TableHeader>
+            <TableBody>
+              {players.map((p) => (
+                <TableRow key={p.player_id}>
+                  <TableCell>
+                    <span className="font-medium">{p.display_name || p.player_id}</span>
+                    {p.display_name && p.display_name !== p.player_id ? (
+                      <span className="ml-2 font-mono text-xs text-muted-foreground">{p.player_id}</span>
+                    ) : null}
+                  </TableCell>
+                  {RIGS.map((rig) => (
+                    <TableCell key={rig} className="text-center">
+                      <Checkbox
+                        checked={chosen.get(p.player_id)?.has(rig) ?? false}
+                        onCheckedChange={(v) => void toggle(p.player_id, rig, v === true)}
+                        aria-label={`${rig.toUpperCase()} camera for ${p.display_name || p.player_id}`}
+                      />
+                    </TableCell>
+                  ))}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
       )}
     </Panel>
   )

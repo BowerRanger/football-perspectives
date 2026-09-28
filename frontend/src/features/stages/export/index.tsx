@@ -108,8 +108,8 @@ export default function ExportStage() {
   return (
     <div className="flex flex-col gap-4">
       <StatusTable rows={data.rows} />
-      {shot ? <CameraPicker shotId={shot} /> : null}
       {shot ? <ViewerPanel shots={data.shots} shot={shot} onShot={setShot} /> : null}
+      {shot ? <CameraPicker shotId={shot} /> : null}
     </div>
   )
 }

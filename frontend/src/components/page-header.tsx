@@ -23,7 +23,8 @@ export function PageHeader({ title, status, description, actions, className }: P
         className,
       )}
     >
-      <div className="flex min-w-0 flex-1 items-center gap-2">
+      {/* min-w keeps the title from collapsing to nothing; actions wrap below it instead. */}
+      <div className="flex min-w-60 flex-1 items-center gap-2">
         <SidebarTrigger className="-ml-1" />
         <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
         <div className="min-w-0">

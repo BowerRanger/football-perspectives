@@ -1,6 +1,6 @@
 import * as React from "react"
 
-import { getJson, getJsonOrNull, qs } from "@/lib/api"
+import { errorMessage, getJson, getJsonOrNull, qs } from "@/lib/api"
 import { anchorFromResponse } from "./anchor-ops"
 import type {
   AnchorMap,
@@ -107,37 +107,53 @@ interface ShotData {
   /** Stadium stored in the shot's anchors.json (null when none). */
   savedStadium: string | null
   loading: boolean
+  /** Set when the saved anchors could not be read. Saving must stay disabled. */
+  loadError: string | null
+  retry: () => void
 }
 
 const EMPTY: AnchorMap = new Map()
 
-/** Loads the shot's saved anchors. Edits are applied by the caller. */
+/**
+ * Loads the shot's saved anchors. A missing file is a valid empty response
+ * from the server; any other failure is surfaced as `loadError` so the caller
+ * can block saving (an unread file must never be overwritten).
+ */
 export function useShotAnchors(shot: string): ShotData {
-  const [data, setData] = React.useState<ShotData>({
+  const [data, setData] = React.useState<Omit<ShotData, "retry">>({
     anchors: EMPTY,
     anchorImageSize: null,
     savedStadium: null,
     loading: false,
+    loadError: null,
   })
+  const [attempt, setAttempt] = React.useState(0)
+  const retry = React.useCallback(() => setAttempt((n) => n + 1), [])
   React.useEffect(() => {
     if (!shot) return
     let cancelled = false
-    setData({ anchors: EMPTY, anchorImageSize: null, savedStadium: null, loading: true })
-    void getJsonOrNull<AnchorsResponse>(`/anchors/${encodeURIComponent(shot)}`).then((res) => {
-      if (cancelled) return
-      const ok = res && res.clip_id === shot
-      setData({
-        anchors: ok ? anchorFromResponse(res) : EMPTY,
-        anchorImageSize: ok && res.image_size && res.image_size[0] > 0 ? res.image_size : null,
-        savedStadium: ok && res.stadium ? res.stadium : null,
-        loading: false,
+    setData({ anchors: EMPTY, anchorImageSize: null, savedStadium: null, loading: true, loadError: null })
+    getJson<AnchorsResponse>(`/anchors/${encodeURIComponent(shot)}`)
+      .then((res) => {
+        if (cancelled) return
+        if (!res || res.clip_id !== shot) throw new Error(`the server returned anchors for "${res?.clip_id ?? "unknown"}"`)
+        setData({
+          anchors: anchorFromResponse(res),
+          anchorImageSize: res.image_size && res.image_size[0] > 0 ? res.image_size : null,
+          savedStadium: res.stadium ? res.stadium : null,
+          loading: false,
+          loadError: null,
+        })
       })
-    })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        setData({ anchors: EMPTY, anchorImageSize: null, savedStadium: null, loading: false, loadError: errorMessage(err) })
+      })
     return () => {
       cancelled = true
     }
-  }, [shot])
-  return data
+  }, [shot, attempt])
+  return { ...data, retry }
 }
 
 interface CameraData {

@@ -8,6 +8,7 @@ import { Field, FieldLabel } from "@/components/ui/field"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { usePipeline } from "@/hooks/use-pipeline"
+import { useConfirm } from "@/hooks/use-dialogs"
 import { errorMessage, getJsonOrNull, postJson } from "@/lib/api"
 import { HmrShotBody } from "./shot-body"
 
@@ -37,6 +38,7 @@ async function loadPlayerOptions(shotId: string): Promise<PlayerOption[]> {
 
 export default function HmrWorldStage() {
   const { attachToJob, isRunning } = usePipeline()
+  const confirm = useConfirm()
   const [shots, setShots] = React.useState<string[] | null>(null)
   const [shot, setShot] = React.useState("")
   const [options, setOptions] = React.useState<PlayerOption[]>([])
@@ -69,9 +71,20 @@ export default function HmrWorldStage() {
   }, [shot])
 
   const run = async () => {
+    const forAll = player === ALL
+    // /api/run-shot wipes this shot's cached per-player HMR output before
+    // re-running; Continue in the header would have resumed from it.
+    const ok = await confirm({
+      title: forAll ? `Re-run hmr_world for every player in ${shot}?` : `Re-run hmr_world for ${player} in ${shot}?`,
+      description: forAll
+        ? `This deletes ${shot}'s cached per-player HMR output and recomputes all of it — typically 35–60 minutes on this Mac. To resume from the cache instead, use Continue in the page header.`
+        : `This deletes ${player}'s cached HMR output for ${shot} and recomputes that player only (a few minutes).`,
+      confirmLabel: forAll ? "Delete cache and re-run all" : "Re-run player",
+      destructive: true,
+    })
+    if (!ok) return
     setDispatching(true)
     try {
-      const forAll = player === ALL
       const { job_id } = forAll
         ? await postJson<{ job_id: string }>("/api/run-shot", { stage: "hmr_world", shot_id: shot })
         : await postJson<{ job_id: string }>("/api/run-shot-player", { shot_id: shot, player_id: player })

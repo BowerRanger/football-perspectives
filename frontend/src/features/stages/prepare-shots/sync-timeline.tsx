@@ -165,7 +165,7 @@ export function SyncTimeline(props: TimelineProps) {
             {ticks.map((f) => (
               <span
                 key={f}
-                className="absolute top-0 bottom-0 border-l border-white/10 pl-1 text-[10px] text-white/40 tabular-nums"
+                className="absolute top-0 bottom-0 border-l border-white/10 pl-1 text-[11px] text-stage-foreground/70 tabular-nums"
                 style={{ left: px(f) }}
               >
                 {f}

@@ -170,6 +170,7 @@ export function TrackVideo({ ref, shotId, fps, boxesByFrame, nameByTrack, highli
           <ChevronRightIcon />
         </Button>
         <Slider
+          aria-label="Frame"
           className="flex-1"
           min={0}
           max={Math.max(1, maxFrame)}

@@ -118,7 +118,7 @@ function RowShell(props: {
   actions: React.ReactNode
 }) {
   return (
-    <li className={cn("flex items-center gap-1 rounded-md pr-1 hover:bg-muted/60", props.active && "bg-muted", props.muted && "opacity-60")}>
+    <li className={cn("flex items-center gap-1 rounded-md pr-1 hover:bg-muted/60", props.active && "bg-muted", props.muted && "text-muted-foreground")}>
       <button
         type="button"
         onClick={props.onSeek}

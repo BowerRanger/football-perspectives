@@ -50,7 +50,7 @@ interface RawAnchorSet {
 export async function loadShot(shot: string): Promise<LoadedShot> {
   const [camera, saved, auto, players] = await Promise.all([
     getJsonOrNull<CameraTrackData>(`/camera/track${qs({ shot })}`),
-    getJsonOrNull<RawAnchorSet>(`/ball-anchors/${enc(shot)}`),
+    getJson<RawAnchorSet>(`/ball-anchors/${enc(shot)}`),
     getJsonOrNull<{ anchors?: unknown[] }>(`/ball-anchors/${enc(shot)}/auto`),
     getJsonOrNull<{ players?: PlayerOption[] }>(`/hmr_world/kp2d_players${qs({ shot })}`),
   ])

@@ -63,32 +63,38 @@ export function PlayerLegend({ data, selectedId, onSelect, defaultOpen, classNam
           </Button>
         </CollapsibleTrigger>
         <CollapsibleContent>
-          <div className="max-h-[45vh] overflow-y-auto border-t p-1" role="list">
+          <div className="max-h-[45vh] overflow-y-auto border-t p-1">
             {data.players.length === 0 ? (
               <p className="p-2 text-xs text-muted-foreground">No players in this shot.</p>
-            ) : null}
-            {data.players.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                role="listitem"
-                aria-pressed={selectedId === p.id}
-                onClick={() => onSelect(p.id)}
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs outline-none transition-colors",
-                  "hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/50",
-                  selectedId === p.id && "bg-accent text-accent-foreground ring-1 ring-info",
-                )}
-              >
-                <span
-                  className="size-2.5 shrink-0 rounded-full"
-                  style={{ backgroundColor: `#${p.colour.toString(16).padStart(6, "0")}` }}
-                  aria-hidden
-                />
-                <span className="min-w-0 flex-1 truncate font-medium">{p.name}</span>
-                {p.name !== p.id ? <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{p.id}</span> : null}
-              </button>
-            ))}
+            ) : (
+              <ul className="flex flex-col">
+                {data.players.map((p) => (
+                  <li key={p.id}>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-pressed={selectedId === p.id}
+                      onClick={() => onSelect(p.id)}
+                      className={cn(
+                        "h-auto w-full justify-start gap-2 px-2 py-1.5 text-left text-xs",
+                        selectedId === p.id && "bg-accent text-accent-foreground ring-1 ring-info",
+                      )}
+                    >
+                      <span
+                        className="size-2.5 shrink-0 rounded-full"
+                        style={{ backgroundColor: `#${p.colour.toString(16).padStart(6, "0")}` }}
+                        aria-hidden
+                      />
+                      <span className="min-w-0 flex-1 truncate font-medium">{p.name}</span>
+                      {p.name !== p.id ? (
+                        <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{p.id}</span>
+                      ) : null}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </CollapsibleContent>
       </Card>

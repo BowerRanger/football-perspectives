@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button"
 import { PanelError, PanelSkeleton } from "@/components/panel"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Kbd } from "@/components/ui/kbd"
@@ -26,7 +27,17 @@ export function EditorWorkspace({ ctrl, embedded = false }: WorkspaceProps) {
   useUnsavedGuard(ctrl.docApi.dirty, { what: "ball anchors" })
 
   if (ctrl.loadError) {
-    return <PanelError title="Could not load ball anchors" message={ctrl.loadError} />
+    return (
+      <PanelError
+        title={`Could not load saved anchors for ${ctrl.shot}`}
+        message={`Saving is disabled so existing anchors can't be overwritten. ${ctrl.loadError}`}
+        action={
+          <Button variant="outline" size="sm" className="mt-2" onClick={ctrl.retryLoad}>
+            Retry
+          </Button>
+        }
+      />
+    )
   }
   const railHeight = embedded ? "lg:h-[680px]" : "lg:h-[calc(100svh-9rem)]"
   // Radix wraps ScrollArea content in a display:table div that ignores truncation; force block.

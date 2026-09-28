@@ -47,6 +47,8 @@ export interface ToolbarProps {
   dirty: boolean
   saving: boolean
   onSave: () => void
+  /** True when the saved anchors failed to load: Save is disabled so they can't be overwritten. */
+  saveBlocked: boolean
   rerunPhase: "idle" | "saving" | "starting"
   /** Why a rerun can't start right now (a job is running), or null. */
   rerunBlockedReason: string | null
@@ -184,13 +186,13 @@ export function EditorControls(props: ToolbarProps) {
       />
       <Tooltip>
         <TooltipTrigger asChild>
-          <Button size="sm" disabled={!shot || props.saving} onClick={props.onSave}>
+          <Button size="sm" disabled={!shot || props.saving || props.saveBlocked} onClick={props.onSave}>
             {props.saving ? <Spinner /> : <SaveIcon />}
             Save anchors
           </Button>
         </TooltipTrigger>
         <TooltipContent className="flex items-center gap-2">
-          Save to anchors.json <Kbd>⌘S</Kbd>
+          {props.saveBlocked ? "Disabled: saved anchors could not be loaded" : "Save to anchors.json"} <Kbd>⌘S</Kbd>
         </TooltipContent>
       </Tooltip>
     </>

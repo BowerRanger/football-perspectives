@@ -297,8 +297,10 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
 
   const missingDeps = React.useCallback(
     (stage: StageName) => {
-      const done = new Map(stages.map((s) => [s.name, s.complete]))
-      return (STAGE_DEPS[stage] ?? []).filter((d) => !done.get(d))
+      // A partial dependency (output for some shots) is enough to run: the
+      // stage processes the shots whose inputs exist.
+      const ready = new Map(stages.map((s) => [s.name, s.complete || !!s.partial]))
+      return (STAGE_DEPS[stage] ?? []).filter((d) => !ready.get(d))
     },
     [stages],
   )

@@ -104,7 +104,7 @@ export function useAnchorEditor({ shot: shotProp, onShotChange, embedded }: Opti
     shot,
     frame: player.frame,
     snapEnabled: view.snap,
-    disabled: saved.loading || !shot,
+    disabled: saved.loading || Boolean(saved.loadError) || !shot,
     landmarks: catalogues.landmarks,
     pitchLines,
     edit,
@@ -136,7 +136,7 @@ export function useAnchorEditor({ shot: shotProp, onShotChange, embedded }: Opti
 
   const save = React.useCallback(
     async (quiet = false): Promise<boolean> => {
-      if (!shot) return false
+      if (!shot || saved.loading || saved.loadError) return false
       setSaving(true)
       setFlash({ text: "Saving…", tone: "warning" })
       try {
@@ -159,11 +159,11 @@ export function useAnchorEditor({ shot: shotProp, onShotChange, embedded }: Opti
         setSaving(false)
       }
     },
-    [shot, imageSize, stadium, anchors],
+    [shot, imageSize, stadium, anchors, saved.loading, saved.loadError],
   )
 
   const rerun = React.useCallback(async () => {
-    if (!shot) return
+    if (!shot || saved.loadError || saved.loading) return
     const ok = await confirm({
       title: `Rerun camera tracking for ${shot}?`,
       description:
@@ -190,7 +190,7 @@ export function useAnchorEditor({ shot: shotProp, onShotChange, embedded }: Opti
     } finally {
       setRerunPhase("idle")
     }
-  }, [shot, confirm, save, pipeline])
+  }, [shot, confirm, save, pipeline, saved.loading, saved.loadError])
 
   const deleteAnchorFrame = React.useCallback(
     async (frame: number) => {
@@ -253,6 +253,8 @@ export function useAnchorEditor({ shot: shotProp, onShotChange, embedded }: Opti
     changeStadium,
     anchors,
     loadingAnchors: saved.loading,
+    anchorLoadError: saved.loadError,
+    retryAnchorLoad: saved.retry,
     track,
     detected: camera.detected,
     dirty,
@@ -260,7 +262,11 @@ export function useAnchorEditor({ shot: shotProp, onShotChange, embedded }: Opti
     save: () => void save(),
     rerun: () => void rerun(),
     rerunPhase,
-    rerunBlockedReason: pipeline.isRunning ? `${pipeline.runningLabel} is running. Wait for it to finish.` : null,
+    rerunBlockedReason: saved.loadError
+      ? "Saved anchors could not be loaded, so they can't be saved first."
+      : pipeline.isRunning
+        ? `${pipeline.runningLabel} is running. Wait for it to finish.`
+        : null,
     viewerHref: viewerShot ? `/viewer?shot=${encodeURIComponent(viewerShot)}` : null,
     view,
     toggleView,

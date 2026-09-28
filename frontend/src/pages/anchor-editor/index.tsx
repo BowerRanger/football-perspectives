@@ -3,7 +3,8 @@ import { useSearchParams } from "react-router"
 import { MonitorIcon } from "lucide-react"
 
 import { PageHeader } from "@/components/page-header"
-import { PanelEmpty } from "@/components/panel"
+import { PanelEmpty, PanelError } from "@/components/panel"
+import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -175,6 +176,7 @@ function controlProps(ed: Editor, showShotSelect: boolean): ToolbarProps {
     anchorCount: ed.anchors.size,
     dirty: ed.dirty,
     saving: ed.saving,
+    saveBlocked: Boolean(ed.anchorLoadError),
     onSave: ed.save,
     rerunPhase: ed.rerunPhase,
     rerunBlockedReason: ed.rerunBlockedReason,
@@ -193,6 +195,19 @@ function EditorBody({ ed, toolbar }: { ed: Editor; toolbar?: ToolbarProps }) {
       className="flex h-full min-h-0 flex-col overflow-y-auto bg-background outline-none md:overflow-hidden"
     >
       {toolbar ? <Toolbar {...toolbar} /> : null}
+      {ed.anchorLoadError ? (
+        <div className="shrink-0 p-3">
+          <PanelError
+            title={`Could not load saved anchors for ${ed.shot}`}
+            message={`Saving is disabled so existing anchors can't be overwritten. ${ed.anchorLoadError}`}
+            action={
+              <Button variant="outline" size="sm" className="mt-2" onClick={ed.retryAnchorLoad}>
+                Retry
+              </Button>
+            }
+          />
+        </div>
+      ) : null}
       {ed.list.loaded && ed.list.shots.length === 0 && !ed.shot ? (
         <PanelEmpty
           title="No shots to annotate"

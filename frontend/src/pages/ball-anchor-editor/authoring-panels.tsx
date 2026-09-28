@@ -82,7 +82,7 @@ function TouchAuthoring({ ctrl }: { ctrl: EditorController }) {
         <Label htmlFor="touch-confidence" className="justify-between text-xs">
           Confidence <span className="font-mono tabular-nums">{a.confidence.toFixed(2)}</span>
         </Label>
-        <Slider id="touch-confidence" min={0} max={1} step={0.05} value={[a.confidence]} onValueChange={(v) => patchAuthoring({ confidence: v[0] ?? 1 })} />
+        <Slider id="touch-confidence" aria-label="Touch confidence" valueText={`${Math.round(a.confidence * 100)}%`} min={0} max={1} step={0.05} value={[a.confidence]} onValueChange={(v) => patchAuthoring({ confidence: v[0] ?? 1 })} />
       </div>
       <Help>
         Click the ball — the nearest reconstructed joint is auto-filled. With Player on Auto, the suggested player and body

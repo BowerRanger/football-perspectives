@@ -133,6 +133,7 @@ export function OverlaidPitchMap({ shots }: PitchMapProps) {
           <ChevronRightIcon />
         </Button>
         <Slider
+          aria-label="Frame"
           className="flex-1"
           min={minFrame}
           max={Math.max(minFrame + 1, maxFrame)}

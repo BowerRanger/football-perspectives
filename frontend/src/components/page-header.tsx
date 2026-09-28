@@ -32,7 +32,7 @@ export function PageHeader({ title, status, description, actions, className }: P
             <h1 className="truncate text-base font-semibold tracking-tight">{title}</h1>
             {status}
           </div>
-          {description ? <p className="hidden truncate text-xs text-muted-foreground md:block">{description}</p> : null}
+          {description ? <p className="hidden text-xs text-muted-foreground md:line-clamp-2">{description}</p> : null}
         </div>
       </div>
       {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}

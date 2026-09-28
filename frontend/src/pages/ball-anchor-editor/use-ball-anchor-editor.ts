@@ -39,6 +39,8 @@ export interface EditorController {
   shot: string
   loading: boolean
   loadError: string | null
+  /** Re-attempt the saved-anchor load after a failure. */
+  retryLoad: () => void
   player: FramePlayer
   docApi: AnchorDocApi
   autoAnchors: AutoAnchor[]
@@ -104,6 +106,8 @@ export function useBallAnchorEditor({ shot, predicted, onFrameChange }: Options)
   const [previewResult, setPreviewResult] = React.useState<PreviewResult | null>(null)
   const [saving, setSaving] = React.useState(false)
   const [solving, setSolving] = React.useState(false)
+  const [attempt, setAttempt] = React.useState(0)
+  const retryLoad = React.useCallback(() => setAttempt((n) => n + 1), [])
   const { reset } = docApi
   const { setFps } = player
 
@@ -136,7 +140,7 @@ export function useBallAnchorEditor({ shot, predicted, onFrameChange }: Options)
     return () => {
       cancelled = true
     }
-  }, [shot, reset, setFps])
+  }, [shot, attempt, reset, setFps])
 
   const predictedByFrame = React.useMemo(() => buildProjection(camera, predicted), [camera, predicted])
   const previewByFrame = React.useMemo(() => {
@@ -157,6 +161,8 @@ export function useBallAnchorEditor({ shot, predicted, onFrameChange }: Options)
   )
 
   const save = React.useCallback(async () => {
+    // A failed load means the saved set is unknown: never overwrite it.
+    if (loading || loadError) return false
     setSaving(true)
     try {
       const res = await saveAnchors(shot, payload())
@@ -170,7 +176,7 @@ export function useBallAnchorEditor({ shot, predicted, onFrameChange }: Options)
     } finally {
       setSaving(false)
     }
-  }, [shot, payload, docApi])
+  }, [shot, payload, docApi, loading, loadError])
 
   const solve = React.useCallback(async () => {
     setSolving(true)
@@ -224,6 +230,7 @@ export function useBallAnchorEditor({ shot, predicted, onFrameChange }: Options)
     shot,
     loading,
     loadError,
+    retryLoad,
     player,
     docApi,
     autoAnchors,

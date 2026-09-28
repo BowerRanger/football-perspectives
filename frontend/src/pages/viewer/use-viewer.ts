@@ -31,7 +31,7 @@ const INITIAL: ViewerState = {
   playing: false,
   speed: 1,
   vis: { ball: true, skeleton: true, mesh: false },
-  cameraMode: "broadcast",
+  cameraMode: "overview",
   selectedId: null,
 }
 
@@ -86,7 +86,8 @@ export function useViewer(shot: string | undefined) {
         engine?.setPlaying(false)
         playingRef.current = false
         selectedRef.current = null
-        setState((s) => ({ ...s, data, frame: 0, phase: data.totalFrames > 0 ? "ready" : "empty" }))
+        const cameraMode: CameraMode = data.track && data.track.size > 0 ? "tracked" : "overview"
+        setState((s) => ({ ...s, data, cameraMode, frame: 0, phase: data.totalFrames > 0 ? "ready" : "empty" }))
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return

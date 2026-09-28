@@ -173,12 +173,12 @@ export function IngestPanel({ onChanged }: { onChanged: () => Promise<void> }) {
             />
           </div>
 
-          <div className="flex flex-col justify-center gap-2">
-            <Button variant="secondary" disabled={disabled} onClick={() => clipsInput.current?.click()}>
+          <div className="flex w-full flex-col justify-center gap-2 sm:w-auto">
+            <Button variant="secondary" className="w-full sm:w-auto" disabled={disabled} onClick={() => clipsInput.current?.click()}>
               <PlusIcon data-icon="inline-start" />
               Add shots
             </Button>
-            <p className="max-w-44 text-xs text-muted-foreground">
+            <p className="text-xs sm:max-w-44 text-muted-foreground">
               Pre-trimmed .mp4 clips, added as ungrouped shots (no splitting).
             </p>
             <input
@@ -196,12 +196,12 @@ export function IngestPanel({ onChanged }: { onChanged: () => Promise<void> }) {
             />
           </div>
 
-          <div className="flex flex-col justify-center gap-2">
-            <Button variant="outline" disabled={disabled} onClick={() => void resplit()}>
+          <div className="flex w-full flex-col justify-center gap-2 sm:w-auto">
+            <Button variant="outline" className="w-full sm:w-auto" disabled={disabled} onClick={() => void resplit()}>
               <RefreshCwIcon data-icon="inline-start" />
               Re-run split
             </Button>
-            <p className="max-w-44 text-xs text-muted-foreground">
+            <p className="text-xs sm:max-w-44 text-muted-foreground">
               Re-ingest the same source video from scratch with the current settings.
             </p>
           </div>
@@ -210,7 +210,7 @@ export function IngestPanel({ onChanged }: { onChanged: () => Promise<void> }) {
         <p
           role="status"
           aria-live="polite"
-          className={cn("flex min-h-5 items-center gap-2 text-sm", status ? STATUS_TONE[status.tone] : "")}
+          className={cn("flex items-center gap-2 text-sm empty:hidden", status ? STATUS_TONE[status.tone] : "")}
         >
           {busy && status?.tone === "muted" ? <Spinner /> : null}
           {status?.text}

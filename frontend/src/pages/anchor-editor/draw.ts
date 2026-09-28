@@ -14,6 +14,8 @@ import type {
 const FONT = "-apple-system, Segoe UI, sans-serif"
 const AMBER = "#facc15"
 const CYAN = "#22d3ee"
+/** Minimum CSS px for landmark labels; multiplied by `scale` to stay legible at any zoom. */
+const LABEL_PX = 12
 
 export interface OverlayInput {
   width: number
@@ -68,12 +70,44 @@ function drawDetectedLines(ctx: CanvasRenderingContext2D, o: OverlayInput) {
   ctx.restore()
 }
 
-function drawLandmarkLabels(ctx: CanvasRenderingContext2D, o: OverlayInput) {
+interface Rect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+function overlaps(a: Rect, b: Rect): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+/** Greedy placement: first of right/left/above/below that stays in frame and clears every placed label. */
+function pickLabelRect(
+  u: number,
+  v: number,
+  tw: number,
+  th: number,
+  gap: number,
+  placed: readonly Rect[],
+  o: OverlayInput,
+): Rect | null {
+  const candidates: Rect[] = [
+    { x: u + gap, y: v - th / 2, w: tw, h: th },
+    { x: u - gap - tw, y: v - th / 2, w: tw, h: th },
+    { x: u - tw / 2, y: v - gap - th, w: tw, h: th },
+    { x: u - tw / 2, y: v + gap, w: tw, h: th },
+  ]
+  return (
+    candidates.find(
+      (r) => r.x >= 0 && r.y >= 0 && r.x + r.w <= o.width && r.y + r.h <= o.height && !placed.some((p) => overlaps(r, p)),
+    ) ?? null
+  )
+}
+
+function drawLandmarkLabels(ctx: CanvasRenderingContext2D, o: OverlayInput, placed: Rect[]) {
   const cam = cameraForFrame(o.track, o.frame)
   if (!cam || o.landmarks.length === 0) return
   const dotR = 3 * o.scale
-  ctx.font = `${11 * o.scale}px ${FONT}`
-  ctx.lineWidth = 3 * o.scale
   for (const lm of o.landmarks) {
     const proj = projectPoint(lm.world_xyz, cam.K, cam.R, cam.t, cam.distortion)
     if (!proj) continue
@@ -83,22 +117,42 @@ function drawLandmarkLabels(ctx: CanvasRenderingContext2D, o: OverlayInput) {
     ctx.arc(u, v, dotR, 0, 2 * Math.PI)
     ctx.fillStyle = "rgba(255, 200, 0, 0.85)"
     ctx.fill()
-    ctx.strokeStyle = "rgba(0, 0, 0, 0.7)"
-    ctx.strokeText(lm.name, u + dotR + 3 * o.scale, v - 3 * o.scale)
-    ctx.fillStyle = "rgba(255, 220, 120, 0.95)"
-    ctx.fillText(lm.name, u + dotR + 3 * o.scale, v - 3 * o.scale)
+    placeLabel(ctx, lm.name, u, v, dotR + 3 * o.scale, "rgba(255, 220, 120, 0.95)", o, placed)
   }
 }
 
-function labelled(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, fill: string, scale: number) {
-  ctx.strokeStyle = "rgba(0,0,0,0.7)"
-  ctx.lineWidth = 3 * scale
-  ctx.strokeText(text, x, y)
-  ctx.fillStyle = fill
-  ctx.fillText(text, x, y)
+/** Draw `text` beside (u, v) on the first free side; skip it when every side collides. */
+function placeLabel(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  u: number,
+  v: number,
+  gap: number,
+  fill: string,
+  o: OverlayInput,
+  placed: Rect[],
+) {
+  const th = LABEL_PX * o.scale
+  const pad = 2 * o.scale
+  ctx.save()
+  ctx.font = `${th}px ${FONT}`
+  ctx.textBaseline = "middle"
+  ctx.lineWidth = 3 * o.scale
+  const tw = ctx.measureText(text).width
+  const rect = pickLabelRect(u, v, tw, th, gap, placed, o)
+  if (rect) {
+    placed.push({ x: rect.x - pad, y: rect.y - pad, w: rect.w + 2 * pad, h: rect.h + 2 * pad })
+    const ty = rect.y + rect.h / 2
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.7)"
+    ctx.strokeText(text, rect.x, ty)
+    ctx.fillStyle = fill
+    ctx.fillText(text, rect.x, ty)
+  }
+  ctx.restore()
 }
 
-function drawAnchorLines(ctx: CanvasRenderingContext2D, anchor: AnchorFrame, s: number) {
+function drawAnchorLines(ctx: CanvasRenderingContext2D, anchor: AnchorFrame, o: OverlayInput, placed: Rect[]) {
+  const s = o.scale
   const dotR = 4 * s
   for (const ln of anchor.lines) {
     const [[x1, y1], [x2, y2]] = ln.image_segment
@@ -114,8 +168,7 @@ function drawAnchorLines(ctx: CanvasRenderingContext2D, anchor: AnchorFrame, s: 
       ctx.fillStyle = AMBER
       ctx.fill()
     }
-    ctx.font = `${11 * s}px ${FONT}`
-    labelled(ctx, ln.name, (x1 + x2) / 2 + 6 * s, (y1 + y2) / 2 - 4 * s, "#fef9c3", s)
+    if (showNames(o)) placeLabel(ctx, ln.name, (x1 + x2) / 2, (y1 + y2) / 2, 6 * s, "#fef9c3", o, placed)
   }
 }
 
@@ -132,7 +185,8 @@ function drawPendingStart(ctx: CanvasRenderingContext2D, start: Vec2, s: number)
   ctx.stroke()
 }
 
-function drawAnchorPoints(ctx: CanvasRenderingContext2D, anchor: AnchorFrame, s: number) {
+function drawAnchorPoints(ctx: CanvasRenderingContext2D, anchor: AnchorFrame, o: OverlayInput, placed: Rect[]) {
+  const s = o.scale
   const dotR = 4 * s
   const ringR = 8 * s
   for (const lm of anchor.points) {
@@ -154,9 +208,15 @@ function drawAnchorPoints(ctx: CanvasRenderingContext2D, anchor: AnchorFrame, s:
     ctx.lineWidth = s
     ctx.strokeStyle = "rgba(255, 255, 255, 0.6)"
     ctx.stroke()
-    ctx.font = `${12 * s}px ${FONT}`
-    labelled(ctx, lm.name, x + ringR + 4 * s, y - 4 * s, "#fff", s)
+    if (showNames(o)) placeLabel(ctx, lm.name, x, y, ringR + 4 * s, "#fff", o, placed)
   }
+}
+
+/** Below this rendered width (CSS px) point/line names pile up, so they show only when "landmark labels" is on. */
+const NARROW_CSS_PX = 640
+
+function showNames(o: OverlayInput): boolean {
+  return o.width / o.scale >= NARROW_CSS_PX || o.view.labels
 }
 
 export function drawOverlay(canvas: HTMLCanvasElement, o: OverlayInput) {
@@ -165,11 +225,18 @@ export function drawOverlay(canvas: HTMLCanvasElement, o: OverlayInput) {
   ctx.clearRect(0, 0, canvas.width, canvas.height)
   if (o.view.pitch) drawProjectedPitch(ctx, o)
   if (o.view.detected) drawDetectedLines(ctx, o)
-  if (o.view.labels) drawLandmarkLabels(ctx, o)
-  if (!o.view.anchors) return
-  if (o.anchor) drawAnchorLines(ctx, o.anchor, o.scale)
-  if (o.pendingLineStart) drawPendingStart(ctx, o.pendingLineStart, o.scale)
-  if (o.anchor) drawAnchorPoints(ctx, o.anchor, o.scale)
+  // Shared label layout: marker rings are obstacles; anchor names claim space before catalogue labels.
+  const placed: Rect[] = []
+  if (o.view.anchors && o.anchor) {
+    const r = 12 * o.scale
+    for (const p of o.anchor.points) placed.push({ x: p.image_xy[0] - r, y: p.image_xy[1] - r, w: 2 * r, h: 2 * r })
+  }
+  if (o.view.anchors) {
+    if (o.anchor) drawAnchorLines(ctx, o.anchor, o, placed)
+    if (o.pendingLineStart) drawPendingStart(ctx, o.pendingLineStart, o.scale)
+    if (o.anchor) drawAnchorPoints(ctx, o.anchor, o, placed)
+  }
+  if (o.view.labels) drawLandmarkLabels(ctx, o, placed)
 }
 
 /** Colour ramp for the coverage strip (red -> green by confidence). */

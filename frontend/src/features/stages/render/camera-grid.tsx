@@ -18,8 +18,8 @@ function CameraCard({ shotId, cam }: { shotId: string; cam: RenderCamera }) {
   const stem = cam.file.replace(/\.mp4$/, "")
   const mb = (cam.size_bytes / (1024 * 1024)).toFixed(1)
   return (
-    <figure className={cn("flex min-w-0 flex-col overflow-hidden rounded-lg border bg-card", cam.vertical && "max-w-52")}>
-      <div className="bg-stage">
+    <figure className={cn("flex min-w-0 flex-col gap-2", cam.vertical && "max-w-52")}>
+      <div className="overflow-hidden rounded-lg bg-stage">
         <video
           // #t=0.1 makes browsers paint a poster frame instead of a black box.
           src={`/api/render/video/${encodeURIComponent(shotId)}/${encodeURIComponent(stem)}#t=0.1`}
@@ -28,7 +28,7 @@ function CameraCard({ shotId, cam }: { shotId: string; cam: RenderCamera }) {
           className="block w-full"
         />
       </div>
-      <figcaption className="flex flex-wrap items-center gap-2 px-3 py-2">
+      <figcaption className="flex flex-wrap items-center gap-2 px-0.5">
         <span className="text-sm font-medium">
           {cam.id}
           {cam.vertical ? " (9:16)" : ""}

@@ -1,5 +1,5 @@
 import { Link } from "react-router"
-import { ChevronDownIcon, EyeIcon, ExternalLinkIcon, RefreshCwIcon, SaveIcon } from "lucide-react"
+import { CheckIcon, ChevronDownIcon, EyeIcon, ExternalLinkIcon, RefreshCwIcon, SaveIcon } from "lucide-react"
 
 import { ToneBadge } from "@/components/status"
 import { Button } from "@/components/ui/button"
@@ -15,7 +15,6 @@ import { Kbd } from "@/components/ui/kbd"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { cn } from "@/lib/utils"
 import type { Stadium, ViewOptions } from "./types"
 
 export const VIEW_ITEMS: { key: keyof ViewOptions; label: string; hint: string; keys: string }[] = [
@@ -30,7 +29,7 @@ const NO_STADIUM = "__none__"
 
 export type StatusTone = "muted" | "warning" | "destructive"
 
-interface ToolbarProps {
+export interface ToolbarProps {
   shots: readonly string[]
   shot: string
   showShotSelect: boolean
@@ -42,6 +41,9 @@ interface ToolbarProps {
   onToggleView: (key: keyof ViewOptions) => void
   status: string
   statusTone: StatusTone
+  /** True when `status` is a transient message (save/rerun result) rather than the shot baseline. */
+  statusIsFlash: boolean
+  anchorCount: number
   dirty: boolean
   saving: boolean
   onSave: () => void
@@ -50,12 +52,6 @@ interface ToolbarProps {
   rerunBlockedReason: string | null
   onRerun: () => void
   viewerHref: string | null
-}
-
-const STATUS_CLASS: Record<StatusTone, string> = {
-  muted: "text-muted-foreground",
-  warning: "text-warning",
-  destructive: "text-destructive",
 }
 
 function ViewMenu({ view, onToggle }: { view: ViewOptions; onToggle: (key: keyof ViewOptions) => void }) {
@@ -111,10 +107,29 @@ function RerunButton(props: Pick<ToolbarProps, "rerunPhase" | "rerunBlockedReaso
   )
 }
 
-export function Toolbar(props: ToolbarProps) {
+/** Dirty / saved / transient-message badge shown beside the title (page) or at the toolbar's right (embedded). */
+export function AnchorStatusBadge(props: Pick<ToolbarProps, "dirty" | "anchorCount" | "status" | "statusTone" | "statusIsFlash">) {
+  if (props.dirty) return <ToneBadge tone="warning">Unsaved changes · {props.anchorCount} anchor frames</ToneBadge>
+  if (props.statusIsFlash) {
+    const tone = props.statusTone === "muted" ? "success" : props.statusTone
+    return (
+      <ToneBadge tone={tone} role="status" aria-live="polite" className="max-w-full truncate">
+        {props.status}
+      </ToneBadge>
+    )
+  }
+  return (
+    <ToneBadge tone="muted">
+      <CheckIcon /> {props.anchorCount} anchor frames saved
+    </ToneBadge>
+  )
+}
+
+/** Shot / stadium / view / rerun / save. Shared by the page header and the embedded toolbar. */
+export function EditorControls(props: ToolbarProps) {
   const { shots, shot, showShotSelect, onShotChange, stadiums, stadium, onStadiumChange } = props
   return (
-    <div className="flex flex-wrap items-center gap-2 border-b bg-card px-3 py-2">
+    <>
       {showShotSelect ? (
         <Select value={shot || undefined} onValueChange={onShotChange} disabled={shots.length === 0}>
           <SelectTrigger size="sm" aria-label="Shot" className="w-40 font-mono text-xs">
@@ -153,40 +168,42 @@ export function Toolbar(props: ToolbarProps) {
         <TooltipContent>Pick the stadium to enable mowing-stripe entries in the Lines palette</TooltipContent>
       </Tooltip>
       <ViewMenu view={props.view} onToggle={props.onToggleView} />
-      <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
-        <p
-          role="status"
-          aria-live="polite"
-          className={cn("min-w-0 truncate text-xs", STATUS_CLASS[props.statusTone])}
-        >
-          {props.status}
-        </p>
-        {props.dirty ? <ToneBadge tone="warning">Unsaved changes</ToneBadge> : null}
-        {props.viewerHref ? (
-          <Button asChild variant="ghost" size="sm">
-            <Link to={props.viewerHref}>
-              <ExternalLinkIcon />
-              Open viewer
-            </Link>
+      {props.viewerHref ? (
+        <Button asChild variant="ghost" size="sm">
+          <Link to={props.viewerHref}>
+            <ExternalLinkIcon />
+            Open viewer
+          </Link>
+        </Button>
+      ) : null}
+      <RerunButton
+        shot={shot}
+        rerunPhase={props.rerunPhase}
+        rerunBlockedReason={props.rerunBlockedReason}
+        onRerun={props.onRerun}
+      />
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button size="sm" disabled={!shot || props.saving} onClick={props.onSave}>
+            {props.saving ? <Spinner /> : <SaveIcon />}
+            Save anchors
           </Button>
-        ) : null}
-        <RerunButton
-          shot={shot}
-          rerunPhase={props.rerunPhase}
-          rerunBlockedReason={props.rerunBlockedReason}
-          onRerun={props.onRerun}
-        />
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button size="sm" disabled={!shot || props.saving} onClick={props.onSave}>
-              {props.saving ? <Spinner /> : <SaveIcon />}
-              Save anchors
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent className="flex items-center gap-2">
-            Save to anchors.json <Kbd>⌘S</Kbd>
-          </TooltipContent>
-        </Tooltip>
+        </TooltipTrigger>
+        <TooltipContent className="flex items-center gap-2">
+          Save to anchors.json <Kbd>⌘S</Kbd>
+        </TooltipContent>
+      </Tooltip>
+    </>
+  )
+}
+
+/** Compact single toolbar row for the embedded (Camera stage) editor. */
+export function Toolbar(props: ToolbarProps) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
+      <EditorControls {...props} />
+      <div className="ml-auto min-w-0">
+        <AnchorStatusBadge {...props} />
       </div>
     </div>
   )

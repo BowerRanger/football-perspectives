@@ -30,7 +30,7 @@ export function EditorWorkspace({ ctrl, embedded = false }: WorkspaceProps) {
   }
   const railHeight = embedded ? "lg:h-[680px]" : "lg:h-[calc(100svh-9rem)]"
   // Radix wraps ScrollArea content in a display:table div that ignores truncation; force block.
-  const rail = "rounded-lg border [&_[data-radix-scroll-area-viewport]>div]:!block"
+  const rail = "[&_[data-radix-scroll-area-viewport]>div]:!block"
   return (
     <div className="flex flex-col gap-3">
       {embedded ? (
@@ -46,14 +46,14 @@ export function EditorWorkspace({ ctrl, embedded = false }: WorkspaceProps) {
       <p className="text-xs text-muted-foreground lg:hidden">
         Frame annotation works best on a desktop screen; tools stack below the frame on narrow displays.
       </p>
-      <div className="grid grid-cols-[minmax(0,1fr)] gap-3 lg:grid-cols-[250px_minmax(0,1fr)_320px]">
-        <ScrollArea className={cn("order-2 h-80 lg:order-none", rail, railHeight)}>
-          <div className="flex flex-col gap-3 p-3">
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-y-3 lg:grid-cols-[250px_minmax(0,1fr)_320px] lg:gap-y-0">
+        <ScrollArea className={cn("order-2 h-80 border-t pt-3 lg:order-none lg:border-t-0 lg:pt-0 lg:pr-3", rail, railHeight)}>
+          <div className="flex flex-col gap-3 p-1 lg:pl-0">
             <TagPalette selected={ctrl.selectedTag} onSelect={ctrl.setSelectedTag} />
             <AuthoringPanel ctrl={ctrl} />
           </div>
         </ScrollArea>
-        <div className="order-first flex min-w-0 flex-col gap-3 lg:order-none">
+        <div className="order-first flex min-w-0 flex-col gap-3 lg:order-none lg:border-l lg:px-3">
           {ctrl.loading ? <PanelSkeleton rows={2} media /> : null}
           <div className={cn("flex flex-col gap-3", ctrl.loading && "hidden")}>
             <FrameCanvas ctrl={ctrl} />
@@ -62,8 +62,8 @@ export function EditorWorkspace({ ctrl, embedded = false }: WorkspaceProps) {
             {ctrl.previewResult ? <PreviewSummary result={ctrl.previewResult} /> : null}
           </div>
         </div>
-        <ScrollArea className={cn("order-3 h-96 lg:order-none", rail, railHeight)}>
-          <div className="p-3">
+        <ScrollArea className={cn("order-3 h-96 border-t pt-3 lg:order-none lg:border-l lg:border-t-0 lg:pt-0", rail, railHeight)}>
+          <div className="p-3 lg:pr-0">
             <EventsList
               anchors={ctrl.docApi.doc.anchors}
               autoAnchors={ctrl.autoAnchors}

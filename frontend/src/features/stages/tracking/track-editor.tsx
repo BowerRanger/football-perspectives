@@ -272,8 +272,8 @@ export function TrackEditor({ shotId }: { shotId: string }) {
           highlightIds={highlightIds}
           onPickTrack={pickTrack}
         />
-        <div className="flex min-h-0 flex-col rounded-lg border bg-card">
-          <div className="border-b px-3 py-2 text-sm font-medium">
+        <div className="flex min-h-0 flex-col border-t pt-3 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-4">
+          <div className="pb-2 text-sm font-medium">
             Players <span className="font-normal text-muted-foreground">· {shotId} · {groups.length}</span>
           </div>
           <ScrollArea className="h-[min(60vh,34rem)]">

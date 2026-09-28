@@ -96,14 +96,14 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
 
   const bumpOutputVersion = React.useCallback(() => setOutputVersion((v) => v + 1), [])
 
-  const markRunning = React.useCallback((targets: string[], label: string) => {
+  const markRunning = React.useCallback((targets: string[], label: string, startedAt: number = Date.now()) => {
     setLiveState((prev) => {
       const next = { ...prev }
       for (const t of targets) next[t as StageName] = "running"
       return next
     })
     setRunningLabel(label)
-    setLog({ ...EMPTY_LOG, status: "running", title: label, startedAt: Date.now() })
+    setLog({ ...EMPTY_LOG, status: "running", title: label, startedAt })
     setLogOpen(true)
   }, [])
 
@@ -271,13 +271,14 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     if (!stagesLoaded || reattachedRef.current) return
     reattachedRef.current = true
-    void getJson<{ job_id: string; stages: string }[]>("/api/jobs?status=running")
+    void getJson<{ job_id: string; stages: string; started_at?: number }[]>("/api/jobs?status=running")
       .then((jobs) => {
         const job = jobs[0]
         if (!job) return
         const targets = job.stages === "all" ? stages.map((s) => s.name) : job.stages.split(",")
         const label = job.stages === "all" ? "Pipeline" : humanizeStageName(targets[0])
-        markRunning(targets, label)
+        // Server epoch seconds → the log dock's elapsed timer shows the real run time.
+        markRunning(targets, label, job.started_at ? job.started_at * 1000 : Date.now())
         streamJob(job.job_id, targets, label)
       })
       .catch(() => {

@@ -171,6 +171,11 @@
   a {
     text-underline-offset: 3px;
   }
+  /* Browsers default <kbd> to monospace; key hints and their captions are UI
+     text, not data. */
+  kbd {
+    font-family: var(--font-sans);
+  }
   /* Data, frame numbers and coordinates line up in columns. */
   table, [data-numeric] {
     font-variant-numeric: tabular-nums;

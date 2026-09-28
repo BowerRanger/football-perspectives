@@ -25,7 +25,8 @@ const STATUS_LABEL: Record<StageStatus, string> = {
 
 const DOT_CLASS: Record<StageStatus, string> = {
   complete: "bg-success",
-  partial: "bg-[linear-gradient(90deg,var(--info)_50%,transparent_50%)] ring-1 ring-inset ring-info",
+  // Half-filled success: some output exists. Info blue stays reserved for selection/hints.
+  partial: "bg-[linear-gradient(90deg,var(--success)_50%,transparent_50%)] ring-1 ring-inset ring-success",
   running: "bg-warning animate-pulse",
   error: "bg-destructive",
   pending: "bg-transparent ring-1 ring-inset ring-muted-foreground/60",
@@ -48,7 +49,7 @@ export function StatusDot({ status, className }: StatusDotProps) {
 
 const BADGE_CLASS: Record<StageStatus, string> = {
   complete: "bg-success/15 text-success border-success/25",
-  partial: "bg-info/15 text-info border-info/25",
+  partial: "bg-transparent text-foreground border-success/40",
   running: "bg-warning/15 text-warning border-warning/25",
   error: "bg-destructive/15 text-destructive border-destructive/25",
   pending: "bg-transparent text-muted-foreground border-border",

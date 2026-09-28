@@ -1,7 +1,7 @@
 import * as React from "react"
 import { useSearchParams } from "react-router"
 
-import { Panel, PanelEmpty, PanelError, PanelSkeleton, StatList } from "@/components/panel"
+import { Panel, PanelEmpty, PanelError, PanelSkeleton } from "@/components/panel"
 import { ToneBadge } from "@/components/status"
 import { useConfirm } from "@/hooks/use-dialogs"
 import { errorMessage } from "@/lib/api"
@@ -43,15 +43,19 @@ function Summary({ track }: { track: BallPreviewTrack }) {
   return (
     <Panel title="Ball track summary">
       <div className="flex flex-col gap-3">
-        <StatList
-          className="max-w-md"
-          items={[
+        <dl className="grid gap-x-8 gap-y-2 text-sm sm:grid-cols-2 xl:grid-cols-4">
+          {[
             { label: "Clip", value: track.clip_id || "(unnamed)" },
             { label: "FPS", value: fmt(track.fps, 2) },
             { label: "Frames", value: fmtInt(frames.length) },
             { label: "Flight segments", value: `${segs.length} (with spin: ${withSpin})` },
-          ]}
-        />
+          ].map((it) => (
+            <div key={it.label} className="flex items-baseline justify-between gap-3 border-b border-border/50 pb-1.5">
+              <dt className="text-muted-foreground">{it.label}</dt>
+              <dd className="shrink-0 text-right font-medium tabular-nums">{it.value}</dd>
+            </div>
+          ))}
+        </dl>
         <div className="flex flex-wrap items-center gap-2" aria-label="State distribution">
           <span className="text-sm text-muted-foreground">State distribution</span>
           {[...states.entries()].map(([s, n]) => (

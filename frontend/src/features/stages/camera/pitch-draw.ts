@@ -109,7 +109,17 @@ export function drawPitch(ctx: CanvasRenderingContext2D) {
   drawGoalEnd(ctx, false)
 }
 
-function drawMarker(ctx: CanvasRenderingContext2D, id: string, colour: string, pose: PitchCameraPose, live: boolean) {
+/** Minimum on-screen label size, in CSS px. */
+const LABEL_CSS_PX = 11
+
+function drawMarker(
+  ctx: CanvasRenderingContext2D,
+  id: string,
+  colour: string,
+  pose: PitchCameraPose,
+  live: boolean,
+  cssScale: number,
+) {
   const { pos, z, fwd, isAnchor } = pose
   const [cx, cy] = pitchToPx(pos[0], pos[1])
   const [dx, dy] = [fwd[0], -fwd[1]] // canvas y is flipped vs world y
@@ -134,21 +144,37 @@ function drawMarker(ctx: CanvasRenderingContext2D, id: string, colour: string, p
   ctx.fill()
   ctx.stroke()
 
-  const off = pos[0] < -3 || pos[0] > 108 || pos[1] < -3 || pos[1] > 71
   const label = `${id} (${pos[0].toFixed(1)}, ${pos[1].toFixed(1)}, ${z.toFixed(1)})`
-  ctx.font = `bold 10px ${FONT}`
-  const tw = ctx.measureText(label).width + 6
-  const lx = Math.max(2, Math.min(MAP_W - tw - 2, cx + 12))
-  const ly = Math.max(14, Math.min(MAP_H - 4, cy - 10))
-  ctx.fillStyle = off ? "rgba(127,29,29,0.92)" : "rgba(0,0,0,0.72)"
-  ctx.fillRect(lx, ly - 11, tw, 14)
-  ctx.fillStyle = off ? "#fecaca" : colour
-  ctx.fillText(label, lx + 3, ly)
+  // Map units per CSS px: the canvas is drawn in map space but displayed at
+  // cssScale, so size the label in map units to land on LABEL_CSS_PX on screen.
+  const k = 1 / cssScale
+  const fontPx = LABEL_CSS_PX * k
+  const padX = 4 * k
+  const chipH = fontPx + 5 * k
+  ctx.font = `600 ${fontPx}px ${FONT}`
+  const tw = ctx.measureText(label).width + padX * 2
+  const lx = Math.max(2 * k, Math.min(MAP_W - tw - 2 * k, cx + 12 * k))
+  const ly = Math.max(chipH + 2 * k, Math.min(MAP_H - 4 * k, cy - 10 * k))
+  ctx.fillStyle = "rgba(10,14,26,0.82)"
+  ctx.fillRect(lx, ly - chipH + 3 * k, tw, chipH)
+  ctx.fillStyle = colour
+  ctx.fillText(label, lx + padX, ly)
 }
 
-export function renderPitchFrame(ctx: CanvasRenderingContext2D, shots: readonly IndexedShot[], fi: number) {
+/**
+ * `cssScale` = displayed CSS width / MAP_W; `dpr` = devicePixelRatio. The
+ * backing store is MAP_W*cssScale*dpr wide, so labels stay crisp and legible.
+ */
+export function renderPitchFrame(
+  ctx: CanvasRenderingContext2D,
+  shots: readonly IndexedShot[],
+  fi: number,
+  cssScale = 1,
+  dpr = 1,
+) {
+  ctx.setTransform(cssScale * dpr, 0, 0, cssScale * dpr, 0, 0)
   drawPitch(ctx)
   for (const shot of shots) {
-    drawMarker(ctx, shot.id, shot.colour, nearestInShot(shot, fi), fi >= shot.minFrame && fi <= shot.maxFrame)
+    drawMarker(ctx, shot.id, shot.colour, nearestInShot(shot, fi), fi >= shot.minFrame && fi <= shot.maxFrame, cssScale)
   }
 }

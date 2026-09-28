@@ -177,17 +177,17 @@ export function TrackVideo({ ref, shotId, fps, boxesByFrame, nameByTrack, highli
           value={[Math.min(frame, Math.max(1, maxFrame))]}
           onValueChange={(v) => seekToFrame(v[0] ?? 0)}
         />
-        <span className="min-w-20 text-right font-mono text-xs text-muted-foreground tabular-nums">Frame {frame}</span>
+        <span className="min-w-20 text-right text-xs text-muted-foreground tabular-nums">Frame <span className="font-mono">{frame}</span></span>
       </div>
       <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            <KbdGroup>
+            <KbdGroup className="font-sans">
               <Kbd>Space</Kbd> play
             </KbdGroup>
-            <KbdGroup>
+            <KbdGroup className="font-sans">
               <Kbd>←</Kbd>
               <Kbd>→</Kbd> step
             </KbdGroup>
-            <KbdGroup>
+            <KbdGroup className="font-sans">
               <Kbd>Shift</Kbd>+<Kbd>←</Kbd>
               <Kbd>→</Kbd> ±10
             </KbdGroup>

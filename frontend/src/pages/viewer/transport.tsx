@@ -106,7 +106,7 @@ function VisibilityToggles({ data, vis, onChange }: { data: SceneData; vis: Visi
 }
 
 const CAMERA_LABELS: Record<Exclude<CameraMode, "tracked">, string> = {
-  broadcast: "Broadcast",
+  overview: "Overview",
   tactical: "Tactical (top)",
   "behind-goal": "Behind goal",
 }
@@ -119,12 +119,13 @@ function CameraSelect({ data, mode, onChange }: { data: SceneData; mode: CameraM
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
+        {data.track ? <SelectItem value="tracked">Broadcast (solved)</SelectItem> : null}
         {(Object.keys(CAMERA_LABELS) as (keyof typeof CAMERA_LABELS)[]).map((k) => (
           <SelectItem key={k} value={k}>
             {CAMERA_LABELS[k]}
           </SelectItem>
         ))}
-        {data.track ? <SelectItem value="tracked">Tracked: {data.trackClipId}</SelectItem> : null}
+        
       </SelectContent>
     </Select>
   )

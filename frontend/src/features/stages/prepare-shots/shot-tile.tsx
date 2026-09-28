@@ -105,15 +105,15 @@ export function ShotTile({
       }}
       onDragEnd={() => setDragging(false)}
       className={cn(
-        "flex min-w-0 flex-col overflow-hidden rounded-lg border bg-card transition-opacity",
+        "flex min-w-0 flex-col gap-2 rounded-lg transition-opacity",
         draggable && "cursor-grab active:cursor-grabbing",
         (dragging || dimmed) && "opacity-60",
       )}
-      style={accent ? { borderTop: `2px solid ${accent}` } : undefined}
     >
       <button
         type="button"
-        className="group relative block bg-stage outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+        className="group relative block overflow-hidden rounded-lg bg-stage outline-none hover:ring-2 hover:ring-ring/40 focus-visible:ring-3 focus-visible:ring-ring/50"
+        style={accent ? { borderTop: `2px solid ${accent}` } : undefined}
         aria-label={`Open ${shot.id} in the large preview`}
         onMouseEnter={play}
         onMouseLeave={stop}
@@ -135,7 +135,7 @@ export function ShotTile({
           className="aspect-video w-full object-cover"
         />
       </button>
-      <div className="flex flex-col gap-1.5 p-2">
+      <div className="flex flex-col gap-1.5 px-0.5">
         <div className="flex items-center gap-2 text-sm">
           <span className="min-w-0 truncate font-mono font-medium">{shot.id}</span>
           <span

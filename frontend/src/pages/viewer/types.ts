@@ -119,4 +119,4 @@ export interface SceneData {
   playerSource: "refined_poses" | "hmr_world"
 }
 
-export type CameraMode = "broadcast" | "tactical" | "behind-goal" | "tracked"
+export type CameraMode = "overview" | "tactical" | "behind-goal" | "tracked"

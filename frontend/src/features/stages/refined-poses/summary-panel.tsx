@@ -1,4 +1,4 @@
-import { Panel, StatList } from "@/components/panel"
+import { Panel } from "@/components/panel"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { TriangleAlertIcon } from "lucide-react"
 import { fmt, fmtInt } from "@/lib/format"
@@ -89,7 +89,14 @@ export function SummaryPanel({ summary }: { summary: RefinedSummary }) {
   return (
     <Panel title="Pipeline summary">
       <div className="flex flex-col gap-3">
-        <StatList items={items} className="max-w-xl" />
+        <dl className="grid gap-x-8 gap-y-2 text-sm sm:grid-cols-2 xl:grid-cols-3">
+          {items.map((it) => (
+            <div key={it.label} className="flex items-baseline justify-between gap-3 border-b border-border/50 pb-1.5">
+              <dt className="text-muted-foreground">{it.label}</dt>
+              <dd className="shrink-0 text-right font-medium tabular-nums">{it.value}</dd>
+            </div>
+          ))}
+        </dl>
         <Warning title="Shots missing from sync_map" items={strings(summary, "shots_missing_sync")} />
         <Warning title="Beta disagreement" items={strings(summary, "beta_disagreement_warnings")} />
       </div>

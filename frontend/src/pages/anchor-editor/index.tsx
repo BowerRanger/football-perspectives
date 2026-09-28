@@ -13,7 +13,7 @@ import { AnchorList } from "./anchor-list"
 import { CoverageStrip } from "./coverage-strip"
 import { PalettePanel } from "./palette-panel"
 import { StageCanvas } from "./stage-canvas"
-import { Toolbar } from "./toolbar"
+import { AnchorStatusBadge, EditorControls, Toolbar, type ToolbarProps } from "./toolbar"
 import { TransportBar } from "./transport-bar"
 import { useAnchorEditor } from "./use-anchor-editor"
 
@@ -157,46 +157,42 @@ function MobileBody({ ed }: { ed: Editor }) {
   )
 }
 
-interface AnchorEditorProps {
-  /** Fill the parent's height and omit page chrome (Camera stage panel). */
-  embedded?: boolean
-  /** Controlled shot id. Without it the editor manages its own selection. */
-  shot?: string
-  /** Called when the operator (or the default resolution) picks a shot. */
-  onShotChange?: (shot: string) => void
+/** Everything the toolbar / page header needs, derived from the editor controller. */
+function controlProps(ed: Editor, showShotSelect: boolean): ToolbarProps {
+  return {
+    shots: ed.list.shots,
+    shot: ed.shot,
+    showShotSelect,
+    onShotChange: (s) => void ed.requestShot(s),
+    stadiums: ed.catalogues.stadiums,
+    stadium: ed.stadium,
+    onStadiumChange: ed.changeStadium,
+    view: ed.view,
+    onToggleView: ed.toggleView,
+    status: ed.status.text,
+    statusTone: ed.status.tone,
+    statusIsFlash: ed.statusIsFlash,
+    anchorCount: ed.anchors.size,
+    dirty: ed.dirty,
+    saving: ed.saving,
+    onSave: ed.save,
+    rerunPhase: ed.rerunPhase,
+    rerunBlockedReason: ed.rerunBlockedReason,
+    onRerun: ed.rerun,
+    viewerHref: ed.viewerHref,
+  }
 }
 
-export function AnchorEditor({ embedded = false, shot, onShotChange }: AnchorEditorProps) {
-  const ed = useAnchorEditor({ shot, onShotChange, embedded })
+/** Editor body. Page mode has its controls in the PageHeader; embedded mode adds a compact toolbar row. */
+function EditorBody({ ed, toolbar }: { ed: Editor; toolbar?: ToolbarProps }) {
   const isMobile = useIsMobile()
-  const showShotSelect = shot === undefined || onShotChange !== undefined
-
   return (
     <div
       ref={ed.rootRef}
       tabIndex={-1}
       className="flex h-full min-h-0 flex-col overflow-y-auto bg-background outline-none md:overflow-hidden"
     >
-      <Toolbar
-        shots={ed.list.shots}
-        shot={ed.shot}
-        showShotSelect={showShotSelect}
-        onShotChange={(s) => void ed.requestShot(s)}
-        stadiums={ed.catalogues.stadiums}
-        stadium={ed.stadium}
-        onStadiumChange={ed.changeStadium}
-        view={ed.view}
-        onToggleView={ed.toggleView}
-        status={ed.status.text}
-        statusTone={ed.status.tone}
-        dirty={ed.dirty}
-        saving={ed.saving}
-        onSave={ed.save}
-        rerunPhase={ed.rerunPhase}
-        rerunBlockedReason={ed.rerunBlockedReason}
-        onRerun={ed.rerun}
-        viewerHref={ed.viewerHref}
-      />
+      {toolbar ? <Toolbar {...toolbar} /> : null}
       {ed.list.loaded && ed.list.shots.length === 0 && !ed.shot ? (
         <PanelEmpty
           title="No shots to annotate"
@@ -209,6 +205,22 @@ export function AnchorEditor({ embedded = false, shot, onShotChange }: AnchorEdi
       )}
     </div>
   )
+}
+
+interface AnchorEditorProps {
+  /** Always embedded; kept so existing call sites (`<AnchorEditor embedded />`) stay valid. */
+  embedded?: boolean
+  /** Controlled shot id. Without it the editor manages its own selection. */
+  shot?: string
+  /** Called when the operator (or the default resolution) picks a shot. */
+  onShotChange?: (shot: string) => void
+}
+
+/** Embedded editor (Camera stage panel): fills the parent, compact single toolbar row, no PageHeader. */
+export function AnchorEditor({ shot, onShotChange }: AnchorEditorProps) {
+  const ed = useAnchorEditor({ shot, onShotChange, embedded: true })
+  const showShotSelect = shot === undefined || onShotChange !== undefined
+  return <EditorBody ed={ed} toolbar={controlProps(ed, showShotSelect)} />
 }
 
 export default function AnchorEditorPage() {
@@ -226,11 +238,18 @@ export default function AnchorEditorPage() {
       ),
     [setParams],
   )
+  const ed = useAnchorEditor({ shot, onShotChange: setShot, embedded: false })
+  const props = controlProps(ed, true)
   return (
     <>
-      <PageHeader title="Pitch anchors" />
+      <PageHeader
+        title="Pitch anchors"
+        description="Click pitch landmarks and lines on keyframes; the camera stage solves the camera around them."
+        status={<AnchorStatusBadge {...props} />}
+        actions={<EditorControls {...props} />}
+      />
       <div className="flex min-h-0 flex-col md:h-[calc(100svh-3.6rem)] md:min-h-[520px]">
-        <AnchorEditor shot={shot} onShotChange={setShot} />
+        <EditorBody ed={ed} />
       </div>
     </>
   )

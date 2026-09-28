@@ -7,8 +7,15 @@ import type { CameraMode, Mat3, PlayerTrack, SceneData, TrackedPose, Vec3 } from
 
 const DEFAULT_FOV = 50
 const PITCH_CENTRE = new THREE.Vector3(52.5, 0, -34)
-const PRESETS: Record<Exclude<CameraMode, "tracked">, Vec3> = {
-  broadcast: [52.5, 25, 50],
+/** Overview is fitted to the canvas aspect (see fitOverview), so it has no fixed position. */
+const OVERVIEW_ELEVATION = (52 * Math.PI) / 180
+const PITCH_CORNERS: Vec3[] = [
+  [0, 0, 0],
+  [105, 0, 0],
+  [105, 68, 0],
+  [0, 68, 0],
+]
+const PRESETS: Record<"tactical" | "behind-goal", Vec3> = {
   tactical: [52.5, 80, -34],
   "behind-goal": [-10, 10, -34],
 }
@@ -52,7 +59,8 @@ export class ViewerEngine {
   private frame = 0
   private playing = false
   private speed = 1
-  private cameraMode: CameraMode = "broadcast"
+  private cameraMode: CameraMode = "overview"
+  private overviewPristine = true
   private selectedId: string | null = null
   private vis: Visibility = { ball: true, skeleton: true, mesh: false }
   private readonly tmpAxis = new THREE.Vector3()
@@ -80,7 +88,10 @@ export class ViewerEngine {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement)
     this.controls.enableDamping = true
     this.controls.addEventListener("change", this.markDirty)
-    this.applyPreset("broadcast")
+    this.controls.addEventListener("start", () => {
+      this.overviewPristine = false
+    })
+    this.applyPreset("overview")
 
     this.resizeObserver = new ResizeObserver(this.resize)
     this.resizeObserver.observe(container)
@@ -98,6 +109,7 @@ export class ViewerEngine {
     this.camera.aspect = w / h
     this.camera.updateProjectionMatrix()
     this.renderer.setSize(w, h, false)
+    if (this.cameraMode === "overview" && this.overviewPristine) this.fitOverview()
     this.dirty = true
   }
 
@@ -120,7 +132,8 @@ export class ViewerEngine {
       this.scene.add(this.ball)
     }
     this.frame = Math.min(this.frame, Math.max(0, data.totalFrames - 1))
-    this.applyPreset("broadcast")
+    // Default to the solved camera when the shot has one; otherwise the fitted overview.
+    this.setCameraMode(data.track && data.track.size > 0 ? "tracked" : "overview")
     this.updateFrame(this.frame)
   }
 
@@ -204,7 +217,41 @@ export class ViewerEngine {
     this.dirty = true
   }
 
+  /** Elevated 3/4 view from the near touchline; distance is solved so the whole pitch fills the canvas. */
+  private fitOverview(): void {
+    this.controls.enabled = true
+    if (this.camera.fov !== DEFAULT_FOV) this.camera.fov = DEFAULT_FOV
+    this.camera.aspect = Math.max(0.01, this.camera.aspect)
+    this.camera.updateProjectionMatrix()
+    const dir = new THREE.Vector3(0, Math.sin(OVERVIEW_ELEVATION), Math.cos(OVERVIEW_ELEVATION))
+    const fits = (dist: number): boolean => {
+      this.camera.position.copy(PITCH_CENTRE).addScaledVector(dir, dist)
+      this.camera.lookAt(PITCH_CENTRE)
+      this.camera.updateMatrixWorld(true)
+      const v = new THREE.Vector3()
+      return PITCH_CORNERS.every((c) => {
+        v.set(...pitchToThree(c)).project(this.camera)
+        return Math.abs(v.x) <= 0.96 && Math.abs(v.y) <= 0.94
+      })
+    }
+    let lo = 10
+    let hi = 400
+    for (let i = 0; i < 24; i++) {
+      const mid = (lo + hi) / 2
+      if (fits(mid)) hi = mid
+      else lo = mid
+    }
+    fits(hi)
+    this.controls.target.copy(PITCH_CENTRE)
+    this.controls.update()
+  }
+
   private applyPreset(mode: Exclude<CameraMode, "tracked">): void {
+    if (mode === "overview") {
+      this.overviewPristine = true
+      this.fitOverview()
+      return
+    }
     this.controls.enabled = true
     if (this.camera.fov !== DEFAULT_FOV) {
       this.camera.fov = DEFAULT_FOV

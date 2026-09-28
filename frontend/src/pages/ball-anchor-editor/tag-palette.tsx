@@ -31,7 +31,7 @@ export function TagPalette({ selected, onSelect }: TagPaletteProps) {
             <span aria-hidden className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: t.color }} />
             <span className="flex min-w-0 flex-1 flex-col leading-tight">
               <span className="text-sm">{t.label}</span>
-              <span className="truncate font-mono text-xs font-normal text-muted-foreground">{t.range}</span>
+              <RangeText range={t.range} />
             </span>
             <Kbd>{t.key}</Kbd>
           </ToggleGroupItem>
@@ -41,5 +41,20 @@ export function TagPalette({ selected, onSelect }: TagPaletteProps) {
         <p className="rounded-md bg-muted/50 p-2 text-xs leading-relaxed text-muted-foreground">{tag.description}</p>
       ) : null}
     </div>
+  )
+}
+
+/** Numbers/units render mono; descriptor words ("event", "body-pinned") stay in the sans font. */
+function RangeText({ range }: { range: string }) {
+  const parts = range.split(", ")
+  return (
+    <span className="truncate text-xs font-normal text-muted-foreground">
+      {parts.map((part, i) => (
+        <span key={i}>
+          {i > 0 ? ", " : null}
+          <span className={/\d/.test(part) ? "font-mono" : undefined}>{part}</span>
+        </span>
+      ))}
+    </span>
   )
 }

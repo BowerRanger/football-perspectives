@@ -276,5 +276,6 @@ export function useAnchorEditor({ shot: shotProp, onShotChange, embedded }: Opti
     deletePoint: (name: string) => edit((m) => removePoint(m, player.frame, name)),
     deleteLine: (i: number) => edit((m) => removeLine(m, player.frame, i)),
     status: flashMsg ?? { text: baseline, tone: "muted" as const },
+    statusIsFlash: flashMsg !== null,
   }
 }

@@ -69,10 +69,27 @@ export function OverlaidPitchMap({ shots }: PitchMapProps) {
   const fps = shots[0]?.fps || 30
   const { frame, playing, seek, toggle } = usePlayback(minFrame, maxFrame, fps)
 
+  const wrapRef = React.useRef<HTMLDivElement>(null)
+  const [cssW, setCssW] = React.useState(MAP_W)
+  const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1
+
+  React.useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => setCssW(Math.max(1, Math.round(el.clientWidth))))
+    ro.observe(el)
+    setCssW(Math.max(1, Math.round(el.clientWidth)))
+    return () => ro.disconnect()
+  }, [shots.length])
+
+  // Backing store matches displayed size x DPR so labels are crisp at any width.
+  const pxW = Math.round(cssW * dpr)
+  const pxH = Math.round((cssW * MAP_H * dpr) / MAP_W)
+
   React.useEffect(() => {
     const ctx = canvasRef.current?.getContext("2d")
-    if (ctx) renderPitchFrame(ctx, shots, frame)
-  }, [shots, frame])
+    if (ctx) renderPitchFrame(ctx, shots, frame, cssW / MAP_W, dpr)
+  }, [shots, frame, cssW, dpr, pxW, pxH])
 
   if (shots.length === 0) {
     return (
@@ -95,11 +112,11 @@ export function OverlaidPitchMap({ shots }: PitchMapProps) {
 
   return (
     <div className="flex flex-col gap-2 outline-none" tabIndex={0} onKeyDown={onKeyDown} aria-label="Camera pitch map">
-      <div className="overflow-hidden rounded-lg bg-stage">
+      <div ref={wrapRef} className="overflow-hidden rounded-lg bg-stage">
         <canvas
           ref={canvasRef}
-          width={MAP_W}
-          height={MAP_H}
+          width={pxW}
+          height={pxH}
           role="img"
           aria-label="Top-down pitch with each shot's camera position and view direction"
           className="block h-auto w-full"
@@ -123,20 +140,20 @@ export function OverlaidPitchMap({ shots }: PitchMapProps) {
           value={[frame]}
           onValueChange={(v) => seek(v[0] ?? minFrame)}
         />
-        <span className="min-w-32 text-right font-mono text-xs text-muted-foreground tabular-nums">
-          Frame {frame} ({(frame / Math.max(1, fps)).toFixed(2)}s)
+        <span className="min-w-32 text-right text-xs text-muted-foreground tabular-nums">
+          Frame <span className="font-mono">{frame}</span> (<span className="font-mono">{(frame / Math.max(1, fps)).toFixed(2)}s</span>)
         </span>
       </div>
       <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        <KbdGroup>
+        <KbdGroup className="font-sans">
           <Kbd>←</Kbd>
           <Kbd>→</Kbd> step
         </KbdGroup>
-        <KbdGroup>
+        <KbdGroup className="font-sans">
           <Kbd>Shift</Kbd>+<Kbd>←</Kbd>
           <Kbd>→</Kbd> ±10
         </KbdGroup>
-        <KbdGroup>
+        <KbdGroup className="font-sans">
           <Kbd>Space</Kbd> play
         </KbdGroup>
         <span>Gold outline = anchored frame</span>

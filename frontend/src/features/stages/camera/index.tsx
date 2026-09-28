@@ -101,7 +101,7 @@ export default function CameraStage() {
       >
         <div className="grid gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
           <OverlaidPitchMap shots={indexed} />
-          <div className="grid content-start gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+          <div className="flex min-w-0 flex-col divide-y">
             {state.shots.map((s) => (
               <ShotInfoCard key={s.id} {...s} />
             ))}

@@ -133,7 +133,7 @@ export default function ViewerPage() {
     <div className="flex h-svh min-h-0 flex-col">
       <PageHeader
         title="3D viewer"
-        description="Pitch-registered reconstruction: players, ball and solved broadcast camera."
+        description="Pitch-registered reconstruction: players and ball, viewed through the solved broadcast camera or a free orbit."
         actions={<ShotSelect shots={shots ?? []} value={shot ?? ""} onChange={onShot} />}
       />
       <div className="min-h-0 flex-1">

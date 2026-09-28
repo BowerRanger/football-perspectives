@@ -1,4 +1,3 @@
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Separator } from "@/components/ui/separator"
 import { StatList } from "@/components/panel"
 import { fmt } from "@/lib/format"
@@ -15,14 +14,12 @@ export function ShotInfoCard({ id, colour, track, anchors }: ShotCameraData) {
   const anchoredFrames = frames.filter((f) => f.is_anchor).length
 
   return (
-    <Card size="sm" className="gap-3">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-sm">
-          <span aria-hidden className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: colour }} />
-          <span className="font-mono">{id}</span>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-3">
+    <section className="flex min-w-0 flex-col gap-3 py-4 first:pt-0 last:pb-0">
+      <h3 className="flex items-center gap-2 text-sm font-medium">
+        <span aria-hidden className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: colour }} />
+        <span className="font-mono">{id}</span>
+      </h3>
+      <div className="flex flex-col gap-3">
         {hasTrack && track ? (
           <>
             <StatList
@@ -50,7 +47,7 @@ export function ShotInfoCard({ id, colour, track, anchors }: ShotCameraData) {
             <span className="text-muted-foreground">No anchors yet — mark landmarks in the editor below.</span>
           )}
         </p>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   )
 }

@@ -586,12 +586,22 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
     # browser to re-fetch makes JS edits visible without a hard reload.
     _NO_STORE = {"Cache-Control": "no-store"}
 
+    # Every page is the same React SPA shell (built from ``frontend/`` into
+    # ``static/app``); client-side routing picks the page. Hashed assets are
+    # served by the ``/static`` mount above.
+    spa_index = static_dir / "app" / "index.html"
+
+    def _spa_shell() -> FileResponse:
+        if not spa_index.exists():
+            raise HTTPException(
+                status_code=404,
+                detail="Dashboard build not found — run `npm run build` in frontend/",
+            )
+        return FileResponse(str(spa_index), headers=_NO_STORE)
+
     @app.get("/")
     def index():
-        index_path = static_dir / "index.html"
-        if index_path.exists():
-            return FileResponse(str(index_path), headers=_NO_STORE)
-        raise HTTPException(status_code=404, detail="index.html not found")
+        return _spa_shell()
 
     @app.get("/api/stages")
     def get_stages():
@@ -944,10 +954,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
 
     @app.get("/viewer")
     def viewer_page():
-        viewer_path = static_dir / "viewer.html"
-        if not viewer_path.exists():
-            raise HTTPException(status_code=404, detail="viewer.html not found")
-        return FileResponse(str(viewer_path), headers=_NO_STORE)
+        return _spa_shell()
 
     @app.get("/api/export/scene.glb")
     def get_scene_glb(shot: str | None = None):
@@ -3816,18 +3823,11 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
 
     @app.get("/anchor_editor")
     def anchor_editor_page():
-        # (no-store too — same dev-cache issue as / and /viewer)
-        editor_path = static_dir / "anchor_editor.html"
-        if not editor_path.exists():
-            raise HTTPException(status_code=404, detail="anchor_editor.html not found")
-        return FileResponse(str(editor_path), headers=_NO_STORE)
+        return _spa_shell()
 
     @app.get("/ball-anchor-editor", include_in_schema=False)
     def serve_ball_anchor_editor():
-        ball_editor_path = static_dir / "ball_anchor_editor.html"
-        if not ball_editor_path.exists():
-            raise HTTPException(status_code=404, detail="ball_anchor_editor.html not found")
-        return FileResponse(str(ball_editor_path), headers=_NO_STORE)
+        return _spa_shell()
 
     return app
 

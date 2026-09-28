@@ -1,0 +1,1 @@
+import{n as e,r as t,t as n}from"./index-CTa61HdM.js";var r=t();function i(t){return(0,r.jsx)(e,{title:`Not ported yet`})}function a(){return(0,r.jsxs)(r.Fragment,{children:[(0,r.jsx)(n,{title:`Pitch anchors`}),(0,r.jsx)(`div`,{className:`p-4`,children:(0,r.jsx)(i,{})})]})}export{i as AnchorEditor,a as default};

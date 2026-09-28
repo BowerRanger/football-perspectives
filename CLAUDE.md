@@ -19,7 +19,7 @@ Project-scoped subagents live in `.claude/agents/` (prefixed `fp-` to avoid coll
 | `fp-ball-camera` | Specialist IC — `ball_*` family, ball/camera stages, calibration, ball-accuracy evals |
 | `fp-pipeline-3d` | Specialist IC — GVHMR/SMPL, foot anchoring, refined_poses, glTF/FBX export |
 | `fp-blender` | Specialist IC — headless Blender: render-stage toon renders, Blender scene building/scripts, FBX-in-Blender mechanics |
-| `fp-web` | Specialist IC — FastAPI dashboard + static JS panels + viewer |
+| `fp-web` | Specialist IC — FastAPI dashboard + React/shadcn frontend (panels, editors, viewer) |
 | `fp-ue5` | Specialist IC — UE5 editor Python, unreal-mcp bridge, crash recovery |
 | `fp-qa` | QA/eval IC — runs tests/evals, reports evidence, APPROVED/REJECTED verdict; never edits code |
 
@@ -68,7 +68,7 @@ Markers (`pyproject.toml`): `unit`, `integration`, `e2e` (real fixtures/GPU, ski
 
 - `src/stages/` — one module per pipeline stage (the seven stages above).
 - `src/utils/` — the actual algorithms; stage modules are thin orchestrators. The `ball_*` family (~40 modules) implements the ball stage; camera solving lives in `anchor_solver.py`, `line_camera_refine.py`, `feature_propagator.py`, `bundle_adjust.py` and friends. Within `ball_*`: `ball_hybrid_{types,physics,blend,trajectory,gating,spin}.py` is the physics-fit/delta-blend dense-track builder gated by `ball.trajectory: hybrid` (see Configuration); `ball_cue_{audio,net,blur,fusion,config}.py` is single-camera event-cue corroboration for it; `ball_bench_*.py` (+ `scripts/run_ball_bench.py`) is its synthetic-truth benchmark/regression harness.
-- `src/web/` — FastAPI dashboard + static JS panels; `src/schemas/` — JSON schemas for stage sidecars; `src/pipeline/` — runner/manifest plumbing.
+- `src/web/` — FastAPI dashboard (`server.py`) serving the committed React build in `static/app/`; `frontend/` — the React + Vite + shadcn/ui source (see `frontend/README.md`); `src/schemas/` — JSON schemas for stage sidecars; `src/pipeline/` — runner/manifest plumbing.
 - `scripts/` — eval harnesses, probes, and one-off validation CLIs (not shipped); the `probe_*` / `eval_*` scripts document past investigations.
 - `third_party/` — vendored research code (GVHMR, WASB-SBDT, PnLCalib). **Never edit vendored source**: integrate via context-manager shims (cwd redirect, device redirect, numpy/chumpy patches) in `src/utils/` wrappers, e.g. `gvhmr_estimator.py`, `wasb_ball_detector.py`.
 - `docs/superpowers/specs/` and `docs/superpowers/plans/` — dated design docs and implementation plans (`YYYY-MM-DD-topic.md`). Check here for the reasoning behind any subsystem before redesigning it.
@@ -113,7 +113,7 @@ The 2D pose stage was collapsed into `hmr_world` (decision D15): GVHMR runs ViTP
 
 **Single camera per clip**: One broadcast camera, manually trimmed to a single uninterrupted shot. The camera body is assumed fixed (broadcast pan-tilt-zoom rig), so translation `t` is solved once and held constant; only `R` and focal length vary per frame.
 
-**Highlights ingestion** (`prepare_shots.mode: auto|copy|split`): a single input ≥ `split.min_input_duration_s` (default 90 s) is auto-split with PySceneDetect **plus a frame-diff spike-rescue pass** (recovers hard cuts the adaptive detector loses inside continuous fast action — see `src/utils/shot_split.py`), then each shot is classified from sampled frames (pitch-green ratio → reaction shots, brightness → fade transitions, YOLO person dominance → player close-ups/celebrations, zoom-invariant motion rate → slow-mo replays, which are retimed to real time at extraction). Reaction/transition shots stay in the manifest but are `excluded` (every stage iterates `manifest.active_shots()`); the dashboard's dropped tray restores them. Contiguous gameplay shots are grouped into highlight events (rules: transition between shots / source-time gap / wide live shot after a replay) and each group is auto-aligned by motion-energy NCC into the group-scoped `shots/sync_map.json` (operator `manual` offsets always win). Review UX lives in the dashboard's Prepare Shots panel (`src/web/static/js/prepare_shots_panel.js`): groups board with drag-to-regroup, dropped tray, and a per-group sync timeline.
+**Highlights ingestion** (`prepare_shots.mode: auto|copy|split`): a single input ≥ `split.min_input_duration_s` (default 90 s) is auto-split with PySceneDetect **plus a frame-diff spike-rescue pass** (recovers hard cuts the adaptive detector loses inside continuous fast action — see `src/utils/shot_split.py`), then each shot is classified from sampled frames (pitch-green ratio → reaction shots, brightness → fade transitions, YOLO person dominance → player close-ups/celebrations, zoom-invariant motion rate → slow-mo replays, which are retimed to real time at extraction). Reaction/transition shots stay in the manifest but are `excluded` (every stage iterates `manifest.active_shots()`); the dashboard's dropped tray restores them. Contiguous gameplay shots are grouped into highlight events (rules: transition between shots / source-time gap / wide live shot after a replay) and each group is auto-aligned by motion-energy NCC into the group-scoped `shots/sync_map.json` (operator `manual` offsets always win). Review UX lives in the dashboard's Prepare Shots panel (`frontend/src/features/stages/prepare-shots/`): groups board with drag-to-regroup, dropped tray, and a per-group sync timeline.
 
 **Camera tracking**: Keyframe-anchored. The user marks pitch landmarks on a sparse set of keyframes via the web anchor editor; the camera stage solves anchor frames first, then propagates between them with bidirectional optical-flow feature tracking and a smoother. Per-frame confidence is reported so uncertain spans surface as candidates for additional anchors.
 
@@ -164,11 +164,12 @@ GPU: strongly recommended for `hmr_world` (GVHMR); 8GB VRAM minimum, 12GB+ recom
 
 ## Browser Dashboard and Viewer
 
-`python recon.py serve --output ./output/` starts a FastAPI dashboard. Static assets live in `src/web/static/` and are served alongside read-only API endpoints:
+`python recon.py serve --output ./output/` starts a FastAPI dashboard. The UI is a React + Vite + shadcn/ui SPA (source `frontend/`, conventions in `frontend/README.md`); its production build is committed to `src/web/static/app/` so serving needs no Node. After a frontend change run `npm run build` in `frontend/` and commit the build with the source (the web feature tests grep the committed bundle). Pages, all inside one sidebar shell (dark by default, light/system toggle):
 
-- `/` (`index.html`) — pipeline dashboard with stage status and the anchor editor link.
-- `/anchor-editor` (`anchor_editor.html`) — place pitch landmarks on keyframes; the camera stage propagates between them.
-- `/viewer` (`viewer.html`) — 3D viewer that loads `export/gltf/scene.glb`, with playback controls, orbit camera, and a confidence timeline highlighting frames where camera or HMR are uncertain.
+- `/?stage=<name>` — pipeline dashboard: stage status (complete / partial / running / failed), run controls (Continue, Re-run clean with a dry-run list of what is cleared, Run all), run log dock (reattaches after reload), and one panel per stage.
+- `/anchor_editor` — place pitch landmarks on keyframes; the camera stage propagates between them (also embedded in the Camera panel).
+- `/ball-anchor-editor?shot=` — ball anchors, touches, goal impacts, pitch fixes, shot chains (also embedded in the Ball panel; one implementation, full-payload saves).
+- `/viewer?shot=` — 3D scene viewer (players, ball, solved broadcast camera) with playback (also embedded in the Export panel).
 
 ## Quality Report
 

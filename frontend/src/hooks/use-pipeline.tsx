@@ -1,7 +1,7 @@
 import * as React from "react"
 import { toast } from "sonner"
 
-import { deleteJson, errorMessage, getJson, postJson } from "@/lib/api"
+import { ApiError, errorMessage, getJson, postJson } from "@/lib/api"
 import {
   humanizeStageName,
   STAGE_DEPS,
@@ -24,6 +24,8 @@ interface LogState {
   title: string
   startedAt: number | null
   finishedAt: number | null
+  /** SSE health: "reconnecting" while the dashboard retries a dropped stream. */
+  connection: "ok" | "reconnecting"
 }
 
 interface PipelineContextValue {
@@ -55,7 +57,16 @@ export function usePipeline(): PipelineContextValue {
   return ctx
 }
 
-const EMPTY_LOG: LogState = { lines: [], status: "idle", title: "", startedAt: null, finishedAt: null }
+const EMPTY_LOG: LogState = {
+  lines: [],
+  status: "idle",
+  title: "",
+  startedAt: null,
+  finishedAt: null,
+  connection: "ok",
+}
+
+const RECONNECT_MAX_MS = 15_000
 
 export function PipelineProvider({ children }: { children: React.ReactNode }) {
   const [stages, setStages] = React.useState<StageInfo[]>([])
@@ -92,15 +103,52 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
       return next
     })
     setRunningLabel(label)
-    setLog({ lines: [], status: "running", title: label, startedAt: Date.now(), finishedAt: null })
+    setLog({ ...EMPTY_LOG, status: "running", title: label, startedAt: Date.now() })
     setLogOpen(true)
   }, [])
 
-  const streamJob = React.useCallback(
-    (jobId: string, targets: string[], label: string, onDone?: (status: string) => void) => {
+  const finishJob = React.useCallback(
+    (targets: string[], label: string, status: string, onDone?: (status: string) => void) => {
+      const ok = status === "done"
+      setLiveState((prev) => {
+        const next = { ...prev }
+        for (const t of targets) {
+          if (ok) delete next[t as StageName]
+          else next[t as StageName] = "error"
+        }
+        return next
+      })
+      setRunningLabel(null)
+      setLog((prev) => ({ ...prev, status: ok ? "done" : "error", finishedAt: Date.now(), connection: "ok" }))
+      if (ok) toast.success(`${label} finished`)
+      else toast.error(`${label} failed`, { description: "The log dock shows the traceback." })
+      void refreshStages().then(() => {
+        setOutputVersion((v) => v + 1)
+        onDone?.(status)
+      })
+    },
+    [refreshStages],
+  )
+
+  type StreamFn = (
+    jobId: string,
+    targets: string[],
+    label: string,
+    onDone?: (status: string) => void,
+    attempt?: number,
+  ) => void
+  // Reconnects re-enter the stream through a ref: a useCallback can't
+  // safely capture itself while it is being initialised.
+  const streamJobRef = React.useRef<StreamFn | null>(null)
+
+  const streamJob = React.useCallback<StreamFn>(
+    (jobId, targets, label, onDone, attempt = 0) => {
       sourceRef.current?.close()
       const source = new EventSource(`/api/jobs/${jobId}/logs`)
       sourceRef.current = source
+      // The server replays the whole log on (re)connect, so a reconnect
+      // starts from an empty buffer instead of appending duplicates.
+      let replaced = attempt === 0
       // Batch log lines per animation frame — a chatty stage emits hundreds
       // of lines a second and one setState per line would thrash React.
       let pending: string[] = []
@@ -110,9 +158,15 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
         if (!pending.length) return
         const chunk = pending
         pending = []
+        const reset = !replaced
+        replaced = true
         setLog((prev) => {
-          const lines = prev.lines.concat(chunk)
-          return { ...prev, lines: lines.length > MAX_LOG_LINES ? lines.slice(-MAX_LOG_LINES) : lines }
+          const lines = (reset ? [] : prev.lines).concat(chunk)
+          return {
+            ...prev,
+            connection: "ok",
+            lines: lines.length > MAX_LOG_LINES ? lines.slice(-MAX_LOG_LINES) : lines,
+          }
         })
       }
       source.addEventListener("log", (e) => {
@@ -135,41 +189,54 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
         } catch {
           /* keep error */
         }
-        const ok = status === "done"
-        setLiveState((prev) => {
-          const next = { ...prev }
-          for (const t of targets) {
-            if (ok) delete next[t as StageName]
-            else next[t as StageName] = "error"
-          }
-          return next
-        })
-        setRunningLabel(null)
-        setLog((prev) => ({ ...prev, status: ok ? "done" : "error", finishedAt: Date.now() }))
-        if (ok) toast.success(`${label} finished`)
-        else toast.error(`${label} failed`, { description: "The log dock has the full traceback." })
-        void refreshStages().then(() => {
-          setOutputVersion((v) => v + 1)
-          onDone?.(status)
-        })
+        finishJob(targets, label, status, onDone)
       })
       source.onerror = () => {
-        // EventSource auto-reconnects; only surface a permanent close.
-        if (source.readyState === EventSource.CLOSED && sourceRef.current === source) {
-          setLog((prev) => ({ ...prev, lines: prev.lines.concat("[dashboard] log stream disconnected") }))
-        }
+        if (sourceRef.current !== source) return
+        // Take over from EventSource's own retry (which would replay into
+        // the existing buffer): back off, confirm the job still exists,
+        // then reopen the stream.
+        source.close()
+        sourceRef.current = null
+        setLog((prev) => ({ ...prev, connection: "reconnecting" }))
+        const delay = Math.min(1000 * 2 ** attempt, RECONNECT_MAX_MS)
+        window.setTimeout(() => {
+          void getJson<{ status: string }>(`/api/jobs/${jobId}/status`)
+            .then(() => streamJobRef.current?.(jobId, targets, label, onDone, attempt + 1))
+            .catch((err: unknown) => {
+              if (err instanceof ApiError && err.status === 404) {
+                setLog((prev) => ({
+                  ...prev,
+                  lines: prev.lines.concat("[dashboard] The server restarted and this job is gone."),
+                }))
+                finishJob(targets, label, "error", onDone)
+              } else {
+                streamJobRef.current?.(jobId, targets, label, onDone, attempt + 1)
+              }
+            })
+        }, delay)
       }
     },
-    [refreshStages],
+    [finishJob],
   )
 
-  const startRun = React.useCallback(
-    async (target: StageName | "all", fromStage?: StageName) => {
+  React.useEffect(() => {
+    streamJobRef.current = streamJob
+  }, [streamJob])
+
+  const runJob = React.useCallback(
+    async (target: StageName | "all", opts: { fromStage?: StageName; cleanFirst?: boolean }) => {
       const targets = target === "all" ? stages.map((s) => s.name) : [target]
       const label = target === "all" ? "Pipeline" : humanizeStageName(target)
       markRunning(targets, label)
       try {
-        const body = fromStage ? { stages: target, from_stage: fromStage } : { stages: target }
+        const body = {
+          stages: target,
+          ...(opts.fromStage ? { from_stage: opts.fromStage } : {}),
+          // Server clears outputs only once the run is accepted, so a
+          // rejected run (409/429) never loses the previous output.
+          ...(opts.cleanFirst ? { clean_first: true } : {}),
+        }
         const { job_id } = await postJson<{ job_id: string }>("/api/run", body)
         streamJob(job_id, targets, label)
       } catch (err) {
@@ -191,18 +258,32 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
     [stages, markRunning, streamJob],
   )
 
-  const rerunStage = React.useCallback(
-    async (stage: StageName) => {
-      try {
-        await deleteJson(`/api/output/${stage}`)
-      } catch (err) {
-        toast.error(`Could not clear ${humanizeStageName(stage)} output`, { description: errorMessage(err) })
-        return
-      }
-      await startRun(stage)
-    },
-    [startRun],
+  const startRun = React.useCallback(
+    (target: StageName | "all", fromStage?: StageName) => runJob(target, { fromStage }),
+    [runJob],
   )
+
+  const rerunStage = React.useCallback((stage: StageName) => runJob(stage, { cleanFirst: true }), [runJob])
+
+  // Reattach to a run that was already in flight when the page loaded
+  // (reload, or a second tab): the SSE endpoint replays the whole log.
+  const reattachedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (!stagesLoaded || reattachedRef.current) return
+    reattachedRef.current = true
+    void getJson<{ job_id: string; stages: string }[]>("/api/jobs?status=running")
+      .then((jobs) => {
+        const job = jobs[0]
+        if (!job) return
+        const targets = job.stages === "all" ? stages.map((s) => s.name) : job.stages.split(",")
+        const label = job.stages === "all" ? "Pipeline" : humanizeStageName(targets[0])
+        markRunning(targets, label)
+        streamJob(job.job_id, targets, label)
+      })
+      .catch(() => {
+        /* older server without /api/jobs — nothing to reattach */
+      })
+  }, [stagesLoaded, stages, markRunning, streamJob])
 
   const attachToJob = React.useCallback(
     (jobId: string, targetStage: StageName | string, onDone?: (status: string) => void) => {

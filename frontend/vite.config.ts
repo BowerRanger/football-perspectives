@@ -12,8 +12,10 @@ const API_PREFIXES = [
   "/stadiums", "/camera", "/tracking", "/hmr_world", "/refined_poses", "/ball/preview",
 ]
 
-export default defineConfig({
-  base: "/static/app/",
+export default defineConfig(({ command }) => ({
+  // Dev serves from "/" so page routes (/anchor_editor, /viewer…) resolve
+  // exactly as they do behind FastAPI; the build is mounted at /static/app/.
+  base: command === "serve" ? "/" : "/static/app/",
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: { "@": path.resolve(__dirname, "./src") },
@@ -32,4 +34,4 @@ export default defineConfig({
       ]),
     ),
   },
-})
+}))

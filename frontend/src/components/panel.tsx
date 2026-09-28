@@ -33,7 +33,9 @@ export function Panel({
   return (
     <Card className={cn("gap-0 py-0", className)} {...props}>
       <CardHeader className="border-b px-4 py-3 [.border-b]:pb-3">
-        <CardTitle className="text-sm font-semibold">{title}</CardTitle>
+        <CardTitle role="heading" aria-level={2} className="text-sm font-semibold">
+          {title}
+        </CardTitle>
         {description ? <CardDescription className="text-xs">{description}</CardDescription> : null}
         {actions ? <CardAction className="flex items-center gap-2">{actions}</CardAction> : null}
       </CardHeader>

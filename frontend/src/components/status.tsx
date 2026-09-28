@@ -2,16 +2,22 @@ import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import type { LiveStageState } from "@/lib/stages"
 
-export type StageStatus = "complete" | "running" | "error" | "pending"
+export type StageStatus = "complete" | "partial" | "running" | "error" | "pending"
 
-export function resolveStageStatus(complete: boolean | undefined, live: LiveStageState | undefined): StageStatus {
+export function resolveStageStatus(
+  complete: boolean | undefined,
+  live: LiveStageState | undefined,
+  partial?: boolean,
+): StageStatus {
   if (live === "running") return "running"
   if (live === "error") return "error"
-  return complete ? "complete" : "pending"
+  if (complete) return "complete"
+  return partial ? "partial" : "pending"
 }
 
 const STATUS_LABEL: Record<StageStatus, string> = {
   complete: "Complete",
+  partial: "Partial",
   running: "Running",
   error: "Failed",
   pending: "Not run",
@@ -19,6 +25,7 @@ const STATUS_LABEL: Record<StageStatus, string> = {
 
 const DOT_CLASS: Record<StageStatus, string> = {
   complete: "bg-success",
+  partial: "bg-[linear-gradient(90deg,var(--info)_50%,transparent_50%)] ring-1 ring-inset ring-info",
   running: "bg-warning animate-pulse",
   error: "bg-destructive",
   pending: "bg-transparent ring-1 ring-inset ring-muted-foreground/60",
@@ -41,6 +48,7 @@ export function StatusDot({ status, className }: StatusDotProps) {
 
 const BADGE_CLASS: Record<StageStatus, string> = {
   complete: "bg-success/15 text-success border-success/25",
+  partial: "bg-info/15 text-info border-info/25",
   running: "bg-warning/15 text-warning border-warning/25",
   error: "bg-destructive/15 text-destructive border-destructive/25",
   pending: "bg-transparent text-muted-foreground border-border",
@@ -54,7 +62,7 @@ interface StatusBadgeProps {
 export function StatusBadge({ status, className }: StatusBadgeProps) {
   return (
     <Badge variant="outline" className={cn("gap-1.5", BADGE_CLASS[status], className)}>
-      <StatusDot status={status} className={status === "pending" ? "" : "bg-current"} />
+      <StatusDot status={status} className={status === "pending" || status === "partial" ? "" : "bg-current"} />
       {STATUS_LABEL[status]}
     </Badge>
   )

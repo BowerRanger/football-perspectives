@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router"
 
 import { PageHeader } from "@/components/page-header"
 import { PanelError, PanelSkeleton } from "@/components/panel"
-import { StageActions } from "@/components/stage-actions"
+import { BlockedNote, StageActions } from "@/components/stage-actions"
 import { StatusBadge, resolveStageStatus } from "@/components/status"
 import { Button } from "@/components/ui/button"
 import { STAGE_PANELS } from "@/features/stages/registry"
@@ -81,16 +81,21 @@ export default function DashboardPage() {
   }
 
   const info = stages.find((s) => s.name === stage)
-  const status = resolveStageStatus(info?.complete, liveState[stage])
+  const status = resolveStageStatus(info?.complete, liveState[stage], info?.partial)
   const Panel = STAGE_PANELS[stage]
 
   return (
     <>
       <PageHeader
         title={humanizeStageName(stage)}
-        status={<StatusBadge status={status} />}
+        status={
+          <>
+            <StatusBadge status={status} />
+            <BlockedNote stage={stage} />
+          </>
+        }
         description={STAGE_DESCRIPTIONS[stage]}
-        actions={<StageActions stage={stage} complete={!!info?.complete} />}
+        actions={<StageActions stage={stage} hasOutput={!!(info?.complete || info?.partial)} />}
       />
       <div className="flex flex-1 flex-col gap-4 p-4 md:p-6">
         <PanelBoundary key={`${stage}:${outputVersion}`}>

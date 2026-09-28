@@ -3,24 +3,20 @@ player/bone selectors, click-to-suggest via /joints-near)."""
 
 from __future__ import annotations
 
-from pathlib import Path
+from tests.frontend_source import assert_markers, bundle_text, source_text
 
-from fastapi.testclient import TestClient
-
-from src.web.server import create_app
-
-
-def _client(tmp_path: Path) -> TestClient:
-    return TestClient(create_app(output_dir=tmp_path, config_path=None))
-
-
-def test_editor_served_with_touch_authoring(tmp_path: Path):
-    html = _client(tmp_path).get("/ball-anchor-editor").text
-    # Palette gained a player_touch tag and a touch-authoring section.
-    assert 'id: "player_touch"' in html
-    assert 'id="touchAuthor"' in html
-    assert 'id="touchBone"' in html
-    # Click-to-suggest hits the new endpoint.
-    assert "/joints-near?shot=" in html
+MARKERS = [
+    '"player_touch"',
+    # Click-to-suggest hits the joints-near endpoint.
+    "/joints-near",
     # Confidence surfaced on auto rows.
-    assert "a.confidence" in html
+    ".confidence",
+]
+
+
+def test_editor_source_has_touch_authoring():
+    assert_markers(source_text("pages/ball-anchor-editor"), MARKERS, "ball anchor editor source")
+
+
+def test_committed_build_has_touch_authoring():
+    assert_markers(bundle_text(), ["player_touch", "/joints-near"], "committed dashboard build")

@@ -55,6 +55,7 @@ import logging
 import re
 import shutil
 import sys
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -306,6 +307,48 @@ _STAGE_ARTIFACTS: dict[str, list[str]] = {
     "export": ["export/gltf", "export/fbx", "export/ue_manifest.json"],
 }
 
+# Render writes per-shot videos under render/; it has no _STAGE_ARTIFACTS
+# entry (nothing to wipe on re-run) but still counts as output.
+_STAGE_OUTPUT_EXTRA: dict[str, list[str]] = {"render": ["render/*/*.mp4"]}
+
+
+def _stage_has_output(output_dir: Path, stage: str) -> bool:
+    """True when any of the stage's generated outputs exist on disk."""
+    patterns = _STAGE_ARTIFACTS.get(stage, []) + _STAGE_OUTPUT_EXTRA.get(stage, [])
+    for relpath in patterns:
+        if "*" in relpath:
+            if next(output_dir.glob(relpath), None) is not None:
+                return True
+            continue
+        target = output_dir / relpath
+        if target.is_file() or (target.is_dir() and next(target.iterdir(), None) is not None):
+            return True
+    return False
+
+
+def _stage_output_paths(output_dir: Path, stage: str) -> list[Path]:
+    """Existing paths a re-run of ``stage`` would clear (globs expanded)."""
+    paths: list[Path] = []
+    for relpath in _STAGE_ARTIFACTS.get(stage, []):
+        if "*" in relpath:
+            paths.extend(sorted(output_dir.glob(relpath)))
+        elif (output_dir / relpath).exists():
+            paths.append(output_dir / relpath)
+    return paths
+
+
+def _clear_stage_outputs(output_dir: Path, stage: str) -> list[str]:
+    """Delete a stage's generated outputs; returns the removed relpaths."""
+    removed: list[str] = []
+    for target in _stage_output_paths(output_dir, stage):
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+        removed.append(str(target.relative_to(output_dir)))
+    return removed
+
+
 # ---------------------------------------------------------------------------
 # Job registry
 # ---------------------------------------------------------------------------
@@ -319,6 +362,7 @@ class Job:
     log_queue: Queue = field(default_factory=Queue)
     log_lines: list[str] = field(default_factory=list)
     error: str | None = None
+    started_at: float = field(default_factory=time.time)
 
 
 _jobs: dict[str, Job] = {}
@@ -398,6 +442,10 @@ class RunRequest(BaseModel):
     input_path: str | None = None
     # Wipe previous split state and re-ingest (dashboard "Re-run split").
     force_resplit: bool = False
+    # Dashboard "Re-run stage": clear the single named stage's generated
+    # outputs (same set as DELETE /api/output/{stage}) only AFTER the run
+    # has been accepted, so a rejected run (409/429) never loses output.
+    clean_first: bool = False
 
 
 def _emit(job: Job, line: str) -> None:
@@ -605,14 +653,19 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
 
     @app.get("/api/stages")
     def get_stages():
-        return [
-            {
+        # ``partial``: not complete, but some output exists (e.g. hmr_world
+        # with a subset of players, per-shot ball tracks, one shot rendered)
+        # — the dashboard shows it as "Partial" rather than "Not run".
+        stages = []
+        for i, name in enumerate(STAGE_ORDER):
+            complete = _STAGE_COMPLETE[name](output_dir)
+            stages.append({
                 "name": name,
                 "index": i + 1,
-                "complete": _STAGE_COMPLETE[name](output_dir),
-            }
-            for i, name in enumerate(STAGE_ORDER)
-        ]
+                "complete": complete,
+                "partial": not complete and _stage_has_output(output_dir, name),
+            })
+        return stages
 
     def _output_dirs_payload() -> dict:
         return {
@@ -796,6 +849,11 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
     @app.post("/api/run", status_code=202)
     def run_stages(params: RunRequest):
         _validate_input_path(params)
+        if params.clean_first and params.stages not in STAGE_ORDER:
+            raise HTTPException(
+                status_code=400,
+                detail="clean_first needs a single stage name, not a list or 'all'",
+            )
         requested_stages = (params.stages or "").split(",")
         wants_hmr = "hmr_world" in requested_stages or params.stages == "all"
         if wants_hmr:
@@ -816,6 +874,9 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         job = Job(job_id=job_id, stages=params.stages)
         with _jobs_lock:
             _jobs[job_id] = job
+        if params.clean_first:
+            removed = _clear_stage_outputs(output_dir, params.stages)
+            _emit(job, f"[dashboard] cleared {params.stages} outputs: {removed or 'nothing to clear'}")
         thread = Thread(
             target=_run_job,
             args=(job, output_dir, app.state.config_path, params),
@@ -823,6 +884,23 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         )
         thread.start()
         return {"job_id": job_id}
+
+    @app.get("/api/jobs")
+    def list_jobs(status: str | None = None):
+        """Jobs known to this server process, newest first.
+
+        ``?status=running`` lets a freshly loaded dashboard reattach to an
+        in-flight run (its log replays over the SSE endpoint).
+        """
+        with _jobs_lock:
+            jobs = list(_jobs.values())
+        if status:
+            jobs = [j for j in jobs if j.status == status]
+        jobs.sort(key=lambda j: j.started_at, reverse=True)
+        return [
+            {"job_id": j.job_id, "stages": j.stages, "status": j.status, "started_at": j.started_at}
+            for j in jobs
+        ]
 
     @app.get("/api/jobs/{job_id}/status")
     def job_status(job_id: str):
@@ -849,32 +927,29 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @app.delete("/api/output/{stage}")
-    def delete_output(stage: str):
-        import shutil
+    @app.get("/api/output/{stage}/artifacts")
+    def stage_artifacts(stage: str):
+        """Dry run of a re-run's clear step: what would be deleted.
 
+        Operator input (anchors, camera selections, team overrides) is never
+        in this list — see ``_STAGE_ARTIFACTS``.
+        """
         if stage not in STAGE_ORDER:
             raise HTTPException(status_code=404, detail=f"Unknown stage: {stage}")
-        removed = []
-        for relpath in _STAGE_ARTIFACTS.get(stage, []):
-            if "*" in relpath:
-                # Glob pattern — match against output_dir and unlink each hit.
-                for match in output_dir.glob(relpath):
-                    if match.is_dir():
-                        shutil.rmtree(match)
-                    else:
-                        match.unlink()
-                    removed.append(str(match.relative_to(output_dir)))
-                continue
-            target = output_dir / relpath
-            if not target.exists():
-                continue
-            if target.is_dir():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
-            removed.append(relpath)
-        return {"stage": stage, "removed": removed}
+        paths = _stage_output_paths(output_dir, stage)
+        return {
+            "stage": stage,
+            "paths": [
+                {"path": str(p.relative_to(output_dir)), "is_dir": p.is_dir()}
+                for p in paths
+            ],
+        }
+
+    @app.delete("/api/output/{stage}")
+    def delete_output(stage: str):
+        if stage not in STAGE_ORDER:
+            raise HTTPException(status_code=404, detail=f"Unknown stage: {stage}")
+        return {"stage": stage, "removed": _clear_stage_outputs(output_dir, stage)}
 
     @app.get("/api/video/{shot_id}")
     def get_video(shot_id: str, request: Request):
@@ -2520,25 +2595,6 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         """Wipe the target shot's stage artefacts and run only that stage
         for that shot. Reuses the existing background-job runner with a
         ``shot_filter`` param plumbed through ``run_pipeline``."""
-        # Wipe per-shot artefacts for this stage. The legacy single-shot
-        # paths in _STAGE_ARTIFACTS (e.g. "ball/ball_track.json") become
-        # per-shot ("ball/{shot_id}_ball_track.json") here.
-        artefacts = _STAGE_ARTIFACTS.get(req.stage, [])
-        for relpath in artefacts:
-            # Try the per-shot variant first; fall back to legacy if needed.
-            target = output_dir / relpath
-            if target.is_file():
-                stem = target.stem
-                per_shot = target.with_name(f"{req.shot_id}_{stem}{target.suffix}")
-                if per_shot.exists():
-                    per_shot.unlink()
-            elif target.is_dir():
-                for child in target.glob(f"{req.shot_id}_*"):
-                    if child.is_file():
-                        child.unlink()
-                    else:
-                        shutil.rmtree(child, ignore_errors=True)
-
         if req.stage == "hmr_world":
             blocker = _hmr_world_in_flight()
             if blocker is not None:
@@ -2558,6 +2614,27 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                 raise HTTPException(
                     status_code=429, detail="Too many concurrent jobs",
                 )
+
+        # Wipe per-shot artefacts for this stage — only after the run is
+        # admitted, so a rejected run (409/429) never loses output. The
+        # legacy single-shot paths in _STAGE_ARTIFACTS (e.g.
+        # "ball/ball_track.json") become per-shot
+        # ("ball/{shot_id}_ball_track.json") here.
+        artefacts = _STAGE_ARTIFACTS.get(req.stage, [])
+        for relpath in artefacts:
+            # Try the per-shot variant first; fall back to legacy if needed.
+            target = output_dir / relpath
+            if target.is_file():
+                stem = target.stem
+                per_shot = target.with_name(f"{req.shot_id}_{stem}{target.suffix}")
+                if per_shot.exists():
+                    per_shot.unlink()
+            elif target.is_dir():
+                for child in target.glob(f"{req.shot_id}_*"):
+                    if child.is_file():
+                        child.unlink()
+                    else:
+                        shutil.rmtree(child, ignore_errors=True)
         job_id = str(uuid.uuid4())[:8]
         job = Job(job_id=job_id, stages=params.stages)
         with _jobs_lock:
@@ -2600,6 +2677,15 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                     "Wait for it to finish or stop the dashboard process."
                 ),
             )
+        with _jobs_lock:
+            running_jobs = sum(
+                1 for j in _jobs.values() if j.status == "running"
+            )
+            if running_jobs >= _MAX_CONCURRENT_JOBS:
+                raise HTTPException(
+                    status_code=429, detail="Too many concurrent jobs",
+                )
+        # Only after admission: a rejected run must not lose the pair's output.
         if hmr_dir.exists():
             for path in hmr_dir.glob(f"{req.shot_id}__{req.player_id}_*"):
                 if path.is_file():
@@ -2610,14 +2696,6 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             shot_filter=req.shot_id,
             player_filter=req.player_id,
         )
-        with _jobs_lock:
-            running_jobs = sum(
-                1 for j in _jobs.values() if j.status == "running"
-            )
-            if running_jobs >= _MAX_CONCURRENT_JOBS:
-                raise HTTPException(
-                    status_code=429, detail="Too many concurrent jobs",
-                )
         job_id = str(uuid.uuid4())[:8]
         job = Job(job_id=job_id, stages=params.stages)
         with _jobs_lock:

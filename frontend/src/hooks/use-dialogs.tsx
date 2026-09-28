@@ -146,7 +146,15 @@ export function DialogsProvider({ children }: { children: React.ReactNode }) {
           <form onSubmit={submitPrompt} className="grid gap-4">
             <DialogHeader>
               <DialogTitle>{promptState?.title}</DialogTitle>
-              {promptState?.description ? <DialogDescription>{promptState.description}</DialogDescription> : null}
+              {promptState?.description ? (
+                <DialogDescription asChild={typeof promptState.description !== "string"}>
+                  {typeof promptState.description === "string" ? (
+                    promptState.description
+                  ) : (
+                    <div>{promptState.description}</div>
+                  )}
+                </DialogDescription>
+              ) : null}
             </DialogHeader>
             <div className="grid gap-2">
               <Label htmlFor="fp-prompt-input">{promptState?.label}</Label>

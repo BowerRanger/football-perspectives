@@ -1,1 +1,0 @@
-import{n as e,r as t}from"./index-CTa61HdM.js";var n=t();function r(){return(0,n.jsx)(e,{title:`Not ported yet`,description:`refined-poses panel is being rebuilt.`})}export{r as default};

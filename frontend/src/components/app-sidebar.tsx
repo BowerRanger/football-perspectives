@@ -46,10 +46,11 @@ export function AppSidebar({ activeStage }: { activeStage: string | null }) {
         <OutputDirSwitcher />
       </SidebarHeader>
       <SidebarContent>
+        <nav aria-label="Dashboard" className="contents">
         <SidebarGroup>
-          <SidebarGroupLabel>Pipeline</SidebarGroupLabel>
+          <SidebarGroupLabel id="nav-pipeline">Pipeline</SidebarGroupLabel>
           <SidebarGroupContent>
-            <SidebarMenu>
+            <SidebarMenu aria-labelledby="nav-pipeline">
               {!stagesLoaded
                 ? Array.from({ length: 8 }, (_, i) => (
                     <SidebarMenuItem key={i}>
@@ -57,7 +58,7 @@ export function AppSidebar({ activeStage }: { activeStage: string | null }) {
                     </SidebarMenuItem>
                   ))
                 : stages.map((s) => {
-                    const status = resolveStageStatus(s.complete, liveState[s.name])
+                    const status = resolveStageStatus(s.complete, liveState[s.name], s.partial)
                     const label = humanizeStageName(s.name)
                     return (
                       <SidebarMenuItem key={s.name}>
@@ -82,9 +83,9 @@ export function AppSidebar({ activeStage }: { activeStage: string | null }) {
         </SidebarGroup>
         <SidebarSeparator />
         <SidebarGroup>
-          <SidebarGroupLabel>Editors</SidebarGroupLabel>
+          <SidebarGroupLabel id="nav-editors">Editors</SidebarGroupLabel>
           <SidebarGroupContent>
-            <SidebarMenu>
+            <SidebarMenu aria-labelledby="nav-editors">
               {EDITORS.map((e) => (
                 <SidebarMenuItem key={e.to}>
                   <SidebarMenuButton asChild isActive={location.pathname === e.to} tooltip={e.label}>
@@ -98,6 +99,7 @@ export function AppSidebar({ activeStage }: { activeStage: string | null }) {
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
+        </nav>
       </SidebarContent>
       <SidebarFooter>
         <SidebarMenu>

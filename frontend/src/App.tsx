@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Outlet, Route, Routes } from "react-router"
+import { Outlet, createBrowserRouter } from "react-router"
 
 import { AppSidebar } from "@/components/app-sidebar"
 import { LogDock } from "@/components/log-dock"
@@ -37,16 +37,17 @@ function Shell() {
   )
 }
 
-export default function App() {
-  return (
-    <Routes>
-      <Route element={<Shell />}>
-        <Route index element={<DashboardPage />} />
-        <Route path="anchor_editor" element={<AnchorEditorPage />} />
-        <Route path="ball-anchor-editor" element={<BallAnchorEditorPage />} />
-        <Route path="viewer" element={<ViewerPage />} />
-        <Route path="*" element={<DashboardPage />} />
-      </Route>
-    </Routes>
-  )
-}
+// A data router (not <BrowserRouter>) so editors can use useBlocker to stop
+// in-app navigation from discarding unsaved operator edits.
+export const router = createBrowserRouter([
+  {
+    element: <Shell />,
+    children: [
+      { index: true, element: <DashboardPage /> },
+      { path: "anchor_editor", element: <AnchorEditorPage /> },
+      { path: "ball-anchor-editor", element: <BallAnchorEditorPage /> },
+      { path: "viewer", element: <ViewerPage /> },
+      { path: "*", element: <DashboardPage /> },
+    ],
+  },
+])

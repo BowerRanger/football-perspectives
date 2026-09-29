@@ -1,0 +1,397 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-28T23:32:06+00:00",
+  "title": "Design System: Football Perspectives Dashboard",
+  "extensions": {
+    "colorMeta": {
+      "background": {
+        "role": "neutral",
+        "displayName": "Floodlit Night",
+        "canonical": "oklch(0.145 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(25% 0 0)",
+          "oklch(35% 0 0)",
+          "oklch(45% 0 0)",
+          "oklch(55% 0 0)",
+          "oklch(68% 0 0)",
+          "oklch(82% 0 0)",
+          "oklch(95% 0 0)"
+        ]
+      },
+      "foreground": {
+        "role": "neutral",
+        "displayName": "Chalk",
+        "canonical": "oklch(0.985 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(25% 0 0)",
+          "oklch(35% 0 0)",
+          "oklch(45% 0 0)",
+          "oklch(55% 0 0)",
+          "oklch(68% 0 0)",
+          "oklch(82% 0 0)",
+          "oklch(95% 0 0)"
+        ]
+      },
+      "card": {
+        "role": "neutral",
+        "displayName": "Raised Charcoal",
+        "canonical": "oklch(0.185 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(25% 0 0)",
+          "oklch(35% 0 0)",
+          "oklch(45% 0 0)",
+          "oklch(55% 0 0)",
+          "oklch(68% 0 0)",
+          "oklch(82% 0 0)",
+          "oklch(95% 0 0)"
+        ]
+      },
+      "primary": {
+        "role": "primary",
+        "displayName": "Chalk White",
+        "canonical": "oklch(0.922 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(25% 0 0)",
+          "oklch(35% 0 0)",
+          "oklch(45% 0 0)",
+          "oklch(55% 0 0)",
+          "oklch(68% 0 0)",
+          "oklch(82% 0 0)",
+          "oklch(95% 0 0)"
+        ]
+      },
+      "primary-light": {
+        "role": "primary",
+        "displayName": "Ink",
+        "canonical": "oklch(0.205 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(25% 0 0)",
+          "oklch(35% 0 0)",
+          "oklch(45% 0 0)",
+          "oklch(55% 0 0)",
+          "oklch(68% 0 0)",
+          "oklch(82% 0 0)",
+          "oklch(95% 0 0)"
+        ]
+      },
+      "muted-foreground": {
+        "role": "neutral",
+        "displayName": "Touchline Grey",
+        "canonical": "oklch(0.72 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(25% 0 0)",
+          "oklch(35% 0 0)",
+          "oklch(45% 0 0)",
+          "oklch(55% 0 0)",
+          "oklch(68% 0 0)",
+          "oklch(82% 0 0)",
+          "oklch(95% 0 0)"
+        ]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "oklch(1 0 0 / 10%)",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(25% 0 0)",
+          "oklch(35% 0 0)",
+          "oklch(45% 0 0)",
+          "oklch(55% 0 0)",
+          "oklch(68% 0 0)",
+          "oklch(82% 0 0)",
+          "oklch(95% 0 0)"
+        ]
+      },
+      "stage": {
+        "role": "neutral",
+        "displayName": "Tunnel Black",
+        "canonical": "oklch(0.11 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(25% 0 0)",
+          "oklch(35% 0 0)",
+          "oklch(45% 0 0)",
+          "oklch(55% 0 0)",
+          "oklch(68% 0 0)",
+          "oklch(82% 0 0)",
+          "oklch(95% 0 0)"
+        ]
+      },
+      "success": {
+        "role": "semantic",
+        "displayName": "Pitch Green",
+        "canonical": "oklch(0.76 0.15 152)",
+        "tonalRamp": [
+          "oklch(15% 0.13 152)",
+          "oklch(25% 0.13 152)",
+          "oklch(35% 0.13 152)",
+          "oklch(45% 0.13 152)",
+          "oklch(55% 0.13 152)",
+          "oklch(68% 0.13 152)",
+          "oklch(82% 0.13 152)",
+          "oklch(95% 0.13 152)"
+        ]
+      },
+      "warning": {
+        "role": "semantic",
+        "displayName": "Amber Flag",
+        "canonical": "oklch(0.82 0.14 78)",
+        "tonalRamp": [
+          "oklch(15% 0.13 78)",
+          "oklch(25% 0.13 78)",
+          "oklch(35% 0.13 78)",
+          "oklch(45% 0.13 78)",
+          "oklch(55% 0.13 78)",
+          "oklch(68% 0.13 78)",
+          "oklch(82% 0.13 78)",
+          "oklch(95% 0.13 78)"
+        ]
+      },
+      "destructive": {
+        "role": "semantic",
+        "displayName": "Red Card",
+        "canonical": "oklch(0.704 0.191 22.216)",
+        "tonalRamp": [
+          "oklch(15% 0.18 22)",
+          "oklch(25% 0.18 22)",
+          "oklch(35% 0.18 22)",
+          "oklch(45% 0.18 22)",
+          "oklch(55% 0.18 22)",
+          "oklch(68% 0.18 22)",
+          "oklch(82% 0.18 22)",
+          "oklch(95% 0.18 22)"
+        ]
+      },
+      "info": {
+        "role": "semantic",
+        "displayName": "Replay Blue",
+        "canonical": "oklch(0.74 0.12 240)",
+        "tonalRamp": [
+          "oklch(15% 0.12 240)",
+          "oklch(25% 0.12 240)",
+          "oklch(35% 0.12 240)",
+          "oklch(45% 0.12 240)",
+          "oklch(55% 0.12 240)",
+          "oklch(68% 0.12 240)",
+          "oklch(82% 0.12 240)",
+          "oklch(95% 0.12 240)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Page title in the sticky header, one per page."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Panel titles, sentence case."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Panel content, stat lists, tables, controls."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Descriptions, captions, badges, hints."
+      },
+      "data": {
+        "displayName": "Data (Geist Mono)",
+        "purpose": "Ids, frame numbers, coordinates, file paths, the run log."
+      }
+    },
+    "shadows": [
+      {
+        "name": "floating-dock",
+        "value": "0 10px 15px -3px rgb(0 0 0 / 0.2), 0 4px 6px -4px rgb(0 0 0 / 0.2)",
+        "purpose": "Run log dock floating over scrolling content."
+      },
+      {
+        "name": "canvas-overlay",
+        "value": "0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)",
+        "purpose": "Control cards over the 3D viewer and editor canvases, with 80% background and backdrop blur."
+      }
+    ],
+    "motion": [
+      {
+        "name": "sidebar-collapse",
+        "value": "200ms linear",
+        "purpose": "Sidebar width / offcanvas transition."
+      },
+      {
+        "name": "running-pulse",
+        "value": "pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite",
+        "purpose": "Running status dot; kept under reduced motion as state feedback."
+      },
+      {
+        "name": "press-nudge",
+        "value": "translateY(1px)",
+        "purpose": "Button active state."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "prefers-reduced-motion: reduce",
+        "purpose": "Drops overlay slide/zoom translation and smooth scroll; spinners and pulse stay."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "sm",
+        "value": "640px"
+      },
+      {
+        "name": "md",
+        "value": "768px",
+        "note": "Sidebar becomes a sheet below this; page padding 16px to 24px."
+      },
+      {
+        "name": "lg",
+        "value": "1024px"
+      },
+      {
+        "name": "xl",
+        "value": "1280px"
+      },
+      {
+        "name": "2xl",
+        "value": "1536px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Monochrome primary; one per header or dialog (Continue, Run for selection).",
+      "html": "<button class=\"ds-btn-primary\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z\"/></svg> Continue</button>",
+      "css": ".ds-btn-primary{font-family:'Geist Variable',ui-sans-serif,system-ui,sans-serif;display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:10px;border:1px solid transparent;font-size:14px;font-weight:500;cursor:pointer;transition:all .15s;background:var(--primary,oklch(0.922 0 0));color:var(--primary-foreground,oklch(0.205 0 0));} .ds-btn-primary:hover{background:color-mix(in oklch,var(--primary,oklch(0.922 0 0)) 80%,transparent);} .ds-btn-primary:focus-visible{outline:none;box-shadow:0 0 0 3px color-mix(in oklch,var(--ring,oklch(0.556 0 0)) 50%,transparent);} .ds-btn-primary:active{transform:translateY(1px);}"
+    },
+    {
+      "name": "Outline Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "Secondary action (Re-run clean, Open full screen).",
+      "html": "<button class=\"ds-btn-outline\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8\"/><path d=\"M3 3v5h5\"/></svg> Re-run clean</button>",
+      "css": ".ds-btn-outline{font-family:'Geist Variable',ui-sans-serif,system-ui,sans-serif;display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:10px;border:1px solid transparent;font-size:14px;font-weight:500;cursor:pointer;transition:all .15s;background:oklch(1 0 0 / 4.5%);border-color:var(--input,oklch(1 0 0 / 15%));color:var(--foreground,oklch(0.985 0 0));} .ds-btn-outline:hover{background:oklch(1 0 0 / 7.5%);} .ds-btn-outline:focus-visible{outline:none;box-shadow:0 0 0 3px color-mix(in oklch,var(--ring,oklch(0.556 0 0)) 50%,transparent);} .ds-btn-outline:active{transform:translateY(1px);}"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Tertiary actions (Run all, log-dock tools).",
+      "html": "<button class=\"ds-btn-ghost\">Run all</button>",
+      "css": ".ds-btn-ghost{font-family:'Geist Variable',ui-sans-serif,system-ui,sans-serif;display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:10px;border:1px solid transparent;font-size:14px;font-weight:500;cursor:pointer;transition:all .15s;background:transparent;color:var(--foreground,oklch(0.985 0 0));} .ds-btn-ghost:hover{background:color-mix(in oklch,var(--muted,oklch(0.269 0 0)) 50%,transparent);} .ds-btn-ghost:focus-visible{outline:none;box-shadow:0 0 0 3px color-mix(in oklch,var(--ring,oklch(0.556 0 0)) 50%,transparent);}"
+    },
+    {
+      "name": "Destructive Button",
+      "kind": "button",
+      "refersTo": "button-destructive",
+      "description": "Destructive action: red text on a tint, never a solid red block.",
+      "html": "<button class=\"ds-btn-destructive\">Delete track</button>",
+      "css": ".ds-btn-destructive{font-family:'Geist Variable',ui-sans-serif,system-ui,sans-serif;display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:10px;border:1px solid transparent;font-size:14px;font-weight:500;cursor:pointer;transition:all .15s;background:color-mix(in oklch,var(--destructive,oklch(0.704 0.191 22.216)) 20%,transparent);color:var(--destructive,oklch(0.704 0.191 22.216));} .ds-btn-destructive:hover{background:color-mix(in oklch,var(--destructive,oklch(0.704 0.191 22.216)) 30%,transparent);} .ds-btn-destructive:focus-visible{outline:none;box-shadow:0 0 0 3px color-mix(in oklch,var(--destructive,oklch(0.704 0.191 22.216)) 40%,transparent);}"
+    },
+    {
+      "name": "Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "32px field, input-tinted fill in dark.",
+      "html": "<input class=\"ds-input\" placeholder=\"prepare_shots\" />",
+      "css": ".ds-input{font-family:'Geist Variable',ui-sans-serif,system-ui,sans-serif;height:32px;padding:0 10px;border-radius:10px;border:1px solid var(--input,oklch(1 0 0 / 15%));background:oklch(1 0 0 / 4.5%);color:var(--foreground,oklch(0.985 0 0));font-size:14px;width:220px;} .ds-input::placeholder{color:var(--muted-foreground,oklch(0.72 0 0));} .ds-input:focus-visible{border-color:var(--ring,oklch(0.556 0 0));outline:none;box-shadow:0 0 0 3px color-mix(in oklch,var(--ring,oklch(0.556 0 0)) 50%,transparent);}"
+    },
+    {
+      "name": "Status Badge",
+      "kind": "chip",
+      "refersTo": "status-badge",
+      "description": "Stage state: hue at 15% fill, 25% border, dot inside.",
+      "html": "<span class=\"ds-badge ds-ok\"><i></i>Complete</span> <span class=\"ds-badge ds-run\"><i></i>Running</span> <span class=\"ds-badge ds-fail\"><i></i>Failed</span> <span class=\"ds-badge ds-pend\"><i></i>Not run</span>",
+      "css": ".ds-badge{font-family:'Geist Variable',ui-sans-serif,system-ui,sans-serif;display:inline-flex;align-items:center;gap:6px;height:20px;padding:2px 8px;border-radius:26px;border:1px solid;font-size:12px;font-weight:500;} .ds-badge i{width:8px;height:8px;border-radius:50%;background:currentColor;} .ds-ok{color:var(--success,oklch(0.76 0.15 152));background:color-mix(in oklch,currentColor 15%,transparent);border-color:color-mix(in oklch,currentColor 25%,transparent);} .ds-run{color:var(--warning,oklch(0.82 0.14 78));background:color-mix(in oklch,currentColor 15%,transparent);border-color:color-mix(in oklch,currentColor 25%,transparent);} .ds-run i{animation:ds-pulse 2s cubic-bezier(.4,0,.6,1) infinite;} .ds-fail{color:var(--destructive,oklch(0.704 0.191 22.216));background:color-mix(in oklch,currentColor 15%,transparent);border-color:color-mix(in oklch,currentColor 25%,transparent);} .ds-pend{color:var(--muted-foreground,oklch(0.72 0 0));border-color:var(--border,oklch(1 0 0 / 10%));} .ds-pend i{background:transparent;box-shadow:inset 0 0 0 1px currentColor;} @keyframes ds-pulse{50%{opacity:.5}}"
+    },
+    {
+      "name": "Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "The only container: Card with sentence-case title, hairline header rule, no shadow.",
+      "html": "<section class=\"ds-panel\"><header><h2>Camera tracks (all shots)</h2><p>Scrub or play to watch moving cameras.</p></header><div class=\"ds-panel-body\"><dl><dt>Frames</dt><dd>429 @ 30.00 fps</dd><dt>Anchored frames</dt><dd>25 / 429</dd></dl></div></section>",
+      "css": ".ds-panel{font-family:'Geist Variable',ui-sans-serif,system-ui,sans-serif;background:var(--card,oklch(0.185 0 0));color:var(--foreground,oklch(0.985 0 0));border-radius:14px;box-shadow:0 0 0 1px oklch(0.985 0 0 / 10%);overflow:hidden;max-width:420px;} .ds-panel header{padding:12px 16px;border-bottom:1px solid var(--border,oklch(1 0 0 / 10%));} .ds-panel h2{margin:0;font-size:14px;font-weight:600;} .ds-panel p{margin:4px 0 0;font-size:12px;color:var(--muted-foreground,oklch(0.72 0 0));} .ds-panel-body{padding:16px;font-size:14px;} .ds-panel dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0;} .ds-panel dt{color:var(--muted-foreground,oklch(0.72 0 0));} .ds-panel dd{margin:0;text-align:right;font-weight:500;font-variant-numeric:tabular-nums;}"
+    },
+    {
+      "name": "Sidebar Stage List",
+      "kind": "nav",
+      "refersTo": "sidebar",
+      "description": "Pipeline list with status dot left and mono index right; active row filled.",
+      "html": "<nav class=\"ds-nav\"><div class=\"ds-nav-label\">Pipeline</div><a tabindex=\"0\"><i class=\"ok\"></i>Prepare Shots<b>1</b></a><a tabindex=\"0\" class=\"active\"><i class=\"fail\"></i>HMR World<b>4</b></a><a tabindex=\"0\"><i class=\"part\"></i>Ball<b>6</b></a><a tabindex=\"0\"><i class=\"pend\"></i>Render<b>8</b></a></nav>",
+      "css": ".ds-nav{font-family:'Geist Variable',ui-sans-serif,system-ui,sans-serif;width:240px;padding:8px;background:var(--sidebar,oklch(0.17 0 0));color:var(--foreground,oklch(0.985 0 0));} .ds-nav-label{height:32px;display:flex;align-items:center;padding:0 8px;font-size:12px;font-weight:500;opacity:.7;} .ds-nav a{display:flex;align-items:center;gap:8px;height:32px;padding:0 8px;border-radius:8px;font-size:14px;cursor:pointer;} .ds-nav a:hover,.ds-nav a.active{background:var(--sidebar-accent,oklch(0.25 0 0));} .ds-nav a:focus-visible{outline:none;box-shadow:0 0 0 2px var(--ring,oklch(0.556 0 0));} .ds-nav b{margin-left:auto;font-family:'Geist Mono Variable',ui-monospace,monospace;font-weight:400;font-size:12px;color:var(--muted-foreground,oklch(0.72 0 0));} .ds-nav i{width:8px;height:8px;border-radius:50%;} .ds-nav i.ok{background:oklch(0.76 0.15 152);} .ds-nav i.fail{background:oklch(0.704 0.191 22.216);} .ds-nav i.part{background:linear-gradient(90deg,oklch(0.76 0.15 152) 50%,transparent 50%);box-shadow:inset 0 0 0 1px oklch(0.76 0.15 152);} .ds-nav i.pend{box-shadow:inset 0 0 0 1px oklch(0.72 0 0 / 60%);}"
+    },
+    {
+      "name": "Run Log Dock",
+      "kind": "custom",
+      "refersTo": "panel",
+      "description": "Floating log panel; stage-well body in mono, warnings amber, traceback lines destructive.",
+      "html": "<section class=\"ds-log\"><header>HMR World log <span>24m 40s</span></header><pre><span>[hmr_world] gberch P014: GVHMR chunk 1/2 … ok (41.2s)</span>\n<span class=\"w\">[hmr_world] WARNING P012: ankle confidence below 0.3</span>\n<span class=\"e\">RuntimeError: MPS backend out of memory</span></pre></section>",
+      "css": ".ds-log{font-family:'Geist Variable',ui-sans-serif,system-ui,sans-serif;border-radius:14px;border:1px solid color-mix(in oklch,var(--destructive,oklch(0.704 0.191 22.216)) 50%,transparent);background:var(--card,oklch(0.185 0 0));color:var(--foreground,oklch(0.985 0 0));box-shadow:0 10px 15px -3px rgb(0 0 0/.2),0 4px 6px -4px rgb(0 0 0/.2);overflow:hidden;max-width:560px;} .ds-log header{padding:8px 12px;border-bottom:1px solid var(--border,oklch(1 0 0 / 10%));font-size:14px;font-weight:500;} .ds-log header span{margin-left:8px;font-family:'Geist Mono Variable',ui-monospace,monospace;font-size:12px;color:var(--muted-foreground,oklch(0.72 0 0));} .ds-log pre{margin:0;padding:8px 12px;background:var(--stage,oklch(0.11 0 0));color:oklch(0.96 0 0 / 85%);font:12px/1.625 'Geist Mono Variable',ui-monospace,monospace;white-space:pre-wrap;} .ds-log .w{color:oklch(0.82 0.14 78);} .ds-log .e{color:oklch(0.704 0.191 22.216);background:oklch(0.704 0.191 22.216 / 12%);display:block;}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Frame Is the Hero",
+    "overview": "The dashboard is a quiet instrument around loud material. Broadcast frames, pitch canvases and the three.js scene are the work; everything else is shadcn/ui (radix-nova style, neutral base) used as shipped, so every stage panel, editor and viewer reads as one tool. The chrome is achromatic: black, white and a few greys. Colour appears only where it means something: a stage's state, a metric's quality, a player's identity, a pitch drawing.\n\nDensity is desktop-operator density: 14px body, 12px secondary text, 32px controls (28px in headers and toolbars), 8 to 16px gaps. Dark is the default theme with a light toggle; both themes share the same structure and the same near-black media well, so footage never changes its surround when the theme flips.",
+    "keyCharacteristics": [
+      "Neutral, flat chrome; hue is reserved for state and data.",
+      "One container: the Panel (a Card with a sentence-case title), never nested.",
+      "Media always sits in the near-black stage well, in both themes.",
+      "Geist for UI, Geist Mono only for ids, frame numbers, coordinates and logs.",
+      "State is always visible: sidebar status dots, header status badge, docked run log."
+    ],
+    "rules": [
+      {
+        "name": "The Colour-Is-Meaning Rule",
+        "body": "Chrome is achromatic. If a hue appears, it is a state (success / warning / destructive / info) or a data identity (player, pitch). A coloured button, heading or decorative accent is off-system.",
+        "section": "colors"
+      },
+      {
+        "name": "The Fixed Surround Rule",
+        "body": "Footage and canvases sit in `stage` in both themes; theme switching never changes what surrounds the image.",
+        "section": "colors"
+      },
+      {
+        "name": "The Sentence-Case Rule",
+        "body": "Titles and labels are sentence case at normal tracking. No uppercase tracked titles.",
+        "section": "typography"
+      },
+      {
+        "name": "The Mono-Is-Data Rule",
+        "body": "Geist Mono is used for values the operator reads as identifiers or numbers (P004, frame 212, 49.0, -31.6), never for headings, buttons or key hints (`kbd` is set back to the sans).",
+        "section": "typography"
+      },
+      {
+        "name": "The Only-Floaters-Cast Rule",
+        "body": "Shadows belong only to things that float over other content (log dock, overlays on media, popovers and dialogs from shadcn). Panels in the flow never cast a shadow.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** use shadcn components from `components/ui` for every control and keep chrome on theme tokens (bg-card, text-muted-foreground, text-success).",
+      "**Do** spend hue only on state (success, warning, destructive, info) and data (player palette, pitch drawing).",
+      "**Do** put every video, canvas and 3D view in the `stage` well.",
+      "**Do** wrap every content block in a Panel with a sentence-case title; give empty states a next step.",
+      "**Do** keep one primary button per header or dialog; make the non-destructive path the primary.",
+      "**Do** use Geist Mono with tabular numerals for ids, frames, coordinates and logs, and nowhere else.",
+      "**Do** show why a control is disabled as visible text or a reachable tooltip."
+    ],
+    "donts": [
+      "**Don't** colour buttons, titles or decorative accents; the primary stays monochrome.",
+      "**Don't** nest Panels or add shadows to in-flow containers.",
+      "**Don't** use uppercase tracked titles or labels.",
+      "**Don't** use unicode glyphs as icons; icons are lucide.",
+      "**Don't** use `alert()` or `window.confirm`; errors are toasts, destructive actions are confirm dialogs.",
+      "**Don't** theme the player palette; a player's colour is identical in both themes and every panel."
+    ]
+  }
+}

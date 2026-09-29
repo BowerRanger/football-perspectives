@@ -32,6 +32,10 @@ Run a backend for dev with `python recon.py serve --output ./output --port 8765`
 | `src/features/stages/<stage>/` | One lazily-loaded panel per pipeline stage (default export, no props) |
 | `src/pages/` | Routed pages: `dashboard.tsx`, `anchor-editor/`, `ball-anchor-editor/`, `viewer/` |
 
+## Impeccable review
+
+Large UX changes or additions (a new page, panel, editor or player; a redesign; a new interaction pattern; a change spanning several pages) get an impeccable pass: audit before, finish review to `ship` after. See "Impeccable review for large UX work" in the repo `CLAUDE.md`. The design system is in `../DESIGN.md`, and the direction contract is in `../.impeccable/surfaces/`.
+
 ## Conventions
 
 - **shadcn throughout.** Buttons, inputs, selects, tabs, tables, dialogs, tooltips, badges, toggles, sliders

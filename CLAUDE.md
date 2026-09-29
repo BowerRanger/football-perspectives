@@ -171,6 +171,12 @@ GPU: strongly recommended for `hmr_world` (GVHMR); 8GB VRAM minimum, 12GB+ recom
 - `/ball-anchor-editor?shot=` — ball anchors, touches, goal impacts, pitch fixes, shot chains (also embedded in the Ball panel; one implementation, full-payload saves).
 - `/viewer?shot=` — 3D scene viewer (players, ball, solved broadcast camera) with playback (also embedded in the Export panel).
 
+**Impeccable review for large UX work (required).** Any large UX change or addition to the dashboard gets an impeccable pass: a new page or stage panel, a new editor or player, a redesign of an existing panel, a new interaction pattern (drag, keyboard, undo, destructive flow), or a change that touches several pages. Small fixes and copy tweaks don't need one.
+- **Before:** run `/impeccable audit` (plus `critique` for flows). This covers the affected pages, or the nearest existing pattern for a new page. Read `PRODUCT.md`, `DESIGN.md` and the direction contract in `.impeccable/surfaces/` first.
+- **Build:** follow `DESIGN.md` and `frontend/README.md`.
+- **Finish:** run the impeccable detector on the changed files. Capture desktop (1440, dark + light) and mobile (390) screenshots. Then run the finish reviewer until its disposition is `ship`.
+- **Records:** update `DESIGN.md` (via the documenter) if the system changed. Record the audit, before and after, in `docs/superpowers/specs/YYYY-MM-DD-*.md`. The 2026-09-28 dashboard audit and 2026-09-29 re-audit are the reference examples.
+
 ## Quality Report
 
 `output/quality_report.json` is generated at the end — per-stage diagnostics aggregated from each stage (anchor reprojection, camera confidence, HMR foot-anchor coverage, ball flight segments, export status). Check this first when debugging reconstruction quality.

@@ -14,6 +14,17 @@ You are the web dashboard specialist IC on the football-perspectives team. Your 
 - After any frontend change run `npm run build` in `frontend/` and commit `src/web/static/app/` with the source — `recon.py serve` ships the committed build. `npm run dev` proxies the API to `FP_API` (default `http://localhost:8765`).
 - Sidecar JSON contracts live in `src/schemas/` — validate against them rather than inventing response shapes.
 
+## Impeccable review (large UX changes)
+
+For any large UX change or addition (a new page, panel, editor or player; a redesign; a new interaction pattern; a change spanning several pages), follow the "Impeccable review for large UX work" rule in `CLAUDE.md`:
+- audit the affected pages before building
+- build to `DESIGN.md` and `frontend/README.md`
+- run the detector and capture desktop (dark + light) and mobile screenshots
+- run the finish reviewer until `ship`
+- update `DESIGN.md` if the system changed, and record the audit in `docs/superpowers/specs/`
+
+If your task is a large UX change and you weren't asked to do this, say so in your report instead of skipping it silently.
+
 ## Tests
 
 `.venv311/bin/python -m pytest tests/test_web_*.py -q` — the `test_web_frontend_features.py` / ball-editor tests grep both `frontend/src` and the committed bundle for endpoint markers, so a stale build fails them. Typecheck with `cd frontend && npx tsc -b --noEmit`. For UI behaviour with no test coverage, describe the manual verification you performed (screenshots via Playwright against `recon.py serve`).

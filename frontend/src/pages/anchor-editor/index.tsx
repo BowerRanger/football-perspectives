@@ -11,11 +11,11 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { AnchorList } from "./anchor-list"
+import { AnchorTransport } from "./anchor-transport"
 import { CoverageStrip } from "./coverage-strip"
 import { PalettePanel } from "./palette-panel"
 import { StageCanvas } from "./stage-canvas"
 import { AnchorStatusBadge, EditorControls, Toolbar, type ToolbarProps } from "./toolbar"
-import { TransportBar } from "./transport-bar"
 import { useAnchorEditor } from "./use-anchor-editor"
 
 type Editor = ReturnType<typeof useAnchorEditor>
@@ -91,9 +91,11 @@ function Stage({ ed }: { ed: Editor }) {
         onPlace={(xy) => void placement.place(xy)}
         onDeleteAnchor={() => ed.deleteAnchorFrame(player.frame)}
       />
-      <TransportBar
+      <AnchorTransport
         player={player}
         totalFrames={ed.totalFrames}
+        fps={ed.fps}
+        keyboard={ed.keyboard}
         hasAnchorHere={ed.hasAnchorHere}
         onAddAnchor={ed.addAnchorHere}
       />
@@ -208,7 +210,27 @@ function EditorBody({ ed, toolbar }: { ed: Editor; toolbar?: ToolbarProps }) {
           />
         </div>
       ) : null}
-      {ed.list.loaded && ed.list.shots.length === 0 && !ed.shot ? (
+      {ed.loadErrors.map((issue) => (
+        <div key={issue.title} className="shrink-0 px-3 pt-3">
+          <PanelError
+            title={issue.title}
+            message={issue.message}
+            action={
+              <Button variant="outline" size="sm" className="mt-2" onClick={issue.retry}>
+                Retry
+              </Button>
+            }
+          />
+        </div>
+      ))}
+      {ed.notices.length > 0 ? (
+        <ul className="shrink-0 space-y-0.5 px-3 pt-2 text-xs text-muted-foreground" aria-label="Unavailable optional data">
+          {ed.notices.map((n) => (
+            <li key={n}>{n}</li>
+          ))}
+        </ul>
+      ) : null}
+      {ed.list.loaded && !ed.list.error && ed.list.shots.length === 0 && !ed.shot ? (
         <PanelEmpty
           title="No shots to annotate"
           description="Run the prepare_shots stage first. Anchors are placed on frames of its shot clips."

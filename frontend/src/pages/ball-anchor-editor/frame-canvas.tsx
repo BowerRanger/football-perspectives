@@ -1,4 +1,5 @@
 import * as React from "react"
+import { VideoOffIcon } from "lucide-react"
 
 import { videoUrl } from "./api"
 import { drawOverlay } from "./overlay-draw"
@@ -9,6 +10,8 @@ export function FrameCanvas({ ctrl }: { ctrl: EditorController }) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
   const { player, docApi, autoAnchors, layers, predictedByFrame, previewByFrame } = ctrl
   const size = player.videoSize
+  const [failed, setFailed] = React.useState(false)
+  React.useEffect(() => setFailed(false), [ctrl.shot])
 
   React.useEffect(() => {
     const canvas = canvasRef.current
@@ -38,7 +41,7 @@ export function FrameCanvas({ ctrl }: { ctrl: EditorController }) {
   }
 
   return (
-    <div className="relative overflow-hidden rounded-lg bg-stage">
+    <div className={`relative overflow-hidden rounded-lg bg-stage ${failed ? "min-h-48" : ""}`}>
       <video
         ref={player.videoRef}
         src={videoUrl(ctrl.shot)}
@@ -47,7 +50,15 @@ export function FrameCanvas({ ctrl }: { ctrl: EditorController }) {
         playsInline
         className="block h-auto w-full"
         aria-label={`Shot ${ctrl.shot} video`}
+        onError={() => setFailed(true)}
       />
+      {failed ? (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-stage p-4 text-center text-stage-foreground">
+          <VideoOffIcon className="size-6 opacity-70" aria-hidden />
+          <p className="text-sm font-medium">Could not load the video for {ctrl.shot}</p>
+          <p className="text-xs opacity-70">Run prepare_shots to (re)create shots/{ctrl.shot}.mp4, then reload.</p>
+        </div>
+      ) : null}
       <canvas
         ref={canvasRef}
         className="absolute inset-0 size-full cursor-crosshair"

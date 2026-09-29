@@ -1,11 +1,13 @@
 import * as React from "react"
 import { toast } from "sonner"
 
-import { Panel, PanelEmpty, PanelSkeleton } from "@/components/panel"
+import { Panel, PanelEmpty, PanelError, PanelSkeleton } from "@/components/panel"
+import { Button } from "@/components/ui/button"
+import { useResource } from "@/hooks/use-resource"
 import { ToneBadge } from "@/components/status"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { errorMessage, getJsonOrNull, putJson } from "@/lib/api"
+import { errorMessage, getJson, putJson } from "@/lib/api"
 
 type Rig = "pov" | "ots"
 const RIGS: readonly Rig[] = ["pov", "ots"]
@@ -20,10 +22,21 @@ interface AvailablePlayer {
   display_name?: string
 }
 
-// Last-known selection per shot. Module-level so the picker survives the
-// stage-panel re-mount after an export job: if the re-mount's GET fails we
-// restore the ticked boxes from here rather than show a blank picker.
-const lastKnown: Record<string, Selection[]> = {}
+interface PickerData {
+  players: AvailablePlayer[]
+  selections: Selection[]
+}
+
+// Both endpoints answer 200 with an empty default when nothing is saved yet,
+// so a throw here is a real failure (shown with Retry, never a blank picker).
+async function loadPicker(shotId: string, signal: AbortSignal): Promise<PickerData> {
+  const q = encodeURIComponent(shotId)
+  const [avail, sel] = await Promise.all([
+    getJson<{ players?: AvailablePlayer[] }>(`/api/export/available-players?shot=${q}`, { signal }),
+    getJson<{ selections?: Selection[] }>(`/api/export/camera-selection?shot=${q}`, { signal }),
+  ])
+  return { players: avail.players ?? [], selections: Array.isArray(sel.selections) ? sel.selections : [] }
+}
 
 type Chosen = ReadonlyMap<string, ReadonlySet<string>>
 
@@ -55,27 +68,14 @@ function withToggle(chosen: Chosen, playerId: string, rig: Rig, on: boolean): Ch
 
 /** Every checkbox toggle saves immediately; the status line mirrors what is on disk. */
 export function CameraPicker({ shotId }: { shotId: string }) {
-  const [players, setPlayers] = React.useState<AvailablePlayer[] | null>(null)
+  const { state, retry } = useResource((signal) => loadPicker(shotId, signal), [shotId])
+  const players = state.status === "ready" ? state.data.players : null
   const [chosen, setChosen] = React.useState<Chosen>(new Map())
   const [saving, setSaving] = React.useState(false)
 
   React.useEffect(() => {
-    let alive = true
-    setPlayers(null)
-    void Promise.all([
-      getJsonOrNull<{ players?: AvailablePlayer[] }>(`/api/export/available-players?shot=${encodeURIComponent(shotId)}`),
-      getJsonOrNull<{ selections?: Selection[] }>(`/api/export/camera-selection?shot=${encodeURIComponent(shotId)}`),
-    ]).then(([avail, sel]) => {
-      if (!alive) return
-      const persisted = Array.isArray(sel?.selections) ? sel.selections : (lastKnown[shotId] ?? [])
-      lastKnown[shotId] = persisted
-      setChosen(toChosen(persisted))
-      setPlayers(avail?.players ?? [])
-    })
-    return () => {
-      alive = false
-    }
-  }, [shotId])
+    if (state.status === "ready") setChosen(toChosen(state.data.selections))
+  }, [state])
 
   const toggle = async (playerId: string, rig: Rig, on: boolean) => {
     if (!players) return
@@ -86,7 +86,6 @@ export function CameraPicker({ shotId }: { shotId: string }) {
     setSaving(true)
     try {
       await putJson(`/api/export/camera-selection?shot=${encodeURIComponent(shotId)}`, { shot_id: shotId, selections })
-      lastKnown[shotId] = selections
     } catch (err) {
       setChosen(previous)
       toast.error("Could not save camera selection", { description: errorMessage(err) })
@@ -95,7 +94,21 @@ export function CameraPicker({ shotId }: { shotId: string }) {
     }
   }
 
-  if (players === null) return <PanelSkeleton rows={3} />
+  if (state.status === "loading") return <PanelSkeleton rows={3} />
+  if (state.status === "error") {
+    return (
+      <PanelError
+        title="Could not load camera selection"
+        message={state.error}
+        action={
+          <Button variant="outline" size="sm" className="mt-2" onClick={retry}>
+            Retry
+          </Button>
+        }
+      />
+    )
+  }
+  if (!players) return null
   const count = countRigs(chosen)
   return (
     <Panel

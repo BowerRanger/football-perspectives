@@ -1,6 +1,8 @@
 import * as React from "react"
 
-import { errorMessage, getJson, getJsonOrNull } from "@/lib/api"
+import { toast } from "sonner"
+
+import { errorMessage, getJson } from "@/lib/api"
 
 import { patchJson } from "./patch"
 import type { FeaturesMap, Manifest, ShotUpdate, SyncMap } from "./types"
@@ -38,12 +40,12 @@ export function useShotsData(): ShotsData {
     try {
       const [m, f, s] = await Promise.all([
         getJson<Manifest>("/api/shots/manifest"),
-        getJsonOrNull<FeaturesMap>("/api/shots/features"),
-        getJsonOrNull<SyncMap>("/api/sync"),
+        getJson<FeaturesMap>("/api/shots/features"),
+        getJson<SyncMap>("/api/sync"),
       ])
       setManifest(m)
-      setFeatures(f ?? {})
-      setSync(s ?? EMPTY_SYNC)
+      setFeatures(f)
+      setSync(s)
       setError(null)
       setRevision((r) => r + 1)
     } catch (err) {
@@ -58,15 +60,22 @@ export function useShotsData(): ShotsData {
   }, [reload])
 
   const reloadSyncQuiet = React.useCallback(async () => {
-    const s = await getJsonOrNull<SyncMap>("/api/sync")
-    setSync(s ?? EMPTY_SYNC)
+    try {
+      setSync(await getJson<SyncMap>("/api/sync"))
+    } catch (err) {
+      toast.error("Could not refresh the sync map", { description: errorMessage(err) })
+    }
   }, [])
 
   const patchShots = React.useCallback(async (updates: ShotUpdate[]) => {
     const updated = await patchJson<Manifest>("/api/shots/bulk", { updates })
     setManifest(updated)
-    const s = await getJsonOrNull<SyncMap>("/api/sync")
-    setSync(s ?? EMPTY_SYNC)
+    try {
+      setSync(await getJson<SyncMap>("/api/sync"))
+    } catch (err) {
+      // The edit itself saved; only the pruned sync map is stale.
+      toast.error("Saved, but could not refresh the sync map", { description: errorMessage(err) })
+    }
     setRevision((r) => r + 1)
   }, [])
 

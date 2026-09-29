@@ -2,14 +2,15 @@ import * as React from "react"
 import { PlayIcon } from "lucide-react"
 import { toast } from "sonner"
 
-import { Panel, PanelEmpty, PanelSkeleton } from "@/components/panel"
+import { Panel, PanelEmpty, PanelError, PanelSkeleton } from "@/components/panel"
 import { Button } from "@/components/ui/button"
 import { Field, FieldLabel } from "@/components/ui/field"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { usePipeline } from "@/hooks/use-pipeline"
 import { useConfirm } from "@/hooks/use-dialogs"
-import { errorMessage, getJsonOrNull, postJson } from "@/lib/api"
+import { useResource } from "@/hooks/use-resource"
+import { errorMessage, getJson, getJsonOrNull, postJson } from "@/lib/api"
 import { HmrShotBody } from "./shot-body"
 
 const ALL = "__all__"
@@ -39,24 +40,17 @@ async function loadPlayerOptions(shotId: string): Promise<PlayerOption[]> {
 export default function HmrWorldStage() {
   const { attachToJob, isRunning } = usePipeline()
   const confirm = useConfirm()
-  const [shots, setShots] = React.useState<string[] | null>(null)
   const [shot, setShot] = React.useState("")
   const [options, setOptions] = React.useState<PlayerOption[]>([])
   const [player, setPlayer] = React.useState(ALL)
   const [dispatching, setDispatching] = React.useState(false)
 
+  const shotsRes = useResource(async (signal) => (await getJson<{ shots?: string[] }>("/api/output/shots", { signal })).shots ?? [], [])
+  const shots = shotsRes.state.status === "ready" ? shotsRes.state.data : null
+  const firstShot = shots?.[0]
   React.useEffect(() => {
-    let alive = true
-    void getJsonOrNull<{ shots?: string[] }>("/api/output/shots").then((d) => {
-      if (!alive) return
-      const ids = d?.shots ?? []
-      setShots(ids)
-      if (ids.length) setShot(ids[0])
-    })
-    return () => {
-      alive = false
-    }
-  }, [])
+    if (firstShot) setShot((cur) => cur || firstShot)
+  }, [firstShot])
 
   React.useEffect(() => {
     if (!shot) return
@@ -98,7 +92,21 @@ export default function HmrWorldStage() {
     }
   }
 
-  if (shots === null) return <PanelSkeleton rows={2} />
+  if (shotsRes.state.status === "loading") return <PanelSkeleton rows={2} />
+  if (shotsRes.state.status === "error") {
+    return (
+      <PanelError
+        title="Could not list shots"
+        message={shotsRes.state.error}
+        action={
+          <Button variant="outline" size="sm" className="mt-2" onClick={shotsRes.retry}>
+            Retry
+          </Button>
+        }
+      />
+    )
+  }
+  if (!shots) return null
   if (shots.length === 0) {
     return (
       <PanelEmpty

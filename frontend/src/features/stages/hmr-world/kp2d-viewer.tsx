@@ -1,10 +1,10 @@
 import * as React from "react"
 
 import { Panel } from "@/components/panel"
+import { FramePlayer } from "@/components/frame-player"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { playerLabel } from "@/lib/format"
 import { drawSkeleton } from "./skeleton"
-import { TransportBar } from "./transport-bar"
 import { useCameraTrack } from "./use-camera-track"
 import type { Coloured, Kp2dPreview, PlayerRef } from "./types"
 
@@ -130,21 +130,20 @@ export function Kp2dViewer({ shotId, players }: { shotId: string; players: reado
           />
           <canvas ref={canvasRef} aria-label="Keypoint overlay" className="pointer-events-none absolute inset-0 size-full" />
         </div>
-        <TransportBar
+        <FramePlayer
+          frame={frame}
+          max={maxFrame}
+          fps={fps}
           playing={playing}
-          onToggle={() => {
+          onTogglePlay={() => {
             const v = videoRef.current
             if (!v) return
             if (v.paused) void v.play()
             else v.pause()
           }}
-          onPrev={() => seekTo(currentFrame() - 1)}
-          onNext={() => seekTo(currentFrame() + 1)}
-          value={frame}
-          min={0}
-          max={maxFrame}
           onSeek={seekTo}
-          readout={`Frame ${frame}`}
+          label="Keypoint frame"
+          keyHints
         />
       </div>
     </Panel>

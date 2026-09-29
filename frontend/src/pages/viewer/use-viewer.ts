@@ -37,7 +37,6 @@ const INITIAL: ViewerState = {
 
 export interface ViewerActions {
   togglePlay: () => void
-  step: (delta: number) => void
   seek: (frame: number) => void
   setSpeed: (speed: number) => void
   setCameraMode: (mode: CameraMode) => void
@@ -104,15 +103,15 @@ export function useViewer(shot: string | undefined) {
         engineRef.current?.setPlaying(next)
         setState((s) => ({ ...s, playing: next }))
       },
-      step: (delta) => {
+      // Scrubbing (slider, arrow keys, Home/End) pauses playback like every other frame player.
+      seek: (frame) => {
         const engine = engineRef.current
         if (!engine) return
         playingRef.current = false
         engine.setPlaying(false)
-        engine.setFrame(engine.currentFrame + delta)
-        setState((s) => ({ ...s, playing: false }))
+        engine.setFrame(frame)
+        setState((s) => (s.playing ? { ...s, playing: false } : s))
       },
-      seek: (frame) => engineRef.current?.setFrame(frame),
       setSpeed: (speed) => {
         speedRef.current = speed
         engineRef.current?.setSpeed(speed)

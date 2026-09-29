@@ -1,6 +1,7 @@
 import * as React from "react"
 
-import { getJsonOrNull } from "@/lib/api"
+import { useResource } from "@/hooks/use-resource"
+import { getJson } from "@/lib/api"
 import type { CameraSample, CameraTrackResponse } from "./types"
 
 const DEFAULT_FPS = 30
@@ -27,17 +28,16 @@ export function buildCameraSamples(ct: CameraTrackResponse): CameraTrackInfo {
   return { fps: ct.fps || DEFAULT_FPS, cameraByFrame: map }
 }
 
-/** Fetches /camera/track once; falls back to 30 fps and no marker when absent. */
-export function useCameraTrack(): CameraTrackInfo {
-  const [info, setInfo] = React.useState<CameraTrackInfo>(EMPTY)
-  React.useEffect(() => {
-    let alive = true
-    void getJsonOrNull<CameraTrackResponse>("/camera/track").then((ct) => {
-      if (alive && ct) setInfo(buildCameraSamples(ct))
-    })
-    return () => {
-      alive = false
-    }
-  }, [])
-  return info
+/**
+ * Fetches /camera/track once (the server answers 200 with empty frames when the
+ * camera stage hasn't run, so any throw is a real failure). The camera is
+ * secondary here: on error the panel still works at 30 fps with no marker, and
+ * `error` lets it say so instead of pretending the camera was never solved.
+ */
+export function useCameraTrack(): CameraTrackInfo & { error: string | null } {
+  const { state } = useResource((signal) => getJson<CameraTrackResponse>("/camera/track", { signal }), [])
+  return React.useMemo(
+    () => ({ ...(state.status === "ready" ? buildCameraSamples(state.data) : EMPTY), error: state.status === "error" ? state.error : null }),
+    [state],
+  )
 }

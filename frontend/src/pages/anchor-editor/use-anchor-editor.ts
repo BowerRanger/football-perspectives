@@ -14,6 +14,7 @@ import {
 import { useCameraData, useCatalogues, usePitchLines, useShotAnchors, useShotList } from "./use-anchor-data"
 import { useEditorKeys } from "./use-editor-keys"
 import { useFramePlayer } from "./use-frame-player"
+import { useScopedKeyboard } from "./use-scoped-keyboard"
 import { usePlacement, type Flash } from "./use-placement"
 import { DEFAULT_VIEW } from "./types"
 import type { AnchorMap, CameraTrack, Vec2, ViewOptions } from "./types"
@@ -25,6 +26,12 @@ interface Options {
   shot?: string
   onShotChange?: (shot: string) => void
   embedded: boolean
+}
+
+export interface LoadIssue {
+  title: string
+  message: string
+  retry: () => void
 }
 
 const DEFAULT_FPS = 30
@@ -46,7 +53,7 @@ export function useAnchorEditor({ shot: shotProp, onShotChange, embedded }: Opti
   const [ownShot, setOwnShot] = React.useState("")
   const shot = shotProp ?? ownShot
   const [stadium, setStadium] = React.useState("")
-  const pitchLines = usePitchLines(stadium)
+  const { lines: pitchLines, error: pitchLinesError } = usePitchLines(stadium)
   const saved = useShotAnchors(shot)
   const camera = useCameraData(shot, pipeline.outputVersion)
   const track = camera.track?.clip_id === shot ? camera.track : null
@@ -219,11 +226,11 @@ export function useAnchorEditor({ shot: shotProp, onShotChange, embedded }: Opti
     setView((v) => ({ ...v, [key]: !v[key] }))
   }, [])
 
+  const keyboard = useScopedKeyboard(rootRef, embedded)
+
   useEditorKeys({
     rootRef,
     embedded,
-    player,
-    totalFrames,
     onEscape: placement.clear,
     onSave: () => void save(),
     onToggleView: toggleView,
@@ -241,9 +248,25 @@ export function useAnchorEditor({ shot: shotProp, onShotChange, embedded }: Opti
       ? `Loading ${shot}`
       : "No shot selected"
 
+  // Main payloads fail loudly (PanelError + Retry); optional overlays get a muted notice.
+  const loadErrors: LoadIssue[] = []
+  if (list.error) loadErrors.push({ title: "Could not list shots", message: list.error, retry: list.retry })
+  if (catalogues.error) {
+    loadErrors.push({ title: "Could not load the landmark catalogue", message: catalogues.error, retry: catalogues.retry })
+  }
+  if (camera.trackError) {
+    loadErrors.push({ title: `Could not load the camera track for ${shot}`, message: camera.trackError, retry: camera.retry })
+  }
+  const notices: string[] = []
+  if (catalogues.stadiumsError) notices.push(`Stadium list unavailable (${catalogues.stadiumsError}); mow-stripe lines can't be added.`)
+  if (pitchLinesError) notices.push(`Pitch line catalogue unavailable (${pitchLinesError}); the Lines palette is empty.`)
+  if (camera.detectedError) notices.push(`Detected-line overlay unavailable (${camera.detectedError}).`)
+
   return {
     rootRef,
     videoRef,
+    loadErrors,
+    notices,
     list,
     catalogues,
     pitchLines,
@@ -272,6 +295,8 @@ export function useAnchorEditor({ shot: shotProp, onShotChange, embedded }: Opti
     toggleView,
     player,
     totalFrames,
+    fps,
+    keyboard,
     imageSize,
     setMeta,
     placement,

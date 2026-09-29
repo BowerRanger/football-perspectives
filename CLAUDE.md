@@ -166,7 +166,7 @@ GPU: strongly recommended for `hmr_world` (GVHMR); 8GB VRAM minimum, 12GB+ recom
 
 `python recon.py serve --output ./output/` starts a FastAPI dashboard. The UI is a React + Vite + shadcn/ui SPA (source `frontend/`, conventions in `frontend/README.md`); its production build is committed to `src/web/static/app/` so serving needs no Node. After a frontend change run `npm run build` in `frontend/` and commit the build with the source (the web feature tests grep the committed bundle). Pages, all inside one sidebar shell (dark by default, light/system toggle):
 
-- `/?stage=<name>` — pipeline dashboard: stage status (complete / partial / running / failed), run controls (Continue, Re-run clean with a dry-run list of what is cleared, Run all), run log dock (reattaches after reload), and one panel per stage.
+- `/?stage=<name>` — pipeline dashboard: stage status (complete / partial / running / failed), run controls (Continue, Re-run clean with a dry-run list of what is cleared, Run all), run log dock (virtualised; reattaches after reload; Cancel interrupts the running job via `POST /api/jobs/{id}/cancel`), and one panel per stage. Destructive track edits are undoable (`/api/tracks/undo`, snapshots in `tracks/.undo/`).
 - `/anchor_editor` — place pitch landmarks on keyframes; the camera stage propagates between them (also embedded in the Camera panel).
 - `/ball-anchor-editor?shot=` — ball anchors, touches, goal impacts, pitch fixes, shot chains (also embedded in the Ball panel; one implementation, full-payload saves).
 - `/viewer?shot=` — 3D scene viewer (players, ball, solved broadcast camera) with playback (also embedded in the Export panel).

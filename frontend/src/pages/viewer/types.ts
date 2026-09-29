@@ -117,6 +117,8 @@ export interface SceneData {
   match: MatchInfo | null
   colours: KitColours
   playerSource: "refined_poses" | "hmr_world"
+  /** Optional data that failed to load (match info, ball track, config, some player poses). */
+  warnings: string[]
 }
 
 export type CameraMode = "overview" | "tactical" | "behind-goal" | "tracked"

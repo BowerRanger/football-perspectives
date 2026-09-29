@@ -2,63 +2,40 @@ import * as React from "react"
 import { useSearchParams } from "react-router"
 
 import { PageHeader } from "@/components/page-header"
+import { PanelError } from "@/components/panel"
+import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
-import { getJsonOrNull } from "@/lib/api"
+import { getJson } from "@/lib/api"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useResource } from "@/hooks/use-resource"
 import { cn } from "@/lib/utils"
 import { EmptyOverlay, ErrorOverlay, LoadingOverlay, MatchHeader, PlayerLegend } from "./overlays"
 import { Transport } from "./transport"
-import { useViewer, type ViewerActions } from "./use-viewer"
+import { useViewer } from "./use-viewer"
+import { useScopedKeyboard } from "@/pages/anchor-editor/use-scoped-keyboard"
 
-const INTERACTIVE = "button,input,select,textarea,[role=combobox],[role=slider],[role=option]"
-
-/** Space play/pause, arrows step (Shift = 10). Ignores keys aimed at other controls. */
-function useViewerKeys(actions: ViewerActions, target: HTMLElement | null, embedded: boolean) {
-  React.useEffect(() => {
-    const el: HTMLElement | Window | null = embedded ? target : window
-    if (!el) return
-    const onKey = (e: Event) => {
-      const ev = e as KeyboardEvent
-      if (ev.metaKey || ev.ctrlKey || ev.altKey) return
-      const t = ev.target instanceof Element ? ev.target : null
-      const inField = !!t?.closest("input,textarea,select,[role=combobox],[role=slider]")
-      if (ev.key === " " && !t?.closest(INTERACTIVE)) {
-        ev.preventDefault()
-        actions.togglePlay()
-      } else if ((ev.key === "ArrowLeft" || ev.key === "ArrowRight") && !inField) {
-        ev.preventDefault()
-        actions.step((ev.key === "ArrowLeft" ? -1 : 1) * (ev.shiftKey ? 10 : 1))
-      }
-    }
-    el.addEventListener("keydown", onKey)
-    return () => el.removeEventListener("keydown", onKey)
-  }, [actions, target, embedded])
-}
-
-/** The reusable 3D viewer. Embedded mode fills its parent and omits page chrome. */
+/**
+ * The reusable 3D viewer. Embedded mode fills its parent and omits page chrome.
+ * Playback keys (Space, arrows, Home/End) come from the transport's FramePlayer,
+ * which is the single owner of the keyboard while the viewer is mounted.
+ */
 export function Viewer({ embedded = false, shot }: { embedded?: boolean; shot?: string }) {
   const { containerRef, state, actions } = useViewer(shot)
   const isMobile = useIsMobile()
   const rootRef = React.useRef<HTMLDivElement>(null)
-  const [rootEl, setRootEl] = React.useState<HTMLDivElement | null>(null)
-  useViewerKeys(actions, rootEl, embedded)
-  const setRoot = React.useCallback((el: HTMLDivElement | null) => {
-    rootRef.current = el
-    setRootEl(el)
-  }, [])
+  // Embedded (Export stage) it shares the page with other players: own the keys only while in use.
+  const keyboard = useScopedKeyboard(rootRef, embedded)
   const { data, phase } = state
   const ready = phase === "ready" && data !== null
 
   return (
     <div
-      ref={setRoot}
-      tabIndex={embedded ? 0 : -1}
+      ref={rootRef}
       aria-label="3D scene viewer"
-      onPointerDown={() => rootRef.current?.focus({ preventScroll: true })}
       className={cn(
-        "relative isolate size-full min-h-64 overflow-hidden bg-stage text-stage-foreground outline-none",
-        embedded ? "rounded-md focus-visible:ring-[3px] focus-visible:ring-ring/50" : "",
+        "relative isolate size-full min-h-64 overflow-hidden bg-stage text-stage-foreground",
+        embedded ? "rounded-md" : "",
       )}
     >
       <div ref={containerRef} className="absolute inset-0" />
@@ -79,7 +56,17 @@ export function Viewer({ embedded = false, shot }: { embedded?: boolean; shot?: 
               />
             </div>
           </div>
-          <Transport data={data} state={state} actions={actions} className="absolute inset-x-2 bottom-2 z-10" />
+          {data.warnings.length > 0 ? (
+            <ul
+              aria-label="Unavailable optional data"
+              className="pointer-events-none absolute inset-x-2 bottom-24 z-10 space-y-0.5 text-xs text-stage-foreground/70 sm:bottom-16"
+            >
+              {data.warnings.map((w) => (
+                <li key={w}>{w}</li>
+              ))}
+            </ul>
+          ) : null}
+          <Transport data={data} state={state} actions={actions} keyboard={keyboard} className="absolute inset-x-2 bottom-2 z-10" />
         </>
       ) : null}
       {phase === "loading" ? <LoadingOverlay progress={state.progress} /> : null}
@@ -108,16 +95,10 @@ function ShotSelect({ shots, value, onChange }: { shots: string[]; value: string
 
 export default function ViewerPage() {
   const [params, setParams] = useSearchParams()
-  const [shots, setShots] = React.useState<string[] | null>(null)
   const shotParam = params.get("shot") || undefined
-
-  React.useEffect(() => {
-    const controller = new AbortController()
-    getJsonOrNull<{ shots?: string[] }>("/api/output/shots", { signal: controller.signal }).then((r) => {
-      if (!controller.signal.aborted) setShots(r?.shots ?? [])
-    })
-    return () => controller.abort()
-  }, [])
+  // /api/output/shots answers 200 with an empty list when nothing is prepared, so a rejection is a real failure.
+  const shotList = useResource((signal) => getJson<{ shots?: string[] }>("/api/output/shots", { signal }), [])
+  const shots = shotList.state.status === "ready" ? (shotList.state.data.shots ?? []) : null
 
   const shot = shotParam ?? shots?.[0]
   const onShot = React.useCallback(
@@ -137,7 +118,23 @@ export default function ViewerPage() {
         actions={<ShotSelect shots={shots ?? []} value={shot ?? ""} onChange={onShot} />}
       />
       <div className="min-h-0 flex-1">
-        {shots === null ? <Skeleton className="size-full rounded-none" /> : <Viewer shot={shot} />}
+        {shotList.state.status === "error" ? (
+          <div className="p-4">
+            <PanelError
+              title="Could not list shots"
+              message={shotList.state.error}
+              action={
+                <Button variant="outline" size="sm" className="mt-2" onClick={shotList.retry}>
+                  Retry
+                </Button>
+              }
+            />
+          </div>
+        ) : shots === null ? (
+          <Skeleton className="size-full rounded-none" />
+        ) : (
+          <Viewer shot={shot} />
+        )}
       </div>
     </div>
   )

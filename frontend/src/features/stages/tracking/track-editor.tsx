@@ -2,6 +2,7 @@ import * as React from "react"
 import { toast } from "sonner"
 
 import { PanelEmpty, PanelError } from "@/components/panel"
+import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useConfirm } from "@/hooks/use-dialogs"
@@ -13,6 +14,7 @@ import { TrackToolbar } from "./toolbar"
 import { TrackVideo, type TrackVideoHandle } from "./track-video"
 import { IGNORE_NAME, type FrameBox, type PlayerGroup } from "./types"
 import { useTrackEditorData } from "./use-track-editor-data"
+import { useTrackUndo } from "./use-track-undo"
 
 const FLASH_MS = 800
 const EMPTY_BOXES: ReadonlyMap<number, FrameBox[]> = new Map()
@@ -29,6 +31,7 @@ function uniqueNames(names: Iterable<string | null | undefined>): string[] {
 export function TrackEditor({ shotId }: { shotId: string }) {
   const confirm = useConfirm()
   const { state, reload, applyName } = useTrackEditorData(shotId)
+  const undoer = useTrackUndo(reload)
   const videoRef = React.useRef<TrackVideoHandle>(null)
   const rowEls = React.useRef(new Map<string, HTMLElement>())
   const [selected, setSelected] = React.useState<ReadonlySet<string>>(new Set())
@@ -67,12 +70,12 @@ export function TrackEditor({ shotId }: { shotId: string }) {
   }, [])
 
   /** Run a mutation, then reload from the server and clear the selection. */
-  async function mutate(label: string, work: () => Promise<string>, failTitle: string) {
+  async function mutate(label: string, work: () => Promise<{ message: string; undoId?: string | null }>, failTitle: string) {
     setBusy(label)
     try {
-      const message = await work()
+      const { message, undoId } = await work()
       setStatus(message)
-      toast.success(message)
+      undoer.announce(message, undoId)
       setSelected(new Set())
       await reload()
     } catch (err) {
@@ -124,8 +127,8 @@ export function TrackEditor({ shotId }: { shotId: string }) {
       return
     }
     await mutate("split", async () => {
-      await api.splitTrack(shotId, target.track_id, f)
-      return `Split ${target.track_id} at frame ${f}`
+      const out = await api.splitTrack(shotId, target.track_id, f)
+      return { message: `Split ${target.track_id} at frame ${f}`, undoId: out.undo_id }
     }, "Split failed")
   }
 
@@ -133,14 +136,14 @@ export function TrackEditor({ shotId }: { shotId: string }) {
     const label = g.name && g.name !== IGNORE_NAME ? g.name : g.key
     const ok = await confirm({
       title: `Delete ${label}?`,
-      description: `Removes ${plural(g.tracks.length, "track")} (${g.tracks.map((t) => t.track_id).join(", ")}) from ${shotId}. This cannot be undone.`,
+      description: `Removes ${plural(g.tracks.length, "track")} (${g.tracks.map((t) => t.track_id).join(", ")}) from ${shotId}. You can undo this from the toolbar.`,
       confirmLabel: "Delete",
       destructive: true,
     })
     if (!ok) return
     await mutate("delete", async () => {
-      await Promise.all(g.tracks.map((t) => api.deleteTrack(shotId, t.track_id)))
-      return `Deleted ${label}`
+      const out = await api.deleteTracksBulk(shotId, g.tracks.map((t) => t.track_id))
+      return { message: `Deleted ${label}`, undoId: out.undo_id }
     }, "Delete failed")
   }
 
@@ -149,14 +152,14 @@ export function TrackEditor({ shotId }: { shotId: string }) {
     if (ids.length === 0) return
     const ok = await confirm({
       title: `Delete ${plural(selected.size, "player")}?`,
-      description: `Removes ${plural(ids.length, "track")} from ${shotId}. This cannot be undone.`,
+      description: `Removes ${plural(ids.length, "track")} from ${shotId}. You can undo this from the toolbar.`,
       confirmLabel: `Delete ${plural(ids.length, "track")}`,
       destructive: true,
     })
     if (!ok) return
     await mutate("delete", async () => {
-      await api.deleteTracksBulk(shotId, ids)
-      return `Deleted ${plural(ids.length, "track")}`
+      const out = await api.deleteTracksBulk(shotId, ids)
+      return { message: `Deleted ${plural(ids.length, "track")}`, undoId: out.undo_id }
     }, "Delete failed")
   }
 
@@ -165,20 +168,23 @@ export function TrackEditor({ shotId }: { shotId: string }) {
     if (selected.size < 2) return
     await mutate("merge", async () => {
       const out = await api.mergeTracks(shotId, ids)
-      return `Merged into ${out.merged_into}${collisionNote(out.frame_collisions)}`
+      return { message: `Merged into ${out.merged_into}${collisionNote(out.frame_collisions)}`, undoId: out.undo_id }
     }, "Merge failed")
   }
 
   async function mergeByName() {
     const ok = await confirm({
       title: "Merge tracks by player name?",
-      description: `Across EVERY shot, all tracks sharing a player name are rewritten to one player_id. Named tracks in this shot: ${allNames.length}. This cannot be undone.`,
+      description: `Across EVERY shot, all tracks sharing a player name are rewritten to one player_id. Named tracks in this shot: ${allNames.length}. You can undo this from the toolbar.`,
       confirmLabel: "Merge by name",
     })
     if (!ok) return
     await mutate("merge-by-name", async () => {
       const out = await api.mergeByName()
-      return `Merged ${plural(out.tracks_removed, "track")} across ${plural(out.merged_groups, "name")}${collisionNote(out.frame_collisions)}`
+      return {
+        message: `Merged ${plural(out.tracks_removed, "track")} across ${plural(out.merged_groups, "name")}${collisionNote(out.frame_collisions)}`,
+        undoId: out.undo_id,
+      }
     }, "Merge by name failed")
   }
 
@@ -192,7 +198,7 @@ export function TrackEditor({ shotId }: { shotId: string }) {
     if (!ok) return
     await mutate("ignore", async () => {
       const out = await api.ignoreUnknown(shotId)
-      return `Marked ${out.count} as 'ignore'`
+      return { message: `Marked ${out.count} as 'ignore'`, undoId: out.undo_id }
     }, "Ignore failed")
   }
 
@@ -200,14 +206,14 @@ export function TrackEditor({ shotId }: { shotId: string }) {
     const ignored = editable.filter((t) => t.player_name === IGNORE_NAME).length
     const ok = await confirm({
       title: "Delete every ignored track?",
-      description: `Removes all tracks named 'ignore' across every shot (${plural(ignored, "track")} in ${shotId}). This cannot be undone.`,
+      description: `Removes all tracks named 'ignore' across every shot (${plural(ignored, "track")} in ${shotId}). You can undo this from the toolbar.`,
       confirmLabel: "Delete ignored",
       destructive: true,
     })
     if (!ok) return
     await mutate("delete-ignored", async () => {
       const out = await api.deleteIgnored()
-      return `Deleted ${plural(out.deleted, "ignored track")}`
+      return { message: `Deleted ${plural(out.deleted, "ignored track")}`, undoId: out.undo_id }
     }, "Delete ignored failed")
   }
 
@@ -224,7 +230,7 @@ export function TrackEditor({ shotId }: { shotId: string }) {
       }
       const msg = `Filled ${plural(out.total_frames_added, "frame")} across ${plural(out.results.length, "track")}`
       setStatus(msg)
-      toast.success(msg)
+      undoer.announce(msg, out.undo_id)
       setSelected(new Set())
       await reload()
     } catch (err) {
@@ -236,7 +242,17 @@ export function TrackEditor({ shotId }: { shotId: string }) {
 
   if (state.status === "loading") return <EditorSkeleton />
   if (state.status === "error") {
-    return <PanelError title="Failed to load tracks for this shot" message={state.message} />
+    return (
+      <PanelError
+        title="Failed to load tracks for this shot"
+        message={state.message}
+        action={
+          <Button size="sm" variant="outline" className="mt-2" onClick={() => void reload()}>
+            Retry
+          </Button>
+        }
+      />
+    )
   }
   if (groups.length === 0) {
     return (
@@ -258,6 +274,8 @@ export function TrackEditor({ shotId }: { shotId: string }) {
         onDeleteSelected={deleteSelected}
         onInterpolate={interpolate}
         onDeleteIgnored={deleteIgnored}
+        undoLabel={undoer.newest?.label ?? null}
+        onUndo={() => void undoer.undo()}
       />
       <p role="status" aria-live="polite" className="min-h-4 text-xs text-muted-foreground">
         {status}

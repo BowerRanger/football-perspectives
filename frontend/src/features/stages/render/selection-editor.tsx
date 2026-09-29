@@ -41,9 +41,8 @@ export function SelectionEditor({ shotId }: { shotId: string }) {
     setStatus("")
     void Promise.all([
       getJson<RenderSelection>(`/api/render/selection${qs({ shot: shotId })}`),
-      getJson<{ players?: AvailablePlayer[] }>(`/api/export/available-players${qs({ shot: shotId })}`).catch(
-        () => ({ players: [] as AvailablePlayer[] }),
-      ),
+      // 200 {players: []} when hmr_world hasn't run; a failure is an error, not "no players".
+      getJson<{ players?: AvailablePlayer[] }>(`/api/export/available-players${qs({ shot: shotId })}`),
     ])
       .then(([sel, avail]) => {
         if (cancelled) return

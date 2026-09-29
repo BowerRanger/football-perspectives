@@ -1,8 +1,8 @@
-import * as React from "react"
-
-import { Panel, PanelEmpty, PanelSkeleton } from "@/components/panel"
+import { Panel, PanelEmpty, PanelError, PanelSkeleton } from "@/components/panel"
+import { Button } from "@/components/ui/button"
+import { useResource } from "@/hooks/use-resource"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { getJsonOrNull } from "@/lib/api"
+import { getJson, getJsonOr404 } from "@/lib/api"
 import { fmtInt, playerColour } from "@/lib/format"
 import { ConfidenceCell, PlayerCell } from "../hmr-world/player-cells"
 import { TrajectoryPanel } from "../hmr-world/trajectory-panel"
@@ -26,16 +26,18 @@ interface Loaded {
   previews: (Coloured<RefinedPlayer> & { data: PosePreview })[]
 }
 
-async function load(): Promise<Loaded> {
+// /players and /summary answer 200 ([] / {}) before the stage has run; a
+// preview 404 means that one player's track is missing. Everything else throws.
+async function load(signal: AbortSignal): Promise<Loaded> {
   const [list, summary] = await Promise.all([
-    getJsonOrNull<{ players?: RefinedPlayer[] }>("/refined_poses/players"),
-    getJsonOrNull<RefinedSummary>("/refined_poses/summary"),
+    getJson<{ players?: RefinedPlayer[] }>("/refined_poses/players", { signal }),
+    getJson<RefinedSummary>("/refined_poses/summary", { signal }),
   ])
-  const players = (list?.players ?? []).map((p, i) => ({ ...p, colour: playerColour(i) }))
+  const players = (list.players ?? []).map((p, i) => ({ ...p, colour: playerColour(i) }))
   const loaded = await Promise.all(
     players.map(async (p) => ({
       ...p,
-      data: await getJsonOrNull<PosePreview>(`/refined_poses/preview?player_id=${encodeURIComponent(p.player_id)}`),
+      data: await getJsonOr404<PosePreview>(`/refined_poses/preview?player_id=${encodeURIComponent(p.player_id)}`, { signal }),
     })),
   )
   const previews = loaded.flatMap((p) =>
@@ -84,19 +86,23 @@ function PlayersTable({ players }: { players: readonly Coloured<RefinedPlayer>[]
 }
 
 export default function RefinedPosesStage() {
-  const [data, setData] = React.useState<Loaded | null>(null)
+  const { state, retry } = useResource(load, [])
 
-  React.useEffect(() => {
-    let alive = true
-    void load().then((d) => {
-      if (alive) setData(d)
-    })
-    return () => {
-      alive = false
-    }
-  }, [])
-
-  if (!data) return <PanelSkeleton rows={6} />
+  if (state.status === "loading") return <PanelSkeleton rows={6} />
+  if (state.status === "error") {
+    return (
+      <PanelError
+        title="Could not load refined poses"
+        message={state.error}
+        action={
+          <Button variant="outline" size="sm" className="mt-2" onClick={retry}>
+            Retry
+          </Button>
+        }
+      />
+    )
+  }
+  const data = state.data
   if (data.players.length === 0) {
     return (
       <PanelEmpty

@@ -31,6 +31,8 @@ export function useFramePlayer(onFrameChange?: (frame: number) => void): FramePl
   fpsRef.current = fps
   const videoElRef = React.useRef<HTMLVideoElement | null>(null)
   videoElRef.current = video
+  const totalRef = React.useRef(totalFrames)
+  totalRef.current = totalFrames
   const cbRef = React.useRef(onFrameChange)
   cbRef.current = onFrameChange
 
@@ -95,7 +97,8 @@ export function useFramePlayer(onFrameChange?: (frame: number) => void): FramePl
     (fi: number) => {
       if (!video) return
       video.pause()
-      const clamped = Math.max(0, fi)
+      const last = totalRef.current > 0 ? totalRef.current - 1 : Number.POSITIVE_INFINITY
+      const clamped = Math.max(0, Math.min(last, Math.trunc(fi)))
       video.currentTime = clamped / fpsRef.current
       setFrame(clamped)
     },

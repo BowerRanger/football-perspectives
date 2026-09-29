@@ -1,10 +1,10 @@
 import * as React from "react"
 
 import { Panel } from "@/components/panel"
+import { FramePlayer } from "@/components/frame-player"
 import { Badge } from "@/components/ui/badge"
 import { getJsonOrNull } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { TransportBar } from "./transport-bar"
 import { CANVAS_H, CANVAS_W } from "./pitch-canvas"
 import {
   buildTrajectoryPlayers,
@@ -20,6 +20,8 @@ interface TrajectoryPanelProps {
   /** Shot whose clip plays beside the pitch; falls back to the first tracked shot. */
   shotId: string | null
   title?: string
+  /** Attach the shared frame shortcuts; pass false when another player owns them on the page. */
+  keyboard?: boolean
 }
 
 function useClipSrc(shotId: string | null): string | null {
@@ -50,16 +52,16 @@ function LegendBadge({ label, colour, hidden, onToggle }: { label: string; colou
 }
 
 /** Top-down per-player trajectories on a pitch, synced to the shot clip. */
-export function TrajectoryPanel({ players: inputs, shotId, title = "Top-down trajectories" }: TrajectoryPanelProps) {
+export function TrajectoryPanel({ players: inputs, shotId, title = "Top-down trajectories", keyboard = true }: TrajectoryPanelProps) {
   const players = React.useMemo(() => buildTrajectoryPlayers(inputs), [inputs])
   const { min, max } = React.useMemo(() => frameRange(players), [players])
-  const { fps, cameraByFrame } = useCameraTrack()
+  const { fps, cameraByFrame, error: cameraError } = useCameraTrack()
   const clipSrc = useClipSrc(shotId)
   const canvasRef = React.useRef<HTMLCanvasElement>(null)
   const videoRef = React.useRef<HTMLVideoElement>(null)
   const [videoReady, setVideoReady] = React.useState(false)
   const [hidden, setHidden] = React.useState<ReadonlySet<string>>(new Set())
-  const { frame, playing, seek, toggle, step } = useTrajectoryPlayback({ min, max, fps, videoRef, videoReady })
+  const { frame, playing, seek, toggle } = useTrajectoryPlayback({ min, max, fps, videoRef, videoReady })
 
   React.useEffect(() => {
     const ctx = canvasRef.current?.getContext("2d")
@@ -76,7 +78,6 @@ export function TrajectoryPanel({ players: inputs, shotId, title = "Top-down tra
       return next
     })
 
-  const sec = (frame / Math.max(1, fps)).toFixed(2)
   return (
     <Panel
       title={title}
@@ -110,17 +111,23 @@ export function TrajectoryPanel({ players: inputs, shotId, title = "Top-down tra
             )}
           </div>
         </div>
-        <TransportBar
-          playing={playing}
-          onToggle={toggle}
-          onPrev={() => step(-1)}
-          onNext={() => step(1)}
-          value={frame}
+        <FramePlayer
+          frame={frame}
           min={min}
           max={max}
+          fps={fps}
+          playing={playing}
+          onTogglePlay={toggle}
           onSeek={seek}
-          readout={`${frame} (${sec}s)`}
+          keyboard={keyboard}
+          keyHints={keyboard}
+          label="Trajectory frame"
         />
+        {cameraError ? (
+          <p role="status" className="text-xs text-warning">
+            Camera track could not be loaded ({cameraError}); the camera marker is hidden and playback assumes 30 fps.
+          </p>
+        ) : null}
         <div className="flex flex-wrap gap-1.5">
           {players.map((p) => (
             <LegendBadge key={p.pid} label={p.label} colour={p.colour} hidden={hidden.has(p.pid)} onToggle={() => toggleHidden(p.pid)} />

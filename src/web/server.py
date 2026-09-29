@@ -49,14 +49,17 @@ Static / export
     GET    /api/export/metadata
 """
 
+import ctypes
 import io
 import json
 import logging
 import re
 import shutil
 import sys
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from queue import Queue
@@ -354,15 +357,26 @@ def _clear_stage_outputs(output_dir: Path, stage: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+class JobCancelled(BaseException):
+    """Raised inside a job's worker thread when the operator cancels it.
+
+    A BaseException (like KeyboardInterrupt) so the pipeline's broad
+    ``except Exception`` handlers can't swallow it; context-manager shims
+    (GVHMR device/cwd redirects, vendored patches) still unwind normally.
+    """
+
+
 @dataclass
 class Job:
     job_id: str
     stages: str
-    status: str = "running"  # running | done | error
+    status: str = "running"  # running | done | error | cancelled
     log_queue: Queue = field(default_factory=Queue)
     log_lines: list[str] = field(default_factory=list)
     error: str | None = None
     started_at: float = field(default_factory=time.time)
+    thread_ident: int | None = None
+    cancel_requested: bool = False
 
 
 _jobs: dict[str, Job] = {}
@@ -453,7 +467,26 @@ def _emit(job: Job, line: str) -> None:
     job.log_queue.put(line)
 
 
+def _request_cancel(job: Job) -> bool:
+    """Raise JobCancelled in the job's worker thread at its next bytecode.
+
+    Long native calls (a torch op, a video decode) finish first, then the
+    exception lands — so a cancel takes effect within one frame or chunk.
+    """
+    job.cancel_requested = True
+    if job.thread_ident is None:
+        return False
+    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_ulong(job.thread_ident), ctypes.py_object(JobCancelled)
+    )
+    if res > 1:  # hit more than one thread: undo and report failure
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(job.thread_ident), None)
+        return False
+    return res == 1
+
+
 def _run_job(job: Job, output_dir: Path, config_path: Path | None, params: RunRequest) -> None:
+    job.thread_ident = threading.get_ident()
     log_dir = output_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"job_{job.job_id}.log"
@@ -529,6 +562,12 @@ def _run_job(job: Job, output_dir: Path, config_path: Path | None, params: RunRe
             **extra_kwargs,
         )
         job.status = "done"
+    except JobCancelled:
+        job.status = "cancelled"
+        job.error = "Cancelled by operator"
+        line = f"[job {job.job_id}] cancelled by operator — the interrupted stage's output may be partial"
+        job.log_lines.append(line)
+        job.log_queue.put(line)
     except Exception as exc:
         import traceback
 
@@ -569,7 +608,7 @@ async def _log_stream(job: Job):
             line = job.log_lines[seen]
             seen += 1
             yield f"event: log\ndata: {json.dumps({'line': line})}\n\n"
-        if job.status in ("done", "error") and seen >= len(job.log_lines):
+        if job.status in ("done", "error", "cancelled") and seen >= len(job.log_lines):
             break
         await asyncio.sleep(0.1)
 
@@ -901,6 +940,21 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             {"job_id": j.job_id, "stages": j.stages, "status": j.status, "started_at": j.started_at}
             for j in jobs
         ]
+
+    @app.post("/api/jobs/{job_id}/cancel", status_code=202)
+    def cancel_job(job_id: str):
+        """Interrupt a running job. The stage in flight stops at its next
+        Python step; its output may be partial (re-run or Continue it)."""
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if job.status != "running":
+            raise HTTPException(status_code=409, detail=f"Job {job_id} is not running ({job.status})")
+        if not job.cancel_requested:
+            _emit(job, f"[job {job_id}] cancel requested — stopping at the next safe point…")
+        _request_cancel(job)
+        return {"job_id": job_id, "status": "cancelling"}
 
     @app.get("/api/jobs/{job_id}/status")
     def job_status(job_id: str):
@@ -3485,6 +3539,90 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                 _tracks_file_locks[shot_id] = lock
             return lock
 
+    # Undo stack for destructive track edits. Each operation snapshots the
+    # tracks files it is about to rewrite into tracks/.undo/<id>/ before
+    # writing; POST /api/tracks/undo restores the newest snapshot. Re-running
+    # tracking clears tracks/ (and so the history) — undo only spans edits.
+    _UNDO_KEEP = 20
+    _undo_mu = Lock()
+
+    def _undo_root() -> Path:
+        return _tracks_dir() / ".undo"
+
+    def _undo_entries() -> list[Path]:
+        root = _undo_root()
+        if not root.exists():
+            return []
+        entries = [d for d in root.iterdir() if (d / "meta.json").is_file()]
+        return sorted(entries, key=lambda d: d.name, reverse=True)
+
+    @contextmanager
+    def _undoable(label: str, paths: list[Path]):
+        """Snapshot ``paths`` before an edit; yields the undo id.
+
+        The snapshot is dropped if the edit raises or changed nothing.
+        """
+        with _undo_mu:
+            op_id = f"{time.time_ns():020d}"
+            op_dir = _undo_root() / op_id
+            op_dir.mkdir(parents=True)
+            files = [pth for pth in paths if pth.is_file()]
+            for pth in files:
+                shutil.copy2(pth, op_dir / pth.name)
+            (op_dir / "meta.json").write_text(json.dumps({
+                "undo_id": op_id,
+                "label": label,
+                "created_at": time.time(),
+                "files": [pth.name for pth in files],
+            }))
+        try:
+            yield op_id
+        except BaseException:
+            shutil.rmtree(op_dir, ignore_errors=True)
+            raise
+        unchanged = all(
+            (op_dir / pth.name).read_bytes() == pth.read_bytes() for pth in files if pth.is_file()
+        )
+        if unchanged:
+            shutil.rmtree(op_dir, ignore_errors=True)
+            return
+        with _undo_mu:
+            for stale in _undo_entries()[_UNDO_KEEP:]:
+                shutil.rmtree(stale, ignore_errors=True)
+
+    def _all_tracks_files() -> list[Path]:
+        return sorted(_tracks_dir().glob("*_tracks.json")) if _tracks_dir().exists() else []
+
+    @app.get("/api/tracks/undo")
+    def list_track_undo():
+        """Undoable track edits, newest first."""
+        return [json.loads((d / "meta.json").read_text()) for d in _undo_entries()]
+
+    @app.post("/api/tracks/undo")
+    async def undo_track_edit(request: Request):
+        """Restore the newest snapshot. ``{"undo_id"}`` (optional) must match
+        the newest entry — undo never skips over a later edit."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        wanted = (body or {}).get("undo_id") if isinstance(body, dict) else None
+        with _undo_mu:
+            entries = _undo_entries()
+            if not entries:
+                raise HTTPException(status_code=404, detail="Nothing to undo")
+            newest = entries[0]
+            meta = json.loads((newest / "meta.json").read_text())
+            if wanted and wanted != meta["undo_id"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"A later edit ({meta['label']}) must be undone first",
+                )
+            for name in meta["files"]:
+                shutil.copy2(newest / name, _tracks_dir() / name)
+            shutil.rmtree(newest, ignore_errors=True)
+        return {"undone": meta["label"], "undo_id": meta["undo_id"], "files": meta["files"]}
+
     def _all_used_player_ids() -> set[str]:
         used: set[str] = set()
         if not _tracks_dir().exists():
@@ -3511,14 +3649,14 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         track_path = _tracks_path(shot_id)
         if not track_path.exists():
             raise HTTPException(status_code=404, detail=f"Tracks not found for {shot_id}")
-        with _tracks_lock(shot_id):
+        with _tracks_lock(shot_id), _undoable(f"Delete {track_id}", [track_path]) as undo_id:
             tr = TracksResult.load(track_path)
             before = len(tr.tracks)
             tr.tracks = [t for t in tr.tracks if t.track_id != track_id]
             if len(tr.tracks) == before:
                 raise HTTPException(status_code=404, detail=f"Track {track_id} not found in {shot_id}")
             tr.save(track_path)
-        return {"shot_id": shot_id, "track_id": track_id, "deleted": True}
+        return {"shot_id": shot_id, "track_id": track_id, "deleted": True, "undo_id": undo_id}
 
     @app.post("/api/tracks/{shot_id}/delete-bulk")
     async def delete_tracks_bulk(shot_id: str, request: Request):
@@ -3537,7 +3675,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
             raise HTTPException(status_code=400, detail="track_ids must be a list of strings")
         wanted = set(ids)
-        with _tracks_lock(shot_id):
+        label = f"Delete {len(wanted)} track{'s' if len(wanted) != 1 else ''}"
+        with _tracks_lock(shot_id), _undoable(label, [track_path]) as undo_id:
             tr = TracksResult.load(track_path)
             existing = {t.track_id for t in tr.tracks}
             missing = sorted(wanted - existing)
@@ -3547,6 +3686,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             "shot_id": shot_id,
             "deleted": sorted(wanted & existing),
             "missing": missing,
+            "undo_id": undo_id,
         }
 
     @app.post("/api/tracks/{shot_id}/interpolate-gaps")
@@ -3589,7 +3729,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         wanted = set(ids)
         results: list[dict[str, Any]] = []
         total_added = 0
-        with _tracks_lock(shot_id):
+        with _tracks_lock(shot_id), _undoable("Interpolate gaps", [track_path]) as undo_id:
             tr = TracksResult.load(track_path)
             existing = {t.track_id for t in tr.tracks}
             missing = sorted(wanted - existing)
@@ -3613,6 +3753,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             "results": results,
             "missing": missing,
             "total_frames_added": total_added,
+            "undo_id": undo_id if total_added > 0 else None,
         }
 
     @app.patch("/api/tracks/{shot_id}/{track_id}")
@@ -3656,6 +3797,12 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         track_path = _tracks_path(shot_id)
         if not track_path.exists():
             raise HTTPException(status_code=404, detail=f"Tracks not found for {shot_id}")
+        with _undoable(f"Split {track_id} at frame {split_frame}", [track_path]) as undo_id:
+            return _split_track(tr_path=track_path, shot_id=shot_id, track_id=track_id,
+                                split_frame=split_frame, undo_id=undo_id)
+
+    def _split_track(*, tr_path: Path, shot_id: str, track_id: str, split_frame: int, undo_id: str):
+        track_path = tr_path
         tr = TracksResult.load(track_path)
         target = next((t for t in tr.tracks if t.track_id == track_id), None)
         if target is None:
@@ -3694,6 +3841,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             "new_player_id": new_player_id,
             "original_frames": len(before),
             "new_frames": len(after),
+            "undo_id": undo_id,
         }
 
     def _physically_merge(
@@ -3748,6 +3896,12 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         track_path = _tracks_path(shot_id)
         if not track_path.exists():
             raise HTTPException(status_code=404, detail=f"Tracks not found for {shot_id}")
+        label = "Merge " + " + ".join(sorted(str(t) for t in track_ids))
+        with _undoable(label, [track_path]) as undo_id:
+            return _merge_tracks(track_path=track_path, shot_id=shot_id, track_ids=track_ids,
+                                 body=body, undo_id=undo_id)
+
+    def _merge_tracks(*, track_path: Path, shot_id: str, track_ids: list, body: dict, undo_id: str):
         tr = TracksResult.load(track_path)
 
         targets = [t for t in tr.tracks if t.track_id in track_ids]
@@ -3786,10 +3940,16 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
             "player_id": canonical_pid,
             "player_name": canonical_name,
             "frame_collisions": collisions,
+            "undo_id": undo_id,
         }
 
     @app.post("/api/tracks/merge-by-name")
     def merge_tracks_by_name():
+        with _undoable("Merge by name (all shots)", _all_tracks_files()) as undo_id:
+            result = _merge_tracks_by_name()
+        return {**result, "undo_id": undo_id}
+
+    def _merge_tracks_by_name():
         if not _tracks_dir().exists():
             return {
                 "merged_groups": 0,
@@ -3873,31 +4033,33 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         track_path = _tracks_path(shot_id)
         if not track_path.exists():
             raise HTTPException(status_code=404, detail=f"Tracks not found for {shot_id}")
-        tr = TracksResult.load(track_path)
-        count = 0
-        for t in tr.tracks:
-            if t.class_name == "ball":
-                continue
-            if not t.player_name:
-                t.player_name = "ignore"
-                count += 1
-        tr.save(track_path)
-        return {"shot_id": shot_id, "count": count}
+        with _undoable(f"Ignore unknown in {shot_id}", [track_path]) as undo_id:
+            tr = TracksResult.load(track_path)
+            count = 0
+            for t in tr.tracks:
+                if t.class_name == "ball":
+                    continue
+                if not t.player_name:
+                    t.player_name = "ignore"
+                    count += 1
+            tr.save(track_path)
+        return {"shot_id": shot_id, "count": count, "undo_id": undo_id if count else None}
 
     @app.post("/api/tracks/delete-ignored")
     def delete_ignored_tracks():
         if not _tracks_dir().exists():
             return {"deleted": 0}
         deleted = 0
-        for tf in sorted(_tracks_dir().glob("*_tracks.json")):
-            tr = TracksResult.load(tf)
-            before = len(tr.tracks)
-            tr.tracks = [t for t in tr.tracks if t.player_name != "ignore"]
-            removed = before - len(tr.tracks)
-            if removed:
-                deleted += removed
-                tr.save(tf)
-        return {"deleted": deleted}
+        with _undoable("Delete ignored tracks (all shots)", _all_tracks_files()) as undo_id:
+            for tf in _all_tracks_files():
+                tr = TracksResult.load(tf)
+                before = len(tr.tracks)
+                tr.tracks = [t for t in tr.tracks if t.player_name != "ignore"]
+                removed = before - len(tr.tracks)
+                if removed:
+                    deleted += removed
+                    tr.save(tf)
+        return {"deleted": deleted, "undo_id": undo_id if deleted else None}
 
     @app.get("/anchor_editor")
     def anchor_editor_page():

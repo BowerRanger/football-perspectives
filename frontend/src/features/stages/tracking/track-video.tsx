@@ -1,9 +1,6 @@
 import * as React from "react"
-import { ChevronLeftIcon, ChevronRightIcon, PauseIcon, PlayIcon } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
-import { Kbd, KbdGroup } from "@/components/ui/kbd"
-import { Slider } from "@/components/ui/slider"
+import { FramePlayer } from "@/components/frame-player"
 import { drawTrackOverlay, hitTestBoxes } from "./overlay"
 import type { FrameBox } from "./types"
 import { videoUrl } from "./api"
@@ -23,18 +20,7 @@ interface TrackVideoProps {
   onPickTrack: (trackId: string) => void
 }
 
-const SKIP_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"])
-
-function isTypingTarget(t: EventTarget | null): boolean {
-  if (!(t instanceof HTMLElement)) return false
-  return SKIP_TAGS.has(t.tagName) || t.isContentEditable
-}
-
-function isActivatable(t: EventTarget | null): boolean {
-  return t instanceof HTMLElement && (t.tagName === "BUTTON" || t.tagName === "A" || t.getAttribute("role") === "slider")
-}
-
-/** Video + bbox overlay canvas + transport. Owns playback and keyboard shortcuts. */
+/** Video + bbox overlay canvas + transport. Playback and shortcuts come from FramePlayer. */
 export function TrackVideo({ ref, shotId, fps, boxesByFrame, nameByTrack, highlightIds, onPickTrack }: TrackVideoProps) {
   const videoRef = React.useRef<HTMLVideoElement>(null)
   const canvasRef = React.useRef<HTMLCanvasElement>(null)
@@ -76,13 +62,6 @@ export function TrackVideo({ ref, shotId, fps, boxesByFrame, nameByTrack, highli
     },
     [fps],
   )
-  const step = React.useCallback(
-    (delta: number) => {
-      const v = videoRef.current
-      if (v) seekToFrame(Math.round(v.currentTime * fps) + delta)
-    },
-    [fps, seekToFrame],
-  )
   const togglePlay = React.useCallback(() => {
     const v = videoRef.current
     if (!v) return
@@ -98,20 +77,6 @@ export function TrackVideo({ ref, shotId, fps, boxesByFrame, nameByTrack, highli
     }),
     [fps, seekToFrame],
   )
-
-  React.useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.metaKey || e.ctrlKey || e.altKey || isTypingTarget(e.target)) return
-      const big = e.shiftKey ? 10 : 1
-      if (e.key === "ArrowLeft" && !isActivatable(e.target)) step(-big)
-      else if (e.key === "ArrowRight" && !isActivatable(e.target)) step(big)
-      else if (e.key === " " && !isActivatable(e.target)) togglePlay()
-      else return
-      e.preventDefault()
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [step, togglePlay])
 
   function onCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
     const c = e.currentTarget
@@ -159,41 +124,16 @@ export function TrackVideo({ ref, shotId, fps, boxesByFrame, nameByTrack, highli
           onClick={onCanvasClick}
         />
       </div>
-      <div className="flex items-center gap-2">
-        <Button size="icon-sm" onClick={togglePlay} aria-label={playing ? "Pause" : "Play"}>
-          {playing ? <PauseIcon /> : <PlayIcon />}
-        </Button>
-        <Button size="icon-sm" variant="outline" onClick={() => step(-1)} aria-label="Previous frame">
-          <ChevronLeftIcon />
-        </Button>
-        <Button size="icon-sm" variant="outline" onClick={() => step(1)} aria-label="Next frame">
-          <ChevronRightIcon />
-        </Button>
-        <Slider
-          aria-label="Frame"
-          className="flex-1"
-          min={0}
-          max={Math.max(1, maxFrame)}
-          step={1}
-          value={[Math.min(frame, Math.max(1, maxFrame))]}
-          onValueChange={(v) => seekToFrame(v[0] ?? 0)}
-        />
-        <span className="min-w-20 text-right text-xs text-muted-foreground tabular-nums">Frame <span className="font-mono">{frame}</span></span>
-      </div>
-      <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            <KbdGroup className="font-sans">
-              <Kbd>Space</Kbd> play
-            </KbdGroup>
-            <KbdGroup className="font-sans">
-              <Kbd>←</Kbd>
-              <Kbd>→</Kbd> step
-            </KbdGroup>
-            <KbdGroup className="font-sans">
-              <Kbd>Shift</Kbd>+<Kbd>←</Kbd>
-              <Kbd>→</Kbd> ±10
-            </KbdGroup>
-            <span>Click a box to edit that player · shortcuts pause while typing</span>
-      </p>
+      <FramePlayer
+        frame={frame}
+        max={Math.max(1, maxFrame)}
+        playing={playing}
+        onTogglePlay={togglePlay}
+        onSeek={seekToFrame}
+        fps={fps}
+        keyHints
+      />
+      <p className="text-xs text-muted-foreground">Click a box to edit that player · shortcuts pause while typing</p>
     </div>
   )
 }

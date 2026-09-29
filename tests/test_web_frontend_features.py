@@ -71,6 +71,57 @@ def test_editors_are_components_not_iframes() -> None:
     assert_markers(source_text("features/stages/export"), ["<Viewer"], "export stage")
 
 
+def test_run_log_can_cancel_and_is_virtualised() -> None:
+    assert_markers(source_text("hooks/use-pipeline.tsx"), ["/cancel", '"cancelled"'], "pipeline store")
+    assert_markers(source_text("components/log-dock.tsx"), ["useVirtualizer", "Cancel run"], "log dock")
+    assert_markers(bundle_text(), ["/cancel", "Cancel run"], "committed build")
+
+
+def test_track_edits_are_undoable() -> None:
+    assert_markers(source_text("features/stages/tracking"), ["/api/tracks/undo", "Undo"], "tracking source")
+    assert_markers(bundle_text(), ["/api/tracks/undo"], "committed build")
+
+
+def test_every_transport_uses_the_shared_frame_player() -> None:
+    players = [
+        "features/stages/hmr-world/kp2d-viewer.tsx",
+        "features/stages/hmr-world/trajectory-panel.tsx",
+        "features/stages/camera/overlaid-pitch-map.tsx",
+        "features/stages/tracking/track-video.tsx",
+        "pages/viewer/transport.tsx",
+        "pages/anchor-editor/anchor-transport.tsx",
+        "pages/ball-anchor-editor/transport.tsx",
+    ]
+    for rel in players:
+        assert_markers(source_text(rel), ["<FramePlayer"], rel)
+    # No hand-rolled scrubbers left: the only Sliders outside the shared
+    # player are value controls (sync offsets, touch confidence).
+    from tests.frontend_source import FRONTEND_SRC
+
+    sliders = sorted(
+        str(p.relative_to(FRONTEND_SRC))
+        for p in FRONTEND_SRC.rglob("*.tsx")
+        if "<Slider" in p.read_text(encoding="utf-8") and "components/" not in str(p.relative_to(FRONTEND_SRC))
+    )
+    assert sliders == [
+        "features/stages/prepare-shots/sync-offsets.tsx",
+        "pages/ball-anchor-editor/authoring-panels.tsx",
+    ]
+
+
+def test_failed_reads_are_not_rendered_as_empty() -> None:
+    # getJsonOrNull swallows every failure; it is reserved for optional
+    # lookups. Main payloads use getJson / getJsonOr404 + useResource.
+    from tests.frontend_source import FRONTEND_SRC
+
+    uses = sum(
+        p.read_text(encoding="utf-8").count("getJsonOrNull<")
+        for p in FRONTEND_SRC.rglob("*.ts*")
+        if p.name != "api.ts" or "lib" not in p.parts
+    )
+    assert uses <= 6, f"{uses} best-effort reads — main payloads must surface errors"
+
+
 def test_unsaved_edits_are_guarded() -> None:
     for rel in ("pages/anchor-editor", "pages/ball-anchor-editor", "features/stages/prepare-shots"):
         assert_markers(source_text(rel), ["useUnsavedGuard("], rel)

@@ -3,36 +3,30 @@ import { useSearchParams } from "react-router"
 
 import { Panel, PanelEmpty, PanelError, PanelSkeleton } from "@/components/panel"
 import { ToneBadge } from "@/components/status"
+import { Button } from "@/components/ui/button"
 import { useConfirm } from "@/hooks/use-dialogs"
-import { errorMessage } from "@/lib/api"
+import { useResource } from "@/hooks/use-resource"
+import { getJson } from "@/lib/api"
 import { fmt, fmtInt, fmtPct } from "@/lib/format"
-import { loadBallTrack, type BallPreviewTrack } from "@/pages/ball-anchor-editor/api"
+import { loadShotOptions, type BallPreviewTrack } from "@/pages/ball-anchor-editor/api"
 import { BallAnchorEditor } from "@/pages/ball-anchor-editor"
-import { ShotSelect, useShotOptions } from "@/pages/ball-anchor-editor/shot-select"
+import { ShotSelect } from "@/pages/ball-anchor-editor/shot-select"
 import { Ball3D } from "./ball-3d"
 import { SegmentsTable } from "./segments-table"
 import { TopdownCanvas } from "./topdown-canvas"
 
-type TrackState =
-  | { kind: "loading" }
-  | { kind: "error"; message: string }
-  | { kind: "ready"; track: BallPreviewTrack | null }
-
-function useBallTrack(shot: string): TrackState {
-  const [state, setState] = React.useState<TrackState>({ kind: "loading" })
-  React.useEffect(() => {
-    if (!shot) return
-    let cancelled = false
-    setState({ kind: "loading" })
-    loadBallTrack(shot)
-      .then((track) => !cancelled && setState({ kind: "ready", track }))
-      .catch((err: unknown) => !cancelled && setState({ kind: "error", message: errorMessage(err) }))
-    return () => {
-      cancelled = true
-    }
-  }, [shot])
-  return state
+function RetryButton({ onClick }: { onClick: () => void }) {
+  return (
+    <Button variant="outline" size="sm" className="mt-2" onClick={onClick}>
+      Retry
+    </Button>
+  )
 }
+
+// /ball/preview answers 200 with empty frames until the stage has run, so a
+// throw is a real failure (the shared loadBallTrack swallows those as null).
+const loadTrack = (shot: string, signal: AbortSignal) =>
+  getJson<BallPreviewTrack>(`/ball/preview?shot=${encodeURIComponent(shot)}`, { signal })
 
 function Summary({ track }: { track: BallPreviewTrack }) {
   const frames = track.frames ?? []
@@ -86,9 +80,10 @@ function Trajectories({ frames, frame }: { frames: NonNullable<BallPreviewTrack[
 /** Ball stage: summary, the anchor editor (single shared implementation), then trajectory views. */
 export default function BallStage() {
   const [params, setParams] = useSearchParams()
-  const shots = useShotOptions()
-  const shot = params.get("shot") ?? shots.options[0]?.id ?? ""
-  const trackState = useBallTrack(shot)
+  const shotsRes = useResource(() => loadShotOptions(), [])
+  const options = shotsRes.state.status === "ready" ? shotsRes.state.data : []
+  const shot = params.get("shot") ?? options[0]?.id ?? ""
+  const trackRes = useResource((signal) => (shot ? loadTrack(shot, signal) : Promise.resolve(null)), [shot])
   const [frame, setFrame] = React.useState(0)
   const confirm = useConfirm()
   const [dirty, setDirty] = React.useState(false)
@@ -114,13 +109,21 @@ export default function BallStage() {
     )
   }
 
-  const track = trackState.kind === "ready" ? trackState.track : null
+  const track = trackRes.state.status === "ready" ? trackRes.state.data : null
   const frames = track?.frames ?? []
   const predicted = React.useMemo(() => frames.filter((f) => f.world_xyz), [frames])
 
-  if (shots.loading) return <PanelSkeleton rows={5} media />
-  if (shots.error) return <PanelError title="Could not list shots" message={shots.error} />
-  if (!shots.options.length) {
+  if (shotsRes.state.status === "loading") return <PanelSkeleton rows={5} media />
+  if (shotsRes.state.status === "error") {
+    return (
+      <PanelError
+        title="Could not list shots"
+        message={shotsRes.state.error}
+        action={<RetryButton onClick={shotsRes.retry} />}
+      />
+    )
+  }
+  if (!options.length) {
     return (
       <PanelEmpty
         title="No shots yet"
@@ -132,11 +135,17 @@ export default function BallStage() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-3">
-        <ShotSelect value={shot} options={shots.options} onChange={(s) => void onShot(s)} id="ball-stage-shot" />
+        <ShotSelect value={shot} options={options} onChange={(s) => void onShot(s)} id="ball-stage-shot" />
       </div>
-      {trackState.kind === "loading" ? <PanelSkeleton rows={4} /> : null}
-      {trackState.kind === "error" ? <PanelError title="Could not load the ball track" message={trackState.message} /> : null}
-      {trackState.kind === "ready" && !frames.length ? (
+      {trackRes.state.status === "loading" ? <PanelSkeleton rows={4} /> : null}
+      {trackRes.state.status === "error" ? (
+        <PanelError
+          title="Could not load the ball track"
+          message={trackRes.state.error}
+          action={<RetryButton onClick={trackRes.retry} />}
+        />
+      ) : null}
+      {trackRes.state.status === "ready" && !frames.length ? (
         <PanelEmpty
           title="No ball track yet"
           description="Drop anchors below (optional), then run the Ball stage from the header. The editor only needs the clip and camera track."

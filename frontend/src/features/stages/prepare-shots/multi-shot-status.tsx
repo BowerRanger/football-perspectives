@@ -1,10 +1,11 @@
-import * as React from "react"
 
-import { Panel } from "@/components/panel"
+import { Panel, PanelError } from "@/components/panel"
+import { Button } from "@/components/ui/button"
 import { ToneBadge, type Tone } from "@/components/status"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { getJsonOrNull } from "@/lib/api"
+import { getJson } from "@/lib/api"
+import { useResource } from "@/hooks/use-resource"
 import { fmtInt } from "@/lib/format"
 
 interface ShotStatus {
@@ -93,29 +94,31 @@ function refinedLine(rp: RefinedSummary | undefined): string {
 
 /** Per-shot artefact summary plus the refined-poses line from the quality report. */
 export function MultiShotStatus({ shotIds }: { shotIds: string[] }) {
-  const [rows, setRows] = React.useState<(ShotStatus | null)[] | null>(null)
-  const [report, setReport] = React.useState<QualityReport | null>(null)
   const key = shotIds.join("|")
-
-  React.useEffect(() => {
-    let cancelled = false
+  // shot-status and quality-report answer 200 with empty payloads when
+  // nothing has run, so any failure here is a real error worth a Retry.
+  const { state, retry } = useResource(async (signal) => {
     const ids = key ? key.split("|") : []
-    void Promise.all([
-      Promise.all(ids.map((id) => getJsonOrNull<ShotStatus>(`/api/output/shot-status/${encodeURIComponent(id)}`))),
-      getJsonOrNull<QualityReport>("/api/output/quality-report"),
-    ]).then(([r, q]) => {
-      if (cancelled) return
-      setRows(r)
-      setReport(q)
-    })
-    return () => {
-      cancelled = true
-    }
+    const [rows, report] = await Promise.all([
+      Promise.all(ids.map((id) => getJson<ShotStatus>(`/api/output/shot-status/${encodeURIComponent(id)}`, { signal }))),
+      getJson<QualityReport>("/api/output/quality-report", { signal }),
+    ])
+    return { rows, report }
   }, [key])
 
   return (
     <Panel title="Multi-shot status" description="Which shots have anchors, a current camera solve, poses, ball and export output.">
-      {rows === null ? (
+      {state.status === "error" ? (
+        <PanelError
+          title="Could not load shot status"
+          message={state.error}
+          action={
+            <Button size="sm" variant="outline" className="mt-2" onClick={retry}>
+              Retry
+            </Button>
+          }
+        />
+      ) : state.status === "loading" ? (
         <div className="flex flex-col gap-2">
           <Skeleton className="h-6 w-full" />
           <Skeleton className="h-6 w-4/5" />
@@ -134,7 +137,7 @@ export function MultiShotStatus({ shotIds }: { shotIds: string[] }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rows.map((s, i) =>
+              {state.data.rows.map((s, i) =>
                 s ? (
                   <StatusRow key={shotIds[i]} s={s} />
                 ) : (
@@ -150,7 +153,7 @@ export function MultiShotStatus({ shotIds }: { shotIds: string[] }) {
           </Table>
           <p className="text-sm">
             <strong className="font-medium">Refined poses:</strong>{" "}
-            <span className="text-muted-foreground">{refinedLine(report?.refined_poses)}</span>
+            <span className="text-muted-foreground">{refinedLine(state.data.report.refined_poses)}</span>
           </p>
         </div>
       )}

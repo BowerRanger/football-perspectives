@@ -45,6 +45,10 @@ export interface EditorController {
   docApi: AnchorDocApi
   autoAnchors: AutoAnchor[]
   quality: BallQuality | null
+  /** Muted notices for optional data that failed to load (auto anchors, players, quality strip). */
+  notices: string[]
+  /** The quality strip could not be loaded (as opposed to "stage not run"). */
+  qualityFailed: boolean
   players: PlayerOption[]
   selectedTag: string
   setSelectedTag: (id: string) => void
@@ -98,6 +102,8 @@ export function useBallAnchorEditor({ shot, predicted, onFrameChange }: Options)
   const [autoAnchors, setAutoAnchors] = React.useState<AutoAnchor[]>([])
   const [players, setPlayers] = React.useState<PlayerOption[]>([])
   const [quality, setQuality] = React.useState<BallQuality | null>(null)
+  const [loadNotices, setLoadNotices] = React.useState<string[]>([])
+  const [qualityNotice, setQualityNotice] = React.useState<string | null>(null)
   const [selectedTag, setSelectedTag] = React.useState("grounded")
   const [authoring, setAuthoring] = React.useState<Authoring>(DEFAULT_AUTHORING)
   const [touchSuggestion, setTouchSuggestion] = React.useState<{ player: string; bone: string } | null>(null)
@@ -111,6 +117,19 @@ export function useBallAnchorEditor({ shot, predicted, onFrameChange }: Options)
   const { reset } = docApi
   const { setFps } = player
 
+  // The quality strip is an optional overlay: a failure earns a notice, not an empty strip.
+  const refreshQuality = React.useCallback((forShot: string, isStale: () => boolean) => {
+    loadQuality(forShot)
+      .then((q) => {
+        if (isStale()) return
+        setQuality(q)
+        setQualityNotice(null)
+      })
+      .catch((err: unknown) => {
+        if (!isStale()) setQualityNotice(`Ball quality strip unavailable (${errorMessage(err)}).`)
+      })
+  }, [])
+
   React.useEffect(() => {
     if (!shot) return
     let cancelled = false
@@ -120,6 +139,8 @@ export function useBallAnchorEditor({ shot, predicted, onFrameChange }: Options)
     setPitchFixes(null)
     setTouchSuggestion(null)
     setQuality(null)
+    setQualityNotice(null)
+    setLoadNotices([])
     loadShot(shot)
       .then((s) => {
         if (cancelled) return
@@ -128,6 +149,7 @@ export function useBallAnchorEditor({ shot, predicted, onFrameChange }: Options)
         setImageSize(s.imageSize)
         setAutoAnchors(s.autoAnchors)
         setPlayers(s.players)
+        setLoadNotices(s.notices)
         reset({ anchors: s.anchors, shotChains: s.shotChains, dismissedAuto: s.dismissedAuto })
         setLoading(false)
       })
@@ -136,11 +158,11 @@ export function useBallAnchorEditor({ shot, predicted, onFrameChange }: Options)
         setLoadError(errorMessage(err))
         setLoading(false)
       })
-    void loadQuality(shot).then((q) => !cancelled && setQuality(q))
+    refreshQuality(shot, () => cancelled)
     return () => {
       cancelled = true
     }
-  }, [shot, attempt, reset, setFps])
+  }, [shot, attempt, reset, setFps, refreshQuality])
 
   const predictedByFrame = React.useMemo(() => buildProjection(camera, predicted), [camera, predicted])
   const previewByFrame = React.useMemo(() => {
@@ -168,7 +190,7 @@ export function useBallAnchorEditor({ shot, predicted, onFrameChange }: Options)
       const res = await saveAnchors(shot, payload())
       docApi.markSaved()
       toast.success(`Saved ${res.count} anchors`, { description: "Re-run the Ball stage to apply them." })
-      void loadQuality(shot).then(setQuality)
+      refreshQuality(shot, () => false)
       return true
     } catch (err) {
       toast.error("Could not save ball anchors", { description: errorMessage(err) })
@@ -176,7 +198,7 @@ export function useBallAnchorEditor({ shot, predicted, onFrameChange }: Options)
     } finally {
       setSaving(false)
     }
-  }, [shot, payload, docApi, loading, loadError])
+  }, [shot, payload, docApi, loading, loadError, refreshQuality])
 
   const solve = React.useCallback(async () => {
     setSolving(true)
@@ -235,6 +257,8 @@ export function useBallAnchorEditor({ shot, predicted, onFrameChange }: Options)
     docApi,
     autoAnchors,
     quality,
+    qualityFailed: qualityNotice !== null,
+    notices: qualityNotice ? [...loadNotices, qualityNotice] : loadNotices,
     players,
     selectedTag,
     setSelectedTag,

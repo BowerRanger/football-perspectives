@@ -1,4 +1,4 @@
-import { getJsonOrNull, qs } from "@/lib/api"
+import { errorMessage, getJson, getJsonOr404, qs } from "@/lib/api"
 import { playerColour } from "@/lib/format"
 import { loadSmplModel } from "./smpl"
 import type {
@@ -51,10 +51,26 @@ function teamColour(team: string, colours: KitColours, index: number): number {
   return hexToInt(playerColour(index)) ?? colours.unknown
 }
 
-async function loadMatch(shot: string | undefined, signal: AbortSignal): Promise<MatchInfo | null> {
-  const meta = await getJsonOrNull<SceneMetadata>(`/api/export/metadata${qs({ shot })}`, { signal })
-  if (meta?.match) return meta.match
-  return getJsonOrNull<MatchInfo>("/api/match", { signal })
+/**
+ * Match info only drives the header and kit colours, so failures are warnings.
+ * /api/export/metadata 404s until the export stage has run (normal → null);
+ * /api/match answers 200 null when no match is saved.
+ */
+async function loadMatch(shot: string | undefined, signal: AbortSignal, warnings: string[]): Promise<MatchInfo | null> {
+  try {
+    const meta = await getJsonOr404<SceneMetadata>(`/api/export/metadata${qs({ shot })}`, { signal })
+    if (meta?.match) return meta.match
+  } catch (err) {
+    if (signal.aborted) throw err
+    warnings.push(`Export metadata unavailable (${errorMessage(err)}).`)
+  }
+  try {
+    return await getJson<MatchInfo | null>("/api/match", { signal })
+  } catch (err) {
+    if (signal.aborted) throw err
+    warnings.push(`Match info unavailable (${errorMessage(err)}); team names and kit colours use defaults.`)
+    return null
+  }
 }
 
 function buildTrack(raw: CameraTrackRaw | null): Map<number, TrackedPose> | null {
@@ -72,9 +88,13 @@ interface PlayerListing {
   refs: { id: string; shot: string; name: string }[]
 }
 
-/** Prefer refined_poses; fall back to hmr_world when it has nothing for this shot. */
+/**
+ * Prefer refined_poses; fall back to hmr_world when it has nothing for this
+ * shot. Both endpoints answer 200 with an empty list when the stage hasn't
+ * run, so a rejection is a real failure and aborts the load (Retry overlay).
+ */
 async function listPlayers(shot: string | undefined, signal: AbortSignal): Promise<PlayerListing> {
-  const refined = await getJsonOrNull<{ players?: PlayerRow[] }>("/refined_poses/players", { signal })
+  const refined = await getJson<{ players?: PlayerRow[] }>("/refined_poses/players", { signal })
   const matching = (refined?.players ?? []).filter((row) => {
     if (!shot) return true
     const cs = row.contributing_shots ?? []
@@ -87,7 +107,7 @@ async function listPlayers(shot: string | undefined, signal: AbortSignal): Promi
       refs: matching.map((r) => ({ id: r.player_id, shot: shot ?? "", name: r.player_name ?? "" })),
     }
   }
-  const list = await getJsonOrNull<{ players?: (string | PlayerRow)[] }>(`/hmr_world/players${qs({ shot })}`, { signal })
+  const list = await getJson<{ players?: (string | PlayerRow)[] }>(`/hmr_world/players${qs({ shot })}`, { signal })
   const refs: PlayerListing["refs"] = []
   for (const r of list?.players ?? []) {
     if (typeof r === "string") refs.push({ id: r, shot: shot ?? "", name: "" })
@@ -100,24 +120,39 @@ async function fetchPreviews(
   listing: PlayerListing,
   signal: AbortSignal,
   onStep: (done: number) => void,
+  warnings: string[],
 ): Promise<{ ref: PlayerListing["refs"][number]; preview: PlayerPreview }[]> {
   const endpoint = listing.source === "refined_poses" ? "/refined_poses/preview" : "/hmr_world/preview"
   const results: { ref: PlayerListing["refs"][number]; preview: PlayerPreview }[] = []
+  const failures: string[] = []
   let done = 0
   for (let i = 0; i < listing.refs.length; i += PREVIEW_CONCURRENCY) {
     const chunk = listing.refs.slice(i, i + PREVIEW_CONCURRENCY)
     const loaded = await Promise.all(
       chunk.map(async (ref) => {
-        const preview = await getJsonOrNull<PlayerPreview>(
-          `${endpoint}${qs({ player_id: ref.id, include_pose: 1, shot: ref.shot })}`,
-          { signal },
-        )
-        done += 1
-        onStep(done)
-        return preview ? { ref, preview } : null
+        try {
+          // 404 = the file vanished between listing and fetch: skip that player.
+          const preview = await getJsonOr404<PlayerPreview>(
+            `${endpoint}${qs({ player_id: ref.id, include_pose: 1, shot: ref.shot })}`,
+            { signal },
+          )
+          return preview ? { ref, preview } : null
+        } catch (err) {
+          if (signal.aborted) throw err
+          failures.push(`${ref.id} (${errorMessage(err)})`)
+          return null
+        } finally {
+          done += 1
+          onStep(done)
+        }
       }),
     )
     for (const l of loaded) if (l) results.push(l)
+  }
+  if (failures.length > 0) {
+    // Every pose failing is a broken load; a few failing is a partial scene the operator must be told about.
+    if (results.length === 0) throw new Error(`Could not load any player poses: ${failures.slice(0, 3).join("; ")}`)
+    warnings.push(`${failures.length} player pose${failures.length === 1 ? "" : "s"} failed to load and ${failures.length === 1 ? "is" : "are"} missing: ${failures.slice(0, 3).join("; ")}${failures.length > 3 ? "…" : ""}.`)
   }
   return results
 }
@@ -139,11 +174,24 @@ function toTrack(ref: PlayerListing["refs"][number], p: PlayerPreview, colours: 
   }
 }
 
-async function loadBall(shot: string | undefined, signal: AbortSignal) {
-  const cfg = await getJsonOrNull<{ ball?: { ball_radius_m?: number } }>("/api/config", { signal })
+/** Ball is optional in the scene: /ball/preview answers 200 + no frames when the stage hasn't run, so a rejection earns a warning. */
+async function loadBall(shot: string | undefined, signal: AbortSignal, warnings: string[]) {
+  let cfg: { ball?: { ball_radius_m?: number } } | null = null
+  try {
+    cfg = await getJson<{ ball?: { ball_radius_m?: number } }>("/api/config", { signal })
+  } catch (err) {
+    if (signal.aborted) throw err
+    warnings.push(`Ball size config unavailable (${errorMessage(err)}); using the default radius.`)
+  }
   const r = cfg?.ball?.ball_radius_m
   const radius = typeof r === "number" && r > 0 ? r : DEFAULT_BALL_RADIUS_M
-  const ball = await getJsonOrNull<{ frames?: BallFrameRaw[] }>(`/ball/preview${qs({ shot })}`, { signal })
+  let ball: { frames?: BallFrameRaw[] } | null = null
+  try {
+    ball = await getJson<{ frames?: BallFrameRaw[] }>(`/ball/preview${qs({ shot })}`, { signal })
+  } catch (err) {
+    if (signal.aborted) throw err
+    warnings.push(`Ball track unavailable (${errorMessage(err)}); the scene has no ball.`)
+  }
   const frames = ball?.frames ?? []
   const byFrame = new Map<number, Vec3>()
   for (const f of frames) if (f.world_xyz) byFrame.set(f.frame, f.world_xyz)
@@ -151,16 +199,22 @@ async function loadBall(shot: string | undefined, signal: AbortSignal) {
   return { radius, byFrame, hasBall: frames.length > 0, frameCount: last }
 }
 
-/** Fetch everything the viewer needs. Throws on abort; missing stage output yields empty data. */
+/**
+ * Fetch everything the viewer needs. Throws on abort and on any failure of a
+ * main payload (camera track, player list, player poses); missing stage output
+ * yields empty data; optional data failures land in `warnings`.
+ */
 export async function loadSceneData(
   shot: string | undefined,
   onProgress: ProgressFn,
   signal: AbortSignal,
 ): Promise<SceneData> {
+  const warnings: string[] = []
   onProgress({ label: "Reading match and camera", value: 5 })
   const [match, camRaw] = await Promise.all([
-    loadMatch(shot, signal),
-    getJsonOrNull<CameraTrackRaw>(`/camera/track${qs({ shot })}`, { signal }),
+    loadMatch(shot, signal, warnings),
+    // 200 + empty frames when the camera stage hasn't run; a rejection is a real failure.
+    getJson<CameraTrackRaw>(`/camera/track${qs({ shot })}`, { signal }),
   ])
   const track = buildTrack(camRaw)
   let totalFrames = camRaw?.frames?.length ?? 0
@@ -172,6 +226,7 @@ export async function loadSceneData(
   const total = Math.max(1, listing.refs.length)
   const previews = await fetchPreviews(listing, signal, (done) =>
     onProgress({ label: `Loading poses (${done}/${total})`, value: 15 + Math.round((done / total) * 60) }),
+    warnings,
   )
   const colours = kitColours(match)
   const players = previews.map(({ ref, preview }, i) => toTrack(ref, preview, colours, i))
@@ -180,7 +235,7 @@ export async function loadSceneData(
   }
 
   onProgress({ label: "Loading ball and body model", value: 80 })
-  const [ball, smpl] = await Promise.all([loadBall(shot, signal), smplPromise])
+  const [ball, smpl] = await Promise.all([loadBall(shot, signal, warnings), smplPromise])
   totalFrames = Math.max(totalFrames, ball.frameCount)
 
   return {
@@ -197,5 +252,6 @@ export async function loadSceneData(
     match,
     colours,
     playerSource: listing.source,
+    warnings,
   }
 }

@@ -1,22 +1,23 @@
-import * as React from "react"
-
-import { Panel, PanelEmpty, PanelSkeleton } from "@/components/panel"
+import { Panel, PanelEmpty, PanelError, PanelSkeleton } from "@/components/panel"
+import { Button } from "@/components/ui/button"
+import { useResource } from "@/hooks/use-resource"
 import { ToneBadge } from "@/components/status"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { getJsonOrNull } from "@/lib/api"
+import { getJson, getJsonOr404 } from "@/lib/api"
 import { fmtInt, playerColour } from "@/lib/format"
 import { Kp2dViewer, type Kp2dPlayer } from "./kp2d-viewer"
 import { PlayerCell } from "./player-cells"
 import type { Kp2dPreview, PlayerRef, PlayersResponse } from "./types"
 
-async function loadKp2d(shotId: string): Promise<Kp2dPlayer[]> {
+async function loadKp2d(shotId: string, signal: AbortSignal): Promise<Kp2dPlayer[]> {
   const shotQ = `shot=${encodeURIComponent(shotId)}`
-  const list = await getJsonOrNull<PlayersResponse>(`/hmr_world/kp2d_players?${shotQ}`)
-  const players = list?.players ?? []
+  const list = await getJson<PlayersResponse>(`/hmr_world/kp2d_players?${shotQ}`, { signal })
+  const players = list.players ?? []
   return Promise.all(
     players.map(async (p: PlayerRef, i): Promise<Kp2dPlayer> => {
-      const data = await getJsonOrNull<Kp2dPreview>(
+      const data = await getJsonOr404<Kp2dPreview>(
         `/hmr_world/kp2d_preview?player_id=${encodeURIComponent(p.player_id)}&${shotQ}`,
+        { signal },
       )
       return { ...p, colour: playerColour(i), data: data ?? { player_id: p.player_id, frames: [] } }
     }),
@@ -57,20 +58,23 @@ function FrameCountTable({ players }: { players: readonly Kp2dPlayer[] }) {
 
 /** kp2d summary, skeleton viewer and per-player frame counts for one shot. */
 export function Kp2dPanel({ shotId }: { shotId: string }) {
-  const [players, setPlayers] = React.useState<Kp2dPlayer[] | null>(null)
+  const { state, retry } = useResource((signal) => loadKp2d(shotId, signal), [shotId])
 
-  React.useEffect(() => {
-    let alive = true
-    setPlayers(null)
-    void loadKp2d(shotId).then((p) => {
-      if (alive) setPlayers(p)
-    })
-    return () => {
-      alive = false
-    }
-  }, [shotId])
-
-  if (players === null) return <PanelSkeleton rows={3} media />
+  if (state.status === "loading") return <PanelSkeleton rows={3} media />
+  if (state.status === "error") {
+    return (
+      <PanelError
+        title="Could not load 2D keypoints"
+        message={state.error}
+        action={
+          <Button variant="outline" size="sm" className="mt-2" onClick={retry}>
+            Retry
+          </Button>
+        }
+      />
+    )
+  }
+  const players = state.data
   if (players.length === 0) {
     return (
       <Panel title="2D keypoints">

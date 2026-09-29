@@ -1,8 +1,10 @@
 import * as React from "react"
 
-import { Panel, PanelEmpty, PanelSkeleton } from "@/components/panel"
+import { Panel, PanelEmpty, PanelError, PanelSkeleton } from "@/components/panel"
+import { Button } from "@/components/ui/button"
+import { useResource } from "@/hooks/use-resource"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { getJsonOrNull } from "@/lib/api"
+import { getJson, getJsonOr404 } from "@/lib/api"
 import { fmtInt, playerColour } from "@/lib/format"
 import { Kp2dPanel } from "./kp2d-panel"
 import { ConfidenceCell, PlayerCell } from "./player-cells"
@@ -11,14 +13,17 @@ import type { Coloured, PlayerRef, PlayersResponse, PosePreview } from "./types"
 
 type LoadedPlayer = Coloured<PlayerRef> & { data: PosePreview | null }
 
-async function loadShot(shotId: string): Promise<LoadedPlayer[]> {
-  const list = await getJsonOrNull<PlayersResponse>(`/hmr_world/players?shot=${encodeURIComponent(shotId)}`)
+// /hmr_world/players answers 200 with [] when nothing ran; /preview 404s for a
+// listed-but-missing player (row shows "—"). Anything else is a real failure.
+async function loadShot(shotId: string, signal: AbortSignal): Promise<LoadedPlayer[]> {
+  const list = await getJson<PlayersResponse>(`/hmr_world/players?shot=${encodeURIComponent(shotId)}`, { signal })
   return Promise.all(
-    (list?.players ?? []).map(async (p, i) => ({
+    (list.players ?? []).map(async (p, i) => ({
       ...p,
       colour: playerColour(i),
-      data: await getJsonOrNull<PosePreview>(
+      data: await getJsonOr404<PosePreview>(
         `/hmr_world/preview?shot=${encodeURIComponent(shotId)}&player_id=${encodeURIComponent(p.player_id)}`,
+        { signal },
       ),
     })),
   )
@@ -59,18 +64,8 @@ function PlayersTable({ shotId, players }: { shotId: string; players: readonly L
 
 /** One shot's hmr_world output: player table, trajectories, keypoints. */
 export function HmrShotBody({ shotId }: { shotId: string }) {
-  const [players, setPlayers] = React.useState<LoadedPlayer[] | null>(null)
-
-  React.useEffect(() => {
-    let alive = true
-    setPlayers(null)
-    void loadShot(shotId).then((p) => {
-      if (alive) setPlayers(p)
-    })
-    return () => {
-      alive = false
-    }
-  }, [shotId])
+  const { state, retry } = useResource((signal) => loadShot(shotId, signal), [shotId])
+  const players = state.status === "ready" ? state.data : null
 
   const withRoot = React.useMemo(
     () =>
@@ -80,8 +75,21 @@ export function HmrShotBody({ shotId }: { shotId: string }) {
     [players],
   )
 
-  if (players === null) return <PanelSkeleton rows={5} />
-  if (players.length === 0) {
+  if (state.status === "loading") return <PanelSkeleton rows={5} />
+  if (state.status === "error") {
+    return (
+      <PanelError
+        title={`Could not load hmr_world output for ${shotId}`}
+        message={state.error}
+        action={
+          <Button variant="outline" size="sm" className="mt-2" onClick={retry}>
+            Retry
+          </Button>
+        }
+      />
+    )
+  }
+  if (!players || players.length === 0) {
     return (
       <Panel title="HMR World">
         <PanelEmpty
@@ -94,7 +102,7 @@ export function HmrShotBody({ shotId }: { shotId: string }) {
   return (
     <>
       <PlayersTable shotId={shotId} players={players} />
-      {withRoot.length > 0 ? <TrajectoryPanel players={withRoot} shotId={shotId} title="Top-down player trajectories (pitch-world)" /> : null}
+      {withRoot.length > 0 ? <TrajectoryPanel players={withRoot} shotId={shotId} title="Top-down player trajectories (pitch-world)" keyboard={false} /> : null}
       <Kp2dPanel shotId={shotId} />
     </>
   )

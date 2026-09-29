@@ -2,6 +2,7 @@ import * as React from "react"
 import { toast } from "sonner"
 
 import { ApiError, errorMessage, getJson, postJson } from "@/lib/api"
+import { appendLogLines, EMPTY_LOG_BUFFER, type LogBuffer } from "@/lib/log-buffer"
 import {
   humanizeStageName,
   STAGE_DEPS,
@@ -14,12 +15,13 @@ import {
 // any panel that launches a job (uploads, per-shot runs). One job may be in
 // flight at a time; every run trigger reads `runningLabel` to lock itself.
 
-export type LogStatus = "idle" | "running" | "done" | "error"
+export type LogStatus = "idle" | "running" | "done" | "error" | "cancelled"
 
-const MAX_LOG_LINES = 5000
-
-interface LogState {
-  lines: string[]
+interface LogState extends LogBuffer {
+  /** Job being streamed (enables Cancel). */
+  jobId: string | null
+  /** True between the cancel request and the job's done event. */
+  cancelling: boolean
   status: LogStatus
   title: string
   startedAt: number | null
@@ -47,6 +49,8 @@ interface PipelineContextValue {
   logOpen: boolean
   setLogOpen: (open: boolean) => void
   clearLog: () => void
+  /** Interrupt the in-flight job (its current stage may be left partial). */
+  cancelRun: () => Promise<void>
 }
 
 const PipelineContext = React.createContext<PipelineContextValue | null>(null)
@@ -58,7 +62,9 @@ export function usePipeline(): PipelineContextValue {
 }
 
 const EMPTY_LOG: LogState = {
-  lines: [],
+  ...EMPTY_LOG_BUFFER,
+  jobId: null,
+  cancelling: false,
   status: "idle",
   title: "",
   startedAt: null,
@@ -110,17 +116,25 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
   const finishJob = React.useCallback(
     (targets: string[], label: string, status: string, onDone?: (status: string) => void) => {
       const ok = status === "done"
+      const cancelled = status === "cancelled"
       setLiveState((prev) => {
         const next = { ...prev }
         for (const t of targets) {
-          if (ok) delete next[t as StageName]
+          if (ok || cancelled) delete next[t as StageName]
           else next[t as StageName] = "error"
         }
         return next
       })
       setRunningLabel(null)
-      setLog((prev) => ({ ...prev, status: ok ? "done" : "error", finishedAt: Date.now(), connection: "ok" }))
+      setLog((prev) => ({
+        ...prev,
+        status: ok ? "done" : cancelled ? "cancelled" : "error",
+        finishedAt: Date.now(),
+        connection: "ok",
+        cancelling: false,
+      }))
       if (ok) toast.success(`${label} finished`)
+      else if (cancelled) toast.info(`${label} cancelled`, { description: "The interrupted stage may have partial output — Continue or Re-run it." })
       else toast.error(`${label} failed`, { description: "The log dock shows the traceback." })
       void refreshStages().then(() => {
         setOutputVersion((v) => v + 1)
@@ -146,6 +160,7 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
       sourceRef.current?.close()
       const source = new EventSource(`/api/jobs/${jobId}/logs`)
       sourceRef.current = source
+      setLog((prev) => (prev.jobId === jobId ? prev : { ...prev, jobId }))
       // The server replays the whole log on (re)connect, so a reconnect
       // starts from an empty buffer instead of appending duplicates.
       let replaced = attempt === 0
@@ -160,14 +175,11 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
         pending = []
         const reset = !replaced
         replaced = true
-        setLog((prev) => {
-          const lines = (reset ? [] : prev.lines).concat(chunk)
-          return {
-            ...prev,
-            connection: "ok",
-            lines: lines.length > MAX_LOG_LINES ? lines.slice(-MAX_LOG_LINES) : lines,
-          }
-        })
+        setLog((prev) => ({
+          ...prev,
+          ...appendLogLines(reset ? EMPTY_LOG_BUFFER : prev, chunk),
+          connection: "ok",
+        }))
       }
       source.addEventListener("log", (e) => {
         try {
@@ -207,7 +219,7 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
               if (err instanceof ApiError && err.status === 404) {
                 setLog((prev) => ({
                   ...prev,
-                  lines: prev.lines.concat("[dashboard] The server restarted and this job is gone."),
+                  ...appendLogLines(prev, ["[dashboard] The server restarted and this job is gone."]),
                 }))
                 finishJob(targets, label, "error", onDone)
               } else {
@@ -248,9 +260,9 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
         setRunningLabel(null)
         setLog((prev) => ({
           ...prev,
+          ...appendLogLines(prev, [`Failed to start: ${errorMessage(err)}`]),
           status: "error",
           finishedAt: Date.now(),
-          lines: prev.lines.concat(`Failed to start: ${errorMessage(err)}`),
         }))
         toast.error(`Could not start ${label}`, { description: errorMessage(err) })
       }
@@ -310,6 +322,18 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
     setLogOpen(false)
   }, [])
 
+  const jobId = log.jobId
+  const cancelRun = React.useCallback(async () => {
+    if (!jobId) return
+    setLog((prev) => ({ ...prev, cancelling: true }))
+    try {
+      await postJson(`/api/jobs/${jobId}/cancel`)
+    } catch (err) {
+      setLog((prev) => ({ ...prev, cancelling: false }))
+      toast.error("Could not cancel the run", { description: errorMessage(err) })
+    }
+  }, [jobId])
+
   const value = React.useMemo<PipelineContextValue>(
     () => ({
       stages,
@@ -328,10 +352,11 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
       logOpen,
       setLogOpen,
       clearLog,
+      cancelRun,
     }),
     [
       stages, stagesLoaded, refreshStages, liveState, runningLabel, outputVersion, bumpOutputVersion,
-      startRun, rerunStage, attachToJob, missingDeps, log, logOpen, clearLog,
+      startRun, rerunStage, attachToJob, missingDeps, log, logOpen, clearLog, cancelRun,
     ],
   )
 

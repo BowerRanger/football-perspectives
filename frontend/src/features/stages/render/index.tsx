@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label"
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import { toast } from "sonner"
 
-import { errorMessage, getJson, getJsonOrNull, postJson } from "@/lib/api"
+import { errorMessage, getJson, postJson } from "@/lib/api"
 import { usePipeline } from "@/hooks/use-pipeline"
 
 import { CameraGrid } from "./camera-grid"
@@ -31,12 +31,12 @@ export default function RenderStage() {
     try {
       const [outputs, allShots] = await Promise.all([
         getJson<RenderOutputs>("/api/render/outputs"),
-        getJsonOrNull<{ shots?: string[] }>("/api/output/shots"),
+        getJson<{ shots?: string[] }>("/api/output/shots"),
       ])
       const shots = outputs.shots ?? {}
       // Union: shots with renders plus shots that exist but were never rendered,
       // so the selection editor works before the first Render run.
-      const shotIds = Array.from(new Set([...Object.keys(shots), ...(allShots?.shots ?? [])])).sort()
+      const shotIds = Array.from(new Set([...Object.keys(shots), ...(allShots.shots ?? [])])).sort()
       setData({ outputs: shots, shotIds })
       setShotId((cur) => (cur && shotIds.includes(cur) ? cur : (shotIds[0] ?? "")))
     } catch (err) {

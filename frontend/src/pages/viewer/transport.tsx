@@ -1,20 +1,10 @@
 import type * as React from "react"
-import {
-  BoxIcon,
-  CircleDotIcon,
-  PauseIcon,
-  PlayIcon,
-  SkipBackIcon,
-  SkipForwardIcon,
-  VideoIcon,
-  WorkflowIcon,
-} from "lucide-react"
+import { BoxIcon, CircleDotIcon, VideoIcon, WorkflowIcon } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
+import { FramePlayer } from "@/components/frame-player"
 import { Card } from "@/components/ui/card"
 import { Kbd } from "@/components/ui/kbd"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Slider } from "@/components/ui/slider"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
@@ -34,33 +24,6 @@ function Hint({ label, keys, children }: { label: string; keys?: string; childre
         </span>
       </TooltipContent>
     </Tooltip>
-  )
-}
-
-function PlaybackControls({ state, actions }: { state: ViewerState; actions: ViewerActions }) {
-  return (
-    <div className="flex items-center gap-1">
-      <Hint label="Step back (Shift for 10)" keys="←">
-        <Button variant="ghost" size="icon-sm" aria-label="Previous frame" onClick={() => actions.step(-1)}>
-          <SkipBackIcon />
-        </Button>
-      </Hint>
-      <Hint label={state.playing ? "Pause" : "Play"} keys="Space">
-        <Button
-          variant="default"
-          size="icon-sm"
-          aria-label={state.playing ? "Pause" : "Play"}
-          onClick={actions.togglePlay}
-        >
-          {state.playing ? <PauseIcon /> : <PlayIcon />}
-        </Button>
-      </Hint>
-      <Hint label="Step forward (Shift for 10)" keys="→">
-        <Button variant="ghost" size="icon-sm" aria-label="Next frame" onClick={() => actions.step(1)}>
-          <SkipForwardIcon />
-        </Button>
-      </Hint>
-    </div>
   )
 }
 
@@ -135,27 +98,26 @@ interface TransportProps {
   data: SceneData
   state: ViewerState
   actions: ViewerActions
+  /** Whether this player owns Space / arrows (false while another player on the page does). */
+  keyboard: boolean
   className?: string
 }
 
-export function Transport({ data, state, actions, className }: TransportProps) {
+export function Transport({ data, state, actions, keyboard, className }: TransportProps) {
   const last = Math.max(0, data.totalFrames - 1)
   return (
-    <Card className={cn(OVERLAY_CARD, "flex-row flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2", className)}>
-      <PlaybackControls state={state} actions={actions} />
-      <Slider
-        className="min-w-36 flex-1"
-        min={0}
+    <Card className={cn(OVERLAY_CARD, "px-3 py-2", className)}>
+      <FramePlayer
+        keyboard={keyboard}
+        frame={state.frame}
         max={last}
-        step={1}
-        value={[Math.min(state.frame, last)]}
-        onValueChange={([v]) => actions.seek(v)}
-        aria-label="Frame"
-      />
-      <output className="min-w-28 text-right font-mono text-xs tabular-nums text-muted-foreground" aria-live="off">
-        Frame {state.frame} / {last}
-      </output>
-      <div className="flex flex-wrap items-center gap-2">
+        fps={data.fps}
+        playing={state.playing}
+        onTogglePlay={actions.togglePlay}
+        onSeek={actions.seek}
+        label="Frame"
+      >
+        <div className="flex flex-wrap items-center gap-2">
         <Select value={String(state.speed)} onValueChange={(v) => actions.setSpeed(Number(v))}>
           <SelectTrigger size="sm" className="w-auto min-w-20" aria-label="Playback speed">
             <SelectValue />
@@ -170,7 +132,8 @@ export function Transport({ data, state, actions, className }: TransportProps) {
         </Select>
         <CameraSelect data={data} mode={state.cameraMode} onChange={actions.setCameraMode} />
         <VisibilityToggles data={data} vis={state.vis} onChange={actions.setVisibility} />
-      </div>
+        </div>
+      </FramePlayer>
     </Card>
   )
 }

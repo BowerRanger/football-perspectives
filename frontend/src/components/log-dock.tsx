@@ -1,10 +1,12 @@
 import * as React from "react"
+import { useVirtualizer } from "@tanstack/react-virtual"
 import {
   ArrowDownToLineIcon,
   CopyIcon,
   DownloadIcon,
   MinusIcon,
   SearchXIcon,
+  SquareIcon,
   TerminalIcon,
   WifiOffIcon,
   XIcon,
@@ -15,11 +17,12 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { ToneBadge } from "@/components/status"
-import { usePipeline } from "@/hooks/use-pipeline"
+import { useConfirm } from "@/hooks/use-dialogs"
+import { usePipeline, type LogStatus } from "@/hooks/use-pipeline"
+import { logText, type LogLine } from "@/lib/log-buffer"
 import { cn } from "@/lib/utils"
 
-const ERROR_LINE = /(Traceback \(most recent call last\)|\bERROR\b|Error:|Exception:|\[FAIL)/
-const WARN_LINE = /(\bWARN(ING)?\b|\[SKIP\])/
+const LINE_HEIGHT_PX = 20
 
 function useElapsed(startedAt: number | null, finishedAt: number | null): string {
   const [now, setNow] = React.useState(() => Date.now())
@@ -48,66 +51,73 @@ function IconAction({ label, onClick, children }: { label: string; onClick: () =
   )
 }
 
-const LogLines = React.memo(function LogLines({ lines }: { lines: string[] }) {
-  return (
-    <>
-      {lines.map((line, i) => (
-        <span
-          key={i}
-          data-log-error={ERROR_LINE.test(line) || undefined}
-          className={cn(
-            "block",
-            ERROR_LINE.test(line) && "bg-destructive/15 text-destructive",
-            !ERROR_LINE.test(line) && WARN_LINE.test(line) && "text-warning",
-          )}
-        >
-          {line || " "}
-        </span>
-      ))}
-    </>
-  )
-})
+const LEVEL_CLASS: Record<LogLine["level"], string> = {
+  info: "",
+  warn: "text-warning",
+  error: "bg-destructive/15 text-destructive",
+}
+
+function StatusChip({ status, cancelling }: { status: LogStatus; cancelling: boolean }) {
+  if (status === "running") {
+    return (
+      <ToneBadge tone="warning">
+        <Spinner className="size-3" /> {cancelling ? "Cancelling…" : "Running"}
+      </ToneBadge>
+    )
+  }
+  if (status === "done") return <ToneBadge tone="success">Finished</ToneBadge>
+  if (status === "cancelled") return <ToneBadge tone="muted">Cancelled</ToneBadge>
+  return <ToneBadge tone="destructive">Failed</ToneBadge>
+}
 
 /**
- * Run log, docked to the bottom of the content area. It follows the tail
- * until the operator scrolls up, highlights error lines, and jumps to the
- * first one on failure.
+ * Run log, docked to the bottom of the content area. Virtualised (a GVHMR
+ * run emits tens of thousands of lines), follows the tail until the
+ * operator scrolls up, and jumps to the first error on failure.
  */
 export function LogDock() {
-  const { log, logOpen, setLogOpen, clearLog } = usePipeline()
-  const preRef = React.useRef<HTMLPreElement>(null)
+  const { log, logOpen, setLogOpen, clearLog, cancelRun } = usePipeline()
+  const confirm = useConfirm()
+  const scrollRef = React.useRef<HTMLDivElement>(null)
   const [follow, setFollow] = React.useState(true)
   const elapsed = useElapsed(log.startedAt, log.finishedAt)
-  const hasError = React.useMemo(() => log.lines.some((l) => ERROR_LINE.test(l)), [log.lines])
+  const count = log.lines.length
+
+  const virtualizer = useVirtualizer({
+    count,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => LINE_HEIGHT_PX,
+    overscan: 30,
+  })
 
   const jumpToError = React.useCallback(() => {
-    const el = preRef.current?.querySelector<HTMLElement>("[data-log-error]")
-    if (!el || !preRef.current) return
+    if (log.firstError === null) return
     setFollow(false)
-    preRef.current.scrollTop = el.offsetTop - 8
-  }, [])
+    virtualizer.scrollToIndex(log.firstError, { align: "start" })
+  }, [log.firstError, virtualizer])
 
   React.useLayoutEffect(() => {
-    const el = preRef.current
-    if (el && follow) el.scrollTop = el.scrollHeight
-  }, [log.lines, follow, logOpen])
+    if (follow && count) virtualizer.scrollToIndex(count - 1, { align: "end" })
+  }, [count, follow, logOpen, virtualizer])
 
   React.useEffect(() => {
     if (log.status === "running") setFollow(true)
     if (log.status === "error") requestAnimationFrame(jumpToError)
-  }, [log.status, jumpToError])
+    // jumpToError intentionally not a dependency: only react to the transition.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [log.status])
 
   if (log.status === "idle" || !logOpen) return null
 
   const onScroll = () => {
-    const el = preRef.current
+    const el = scrollRef.current
     if (!el) return
     setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 24)
   }
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(log.lines.join("\n"))
+      await navigator.clipboard.writeText(logText(log))
       toast.success("Log copied")
     } catch {
       toast.error("Clipboard unavailable", { description: "Use Download instead." })
@@ -115,13 +125,25 @@ export function LogDock() {
   }
 
   const download = () => {
-    const blob = new Blob([log.lines.join("\n")], { type: "text/plain" })
+    const blob = new Blob([logText(log)], { type: "text/plain" })
     const url = URL.createObjectURL(blob)
     const a = document.createElement("a")
     a.href = url
     a.download = `${(log.title || "run").toLowerCase().replace(/\s+/g, "-")}-log.txt`
     a.click()
     URL.revokeObjectURL(url)
+  }
+
+  const onCancel = async () => {
+    const ok = await confirm({
+      title: `Cancel ${log.title || "this run"}?`,
+      description:
+        "The stage in progress stops at its next step and may leave partial output. Stages already finished keep their results; Continue resumes from per-player caches.",
+      confirmLabel: "Cancel run",
+      cancelLabel: "Keep running",
+      destructive: true,
+    })
+    if (ok) await cancelRun()
   }
 
   return (
@@ -136,15 +158,7 @@ export function LogDock() {
         <TerminalIcon className="size-4 text-muted-foreground" />
         <h2 className="text-sm font-medium">{log.title || "Run"} log</h2>
         <span aria-live="polite" className="contents">
-          {log.status === "running" ? (
-            <ToneBadge tone="warning">
-              <Spinner className="size-3" /> Running
-            </ToneBadge>
-          ) : log.status === "done" ? (
-            <ToneBadge tone="success">Finished</ToneBadge>
-          ) : (
-            <ToneBadge tone="destructive">Failed</ToneBadge>
-          )}
+          <StatusChip status={log.status} cancelling={log.cancelling} />
           {log.connection === "reconnecting" ? (
             <ToneBadge tone="muted">
               <WifiOffIcon /> Connection lost — reconnecting…
@@ -154,8 +168,24 @@ export function LogDock() {
         <span className="font-mono text-xs text-muted-foreground" data-numeric>
           {elapsed}
         </span>
+        {log.dropped ? (
+          <span className="text-xs text-muted-foreground">
+            first <span className="font-mono tabular-nums">{log.dropped.toLocaleString()}</span> lines trimmed — full log
+            in <span className="font-mono">output/logs/job_{log.jobId}.log</span>
+          </span>
+        ) : null}
         <div className="ml-auto flex items-center gap-1">
-          {hasError ? (
+          {log.status === "running" && log.jobId ? (
+            <Button
+              variant="destructive"
+              size="xs"
+              disabled={log.cancelling}
+              onClick={() => void onCancel()}
+            >
+              <SquareIcon /> {log.cancelling ? "Cancelling…" : "Cancel run"}
+            </Button>
+          ) : null}
+          {log.firstError !== null ? (
             <Button variant="ghost" size="xs" className="text-destructive" onClick={jumpToError}>
               <SearchXIcon /> First error
             </Button>
@@ -181,15 +211,35 @@ export function LogDock() {
           ) : null}
         </div>
       </div>
-      <pre
-        ref={preRef}
+      <div
+        ref={scrollRef}
         onScroll={onScroll}
         tabIndex={0}
+        role="log"
         aria-label="Log output"
-        className="relative min-h-0 flex-1 overflow-auto bg-stage px-3 py-2 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap text-stage-foreground/85"
+        className="relative min-h-0 flex-1 overflow-auto bg-stage px-3 py-2 font-mono text-xs leading-5 text-stage-foreground/85"
       >
-        {log.lines.length ? <LogLines lines={log.lines} /> : "Waiting for output…"}
-      </pre>
+        {count ? (
+          <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+            {virtualizer.getVirtualItems().map((item) => {
+              const line = log.lines[item.index]
+              return (
+                <div
+                  key={item.key}
+                  data-index={item.index}
+                  ref={virtualizer.measureElement}
+                  className={cn("absolute top-0 left-0 w-full break-all whitespace-pre-wrap", LEVEL_CLASS[line.level])}
+                  style={{ transform: `translateY(${item.start}px)` }}
+                >
+                  {line.text || " "}
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          "Waiting for output…"
+        )}
+      </div>
     </section>
   )
 }

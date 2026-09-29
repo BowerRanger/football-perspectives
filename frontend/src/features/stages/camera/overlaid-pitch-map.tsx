@@ -1,10 +1,7 @@
 import * as React from "react"
-import { ChevronLeftIcon, ChevronRightIcon, PauseIcon, PlayIcon } from "lucide-react"
 
+import { FramePlayer } from "@/components/frame-player"
 import { PanelEmpty } from "@/components/panel"
-import { Button } from "@/components/ui/button"
-import { Kbd, KbdGroup } from "@/components/ui/kbd"
-import { Slider } from "@/components/ui/slider"
 import { MAP_H, MAP_W, renderPitchFrame } from "./pitch-draw"
 import type { IndexedShot } from "./types"
 
@@ -100,18 +97,8 @@ export function OverlaidPitchMap({ shots }: PitchMapProps) {
     )
   }
 
-  function onKeyDown(e: React.KeyboardEvent) {
-    if (e.target !== e.currentTarget) return
-    const big = e.shiftKey ? 10 : 1
-    if (e.key === "ArrowLeft") seek(frame - big)
-    else if (e.key === "ArrowRight") seek(frame + big)
-    else if (e.key === " ") toggle()
-    else return
-    e.preventDefault()
-  }
-
   return (
-    <div className="flex flex-col gap-2 outline-none" tabIndex={0} onKeyDown={onKeyDown} aria-label="Camera pitch map">
+    <div className="flex flex-col gap-2" aria-label="Camera pitch map">
       <div ref={wrapRef} className="overflow-hidden rounded-lg bg-stage">
         <canvas
           ref={canvasRef}
@@ -122,43 +109,17 @@ export function OverlaidPitchMap({ shots }: PitchMapProps) {
           className="block h-auto w-full"
         />
       </div>
-      <div className="flex items-center gap-2">
-        <Button size="icon-sm" onClick={toggle} aria-label={playing ? "Pause" : "Play"}>
-          {playing ? <PauseIcon /> : <PlayIcon />}
-        </Button>
-        <Button size="icon-sm" variant="outline" onClick={() => seek(frame - 1)} aria-label="Previous frame">
-          <ChevronLeftIcon />
-        </Button>
-        <Button size="icon-sm" variant="outline" onClick={() => seek(frame + 1)} aria-label="Next frame">
-          <ChevronRightIcon />
-        </Button>
-        <Slider
-          aria-label="Frame"
-          className="flex-1"
-          min={minFrame}
-          max={Math.max(minFrame + 1, maxFrame)}
-          step={1}
-          value={[frame]}
-          onValueChange={(v) => seek(v[0] ?? minFrame)}
-        />
-        <span className="min-w-32 text-right text-xs text-muted-foreground tabular-nums">
-          Frame <span className="font-mono">{frame}</span> (<span className="font-mono">{(frame / Math.max(1, fps)).toFixed(2)}s</span>)
-        </span>
-      </div>
-      <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        <KbdGroup className="font-sans">
-          <Kbd>←</Kbd>
-          <Kbd>→</Kbd> step
-        </KbdGroup>
-        <KbdGroup className="font-sans">
-          <Kbd>Shift</Kbd>+<Kbd>←</Kbd>
-          <Kbd>→</Kbd> ±10
-        </KbdGroup>
-        <KbdGroup className="font-sans">
-          <Kbd>Space</Kbd> play
-        </KbdGroup>
-        <span>Gold outline = anchored frame</span>
-      </p>
+      <FramePlayer
+        frame={frame}
+        min={minFrame}
+        max={maxFrame}
+        playing={playing}
+        onTogglePlay={toggle}
+        onSeek={seek}
+        fps={fps}
+        keyHints
+      />
+      <p className="text-xs text-muted-foreground">Gold outline = anchored frame</p>
     </div>
   )
 }

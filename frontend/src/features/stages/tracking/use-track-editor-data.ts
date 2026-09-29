@@ -21,15 +21,15 @@ type LoadState =
 async function loadAll(shot: string): Promise<TrackEditorData> {
   const [preview, frames, match] = await Promise.all([
     fetchPreview(shot),
-    fetchFrames(shot).catch(() => null),
+    fetchFrames(shot),
     fetchMatch(),
   ])
   // Prefer the shot's own fps (delivered with /tracking/frames); the camera
   // track only exists once the camera stage has run and 30 misplaces boxes
   // on 25 fps clips.
-  const fps = frames?.fps || (await fetchCameraFps()) || DEFAULT_FPS
+  const fps = frames.fps || (await fetchCameraFps()) || DEFAULT_FPS
   const boxesByFrame = new Map<number, FrameBox[]>()
-  for (const f of frames?.frames ?? []) boxesByFrame.set(f.frame, f.boxes ?? [])
+  for (const f of frames.frames ?? []) boxesByFrame.set(f.frame, f.boxes ?? [])
   return { tracks: preview.tracks, boxesByFrame, fps, roster: match?.roster ?? [] }
 }
 

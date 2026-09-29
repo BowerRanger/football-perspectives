@@ -58,8 +58,12 @@ UI:
 - Media sits in a near-black `stage` well in both themes.
 - The direction contract lives in `.impeccable/surfaces/frontend-src-app-tsx.md`.
 
-## Not done / follow-ups
+## Follow-up round (2026-09-29, "recommended next")
 
-- Job cancel needs a cancellable runner; pipeline jobs run in daemon threads.
-- Server-side undo snapshots for track merges and deletes; today those are confirm-gated only.
-- Typed schemas (zod) mirrored from the Pydantic payload models (audit pattern 3).
+- **Job cancel:** `POST /api/jobs/{id}/cancel` raises `JobCancelled` (a `BaseException`, so the pipeline's `except Exception` handlers can't swallow it) into the job's worker thread via `PyThreadState_SetAsyncExc`. The stage stops at its next Python step; context-manager shims unwind. The status becomes `cancelled`, the SSE `done` carries it, and the log dock has Cancel run (with a confirm).
+- **Track undo:** every destructive track edit snapshots the files it rewrites into `tracks/.undo/<id>/` and returns `undo_id`. `GET/POST /api/tracks/undo` pops the newest (409 if a later edit exists). The UI offers an Undo toast action, a toolbar Undo and ⌘Z. Renames are excluded.
+- **Error vs empty:** `getJsonOr404` + `useResource`. About 71 best-effort reads became 6 optional lookups; main payloads show `PanelError` + Retry.
+- **One transport:** `components/frame-player.tsx` + `hooks/use-frame-keys.ts` replace six hand-rolled players.
+- **Log dock:** lines are classified on ingest (`lib/log-buffer.ts`, unit-tested), the list is virtualised (20k lines render about 50 nodes), and it tells you when the head was trimmed.
+
+Still open: typed schemas (zod) mirrored from the Pydantic payload models (audit pattern 3).

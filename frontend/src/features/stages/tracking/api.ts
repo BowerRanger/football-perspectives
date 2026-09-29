@@ -21,30 +21,48 @@ export async function renameTrack(shot: string, trackId: string, playerName: str
   if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => null), url)
 }
 
-export const deleteTrack = (shot: string, trackId: string) => deleteJson(`/api/tracks/${enc(shot)}/${enc(trackId)}`)
+/** Every destructive edit returns the snapshot id that /api/tracks/undo restores (null = nothing changed). */
+export interface Undoable {
+  undo_id?: string | null
+}
+
+export interface UndoEntry {
+  undo_id: string
+  label: string
+  created_at: string
+  files: string[]
+}
+
+export const listUndo = () => getJson<UndoEntry[]>("/api/tracks/undo")
+
+export const undoEdit = (undoId?: string) =>
+  postJson<{ undone: string; undo_id: string; files: string[] }>("/api/tracks/undo", undoId ? { undo_id: undoId } : {})
+
+export const deleteTrack = (shot: string, trackId: string) =>
+  deleteJson<Undoable>(`/api/tracks/${enc(shot)}/${enc(trackId)}`)
 
 export const deleteTracksBulk = (shot: string, trackIds: string[]) =>
-  postJson(`/api/tracks/${enc(shot)}/delete-bulk`, { track_ids: trackIds })
+  postJson<Undoable>(`/api/tracks/${enc(shot)}/delete-bulk`, { track_ids: trackIds })
 
 export const splitTrack = (shot: string, trackId: string, splitFrame: number) =>
-  postJson("/api/tracks/split", { shot_id: shot, track_id: trackId, split_frame: splitFrame })
+  postJson<Undoable>("/api/tracks/split", { shot_id: shot, track_id: trackId, split_frame: splitFrame })
 
 export const mergeTracks = (shot: string, trackIds: string[]) =>
-  postJson<{ merged_into: string; frame_collisions?: number }>("/api/tracks/merge", {
+  postJson<Undoable & { merged_into: string; frame_collisions?: number }>("/api/tracks/merge", {
     shot_id: shot,
     track_ids: trackIds,
   })
 
 export const mergeByName = () =>
-  postJson<{ tracks_removed: number; merged_groups: number; frame_collisions?: number }>("/api/tracks/merge-by-name")
+  postJson<Undoable & { tracks_removed: number; merged_groups: number; frame_collisions?: number }>("/api/tracks/merge-by-name")
 
 export const ignoreUnknown = (shot: string) =>
-  postJson<{ count: number }>(`/api/tracks/ignore-unknown/${enc(shot)}`)
+  postJson<Undoable & { count: number }>(`/api/tracks/ignore-unknown/${enc(shot)}`)
 
-export const deleteIgnored = () => postJson<{ deleted: number }>("/api/tracks/delete-ignored")
+export const deleteIgnored = () => postJson<Undoable & { deleted: number }>("/api/tracks/delete-ignored")
 
 export const interpolateGaps = (shot: string, trackIds: string[]) =>
-  postJson<{ total_frames_added: number; results: unknown[] }>(`/api/tracks/${enc(shot)}/interpolate-gaps`, {
+  postJson<Undoable & { total_frames_added: number; results: unknown[] }>(`/api/tracks/${enc(shot)}/interpolate-gaps`, {
     track_ids: trackIds,
   })
 

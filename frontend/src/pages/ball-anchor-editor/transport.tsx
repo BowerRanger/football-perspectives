@@ -1,26 +1,13 @@
-import * as React from "react"
-import { ChevronLeftIcon, ChevronRightIcon, FlagIcon, PauseIcon, PlayIcon, VideoOffIcon } from "lucide-react"
+import { FlagIcon, VideoOffIcon } from "lucide-react"
 import { toast } from "sonner"
 
+import { FramePlayer } from "@/components/frame-player"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Kbd } from "@/components/ui/kbd"
 import { Label } from "@/components/ui/label"
-import { Slider } from "@/components/ui/slider"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import type { EditorController } from "./use-ball-anchor-editor"
 
-function IconTip({ label, keys, children }: { label: string; keys?: string; children: React.ReactElement }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent>
-        {label} {keys ? <Kbd>{keys}</Kbd> : null}
-      </TooltipContent>
-    </Tooltip>
-  )
-}
-
+/** The shared FramePlayer plus the ball editor's chain / off-screen actions and layer toggles. */
 export function Transport({ ctrl }: { ctrl: EditorController }) {
   const { player, docApi, selectedTag } = ctrl
   const chain = docApi.activeChain
@@ -32,34 +19,16 @@ export function Transport({ ctrl }: { ctrl: EditorController }) {
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <IconTip label={player.playing ? "Pause" : "Play"} keys="Space">
-        <Button size="icon-sm" variant="secondary" aria-label={player.playing ? "Pause" : "Play"} onClick={player.toggle}>
-          {player.playing ? <PauseIcon /> : <PlayIcon />}
-        </Button>
-      </IconTip>
-      <IconTip label="Previous frame" keys="←">
-        <Button size="icon-sm" variant="outline" aria-label="Previous frame" onClick={() => player.step(-1)}>
-          <ChevronLeftIcon />
-        </Button>
-      </IconTip>
-      <IconTip label="Next frame" keys="→">
-        <Button size="icon-sm" variant="outline" aria-label="Next frame" onClick={() => player.step(1)}>
-          <ChevronRightIcon />
-        </Button>
-      </IconTip>
-      <Slider
-        className="min-w-40 flex-1"
-        aria-label="Seek frame"
-        min={0}
-        max={Math.max(1, player.totalFrames)}
-        step={1}
-        value={[Math.min(player.frame, Math.max(1, player.totalFrames))]}
-        onValueChange={(v) => player.seekTo(v[0] ?? 0)}
-      />
-      <span className="min-w-24 text-right font-mono text-xs tabular-nums text-muted-foreground" aria-live="off">
-        Frame {player.frame}
-      </span>
+    <FramePlayer
+      label="Seek frame"
+      frame={player.frame}
+      max={Math.max(0, player.totalFrames - 1)}
+      fps={player.fps}
+      frameInput
+      playing={player.playing}
+      onTogglePlay={player.toggle}
+      onSeek={player.seekTo}
+    >
       <div className="flex w-full flex-wrap items-center gap-2">
         {selectedTag === "off_screen_flight" ? (
           <Button size="sm" variant="secondary" onClick={() => docApi.markOffScreen(player.currentFrame())}>
@@ -71,7 +40,7 @@ export function Transport({ ctrl }: { ctrl: EditorController }) {
         </Button>
         <LayerToggles ctrl={ctrl} />
       </div>
-    </div>
+    </FramePlayer>
   )
 }
 

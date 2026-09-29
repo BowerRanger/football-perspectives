@@ -18,10 +18,10 @@ export default defineConfig(({ command }) => ({
   base: command === "serve" ? "/" : "/static/app/",
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: { "@": path.resolve(__dirname, "./src") },
+    alias: { "@": path.resolve(import.meta.dirname, "./src") },
   },
   build: {
-    outDir: path.resolve(__dirname, "../src/web/static/app"),
+    outDir: path.resolve(import.meta.dirname, "../src/web/static/app"),
     emptyOutDir: true,
     chunkSizeWarningLimit: 1200,
   },

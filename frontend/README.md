@@ -12,6 +12,7 @@ npm install              # .npmrc forces dev deps even when npm omit=dev is glob
 npm run dev              # Vite on :5173, proxies the API to FP_API (default http://localhost:8765)
 npm run build            # typecheck + build into ../src/web/static/app (commit the result)
 npx tsc -b --noEmit      # typecheck only
+npm test                 # vitest unit tests (src/**/*.test.ts)
 ```
 
 Run a backend for dev with `python recon.py serve --output ./output --port 8765`.
@@ -43,6 +44,14 @@ Run a backend for dev with `python recon.py serve --output ./output --port 8765`
   destructive action, info = selection/hint. `StatusBadge` for stage state, `ToneBadge` for data state.
 - **Panels.** `Panel` (a Card) is the only container; sentence-case titles; never nest Panels.
   Loading → `PanelSkeleton`/`Skeleton`; empty → `PanelEmpty` that says what to do next; failure → `PanelError`.
+- **Errors are never empty states.** Load a panel's main payload with `useResource` (`@/hooks/use-resource`) and
+  `getJson` / `getJsonOr404` (null only on 404 = "not produced yet"); render `PanelError` + Retry on failure.
+  `getJsonOrNull` swallows every failure and is reserved for optional lookups (a test caps its use).
+- **One frame transport.** Every video / canvas / 3D player uses `<FramePlayer>` (`@/components/frame-player`):
+  play/step/scrub with a spoken value, optional frame input, and the shared Space / ←→ / Shift±10 / Home End
+  shortcuts (`useFrameKeys`; only the newest enabled player listens — pass `keyboard={false}` to secondaries).
+- **Runs** go through `usePipeline()`; the log dock is virtualised and has Cancel (`POST /api/jobs/{id}/cancel`).
+  Destructive track edits return an `undo_id`; offer it via a toast action (`POST /api/tracks/undo`).
 - **Media wells.** Video, canvases and three.js sit in `bg-stage` (near-black in both themes).
 - **Destructive actions** go through `useConfirm({ destructive: true })`. Errors surface via
   `toast.error(title, { description })` (sonner) — never `alert()`.

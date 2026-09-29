@@ -2,6 +2,7 @@
 // (joints-near, goal-element-suggest, pitch-fix-suggest) are best-effort:
 // the operator's own choices always win over a suggestion.
 
+import { errorMessage } from "@/lib/api"
 import { goalElementSuggest, jointsNear, pitchFixSuggest, type PitchFixSuggestion } from "./api"
 import { AUTO } from "./tags"
 import type { BallAnchor } from "./types"
@@ -48,17 +49,30 @@ export function makeAnchor(frame: number, xy: [number, number] | null, state: st
   }
 }
 
+/** Run a suggestion lookup; a failure becomes a warning, never a silent "no suggestion". */
+async function suggest<T>(fn: () => Promise<T>, fallback: T): Promise<{ value: T; failed: string | null }> {
+  try {
+    return { value: await fn(), failed: null }
+  } catch (err) {
+    return { value: fallback, failed: errorMessage(err) }
+  }
+}
+
 async function placeTouch(shot: string, frame: number, xy: [number, number], a: Authoring): Promise<Placement> {
-  const hits = await jointsNear(shot, frame, xy[0], xy[1])
+  const { value: hits, failed } = await suggest(() => jointsNear(shot, frame, xy[0], xy[1]), [])
   const forced = a.player !== AUTO
   const player = forced ? a.player : hits[0]?.player_id
   const bone = forced ? a.bone : hits[0]?.bone
   if (!player || !bone) {
+    if (failed) {
+      return { ok: false, message: `Joint suggestions failed (${failed}). Pick a player and body part in the panel, then click again.` }
+    }
     return { ok: false, message: "Touch needs a player and body part — no joint under the cursor. Pick both in the panel, or click closer to a player." }
   }
   const shotLike = a.touchType === "shot" || a.touchType === "volley"
   return {
     ok: true,
+    message: failed ? `Joint suggestions failed (${failed}); used your player and body part.` : undefined,
     touchSuggestion: hits[0] ? { player: hits[0].player_id, bone: hits[0].bone } : undefined,
     anchor: makeAnchor(frame, xy, "player_touch", {
       player_id: player,
@@ -72,10 +86,14 @@ async function placeTouch(shot: string, frame: number, xy: [number, number], a: 
 
 async function placeGoal(shot: string, frame: number, xy: [number, number], a: Authoring): Promise<Placement> {
   let element = a.goalElement
+  let failed: string | null = null
   if (element === AUTO) {
-    element = (await goalElementSuggest(shot, frame, xy[0], xy[1]))[0] ?? AUTO
+    const res = await suggest(() => goalElementSuggest(shot, frame, xy[0], xy[1]), [] as string[])
+    failed = res.failed
+    element = res.value[0] ?? AUTO
   }
   if (element === AUTO) {
+    if (failed) return { ok: false, message: `Goal element suggestions failed (${failed}). Pick an element manually.` }
     return { ok: false, message: "Goal impact needs an element — no goal under the cursor. Pick one manually." }
   }
   return {
@@ -86,7 +104,8 @@ async function placeGoal(shot: string, frame: number, xy: [number, number], a: A
 }
 
 async function placePitchFix(shot: string, frame: number, xy: [number, number]): Promise<Placement> {
-  const fixes = await pitchFixSuggest(shot, frame, xy[0], xy[1])
+  const { value: fixes, failed } = await suggest(() => pitchFixSuggest(shot, frame, xy[0], xy[1]), [] as PitchFixSuggestion[])
+  if (failed) return { ok: false, message: `Pitch feature suggestions failed (${failed}). Try again.` }
   if (!fixes.length) return { ok: false, message: "No pitch feature within range of that click." }
   return { ok: true, pitchFixes: fixes, anchor: makeAnchor(frame, xy, "grounded", { landmark: fixes[0].name }) }
 }

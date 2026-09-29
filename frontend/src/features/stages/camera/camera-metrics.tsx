@@ -5,7 +5,9 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/h
 import { Skeleton } from "@/components/ui/skeleton"
 import { ToneBadge, type Tone } from "@/components/status"
 import { fmt } from "@/lib/format"
-import { getJsonOrNull, qs } from "@/lib/api"
+import { getJson, qs } from "@/lib/api"
+import { useResource } from "@/hooks/use-resource"
+import { Button } from "@/components/ui/button"
 import type { CameraMetrics } from "./types"
 
 // Explanations + thresholds for each honest camera metric (ported verbatim
@@ -112,21 +114,13 @@ function MetricsRows({ m }: { m: CameraMetrics }) {
   )
 }
 
-type MetricsState = { status: "loading" } | { status: "ready"; metrics: CameraMetrics | null }
-
 /** Lazily loaded: the held-out circle check reads the clip video, so it takes a few seconds. */
 export function CameraMetricsBlock({ shot }: { shot: string }) {
-  const [state, setState] = React.useState<MetricsState>({ status: "loading" })
-
-  React.useEffect(() => {
-    let live = true
-    void getJsonOrNull<CameraMetrics>(`/api/camera/metrics${qs({ shot })}`).then((metrics) => {
-      if (live) setState({ status: "ready", metrics })
-    })
-    return () => {
-      live = false
-    }
-  }, [shot])
+  // 200 {available:false} means "no metrics for this shot"; a 500 is an error.
+  const { state, retry } = useResource(
+    (signal) => getJson<CameraMetrics>(`/api/camera/metrics${qs({ shot })}`, { signal }),
+    [shot],
+  )
 
   if (state.status === "loading") {
     return (
@@ -137,7 +131,17 @@ export function CameraMetricsBlock({ shot }: { shot: string }) {
       </div>
     )
   }
-  const m = state.metrics
+  if (state.status === "error") {
+    return (
+      <div className="flex flex-col items-start gap-2 text-sm">
+        <p className="text-destructive">Could not compute quality metrics: {state.error}</p>
+        <Button size="sm" variant="outline" onClick={retry}>
+          Retry
+        </Button>
+      </div>
+    )
+  }
+  const m = state.data
   if (!m || m.available === false) {
     return <p className="text-sm text-muted-foreground">No quality metrics available for this shot.</p>
   }

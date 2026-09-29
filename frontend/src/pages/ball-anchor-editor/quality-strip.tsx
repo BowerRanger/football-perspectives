@@ -13,7 +13,7 @@ export function QualityStrip({ ctrl }: { ctrl: EditorController }) {
   const wrapRef = React.useRef<HTMLDivElement | null>(null)
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
   const [width, setWidth] = React.useState(0)
-  const { quality, player, docApi } = ctrl
+  const { quality, qualityFailed, player, docApi } = ctrl
   const n = quality?.n_frames ?? 0
 
   React.useEffect(() => {
@@ -35,11 +35,11 @@ export function QualityStrip({ ctrl }: { ctrl: EditorController }) {
       quality,
       docApi.doc.anchors,
       player.frame,
-      "No ball quality yet — run the Ball stage",
+      qualityFailed ? "Ball quality could not be loaded" : "No ball quality yet — run the Ball stage",
       cssVar("--muted-foreground", "#a1a1aa"),
       cssVar("--stage", "#0a0a0a"),
     )
-  }, [width, quality, docApi.doc.anchors, player.frame])
+  }, [width, quality, qualityFailed, docApi.doc.anchors, player.frame])
 
   const seekFromPointer = (clientX: number) => {
     if (!n || !wrapRef.current) return

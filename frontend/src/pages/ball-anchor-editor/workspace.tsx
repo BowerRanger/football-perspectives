@@ -23,14 +23,15 @@ interface WorkspaceProps {
 
 /** Three-column editor: tools left, frame + transport centre, events right (stacked on narrow screens). */
 export function EditorWorkspace({ ctrl, embedded = false }: WorkspaceProps) {
+  // The Ball stage (its only host besides the page) has no other player, so this one always owns the keys.
   useEditorShortcuts(ctrl, true)
   useUnsavedGuard(ctrl.docApi.dirty, { what: "ball anchors" })
 
   if (ctrl.loadError) {
     return (
       <PanelError
-        title={`Could not load saved anchors for ${ctrl.shot}`}
-        message={`Saving is disabled so existing anchors can't be overwritten. ${ctrl.loadError}`}
+        title={`Could not load the editor data for ${ctrl.shot}`}
+        message={`Saving is disabled so existing anchors can't be overwritten. Failed to read ${ctrl.loadError}`}
         action={
           <Button variant="outline" size="sm" className="mt-2" onClick={ctrl.retryLoad}>
             Retry
@@ -70,6 +71,13 @@ export function EditorWorkspace({ ctrl, embedded = false }: WorkspaceProps) {
             <FrameCanvas ctrl={ctrl} />
             <Transport ctrl={ctrl} />
             <QualityStrip ctrl={ctrl} />
+            {ctrl.notices.length > 0 ? (
+              <ul className="space-y-0.5 text-xs text-muted-foreground" aria-label="Unavailable optional data">
+                {ctrl.notices.map((n) => (
+                  <li key={n}>{n}</li>
+                ))}
+              </ul>
+            ) : null}
             {ctrl.previewResult ? <PreviewSummary result={ctrl.previewResult} /> : null}
           </div>
         </div>

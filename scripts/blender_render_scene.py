@@ -1165,10 +1165,17 @@ def main(argv: list[str]) -> int:
         if vignette_strength > 0.0:
             mask = group.nodes.new("CompositorNodeEllipseMask")
             mask.inputs["Position"].default_value = (0.5, 0.5)
-            mask.inputs["Size"].default_value = (0.8, 0.8)
+            # Both Size axes are fractions of the frame WIDTH, so a square
+            # size draws a circle — on a 9:16 pass that is a small disc.
+            # Scale y by the aspect to get a frame-filling ellipse.
+            mask.inputs["Size"].default_value = (0.9, 0.9 * height / width)
             blur = group.nodes.new("CompositorNodeBlur")
             blur.inputs["Type"].default_value = "Gaussian"
-            blur.inputs["Size"].default_value = (0.3, 0.3)
+            # Blur Size is in PIXELS in Blender 5.x (a fractional size
+            # was a no-op and left a hard-edged disc); feather by a
+            # quarter of the short side for a soft falloff.
+            feather_px = 0.25 * min(width, height)
+            blur.inputs["Size"].default_value = (feather_px, feather_px)
             group.links.new(mask.outputs["Mask"], blur.inputs["Image"])
             mask_val = group.nodes.new("CompositorNodeRGBToBW")
             group.links.new(blur.outputs["Image"], mask_val.inputs["Image"])

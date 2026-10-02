@@ -1,0 +1,29 @@
+# Short 3 — "What goal is this?" (posterised comic).
+size: [1080, 1920]
+fps: 30
+segments:
+  - src: output-shorts/render_experiments/s3_drone/gberch/drone_9x16.mp4
+    first_frame: 230
+    from: 236
+    to: 335
+  - src: output-shorts/render_experiments/s3_ots/gberch/ots_P006_9x16.mp4
+    first_frame: 335
+    from: 335
+    to: 375
+  - src: output-shorts/render_experiments/s3_chase_slow/gberch/chase_9x16.mp4
+    first_frame: 366
+    stretch: 3
+    from: 366
+    to: 400
+    flash: true
+    label: "REPLAY"
+  - src: output-shorts/render_experiments/s3_net_orbit/gberch/orbit_9x16.mp4
+    first_frame: 384
+    stretch: 3
+    from: 388
+    to: 410
+    hold_s: 1.5
+    label: "REPLAY"
+captions:
+  - {text: "WHAT GOAL IS THIS?", style: kicker, start: 0}
+  - {text: "Name the scorer", style: sub, start: -2.0}

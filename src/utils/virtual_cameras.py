@@ -157,6 +157,16 @@ class RigConfig:
     eyes_up_m: float = 0.10
     eyes_forward_m: float = 0.18
     eyes_smooth_frames: int = 5
+    # Shot-planning knobs for the goal/orbit rigs (shorts editing):
+    # ``focus`` picks what they frame — "centroid" (all players + ball,
+    # the default), "ball", or a player id (e.g. "P006", the scorer) —
+    # smoothed over ``focus_smooth_frames``. ``orbit_start_frame``/
+    # ``orbit_end_frame`` confine the orbit sweep to a frame window (the
+    # angle holds at the ends outside it); -1 = the shot's first/last frame.
+    focus: str = "centroid"
+    focus_smooth_frames: int = 9
+    orbit_start_frame: int = -1
+    orbit_end_frame: int = -1
 
 
 def _head_pose_world(
@@ -413,6 +423,49 @@ def _smoothed_centroid(
     return all_frames, smooth
 
 
+def _focus_path(
+    tracks: Sequence["SmplWorldTrack"],
+    ball_track: object,
+    cfg: RigConfig,
+) -> tuple[list[int], np.ndarray]:
+    """``(frames, smoothed_xyz)`` the goal/orbit rigs aim at, per
+    ``cfg.focus``: the action centroid (default), the ball (held across
+    gaps, leading gap back-filled with the first sighting; falls back to
+    the centroid when the ball is never seen), or one player's root."""
+    all_frames, centroid = _smoothed_centroid(tracks, ball_track, cfg.drone_smooth_frames)
+    focus = (cfg.focus or "centroid").strip()
+    if focus == "centroid" or not all_frames:
+        return all_frames, centroid
+    if focus == "ball":
+        ball_xyz = _ball_xyz_by_frame(ball_track) if ball_track is not None else {}
+        if not ball_xyz:
+            return all_frames, centroid
+        first = ball_xyz[min(ball_xyz)]
+        held, last = [], first
+        for f in all_frames:
+            last = ball_xyz.get(f, last)
+            held.append(last)
+        return all_frames, _moving_average(np.asarray(held), cfg.focus_smooth_frames)
+    player = next((t for t in tracks if t.player_id == focus), None)
+    if player is None:
+        raise ValueError(f"rig focus {focus!r}: no such player track")
+    idx = {int(f): i for i, f in enumerate(np.asarray(player.frames).tolist())}
+    raw, last = [], None
+    for k, f in enumerate(all_frames):
+        if f in idx:
+            last = np.asarray(player.root_t[idx[f]], dtype=np.float64)
+        raw.append(last if last is not None else centroid[k])
+    return all_frames, _moving_average(np.asarray(raw), cfg.focus_smooth_frames)
+
+
+def _orbit_fraction(frame: int, i: int, n: int, cfg: RigConfig, frames: list[int]) -> float:
+    start = cfg.orbit_start_frame if cfg.orbit_start_frame >= 0 else frames[0]
+    end = cfg.orbit_end_frame if cfg.orbit_end_frame >= 0 else frames[-1]
+    if end <= start:
+        return i / (n - 1) if n > 1 else 0.0
+    return min(1.0, max(0.0, (frame - start) / (end - start)))
+
+
 def build_drone_track(
     tracks: Sequence["SmplWorldTrack"],
     ball_track: object,
@@ -465,7 +518,7 @@ def build_goal_track(
     if side not in ("left", "right"):
         raise ValueError(f"build_goal_track: side must be 'left' or 'right', got {side!r}")
     K = intrinsics_from_fov(cfg.goal_fov_deg, image_size)
-    all_frames, smooth = _smoothed_centroid(tracks, ball_track, cfg.drone_smooth_frames)
+    all_frames, smooth = _focus_path(tracks, ball_track, cfg)
     if not all_frames:
         return _make_track(clip_id, image_size, fps, K, [])
 
@@ -543,14 +596,14 @@ def build_orbit_track(
     looking at it.
     """
     K = intrinsics_from_fov(cfg.orbit_fov_deg, image_size)
-    all_frames, smooth = _smoothed_centroid(tracks, ball_track, cfg.drone_smooth_frames)
+    all_frames, smooth = _focus_path(tracks, ball_track, cfg)
     if not all_frames:
         return _make_track(clip_id, image_size, fps, K, [])
 
     n = len(all_frames)
     per_frame: list[_FrameTuple] = []
     for i, (f, target) in enumerate(zip(all_frames, smooth)):
-        frac = i / (n - 1) if n > 1 else 0.0
+        frac = _orbit_fraction(int(f), i, n, cfg, all_frames)
         angle = math.radians(-cfg.orbit_sweep_deg / 2.0 + cfg.orbit_sweep_deg * frac)
         centre = np.array([
             target[0] + cfg.orbit_radius_m * math.sin(angle),

@@ -76,13 +76,35 @@ def test_validate_experiment_fills_defaults():
     assert exp == {
         "id": "e1", "camera": "broadcast", "rig": {}, "style": None,
         "style_name": None, "frames": None, "vertical": False, "speed": None,
+        "time_stretch": 1,
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", [0, 10, 2.5, True, "4"])
+def test_validate_experiment_rejects_bad_time_stretch(bad):
+    with pytest.raises(ValueError, match="time_stretch"):
+        rex.validate_experiment(_min_exp(time_stretch=bad))
+
+
+@pytest.mark.unit
+def test_build_blender_command_passes_time_stretch():
+    exp = rex.validate_experiment(_min_exp(camera="chase", time_stretch=4))
+    cmd = rex.build_blender_command(
+        blender_bin="blender", output_dir=Path("out"), shot="s", exp=exp,
+        quality={"width": 960, "height": 540, "samples": 8}, style_payload={})
+    i = cmd.index("--time-stretch")
+    assert cmd[i + 1] == "4"
+    exp1 = rex.validate_experiment(_min_exp(camera="chase"))
+    assert "--time-stretch" not in rex.build_blender_command(
+        blender_bin="blender", output_dir=Path("out"), shot="s", exp=exp1,
+        quality={"width": 960, "height": 540, "samples": 8}, style_payload={})
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("cam", [
     "broadcast", "drone", "orbit", "chase", "dolly",
-    "pov:P001", "ots:P099", "goal:left", "goal:right",
+    "pov:P001", "ots:P099", "eyes:P005", "goal:left", "goal:right",
     "goalline:left", "goalline:right",
 ])
 def test_validate_experiment_accepts_every_known_camera_id(cam):

@@ -73,11 +73,11 @@ _QUALITY_PRESETS: dict[str, dict[str, int]] = {
 # a player id; goal/goalline (new rigs) take a side.
 _CAMERA_ID_RE = re.compile(
     r"^(broadcast|drone|orbit|chase|dolly"
-    r"|(?:pov|ots):[A-Za-z0-9_-]+"
+    r"|(?:pov|ots|eyes):[A-Za-z0-9_-]+"
     r"|(?:goal|goalline):(?:left|right))$"
 )
 _NO_ARG_RIGS = frozenset({"drone", "orbit", "chase", "dolly"})
-_PLAYER_RIGS = frozenset({"pov", "ots"})
+_PLAYER_RIGS = frozenset({"pov", "ots", "eyes"})
 _SIDE_RIGS = frozenset({"goal", "goalline"})
 
 
@@ -117,6 +117,14 @@ def validate_speed_for_quality(speed: dict | None, quality_name: str) -> None:
         )
 
 
+def _validate_time_stretch(exp_id: str, raw: object) -> int:
+    """``time_stretch``: render-native slow motion factor (int 1-9)."""
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= 9:
+        raise ValueError(
+            f"experiment {exp_id!r}: 'time_stretch' must be an int in 1..9, got {raw!r}")
+    return raw
+
+
 def validate_experiment(raw: object) -> dict:
     """Validate + normalize one experiment entry. Returns a new dict with
     every optional field defaulted (never mutates ``raw``)."""
@@ -132,7 +140,7 @@ def validate_experiment(raw: object) -> dict:
         raise ValueError(
             f"experiment {exp_id!r}: invalid camera id {camera!r}; expected "
             "'broadcast', 'drone', 'orbit', 'chase', 'dolly', 'pov:<pid>', "
-            "'ots:<pid>', 'goal:left|right' or 'goalline:left|right'"
+            "'ots:<pid>', 'eyes:<pid>', 'goal:left|right' or 'goalline:left|right'"
         )
 
     rig = raw.get("rig") or {}
@@ -175,6 +183,7 @@ def validate_experiment(raw: object) -> dict:
         "style": dict(style) if style is not None else None,
         "style_name": style_name,
         "frames": frames,
+        "time_stretch": _validate_time_stretch(exp_id, raw.get("time_stretch", 1)),
         "vertical": vertical,
         "speed": speed,
     }
@@ -416,6 +425,8 @@ def build_blender_command(
     if exp["frames"] is not None:
         cmd += ["--frame-start", str(exp["frames"][0]),
                 "--frame-end", str(exp["frames"][1])]
+    if exp.get("time_stretch", 1) > 1:
+        cmd += ["--time-stretch", str(exp["time_stretch"])]
     if exp["vertical"]:
         cmd.append("--vertical")
     return cmd
@@ -630,6 +641,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--only", default=None,
                     help="comma-separated experiment ids to run (default: all)")
     p.add_argument("--quality", choices=sorted(_QUALITY_PRESETS), default="draft")
+    p.add_argument("--config", type=Path, default=None,
+                    help="clip config YAML deep-merged over config/default.yaml "
+                         "(same as `recon.py run --config`) — e.g. per-match "
+                         "render.teams kit colours")
     p.add_argument("--dry-run", action="store_true",
                     help="print the resolved Blender command per experiment "
                          "without building any camera tracks or invoking anything")
@@ -675,7 +690,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {e}", file=sys.stderr)
         return 2
 
-    cfg = load_config()
+    cfg = load_config(args.config)
     blender_bin = resolve_blender_binary(cfg)
     if blender_bin is None and not args.dry_run:
         print("error: Blender not found (render.blender_path / "

@@ -41,6 +41,7 @@ def hex_to_linear_rgba(hex_str: str) -> tuple[float, float, float, float]:
 def resolve_player_colors(
     teams_cfg: dict,
     team_class: dict[str, tuple[str, str]],
+    role_overrides: dict[str, str] | None = None,
 ) -> dict[str, dict[str, tuple]]:
     """Resolve each player's shirt/shorts/socks colour from team config.
 
@@ -52,27 +53,184 @@ def resolve_player_colors(
     ``home_gk``/``away_gk``/``referee``/``unknown``), so every player is
     routed through :func:`src.utils.team_roles.derive_kit_role` — the same
     mapping the export/UE kit path uses — to get the canonical kit role
-    first. A ``by_player`` override (keyed by role, e.g. ``{"P003":
-    "away"}``) always wins over the derived role.
+    first. Role precedence: a config ``by_player`` override (keyed by
+    role, e.g. ``{"P003": "away"}``) > ``role_overrides`` (the operator's
+    ``players.json`` kit roles, via ``player_names.load_kit_roles`` — the
+    same source the export stage honours) > the derived role.
 
     Falls back gracefully when ``defaults`` doesn't have every role: a
     missing ``*_gk`` role falls back to that side's outfield kit, and
     anything still unresolved falls back to a neutral gray.
     """
+    fallback = {"shirt": "#888888", "shorts": "#666666", "socks": "#888888"}
+    return {
+        pid: {part: hex_to_linear_rgba(kit.get(part, fallback[part]))
+              for part in ("shirt", "shorts", "socks")}
+        for pid, kit in _resolve_kits(teams_cfg, team_class, role_overrides).items()
+    }
+
+
+def _resolve_kits(
+    teams_cfg: dict,
+    team_class: dict[str, tuple[str, str]],
+    role_overrides: dict[str, str] | None,
+) -> dict[str, dict]:
+    """``player_id -> raw kit dict`` (hex values + kit options) — the
+    role resolution shared by :func:`resolve_player_colors` and
+    :func:`resolve_player_looks`."""
     defaults = teams_cfg.get("defaults", {})
     overrides = teams_cfg.get("by_player", {})
+    roles = role_overrides or {}
     fallback = {"shirt": "#888888", "shorts": "#666666", "socks": "#888888"}
-    out: dict[str, dict[str, tuple]] = {}
-    for pid, (team, cls) in team_class.items():
-        role = overrides.get(pid) or derive_kit_role(team, cls)
+    out: dict[str, dict] = {}
+    for pid in sorted(set(team_class) | set(roles)):
+        team, cls = team_class.get(pid, ("unknown", "player"))
+        role = overrides.get(pid) or roles.get(pid) or derive_kit_role(team, cls)
         kit = defaults.get(role)
         if kit is None and role.endswith("_gk"):
             kit = defaults.get(role[: -len("_gk")])
-        if kit is None:
-            kit = fallback
-        out[pid] = {part: hex_to_linear_rgba(kit.get(part, fallback[part]))
-                    for part in ("shirt", "shorts", "socks")}
+        out[pid] = kit if kit is not None else fallback
     return out
+
+
+# --- Per-player look: kit options + appearance -----------------------------
+
+DEFAULT_SKIN_HEX = "#c68863"
+DEFAULT_HAIR_HEX = "#2b1d14"
+DEFAULT_BOOTS_HEX = "#1c1c1c"
+_SLEEVES = ("short", "long")
+
+
+def resolve_player_looks(
+    teams_cfg: dict,
+    team_class: dict[str, tuple[str, str]],
+    role_overrides: dict[str, str] | None = None,
+    appearance: dict[str, dict[str, str]] | None = None,
+) -> dict[str, dict]:
+    """Full per-player look for the anatomical-zone body.
+
+    Returns ``{pid: {"colors": {zone: linear_rgba}, "sleeves": "short"|
+    "long", "gloves": bool}}`` where ``colors`` covers every zone
+    :func:`anatomical_kit_zones` can emit. Kit keys beyond the classic
+    shirt/shorts/socks are optional per role in ``render.teams.defaults``:
+    ``boots`` (hex), ``gloves`` (hex — presence turns gloves on),
+    ``sleeves`` (``short`` default / ``long``). ``appearance`` is the
+    per-player ``skin``/``hair`` hex map from ``players.json``
+    (``player_names.load_player_appearance``).
+    """
+    base = resolve_player_colors(teams_cfg, team_class, role_overrides)
+    kits = _resolve_kits(teams_cfg, team_class, role_overrides)
+    looks = appearance or {}
+    out: dict[str, dict] = {}
+    for pid, colors in base.items():
+        kit = kits[pid]
+        app = looks.get(pid, {})
+        sleeves = kit.get("sleeves", "short")
+        gloves_hex = kit.get("gloves")
+        skin_hex = app.get("skin", DEFAULT_SKIN_HEX)
+        out[pid] = {
+            "colors": {
+                **colors,
+                "boots": hex_to_linear_rgba(kit.get("boots", DEFAULT_BOOTS_HEX)),
+                "gloves": hex_to_linear_rgba(gloves_hex or skin_hex),
+                "skin": hex_to_linear_rgba(skin_hex),
+                "hair": hex_to_linear_rgba(app.get("hair", DEFAULT_HAIR_HEX)),
+            },
+            "sleeves": sleeves if sleeves in _SLEEVES else "short",
+            "gloves": bool(gloves_hex),
+        }
+    return out
+
+
+# SMPL joint indices (src/utils/smpl_skeleton.SMPL_JOINT_NAMES order).
+_PELVIS, _L_HIP, _R_HIP, _SPINE1 = 0, 1, 2, 3
+_L_KNEE, _R_KNEE, _SPINE2 = 4, 5, 6
+_L_ANKLE, _R_ANKLE, _SPINE3 = 7, 8, 9
+_L_FOOT, _R_FOOT, _NECK = 10, 11, 12
+_L_COLLAR, _R_COLLAR, _HEAD = 13, 14, 15
+_L_SHOULDER, _R_SHOULDER = 16, 17
+_L_ELBOW, _R_ELBOW = 18, 19
+_L_WRIST, _R_WRIST, _L_HAND, _R_HAND = 20, 21, 22, 23
+
+_TORSO = {_PELVIS, _SPINE1, _SPINE2, _SPINE3, _L_COLLAR, _R_COLLAR}
+_HANDS = {_L_WRIST, _R_WRIST, _L_HAND, _R_HAND}
+_FEET = {_L_FOOT, _R_FOOT}
+_LIMB_CHILD = {_L_SHOULDER: _L_ELBOW, _R_SHOULDER: _R_ELBOW,
+               _L_HIP: _L_KNEE, _R_HIP: _R_KNEE,
+               _L_KNEE: _L_ANKLE, _R_KNEE: _R_ANKLE}
+
+# Rest-pose garment boundaries (metres / fractions along a bone).
+SHIRT_HEM_ABOVE_PELVIS_M = 0.04   # shirt/shorts split on torso verts
+SHORT_SLEEVE_FRACTION = 0.5       # of shoulder->elbow
+SHORTS_LEG_FRACTION = 0.5         # of hip->knee
+SOCK_TOP_FRACTION = 0.15          # of knee->ankle (sock starts below the knee)
+BOOT_TOP_ABOVE_ANKLE_M = 0.03
+# SMPL's head joint sits at the skull base (crown ~ +0.20 m above it,
+# face spans z ~ 0..+0.10): hair is a crown cap plus the back of the head
+# above the nape; the forehead/face/ears stay skin.
+HAIRLINE_ABOVE_HEAD_M = 0.155     # crown cap
+HAIR_BEHIND_HEAD_M = 0.01         # back-of-head band (z behind the joint)
+HAIR_BACK_MIN_ABOVE_HEAD_M = 0.06 # nape line
+
+
+def _bone_fraction(v: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
+    ab = b - a
+    return float(np.dot(v - a, ab) / max(float(np.dot(ab, ab)), 1e-9))
+
+
+def anatomical_kit_zones(
+    verts: np.ndarray,
+    weights: np.ndarray,
+    joints: np.ndarray,
+    sleeves: str = "short",
+    gloves: bool = False,
+) -> list[str]:
+    """Garment zone per rest-pose SMPL vertex (Y-up, +Z forward).
+
+    Uses each vertex's dominant skinning joint plus its position along
+    that bone, so sleeves end mid upper-arm, shorts mid-thigh, socks
+    start below the knee and feet get boots — the height-band
+    :func:`kit_zone_for_height_fraction` model paints T-posed arms
+    (and hands) shirt-coloured and has no boots, sleeves, gloves or
+    hair. Zones: shirt, shorts, socks, boots, gloves, skin, hair.
+    """
+    verts = np.asarray(verts, dtype=float)
+    joints = np.asarray(joints, dtype=float)
+    dominant = np.asarray(weights).argmax(axis=1)
+    long_sleeves = sleeves == "long"
+    head = joints[_HEAD]
+    zones: list[str] = []
+    for v, j in zip(verts, dominant.tolist()):
+        if j in _TORSO:
+            below_hem = v[1] <= joints[_PELVIS][1] + SHIRT_HEM_ABOVE_PELVIS_M
+            waist = j in (_PELVIS, _SPINE1)
+            zones.append("shorts" if waist and below_hem else "shirt")
+        elif j in (_L_SHOULDER, _R_SHOULDER):
+            t = _bone_fraction(v, joints[j], joints[_LIMB_CHILD[j]])
+            zones.append("shirt" if long_sleeves or t < SHORT_SLEEVE_FRACTION else "skin")
+        elif j in (_L_ELBOW, _R_ELBOW):
+            zones.append("shirt" if long_sleeves else "skin")
+        elif j in _HANDS:
+            zones.append("gloves" if gloves else "skin")
+        elif j in (_L_HIP, _R_HIP):
+            t = _bone_fraction(v, joints[j], joints[_LIMB_CHILD[j]])
+            zones.append("shorts" if t < SHORTS_LEG_FRACTION else "skin")
+        elif j in (_L_KNEE, _R_KNEE):
+            t = _bone_fraction(v, joints[j], joints[_LIMB_CHILD[j]])
+            zones.append("socks" if t > SOCK_TOP_FRACTION else "skin")
+        elif j in (_L_ANKLE, _R_ANKLE):
+            zones.append("boots" if v[1] < joints[j][1] + BOOT_TOP_ABOVE_ANKLE_M
+                         else "socks")
+        elif j in _FEET:
+            zones.append("boots")
+        elif j == _HEAD:
+            crown = v[1] > head[1] + HAIRLINE_ABOVE_HEAD_M
+            back = (v[2] < head[2] - HAIR_BEHIND_HEAD_M
+                    and v[1] > head[1] + HAIR_BACK_MIN_ABOVE_HEAD_M)
+            zones.append("hair" if crown or back else "skin")
+        else:  # neck
+            zones.append("skin")
+    return zones
 
 
 def blender_camera_world_matrix(

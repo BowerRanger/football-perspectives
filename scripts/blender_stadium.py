@@ -12,6 +12,10 @@ from src.utils.pitch import PITCH_LENGTH as L, PITCH_WIDTH as W
 from src.utils.render_look import hex_to_linear_rgba
 
 
+DEFAULT_CROWD_COLORS = ("#283e50", "#b1b8af", "#a64039", "#ceac78", "#476780", "#d2c9b5")
+DEFAULT_BOARD_TEXT = "FOOTBALL / PERSPECTIVES"
+
+
 def build_stadium(bpy, style):
     cfg = style.get("stadium", {})
     if not cfg.get("enabled", True):
@@ -43,8 +47,10 @@ def build_stadium(bpy, style):
     white = material("Stadium_White", "#e1e9e6", True)
     turf = material("Stadium_Runoff", "#355f43")
     ground = material("Stadium_Concourse", "#414e55")
+    # crowd_colors: per-venue shirt palette (repeat a colour to weight it),
+    # e.g. a home end in club colours.
     crowd = [material(f"Stadium_Crowd_{i}", c) for i, c in enumerate(
-        ["#283e50", "#b1b8af", "#a64039", "#ceac78", "#476780", "#d2c9b5"])]
+        cfg.get("crowd_colors") or DEFAULT_CROWD_COLORS)]
     skin = material("Stadium_CrowdSkin", "#b88667")
 
     # All cuboids for a material share one mesh; no thousands of Blender objects.
@@ -128,7 +134,7 @@ def build_stadium(bpy, style):
         local(board,0,-3.5,0.60,(length,0.16,1.15))
         for u in range(-int(length/2)+4,int(length/2)-3,9):
             data = bpy.data.curves.new(f"{name}_BoardText", "FONT")
-            data.body = "FOOTBALL / PERSPECTIVES"
+            data.body = cfg.get("board_text") or DEFAULT_BOARD_TEXT
             data.align_x = "CENTER"
             data.size = 0.29
             data.extrude = 0

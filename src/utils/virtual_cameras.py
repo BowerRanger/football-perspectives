@@ -149,6 +149,14 @@ class RigConfig:
     sideline_height_m: float = 14.0
     corner_fov_deg: float = 58.0
     corner_height_m: float = 10.0
+    # Eye-line cam (``eyes:<PID>``): a player's smoothed eye position
+    # (head joint + up/forward offsets, clear of the player's own head
+    # mesh) aimed at the smoothed ball — "what the keeper saw". Unlike
+    # ``pov`` (raw head facing) it keeps the ball in frame.
+    eyes_fov_deg: float = 70.0
+    eyes_up_m: float = 0.10
+    eyes_forward_m: float = 0.18
+    eyes_smooth_frames: int = 5
 
 
 def _head_pose_world(
@@ -284,6 +292,74 @@ def build_ots_track(
         R, t = look_at_view(center, target)
         conf = float(track.confidence[i]) * (1.0 if ok else 0.5)
         per_frame.append((int(fr), R, t, conf))
+    return _make_track(clip_id, image_size, fps, K, per_frame)
+
+
+def _moving_average(arr: np.ndarray, window: int) -> np.ndarray:
+    """Centered, edge-padded moving average over axis 0 (same length)."""
+    arr = np.asarray(arr, dtype=np.float64)
+    win = max(1, int(window))
+    if win == 1 or len(arr) == 0:
+        return arr
+    pad = win // 2
+    padded = np.pad(arr, ((pad, pad), (0, 0)), mode="edge")
+    kernel = np.ones(win) / win
+    return np.stack(
+        [np.convolve(padded[:, k], kernel, mode="valid") for k in range(arr.shape[1])],
+        axis=1,
+    )[: len(arr)]
+
+
+def build_eyes_track(
+    track: "SmplWorldTrack",
+    ball_track: object,
+    cfg: RigConfig,
+    image_size: tuple[int, int],
+    fps: float,
+    clip_id: str,
+) -> CameraTrack:
+    """Eye-line camera: the player's (smoothed) eye position aimed at the
+    (smoothed) ball — e.g. ``eyes:<keeper>`` for a "would you save this?"
+    shot.
+
+    The eye point is the head joint lifted ``eyes_up_m`` and pushed
+    ``eyes_forward_m`` along the ground-projected facing so the near
+    clip never lands inside the player's own head/outline hull. The ball
+    target bridges short occlusions (``ball_target_max_occlusion_frames``)
+    then falls back to a point ahead of the player; both the eye path and
+    the target path are moving-averaged over ``eyes_smooth_frames`` so
+    GVHMR head jitter doesn't shake the frame.
+    """
+    K = intrinsics_from_fov(cfg.eyes_fov_deg, image_size)
+    ball_xyz = _ball_xyz_by_frame(ball_track)
+    frames = [int(f) for f in np.asarray(track.frames).tolist()]
+    if not frames:
+        return _make_track(clip_id, image_size, fps, K, [])
+    eyes, targets, confs = [], [], []
+    last_target: np.ndarray | None = None
+    since_ball = 0
+    for i, fr in enumerate(frames):
+        head_pos, head_R, ok = _head_pose_world(track, i)
+        facing = _normalize(head_R @ FACE_AXIS_CANONICAL)
+        facing_ground = _normalize(np.array([facing[0], facing[1], 0.0]))
+        eye = head_pos + cfg.eyes_up_m * WORLD_UP + cfg.eyes_forward_m * facing_ground
+        target = ball_xyz.get(fr)
+        if target is not None:
+            last_target, since_ball = target, 0
+        elif last_target is not None and since_ball < cfg.ball_target_max_occlusion_frames:
+            target = last_target
+            since_ball += 1
+        else:
+            target = eye + facing_ground * 10.0
+        eyes.append(eye)
+        targets.append(target)
+        confs.append(float(track.confidence[i]) * (1.0 if ok else 0.5))
+    eyes_s = _moving_average(np.asarray(eyes), cfg.eyes_smooth_frames)
+    targets_s = _moving_average(np.asarray(targets), cfg.eyes_smooth_frames)
+    per_frame: list[_FrameTuple] = []
+    for fr, eye, target, conf in zip(frames, eyes_s, targets_s, confs):
+        R, t = _look_at_safe(eye, target)
+        per_frame.append((fr, R, t, conf))
     return _make_track(clip_id, image_size, fps, K, per_frame)
 
 

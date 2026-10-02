@@ -60,10 +60,7 @@ DEFAULT_SUN_ENERGY = 3.0
 # --- Player constants ------------------------------------------------------
 # Fixed skin tone (not team-configurable) — declared once here, linearised
 # via render_look.hex_to_linear_rgba wherever a material needs it.
-SKIN_COLOR_HEX = "#c68863"
-# The 4 distinct zones `render_look.kit_zone_for_height_fraction` returns
-# (its "skin" zone covers both legs and head/neck rest-height bands).
-_KIT_ZONES = ("socks", "skin", "shorts", "shirt")
+SKIN_COLOR_HEX = "#c68863"  # == render_look.DEFAULT_SKIN_HEX
 # Axial spine-chain bones get a thicker capsule than limb bones in the
 # no-SMPL-asset fallback body.
 _SPINE_BONES = frozenset({"pelvis", "spine1", "spine2", "spine3", "neck"})
@@ -85,7 +82,9 @@ _ARMATURE_BONE_TAIL_M = 0.05
 # Unclassified players (no tracks/*_tracks.json team label) still need a
 # renderable kit — mirrors render_look.resolve_player_colors' own internal
 # fallback so a missing team classification never crashes the build.
-_FALLBACK_KIT_HEX = {"shirt": "#888888", "shorts": "#666666", "socks": "#888888"}
+_FALLBACK_KIT_HEX = {"shirt": "#888888", "shorts": "#666666", "socks": "#888888",
+                     "boots": "#1c1c1c", "gloves": SKIN_COLOR_HEX,
+                     "hair": "#2b1d14"}
 
 # --- Toon-look constants ----------------------------------------------
 # Ball kit is not team-configurable (single shared texture) — same
@@ -125,6 +124,11 @@ _DEFAULT_STYLE: dict = {
     "sun_rotation_deg": DEFAULT_SUN_ROTATION_DEG,
     "world_strength": 1.0,
     "lines_emission_strength": 1.0,
+    # "height_bands" (legacy v1 rest-height kit bands) or "anatomical"
+    # (skinning-weight garments: sleeves, boots, gloves, hair —
+    # render_look.anatomical_kit_zones). config/default.yaml ships
+    # "anatomical"; the bare-style default keeps the v1 look.
+    "body_zones": "height_bands",
     "stadium": {"enabled": True, "roof": True, "crowd_density": 0.65,
                 "seat_color": "#294b65", "accent_color": "#d6b66e"},
     "post": {
@@ -194,6 +198,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--save-blend", action="store_true")
     p.add_argument("--frame-start", type=int, default=None)
     p.add_argument("--frame-end", type=int, default=None)
+    p.add_argument(
+        "--time-stretch", type=int, default=1,
+        help="Render-native slow motion: Blender time-stretching "
+             "(frame_map_old/new) renders N interpolated frames per source "
+             "frame, so the mp4 plays N x slower at the same fps with real "
+             "in-between poses — unlike post-hoc ffmpeg setpts/minterpolate. "
+             "1-9 (Blender caps frame_map_new at 900).")
     return p.parse_args(argv)
 
 
@@ -237,6 +248,7 @@ def main(argv: list[str]) -> int:
         axis_angle_to_quaternion,
     )
     from src.stages.export import _player_team_class_map
+    from src.utils.player_names import load_kit_roles, load_player_appearance
 
     # --vertical is implemented in the render loop below (Task 8): a
     # second pass per non-broadcast camera with resolution_x/y swapped
@@ -692,10 +704,10 @@ def main(argv: list[str]) -> int:
         mat = materials_cache.get(key)
         if mat is not None:
             return mat
+        kit = colors.get(pid) or _fallback_kit_rgba
         if zone == "skin":
-            rgba = _skin_rgba
+            rgba = kit.get("skin", _skin_rgba)
         else:
-            kit = colors.get(pid) or _fallback_kit_rgba
             rgba = kit.get(zone, _fallback_kit_rgba[zone])
         mat = _toon_material(f"{pid}_{zone}", rgba, ramp_steps)
         materials_cache[key] = mat
@@ -751,14 +763,22 @@ def main(argv: list[str]) -> int:
         mod.object = arm
         mod.use_vertex_groups = True
 
-        y = v_template[:, 1].astype(float)
-        y_min, y_max = float(y.min()), float(y.max())
-        vertex_zones = [
-            render_look.kit_zone_for_height_fraction(_height_fraction(v, y_min, y_max))
-            for v in y
-        ]
+        if style.get("body_zones") == "anatomical":
+            opts = player_kit_opts.get(pid, {})
+            vertex_zones = render_look.anatomical_kit_zones(
+                v_template, weights, smpl_data["joint_positions"],
+                sleeves=opts.get("sleeves", "short"),
+                gloves=bool(opts.get("gloves", False)))
+        else:
+            y = v_template[:, 1].astype(float)
+            y_min, y_max = float(y.min()), float(y.max())
+            vertex_zones = [
+                render_look.kit_zone_for_height_fraction(
+                    _height_fraction(v, y_min, y_max))
+                for v in y
+            ]
         slot_index = {}
-        for zone in _KIT_ZONES:
+        for zone in sorted(set(vertex_zones)):
             obj.data.materials.append(
                 _material_for(materials_cache, colors, pid, zone, ramp_steps))
             slot_index[zone] = len(obj.data.materials) - 1
@@ -1212,7 +1232,14 @@ def main(argv: list[str]) -> int:
         scene.render.resolution_x = width
         scene.render.resolution_y = height
         scene.render.fps = int(round(fps))
-        scene.frame_start, scene.frame_end = frame_range
+        # Time stretching maps scene frame f -> animation time f / stretch,
+        # so the stretched range [start*N, end*N] covers the same source
+        # frames with every keyed channel (poses, ball, camera) interpolated.
+        stretch = min(9, max(1, int(args.time_stretch)))
+        scene.render.frame_map_old = 100
+        scene.render.frame_map_new = 100 * stretch
+        scene.frame_start = frame_range[0] * stretch
+        scene.frame_end = frame_range[1] * stretch
 
         engines = [e.identifier for e in
                    scene.render.bl_rna.properties["engine"].enum_items]
@@ -1331,8 +1358,16 @@ def main(argv: list[str]) -> int:
         sys.stdout.write(f"[render] no ball track at {ball_path}; skipping ball\n")
 
     team_class = _player_team_class_map(output_dir)
-    player_colors = render_look.resolve_player_colors(
-        style.get("teams", {}) or {}, team_class)
+    # players.json kit roles + skin/hair (operator data) — the same
+    # role source the export stage honours (load_kit_roles).
+    player_looks = render_look.resolve_player_looks(
+        style.get("teams", {}) or {}, team_class,
+        role_overrides=load_kit_roles(output_dir),
+        appearance=load_player_appearance(output_dir))
+    player_colors = {pid: look["colors"] for pid, look in player_looks.items()}
+    player_kit_opts = {
+        pid: {"sleeves": look["sleeves"], "gloves": look["gloves"]}
+        for pid, look in player_looks.items()}
     smpl_data, pelvis_canon = load_smpl_body_data(_REPO_ROOT, np)
     if smpl_data is not None:
         sys.stdout.write(

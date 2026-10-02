@@ -128,6 +128,10 @@ class RenderStage(BaseStage):
             chase_smooth_frames=int(raw.get("chase_smooth_frames", 9)),
             chase_min_speed_m_s=float(raw.get("chase_min_speed_m_s", 0.5)),
             dolly_fov_deg=float(raw.get("dolly_fov_deg", 30.0)),
+            eyes_fov_deg=float(raw.get("eyes_fov_deg", 70.0)),
+            eyes_up_m=float(raw.get("eyes_up_m", 0.10)),
+            eyes_forward_m=float(raw.get("eyes_forward_m", 0.18)),
+            eyes_smooth_frames=int(raw.get("eyes_smooth_frames", 5)),
             dolly_y_m=float(raw.get("dolly_y_m", -3.0)),
             dolly_height_m=float(raw.get("dolly_height_m", 1.0)),
             tactical_fov_deg=float(raw.get("tactical_fov_deg", 55.0)),
@@ -190,6 +194,8 @@ class RenderStage(BaseStage):
             return vcam.build_pov_track(track, cfg, image_size, fps, clip_id)
         if rig == "ots":
             return vcam.build_ots_track(track, ball_track, cfg, image_size, fps, clip_id)
+        if rig == "eyes":
+            return vcam.build_eyes_track(track, ball_track, cfg, image_size, fps, clip_id)
         logger.warning("render: unknown virtual camera rig %r in %r; skipping", rig, cam_id)
         return None
 

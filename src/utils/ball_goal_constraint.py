@@ -147,6 +147,18 @@ def find_goal_event(
     return best
 
 
+SNAP_REPORT_M = 0.01
+
+
+def snap_into_mouth(y: float, z: float) -> tuple[float, float]:
+    """Clamp a goal-line point so the whole ball is inside the mouth
+    (between the posts, under the bar, above the turf)."""
+    g = _GEOMETRY
+    y = min(max(y, g.post_y_left + BALL_RADIUS_M), g.post_y_right - BALL_RADIUS_M)
+    z = min(max(z, BALL_RADIUS_M), g.crossbar_z - BALL_RADIUS_M)
+    return y, z
+
+
 def infer_line_cross_knots(
     ctx: HybridShotCtx,
     anchors: Sequence[Any],
@@ -177,11 +189,16 @@ def infer_line_cross_knots(
                               bar_margin_m=float(c["bar_margin_m"]))
         if p is None:
             continue
-        z = max(float(p[2]), BALL_RADIUS_M)
-        knot = Knot(frame=frame, xyz=(float(p[0]), float(p[1]), z),
+        # A scored ball crossed inside the mouth. A ray landing within the
+        # margin OUTSIDE it is camera-calibration error near the goal
+        # (kroupi01: 0.5 m wide of a near post the footage shows it inside),
+        # so snap the knot just inside the frame and say so in knot_source.
+        y, z = snap_into_mouth(float(p[1]), float(p[2]))
+        moved = abs(y - float(p[1])) + abs(z - float(p[2]))
+        knot = Knot(frame=frame, xyz=(float(p[0]), y, z),
                     kind="line_cross", depth_hard=True, source="auto", uv=xy)
-        return [knot], GoalEvent(event.frame, event.goal_end_x, event.element,
-                                 "operator_airborne_ray")
+        source = "operator_airborne_ray_snapped" if moved > SNAP_REPORT_M else "operator_airborne_ray"
+        return [knot], GoalEvent(event.frame, event.goal_end_x, event.element, source)
     return [], event
 
 

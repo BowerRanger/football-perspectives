@@ -92,6 +92,21 @@ def test_airborne_anchor_outside_mouth_is_not_promoted(ctx):
     assert knots == [] and event.knot_source is None
 
 
+def test_ray_just_outside_post_snaps_inside_the_mouth(ctx):
+    """kroupi01: footage shows the ball inside the near post but the anchor
+    ray meets the goal line 0.5 m wide (calibration error) — inside the
+    margin, so the knot is snapped in and flagged, not rejected."""
+    anchors = [
+        _anchor(394, "airborne_low", _pixel_of(ctx, (0.0, 38.17, 1.72))),
+        _anchor(402, "goal_impact", _pixel_of(ctx, (-1.5, 35.8, 1.8)), "back_net"),
+    ]
+    knots, event = infer_line_cross_knots(ctx, anchors)
+    (k,) = knots
+    assert k.xyz[1] == pytest.approx(37.66 - 0.11, abs=0.02)
+    assert k.xyz[2] == pytest.approx(1.72, abs=0.02)
+    assert event.knot_source == "operator_airborne_ray_snapped"
+
+
 def test_anchor_outside_window_is_not_promoted(ctx):
     anchors = [
         _anchor(300, "airborne_low", _pixel_of(ctx, (0.0, 36.0, 1.5))),

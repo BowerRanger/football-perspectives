@@ -72,7 +72,7 @@ def test_anatomical_kit_zones_short_sleeves_and_legs():
     cases = [
         ("pelvis_hi", J[0] + [0, 0.08, 0.05], 0, "shirt"),
         ("pelvis_lo", J[0] + [0, -0.03, 0.05], 0, "shorts"),
-        ("upper_arm_in", J[16] + [0.03, 0, 0], 16, "shirt"),
+        ("upper_arm_in", J[16] + [0.03, 0, 0], 16, "sleeve"),
         ("upper_arm_out", J[16] + (J[18] - J[16]) * 0.85, 16, "skin"),
         ("forearm", (J[18] + J[20]) / 2, 18, "skin"),
         ("hand", J[22], 22, "skin"),
@@ -98,7 +98,7 @@ def test_anatomical_kit_zones_long_sleeves_and_gloves():
     verts = np.array([J[16] + (J[18] - J[16]) * 0.85, (J[18] + J[20]) / 2, J[22]])
     zones = rl.anatomical_kit_zones(verts, _one_hot(3, [16, 18, 22]), J,
                                     sleeves="long", gloves=True)
-    assert zones == ["shirt", "shirt", "gloves"]
+    assert zones == ["sleeve", "sleeve", "gloves"]
 
 
 @pytest.mark.unit

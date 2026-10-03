@@ -172,6 +172,11 @@ def _resolve_style(style: dict) -> dict:
     return merged
 
 
+# Per-vertex rest-pose position attribute baked on the SMPL body mesh; kit
+# pattern materials read it so stripes/hoops follow the skinned torso.
+REST_CO_ATTRIBUTE = "rest_co"
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     if "--" in argv:
         argv = argv[argv.index("--") + 1:]
@@ -194,6 +199,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--samples", type=int, default=16)
     p.add_argument("--style-json", default="{}")
     p.add_argument("--vertical", action="store_true")
+    p.add_argument(
+        "--vertical-only", action="store_true",
+        help="Render ONLY the 9:16 portrait pass per camera (skips the "
+             "landscape pass and AOVs) - for shorts where the landscape "
+             "mp4 is never used.")
+    p.add_argument(
+        "--allow-capsule-fallback", action="store_true",
+        help="Accept capsule-limb bodies when the SMPL body asset "
+             "(data/models/smpl_neutral.npz) is missing/unusable. Without "
+             "this flag a missing asset exits non-zero rather than "
+             "silently rendering the wrong bodies.")
     p.add_argument("--aov", action="store_true")
     p.add_argument("--save-blend", action="store_true")
     p.add_argument("--frame-start", type=int, default=None)
@@ -538,12 +554,20 @@ def main(argv: list[str]) -> int:
     _outline_count = 0
     _printed_toon_fallback = False
 
-    def _toon_material(name: str, rgba, ramp_steps: int) -> object:
+    def _toon_material(name: str, rgba, ramp_steps: int,
+                       pattern: dict | None = None) -> object:
         """Diffuse -> Shader-to-RGB -> constant ColorRamp -> Emission.
 
         The ramp quantises lighting into ``ramp_steps`` bands (classic cel
         shading). Emission output keeps the bands flat and print-like.
+
+        ``pattern`` (``{type, colors: (rgba, rgba), width_m}``) switches to
+        :func:`_toon_pattern_material`: the stripe/hoop colour is chosen
+        from the baked ``rest_co`` attribute BEFORE the toon ramp, so the
+        cel bands still shade the pattern.
         """
+        if pattern is not None and _shader_to_rgb_available:
+            return _toon_pattern_material(name, ramp_steps, pattern)
         nonlocal _toon_material_count, _printed_toon_fallback
         mat = bpy.data.materials.new(name)
         mat.use_nodes = True
@@ -584,6 +608,73 @@ def main(argv: list[str]) -> int:
         # verified both against the running Blender before wiring this.)
         nt.links.new(to_rgb.outputs["Color"], ramp.inputs["Factor"])
         nt.links.new(ramp.outputs["Color"], emit.inputs["Color"])
+        nt.links.new(emit.outputs["Emission"], out.inputs["Surface"])
+        _toon_material_count += 1
+        return mat
+
+    def _toon_pattern_material(name: str, ramp_steps: int, pattern: dict) -> object:
+        """Pattern colour (rest-pose stripe mask) x grey toon ramp -> Emission.
+
+        Stripe index = mod(floor(rest_co.<axis> / width + 0.5), 2): x for
+        vertical stripes, y (height of the Y-up rest mesh) for hoops.
+        Mathematically the same as the solid path: ramp(lighting) * colour.
+        """
+        nonlocal _toon_material_count
+        mat = bpy.data.materials.new(name)
+        mat.use_nodes = True
+        nt = mat.node_tree
+        nt.nodes.clear()
+        out = nt.nodes.new("ShaderNodeOutputMaterial")
+        diffuse = nt.nodes.new("ShaderNodeBsdfDiffuse")
+        diffuse.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+        to_rgb = nt.nodes.new("ShaderNodeShaderToRGB")
+        ramp = nt.nodes.new("ShaderNodeValToRGB")
+        ramp.color_ramp.interpolation = "CONSTANT"
+        ramp.color_ramp.elements[0].position = 0.0
+        ramp.color_ramp.elements[0].color = (0.35, 0.35, 0.35, 1.0)
+        ramp.color_ramp.elements[1].position = 0.55
+        ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
+        for k in range(1, ramp_steps - 1):
+            el = ramp.color_ramp.elements.new(0.15 + 0.4 * k / max(1, ramp_steps - 1))
+            f = 0.35 + 0.65 * k / max(1, ramp_steps - 1)
+            el.color = (f, f, f, 1.0)
+        attr = nt.nodes.new("ShaderNodeAttribute")
+        attr.attribute_type = "GEOMETRY"
+        attr.attribute_name = REST_CO_ATTRIBUTE
+        sep = nt.nodes.new("ShaderNodeSeparateXYZ")
+        nt.links.new(attr.outputs["Vector"], sep.inputs["Vector"])
+        axis_out = ("X", "Y")[render_look.pattern_axis(pattern["type"])]
+        div = nt.nodes.new("ShaderNodeMath")
+        div.operation = "DIVIDE"
+        div.inputs[1].default_value = float(pattern["width_m"])
+        nt.links.new(sep.outputs[axis_out], div.inputs[0])
+        shift = nt.nodes.new("ShaderNodeMath")
+        shift.operation = "ADD"
+        shift.inputs[1].default_value = 0.5
+        nt.links.new(div.outputs[0], shift.inputs[0])
+        floor = nt.nodes.new("ShaderNodeMath")
+        floor.operation = "FLOOR"
+        nt.links.new(shift.outputs[0], floor.inputs[0])
+        # PINGPONG(x, 1) is |x mod 2 - 1| and stays well-defined for
+        # negative x (plain MODULO truncates toward zero on Blender's
+        # Math node): floor index -> 0/1 stripe parity.
+        parity = nt.nodes.new("ShaderNodeMath")
+        parity.operation = "PINGPONG"
+        parity.inputs[1].default_value = 1.0
+        nt.links.new(floor.outputs[0], parity.inputs[0])
+        colour = nt.nodes.new("ShaderNodeMixRGB")
+        colour.inputs["Color1"].default_value = pattern["colors"][0]
+        colour.inputs["Color2"].default_value = pattern["colors"][1]
+        nt.links.new(parity.outputs[0], colour.inputs["Fac"])
+        shade = nt.nodes.new("ShaderNodeMixRGB")
+        shade.blend_type = "MULTIPLY"
+        shade.inputs["Fac"].default_value = 1.0
+        nt.links.new(colour.outputs["Color"], shade.inputs["Color1"])
+        nt.links.new(diffuse.outputs["BSDF"], to_rgb.inputs["Shader"])
+        nt.links.new(to_rgb.outputs["Color"], ramp.inputs["Factor"])
+        nt.links.new(ramp.outputs["Color"], shade.inputs["Color2"])
+        emit = nt.nodes.new("ShaderNodeEmission")
+        nt.links.new(shade.outputs["Color"], emit.inputs["Color"])
         nt.links.new(emit.outputs["Emission"], out.inputs["Surface"])
         _toon_material_count += 1
         return mat
@@ -708,8 +799,14 @@ def main(argv: list[str]) -> int:
         if zone == "skin":
             rgba = kit.get("skin", _skin_rgba)
         else:
-            rgba = kit.get(zone, _fallback_kit_rgba[zone])
-        mat = _toon_material(f"{pid}_{zone}", rgba, ramp_steps)
+            # sleeve / collar fall back to the shirt colour.
+            rgba = kit.get(zone) or _fallback_kit_rgba.get(
+                zone, kit.get("shirt", _fallback_kit_rgba["shirt"]))
+        pattern = None
+        opts = player_kit_opts.get(pid, {})
+        if zone in opts.get("pattern_zones", ()):
+            pattern = opts.get("pattern")
+        mat = _toon_material(f"{pid}_{zone}", rgba, ramp_steps, pattern=pattern)
         materials_cache[key] = mat
         return mat
 
@@ -748,6 +845,13 @@ def main(argv: list[str]) -> int:
         face_list = [(int(t[0]), int(t[1]), int(t[2])) for t in faces]
         mesh.from_pydata(verts, [], face_list)
         mesh.update()
+        # Rest-pose positions as a per-vertex vector attribute: pattern
+        # materials read it (skinning never touches attributes), so stripes
+        # and hoops stay glued to the torso as the body runs and turns.
+        rest_attr = mesh.attributes.new(
+            name=REST_CO_ATTRIBUTE, type="FLOAT_VECTOR", domain="POINT")
+        rest_attr.data.foreach_set(
+            "vector", render_look.rest_coords(v_template).ravel().tolist())
         obj = bpy.data.objects.new(f"{pid}_body", mesh)
         bpy.context.collection.objects.link(obj)
         obj.parent = arm
@@ -1373,9 +1477,16 @@ def main(argv: list[str]) -> int:
         appearance=load_player_appearance(output_dir))
     player_colors = {pid: look["colors"] for pid, look in player_looks.items()}
     player_kit_opts = {
-        pid: {"sleeves": look["sleeves"], "gloves": look["gloves"]}
+        pid: {"sleeves": look["sleeves"], "gloves": look["gloves"],
+              "pattern": look["pattern"],
+              "pattern_zones": look["pattern_zones"]}
         for pid, look in player_looks.items()}
     smpl_data, pelvis_canon = load_smpl_body_data(_REPO_ROOT, np)
+    smpl_problem = render_look.smpl_asset_problem(
+        smpl_data, args.allow_capsule_fallback)
+    if smpl_problem:
+        sys.stderr.write(f"[render] {smpl_problem}\n")
+        return 3
     if smpl_data is not None:
         sys.stdout.write(
             f"[render] using real SMPL body mesh (pelvis canon = "
@@ -1449,15 +1560,44 @@ def main(argv: list[str]) -> int:
         scene.frame_set(scene.frame_start)
         bpy.ops.wm.save_as_mainfile(filepath=str(out_dir / "scene.blend"))
 
+    def _hide_player_for_eyes(cam_id: str) -> list:
+        """``eyes:<PID>``: hide that player's armature + body/capsule
+        objects for this camera's renders (the camera sits inside the
+        head, so the own body would clip the lens); returns the objects
+        hidden, for :func:`_restore_hidden`."""
+        pid = render_look.eyes_hidden_pid(cam_id)
+        if pid is None:
+            return []
+        arm = bpy.data.objects.get(f"{pid}_arm")
+        if arm is None:
+            print(f"[render] {cam_id}: no armature for {pid}; nothing to hide")
+            return []
+        objs = [arm, *arm.children_recursive]
+        for o in objs:
+            o.hide_render = True
+        return objs
+
+    def _restore_hidden(objs: list) -> None:
+        for o in objs:
+            o.hide_render = False
+
     for cam_id, cam_obj, frame_start, frame_end in cam_entries:
         safe_id = _safe_cam_id(cam_id)
 
         # AOV EXRs (Task 9) are only rendered for the landscape pass, one
         # subdirectory per camera — never for the 9:16 vertical pass below.
-        aov_dir = (out_dir / "aov" / safe_id) if args.aov else None
-        _render(cam_obj, out_dir / f"{safe_id}.mp4", fps,
-                (frame_start, frame_end), args.width, args.height, args.samples,
-                aov_dir=aov_dir, post=style.get("post"))
+        hidden = _hide_player_for_eyes(cam_id)
+        passes = render_look.plan_passes(
+            cam_id, args.vertical, args.vertical_only)
+        if args.vertical_only and args.aov:
+            print("[render] --aov ignored under --vertical-only "
+                  "(AOVs are landscape-pass only)")
+        aov_dir = (out_dir / "aov" / safe_id) if (
+            args.aov and not args.vertical_only) else None
+        if ("", False) in passes:
+            _render(cam_obj, out_dir / f"{safe_id}.mp4", fps,
+                    (frame_start, frame_end), args.width, args.height,
+                    args.samples, aov_dir=aov_dir, post=style.get("post"))
 
         # 9:16 portrait pass (Task 8): every non-broadcast camera gets a
         # second render at swapped (height, width) resolution. Reframed
@@ -1470,12 +1610,13 @@ def main(argv: list[str]) -> int:
         # never gated on --vertical the way AOV is) — _setup_post_compositor
         # rebuilds its grain bake at this call's swapped resolution, so it
         # stays aligned rather than reusing the landscape pass's tile.
-        if args.vertical and cam_id != "broadcast":
+        if ("_9x16", True) in passes:
             cam_obj.data.sensor_fit = "VERTICAL"
             _render(cam_obj, out_dir / f"{safe_id}_9x16.mp4", fps,
                     (frame_start, frame_end), args.height, args.width, args.samples,
                     post=style.get("post"))
             cam_obj.data.sensor_fit = "HORIZONTAL"
+        _restore_hidden(hidden)
 
     return 0
 

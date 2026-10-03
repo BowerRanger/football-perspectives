@@ -1,6 +1,8 @@
 """Pure look/color/camera math for the render stage (no bpy)."""
 from __future__ import annotations
 
+import re
+
 import numpy as np
 
 from src.utils.team_roles import derive_kit_role
@@ -101,6 +103,123 @@ DEFAULT_BOOTS_HEX = "#1c1c1c"
 _SLEEVES = ("short", "long")
 
 
+_HEX_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+PATTERN_TYPES = ("solid", "vertical_stripes", "hoops")
+DEFAULT_PATTERN_WIDTH_M = 0.07
+_KIT_FALLBACK = {"shirt": "#888888", "shorts": "#666666", "socks": "#888888"}
+_KIT_COLOUR_KEYS = ("shirt", "sleeve_color", "collar", "shorts", "socks", "boots", "gloves")
+
+
+def _norm_hex(value: object, what: str) -> str:
+    if not isinstance(value, str) or not _HEX_RE.match(value.strip()):
+        raise ValueError(f"kit {what}: expected #RGB/#RRGGBB, got {value!r}")
+    h = value.strip().lower()
+    if len(h) == 4:
+        h = "#" + "".join(c * 2 for c in h[1:])
+    return h
+
+
+def _normalize_pattern(raw: object) -> dict | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"kit pattern must be a mapping, got {raw!r}")
+    ptype = raw.get("type", "solid")
+    if ptype not in PATTERN_TYPES:
+        raise ValueError(f"kit pattern type {ptype!r} not in {PATTERN_TYPES}")
+    if ptype == "solid":
+        return None
+    colors = raw.get("colors")
+    if not isinstance(colors, (list, tuple)) or len(colors) != 2:
+        raise ValueError(f"kit pattern {ptype!r} needs colors: [hex, hex]")
+    width = raw.get("width_m", DEFAULT_PATTERN_WIDTH_M)
+    if not isinstance(width, (int, float)) or isinstance(width, bool) or not width > 0:
+        raise ValueError(f"kit pattern width_m must be > 0, got {width!r}")
+    return {"type": ptype,
+            "colors": [_norm_hex(c, "pattern colour") for c in colors],
+            "width_m": float(width)}
+
+
+def normalize_kit(kit: dict | None) -> dict:
+    """KitSpec -> canonical dict (all keys present, hex lower-cased 6-digit).
+
+    Accepts the legacy ``{shirt, shorts, socks[, boots, gloves, sleeves]}``
+    shape unchanged (``sleeves`` keeps meaning LENGTH: short|long; an
+    unknown value falls back to short) plus ``sleeve_color``, ``collar``
+    and ``pattern: {type: solid|vertical_stripes|hoops, colors: [a, b],
+    width_m}``. A ``solid`` pattern normalises to ``None``. Raises
+    ``ValueError`` on a malformed colour or pattern."""
+    src = dict(kit or {})
+    out: dict = {}
+    for key in _KIT_COLOUR_KEYS:
+        val = src.get(key)
+        if val is None:
+            out[key] = _KIT_FALLBACK.get(key)
+        else:
+            out[key] = _norm_hex(val, key)
+    sleeves = src.get("sleeves", "short")
+    out["sleeves"] = sleeves if sleeves in _SLEEVES else "short"
+    out["pattern"] = _normalize_pattern(src.get("pattern"))
+    return out
+
+
+def pattern_axis(ptype: str) -> int:
+    """Rest-coordinate axis a pattern varies along (SMPL rest mesh is Y-up:
+    x lateral, y height). Vertical stripes alternate along x, hoops along y."""
+    return {"vertical_stripes": 0, "hoops": 1}[ptype]
+
+
+def pattern_mask(ptype: str, rest_co: np.ndarray, width_m: float) -> np.ndarray:
+    """0/1 stripe index per rest-pose coordinate row - the numpy twin of
+    the Blender shader chain (floor(c / width + 0.5) mod 2; stripe 0 is
+    centred on c = 0 so the torso is symmetric)."""
+    c = np.asarray(rest_co, dtype=float)[:, pattern_axis(ptype)]
+    return np.mod(np.floor(c / float(width_m) + 0.5), 2).astype(int)
+
+
+def rest_coords(v_template: np.ndarray) -> np.ndarray:
+    """float32 per-vertex rest positions baked as the ``rest_co`` mesh
+    attribute (unaffected by skinning, so patterns ride the body)."""
+    return np.asarray(v_template, dtype=np.float32).reshape(-1, 3).copy()
+
+
+def eyes_hidden_pid(cam_id: str) -> str | None:
+    """``eyes:<PID>`` -> PID (that player's body is hidden for the shot)."""
+    if cam_id.startswith("eyes:") and len(cam_id) > 5:
+        return cam_id[5:]
+    return None
+
+
+def plan_passes(cam_id: str, vertical: bool, vertical_only: bool) -> list[tuple[str, bool]]:
+    """``[(filename_suffix, portrait)]`` render passes for one camera.
+    Default: landscape, plus a 9:16 pass for non-broadcast cameras when
+    ``vertical``. ``vertical_only`` renders just the 9:16 pass (broadcast
+    included - the caller asked for it explicitly)."""
+    if vertical_only:
+        return [("_9x16", True)]
+    passes = [("", False)]
+    if vertical and cam_id != "broadcast":
+        passes.append(("_9x16", True))
+    return passes
+
+
+def smpl_asset_problem(smpl_data: dict | None, allow_capsule_fallback: bool) -> str | None:
+    """Error text when the SMPL body asset is unusable and the capsule
+    fallback was not opted into; ``None`` when fine to proceed."""
+    if allow_capsule_fallback:
+        return None
+    if smpl_data is None:
+        return ("SMPL body asset data/models/smpl_neutral.npz is missing or "
+                "unreadable; refusing to render capsule-limb bodies. Pass "
+                "--allow-capsule-fallback to accept the fallback.")
+    missing = [k for k in ("v_template", "faces", "weights", "joint_positions")
+               if k not in smpl_data]
+    if missing:
+        return (f"SMPL body asset is missing key(s) {missing}; pass "
+                "--allow-capsule-fallback to accept the capsule fallback.")
+    return None
+
+
 def resolve_player_looks(
     teams_cfg: dict,
     team_class: dict[str, tuple[str, str]],
@@ -110,34 +229,44 @@ def resolve_player_looks(
     """Full per-player look for the anatomical-zone body.
 
     Returns ``{pid: {"colors": {zone: linear_rgba}, "sleeves": "short"|
-    "long", "gloves": bool}}`` where ``colors`` covers every zone
-    :func:`anatomical_kit_zones` can emit. Kit keys beyond the classic
-    shirt/shorts/socks are optional per role in ``render.teams.defaults``:
-    ``boots`` (hex), ``gloves`` (hex — presence turns gloves on),
-    ``sleeves`` (``short`` default / ``long``). ``appearance`` is the
+    "long", "gloves": bool, "pattern": None | {type, colors: (rgba, rgba),
+    width_m}, "pattern_zones": ("shirt"[, "sleeve"])}}`` where ``colors``
+    covers every zone :func:`anatomical_kit_zones` can emit (``sleeve``
+    defaults to the shirt colour and ``collar`` likewise). Kits are
+    :func:`normalize_kit`-ed first; the pattern paints the torso and, when
+    no ``sleeve_color`` is set, the sleeves too. ``appearance`` is the
     per-player ``skin``/``hair`` hex map from ``players.json``
     (``player_names.load_player_appearance``).
     """
-    base = resolve_player_colors(teams_cfg, team_class, role_overrides)
-    kits = _resolve_kits(teams_cfg, team_class, role_overrides)
+    kits = {pid: normalize_kit(k)
+            for pid, k in _resolve_kits(teams_cfg, team_class, role_overrides).items()}
     looks = appearance or {}
     out: dict[str, dict] = {}
-    for pid, colors in base.items():
-        kit = kits[pid]
+    for pid, kit in kits.items():
         app = looks.get(pid, {})
-        sleeves = kit.get("sleeves", "short")
-        gloves_hex = kit.get("gloves")
         skin_hex = app.get("skin", DEFAULT_SKIN_HEX)
+        pattern = kit["pattern"]
         out[pid] = {
             "colors": {
-                **colors,
-                "boots": hex_to_linear_rgba(kit.get("boots", DEFAULT_BOOTS_HEX)),
-                "gloves": hex_to_linear_rgba(gloves_hex or skin_hex),
+                "shirt": hex_to_linear_rgba(kit["shirt"]),
+                "shorts": hex_to_linear_rgba(kit["shorts"]),
+                "socks": hex_to_linear_rgba(kit["socks"]),
+                "sleeve": hex_to_linear_rgba(kit["sleeve_color"] or kit["shirt"]),
+                "collar": hex_to_linear_rgba(kit["collar"] or kit["shirt"]),
+                "boots": hex_to_linear_rgba(kit["boots"] or DEFAULT_BOOTS_HEX),
+                "gloves": hex_to_linear_rgba(kit["gloves"] or skin_hex),
                 "skin": hex_to_linear_rgba(skin_hex),
                 "hair": hex_to_linear_rgba(app.get("hair", DEFAULT_HAIR_HEX)),
             },
-            "sleeves": sleeves if sleeves in _SLEEVES else "short",
-            "gloves": bool(gloves_hex),
+            "sleeves": kit["sleeves"],
+            "gloves": bool(kit["gloves"]),
+            "pattern": None if pattern is None else {
+                "type": pattern["type"],
+                "colors": tuple(hex_to_linear_rgba(c) for c in pattern["colors"]),
+                "width_m": pattern["width_m"],
+            },
+            "pattern_zones": (() if pattern is None else
+                              ("shirt",) if kit["sleeve_color"] else ("shirt", "sleeve")),
         }
     return out
 
@@ -168,6 +297,9 @@ BOOT_TOP_ABOVE_ANKLE_M = 0.03
 # SMPL's head joint sits at the skull base (crown ~ +0.20 m above it,
 # face spans z ~ 0..+0.10): hair is a crown cap plus the back of the head
 # above the nape; the forehead/face/ears stay skin.
+COLLAR_BELOW_NECK_M = 0.035        # torso verts this far below the neck joint
+COLLAR_ABOVE_NECK_M = 0.03         # neck verts up to here are collar ring
+COLLAR_HALF_WIDTH_M = 0.09         # lateral extent of the neckline
 HAIRLINE_ABOVE_HEAD_M = 0.155     # crown cap
 HAIR_BEHIND_HEAD_M = 0.01         # back-of-head band (z behind the joint)
 HAIR_BACK_MIN_ABOVE_HEAD_M = 0.06 # nape line
@@ -192,24 +324,33 @@ def anatomical_kit_zones(
     start below the knee and feet get boots — the height-band
     :func:`kit_zone_for_height_fraction` model paints T-posed arms
     (and hands) shirt-coloured and has no boots, sleeves, gloves or
-    hair. Zones: shirt, shorts, socks, boots, gloves, skin, hair.
+    hair. Zones: shirt, sleeve, collar, shorts, socks, boots, gloves, skin,
+    hair (``sleeve``/``collar`` resolve to the shirt colour unless the kit
+    sets ``sleeve_color``/``collar``).
     """
     verts = np.asarray(verts, dtype=float)
     joints = np.asarray(joints, dtype=float)
     dominant = np.asarray(weights).argmax(axis=1)
     long_sleeves = sleeves == "long"
     head = joints[_HEAD]
+    neck = joints[_NECK]
     zones: list[str] = []
     for v, j in zip(verts, dominant.tolist()):
         if j in _TORSO:
             below_hem = v[1] <= joints[_PELVIS][1] + SHIRT_HEM_ABOVE_PELVIS_M
             waist = j in (_PELVIS, _SPINE1)
-            zones.append("shorts" if waist and below_hem else "shirt")
+            if waist and below_hem:
+                zones.append("shorts")
+            elif (v[1] > neck[1] - COLLAR_BELOW_NECK_M
+                  and abs(v[0] - neck[0]) < COLLAR_HALF_WIDTH_M):
+                zones.append("collar")
+            else:
+                zones.append("shirt")
         elif j in (_L_SHOULDER, _R_SHOULDER):
             t = _bone_fraction(v, joints[j], joints[_LIMB_CHILD[j]])
-            zones.append("shirt" if long_sleeves or t < SHORT_SLEEVE_FRACTION else "skin")
+            zones.append("sleeve" if long_sleeves or t < SHORT_SLEEVE_FRACTION else "skin")
         elif j in (_L_ELBOW, _R_ELBOW):
-            zones.append("shirt" if long_sleeves else "skin")
+            zones.append("sleeve" if long_sleeves else "skin")
         elif j in _HANDS:
             zones.append("gloves" if gloves else "skin")
         elif j in (_L_HIP, _R_HIP):
@@ -228,7 +369,9 @@ def anatomical_kit_zones(
             back = (v[2] < head[2] - HAIR_BEHIND_HEAD_M
                     and v[1] > head[1] + HAIR_BACK_MIN_ABOVE_HEAD_M)
             zones.append("hair" if crown or back else "skin")
-        else:  # neck
+        elif j == _NECK:
+            zones.append("collar" if v[1] < neck[1] + COLLAR_ABOVE_NECK_M else "skin")
+        else:
             zones.append("skin")
     return zones
 

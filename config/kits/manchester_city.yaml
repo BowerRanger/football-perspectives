@@ -4,7 +4,7 @@ kits:
   # 2025-26 away (kroupi clip, verified on footage): pale grey/white body with
   # fluorescent-lime sleeves, grey shorts with lime side panel, lime socks.
   "2025-26/away":
-    {shirt: "#d6d8dc", sleeve_color: "#d4e600", shorts: "#c9ccd1", socks: "#d4e600", boots: "#1c1c1c", sleeves: short, source: approx}
+    {shirt: "#dcdfcc", sleeve_color: "#d4e600", shorts: "#c9ccd1", socks: "#d4e600", boots: "#1c1c1c", sleeves: short, source: approx}
   # Donnarumma on kroupi01: mid-green shirt, dark-green shorts, dark socks.
   "2025-26/gk":
     {shirt: "#1f8a4c", shorts: "#14583a", socks: "#2c2f2c", boots: "#e6e6e6", sleeves: long, gloves: "#e6e6e6", source: approx}

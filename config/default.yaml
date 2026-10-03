@@ -12,6 +12,15 @@ pitch:
   goal_depth_m: 1.5
   corner_flag_height_m: 1.5
 
+# Stage freshness (src/pipeline/fingerprint.py, <out>/pipeline_state.json).
+# A completed stage whose config slice / input artefacts (incl. operator
+# files) changed since it last ran is re-run with a "[STALE]" line; code-only
+# drift warns and is re-run only by `recon.py run --stale`. Dirs with no
+# recorded state are "unknown", never stale. See `recon.py status`.
+pipeline:
+  freshness:
+    enabled: true
+
 prepare_shots:
   expected_format: mp4
   output_fps: null

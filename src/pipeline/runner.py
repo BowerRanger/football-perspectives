@@ -5,6 +5,7 @@ import sys
 import time
 from pathlib import Path
 
+from src.pipeline import fingerprint
 from src.pipeline.base import BaseStage
 from src.pipeline.quality_report import write_quality_report
 
@@ -199,6 +200,7 @@ def run_pipeline(
     shot_filter: str | None = None,
     player_filter: str | None = None,
     shots: list[str] | None = None,
+    stale: bool = False,
     **stage_kwargs,
 ) -> None:
     """Run pipeline stages.
@@ -227,16 +229,48 @@ def run_pipeline(
             )
         for shot in shots:
             _run_stages(output_dir, stages, from_stage, config, shot,
-                        player_filter, skip_prepare=True, **stage_kwargs)
+                        player_filter, skip_prepare=True, stale=stale,
+                        **stage_kwargs)
     else:
         _run_stages(output_dir, stages, from_stage, config, shot_filter,
-                    player_filter, **stage_kwargs)
+                    player_filter, stale=stale, **stage_kwargs)
     # Aggregate per-stage diagnostics into output/quality_report.json.
     # This always runs (each section is independent of stage activation).
     try:
         write_quality_report(output_dir)
     except Exception as exc:  # noqa: BLE001 — diagnostics must never fail the run
         print(f"  [WARN] quality_report aggregation failed: {exc}")
+
+
+def _stale_reasons(
+    output_dir: Path, name: str, config: dict, stale_mode: bool, reran: set[str],
+) -> list[str]:
+    """Why a completed stage must re-run ([] = cached result is good).
+
+    Config/input drift always re-runs. Code-only drift warns and skips unless
+    ``stale_mode`` (``--stale``), which also cascades from stages re-run in
+    this invocation.
+    """
+    if not ((config.get("pipeline") or {}).get("freshness") or {}).get("enabled", True):
+        return []
+    fr = fingerprint.assess(output_dir, name, config)
+    reasons = list(fr.reasons)
+    if stale_mode:
+        upstream = [u for u in fingerprint.STAGE_TABLE[name]["upstream"] if u in reran]
+        reasons += [f"upstream {u} re-run" for u in upstream]
+        if fr.code_drift:
+            reasons.append("stage code changed")
+    elif fr.code_drift and not reasons:
+        print(f"  [WARN] {name}: stage code changed since last run "
+              f"(results kept; use --stale to re-run)")
+    return reasons
+
+
+def _record_fingerprint(output_dir: Path, name: str, config: dict) -> None:
+    try:
+        fingerprint.record(output_dir, name, config)
+    except Exception as exc:  # noqa: BLE001 - freshness bookkeeping must not fail a run
+        print(f"  [WARN] could not record fingerprint for {name}: {exc}")
 
 
 def _run_stages(
@@ -247,10 +281,12 @@ def _run_stages(
     shot_filter: str | None,
     player_filter: str | None,
     skip_prepare: bool = False,
+    stale: bool = False,
     **stage_kwargs,
 ) -> None:
     active = resolve_stages(stages, from_stage)
     timings = _load_timings(output_dir)
+    reran: set[str] = set()
     for name in _STAGE_NAMES:
         if name not in active:
             continue
@@ -271,8 +307,11 @@ def _run_stages(
         # circuit a per-shot or per-player retry otherwise.
         filtered = shot_filter is not None or player_filter is not None
         if stage.is_complete() and from_stage != name and not filtered:
-            print(f"  [SKIP] {name} (cached)")
-            continue
+            reasons = _stale_reasons(output_dir, name, config, stale, reran)
+            if not reasons:
+                print(f"  [SKIP] {name} (cached)")
+                continue
+            print(f"  [STALE] {name} ({'; '.join(reasons)})")
         print(f"  [RUN]  {name}")
         stage_start = time.perf_counter()
         if name == "hmr_world":
@@ -290,5 +329,43 @@ def _run_stages(
             "seconds": time.perf_counter() - stage_start,
             "per_shot": per_shot,
         }
+        reran.add(name)
+        if not filtered:
+            _record_fingerprint(output_dir, name, config)
 
     _write_timings(output_dir, timings)
+
+
+def stage_status(output_dir: Path, config: dict) -> list[dict]:
+    """Per-stage ``completeness`` (complete|partial|missing) and
+    ``freshness`` (fresh|stale|unknown) for ``recon.py status``.
+
+    Read-only: never runs a stage.
+    """
+    rows: list[dict] = []
+    for name in _STAGE_NAMES:
+        try:
+            cls = _stage_class(name)
+        except Exception:  # noqa: BLE001 - one broken import must not hide the rest
+            cls = None
+        if cls is None:
+            rows.append({"stage": name, "completeness": "missing",
+                         "freshness": "unknown", "reasons": [],
+                         "code_drift": False, "note": "stage not implemented"})
+            continue
+        try:
+            complete = bool(cls(config=config, output_dir=output_dir).is_complete())
+        except Exception:  # noqa: BLE001
+            complete = False
+        stage_dir = output_dir / name
+        has_files = stage_dir.is_dir() and any(stage_dir.iterdir())
+        completeness = "complete" if complete else ("partial" if has_files else "missing")
+        if completeness == "missing":
+            freshness = fingerprint.Freshness("unknown")
+        else:
+            freshness = fingerprint.assess(output_dir, name, config)
+        rows.append({"stage": name, "completeness": completeness,
+                     "freshness": freshness.state,
+                     "reasons": list(freshness.reasons),
+                     "code_drift": freshness.code_drift, "note": ""})
+    return rows

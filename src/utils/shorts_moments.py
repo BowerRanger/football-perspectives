@@ -133,18 +133,46 @@ def _velocity_change(frames: Mapping[int, Sequence[float]], f: int, fps: float,
     return float(np.linalg.norm(after - before))
 
 
+def _can_score(t: Mapping, keeper_pid: str | None, defending_team: str | None,
+               roles: Mapping[str, str]) -> bool:
+    """The defending keeper, or anyone on the defending team, never scores
+    (origi01: ter Stegen's parry at 425 / a later auto touch at 447 must not
+    beat Origi's tap-in at 440)."""
+    pid = t.get("player_id")
+    if pid is None or pid == keeper_pid:
+        return False
+    team = _team(roles.get(pid))
+    return not (defending_team and team == defending_team)
+
+
 def _pick_strike(ref: int | None, touches: Sequence[Mapping],
                  operator_anchors: Sequence[Mapping],
                  frames: Mapping[int, Sequence[float]], fps: float,
+                 keeper_pid: str | None = None, defending_team: str | None = None,
+                 roles: Mapping[str, str] | None = None,
                  ) -> tuple[Mapping | None, str | None]:
     horizon = ref if ref is not None else 10 ** 9
+    roles = roles or {}
+    ok = lambda t: _can_score(t, keeper_pid, defending_team, roles)  # noqa: E731
     shots = [a for a in operator_anchors
              if a.get("state") == "player_touch" and a.get("touch_type") in SHOT_TOUCH_TYPES
-             and int(a["frame"]) <= horizon]
+             and int(a["frame"]) <= horizon and ok(a)]
     if shots:
         a = max(shots, key=lambda a: int(a["frame"]))
         return a, "operator_shot_anchor"
-    prior = sorted((t for t in touches if int(t["frame"]) <= horizon),
+    # Operator input wins over inferred events: the latest attacking operator
+    # touch before the goal is the strike when it really changes the ball.
+    op_touches = sorted((a for a in operator_anchors
+                         if a.get("state") == "player_touch" and a.get("player_id")
+                         and int(a["frame"]) <= horizon and ok(a)),
+                        key=lambda a: int(a["frame"]))
+    if op_touches:
+        last = op_touches[-1]
+        later_attacking = [t for t in touches
+                           if int(last["frame"]) < int(t["frame"]) <= horizon and ok(t)]
+        if not later_attacking:
+            return last, "operator_touch"
+    prior = sorted((t for t in touches if int(t["frame"]) <= horizon and ok(t)),
                    key=lambda t: (int(t["frame"]), float(t.get("score") or 0.0)))
     if not prior:
         return None, None
@@ -266,13 +294,15 @@ def derive_from_data(
     touches = _dedupe_touches(
         [e for e in events if e.get("kind") == "touch" and e.get("player_id")]
         + [a for a in operator_anchors if a.get("state") == "player_touch" and a.get("player_id")])
-    touch_row, src = _pick_strike(ref, touches, operator_anchors, ball_frames, fps)
+    keeper = _pick_keeper(roles, goal_end, root_xy, impact if impact is not None else line_cross)
+    defending = _team(roles.get(keeper)) if keeper else None
+    touch_row, src = _pick_strike(ref, touches, operator_anchors, ball_frames, fps,
+                                  keeper_pid=keeper, defending_team=defending, roles=roles)
     strike = int(touch_row["frame"]) if touch_row else None
     scorer = touch_row.get("player_id") if touch_row else None
     if src:
         sources["strike"] = src
 
-    keeper = _pick_keeper(roles, goal_end, root_xy, impact if impact is not None else line_cross)
     dive = None
     if strike is not None and ref is not None:
         dive = _keeper_dive_frame(keeper, root_xy, strike - KEEPER_DIVE_PRE_FRAMES, ref,

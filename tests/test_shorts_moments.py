@@ -70,6 +70,29 @@ def test_operator_shot_anchor_beats_diag_touches_and_net_beats_post():
     assert m["sources"] == {**m["sources"], "strike": "operator_shot_anchor", "impact": "operator_anchor"}
 
 
+def test_defending_keeper_and_team_never_score():
+    """origi01: keeper parry (operator anchor) then the tap-in, then a later
+    auto touch credited to the keeper — the scorer is the tap-in, not the GK."""
+    anchors = [
+        {"frame": 95, "state": "player_touch", "player_id": "K", "bone": "r_hand"},
+        {"frame": 100, "state": "player_touch", "player_id": "S", "bone": "r_foot"},
+        {"frame": 135, "state": "goal_impact", "goal_element": "back_net"},
+    ]
+    ev = [{"kind": "touch", "frame": 112, "player_id": "K", "bone": "l_hand", "score": 0.9},
+          {"kind": "touch", "frame": 114, "player_id": "O", "bone": "r_foot", "score": 0.9}]
+    m = _derive(events=ev, anchors=anchors)
+    assert (m["strike"], m["scorer_pid"], m["keeper_pid"]) == (100, "S", "K")
+    assert m["sources"]["strike"] == "operator_touch"
+
+
+def test_later_attacking_auto_touch_still_beats_an_older_operator_touch():
+    anchors = [{"frame": 90, "state": "player_touch", "player_id": "T", "bone": "r_foot"},
+               {"frame": 135, "state": "goal_impact", "goal_element": "back_net"}]
+    ev = [{"kind": "touch", "frame": 100, "player_id": "S", "bone": "r_foot", "score": 0.5}]
+    m = _derive(events=ev, anchors=anchors)
+    assert (m["strike"], m["scorer_pid"]) == (100, "S")
+
+
 def test_line_cross_from_goal_check_wins_else_track_crossing():
     gc = {"goal_frame": 135, "goal_end_x": 0.0,
           "line_cross": {"frame": 126, "xyz": [0.0, 34.0, 1.0]}, "status": "ok"}

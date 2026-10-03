@@ -37,6 +37,7 @@ _CAMERA_RE = re.compile(
     r"|(?:goal|goalline):(?:left|right))$")
 _REF_RE = re.compile(r"@([a-z_]+)")
 DEFAULT_PAD = (6, 6)
+MIN_CUT_FRAMES = 12   # a cut shorter than this after clamping to the clip is unusable
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "config" / "shorts" / "templates"
 _CAND_KEYS = {"camera", "from", "to", "rig", "pad", "time_stretch", "freeze_at", "freeze_s",
               "hold_s", "speed", "flash", "label", "label_style", "subject", "framing", "style"}
@@ -45,6 +46,12 @@ _SLOT_KEYS = {"id", "candidates", "optional"} | _CAND_KEYS
 
 class ShortsTemplateError(ValueError):
     """Template/DSL problem (unknown moment, frame literal, bad camera ...)."""
+
+
+class CutOutsideClipError(ShortsTemplateError):
+    """A candidate's cut doesn't fit inside the clip (e.g. ``strike-135`` on a
+    clip whose strike is at frame 114). The candidate is rejected and the
+    next one tried, unlike authoring errors, which fail the template."""
 
 
 # --- expressions ---------------------------------------------------------
@@ -184,8 +191,15 @@ def _resolve_candidate(tpl: Mapping, slot_id: str, k: int, cand: Mapping,
     c = resolve_refs(copy.deepcopy(dict(cand)), moments, where)
     cut_from = eval_moment_expr(cand["from"], moments, f"{where}.from")
     cut_to = eval_moment_expr(cand["to"], moments, f"{where}.to")
-    if cut_from >= cut_to:
-        raise ShortsTemplateError(f"{where}: empty cut ({cand['from']} -> {cand['to']} = {cut_from}..{cut_to})")
+    # Clamp to the clip: a moment expression like strike-135 lands before
+    # frame 0 on a short clip (kroupi01's strike is at 114).
+    cut_from = max(0, cut_from)
+    if moments.get("clip_end") is not None:
+        cut_to = min(cut_to, int(moments["clip_end"]))
+    if cut_to - cut_from < MIN_CUT_FRAMES:
+        raise CutOutsideClipError(
+            f"{where}: cut too short after clamping to the clip "
+            f"({cand['from']} -> {cand['to']} = {cut_from}..{cut_to})")
     if not _CAMERA_RE.match(c["camera"]):
         raise ShortsTemplateError(f"{where}: invalid camera id {c['camera']!r} after resolution")
     rig = dict(c.get("rig") or {})
@@ -312,7 +326,11 @@ def resolve_template(
         pin = (candidate_pins or {}).get(slot["id"])
         order = [pin] if pin is not None else range(len(slot["candidates"]))
         for k in order:
-            r = _resolve_candidate(tpl, slot["id"], k, slot["candidates"][k], moments)
+            try:
+                r = _resolve_candidate(tpl, slot["id"], k, slot["candidates"][k], moments)
+            except CutOutsideClipError as exc:
+                rejected.append({"candidate": k, "reason": "cut_outside_clip", "detail": str(exc)})
+                continue
             pass_id = f"{tpl['name']}_{slot['id']}" + (f"_c{k}" if k else "")
             spec = _pass_spec(tpl, pass_id, r)
             result = None

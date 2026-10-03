@@ -238,7 +238,7 @@ def derive_from_data(
     line_cross, goal_end = None, None
     lc = (goal_check or {}).get("line_cross")
     if lc and lc.get("frame") is not None:
-        line_cross = int(lc["frame"])
+        line_cross = int(round(float(lc["frame"])))  # e.g. 393.98 -> 394
         sources["line_cross"] = "goal_check"
         if lc.get("xyz"):
             goal_end = _goal_end_for_x(float(lc["xyz"][0]))

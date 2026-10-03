@@ -84,6 +84,30 @@ def test_freeze_at_splits_the_cut_and_holds_the_first_half():
         st.resolve_template(_mini(freeze_at="impact+50"), GBERCH)
 
 
+def test_cut_before_clip_start_is_clamped():
+    """kroupi01: strike at 114, so strike-135 lands at -21 — clamp to frame 0."""
+    kroupi = {**GBERCH, "strike": 114, "impact": 142, "line_cross": 136}
+    r = st.resolve_template(_mini(**{"from": "strike-135", "to": "strike-36"}), kroupi)
+    seg, p = r["edl"]["segments"][0], r["passes"][0]
+    assert (seg["from"], seg["to"]) == (0, 78)
+    assert p["frames"][0] == 0
+
+
+def test_cut_outside_clip_rejects_candidate_and_tries_next():
+    kroupi = {**GBERCH, "strike": 20, "impact": 48, "line_cross": 42, "clip_end": 155}
+    t = {"name": "t", "slots": [{"id": "a", "candidates": [
+        {"camera": "drone", "from": "strike-140", "to": "strike-30"},   # entirely before frame 0
+        {"camera": "chase", "from": "strike-10", "to": "impact"}]}]}
+    r = st.resolve_template(t, kroupi)
+    assert r["ok"] and r["passes"][0]["camera"] == "chase"
+    assert r["slots"][0]["rejected"][0]["reason"] == "cut_outside_clip"
+
+
+def test_cut_is_clamped_to_clip_end_when_known():
+    r = st.resolve_template(_mini(to="impact+60"), {**GBERCH, "clip_end": 428})
+    assert r["edl"]["segments"][0]["to"] == 428
+
+
 # --- candidates + framing ---------------------------------------------------
 
 def _two_candidates():

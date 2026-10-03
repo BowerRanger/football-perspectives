@@ -1,0 +1,12 @@
+club: Bournemouth
+aliases: [AFC Bournemouth, Bournemouth AFC, Cherries]
+kits:
+  # 2025-26 home (kroupi clip, Bournemouth 1-1 Man City): red/black vertical
+  # stripes, black shorts and socks.
+  "2025-26/home":
+    shirt: "#da291c"
+    shorts: "#111111"
+    socks: "#111111"
+    boots: "#1c1c1c"
+    sleeves: short
+    pattern: {type: vertical_stripes, colors: ["#da291c", "#111111"], width_m: 0.07}

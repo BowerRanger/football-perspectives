@@ -1,0 +1,12 @@
+# Liverpool kits. 2025-26 home matches the hand palette confirmed against the
+# gberch footage (Anfield, Liverpool v Chelsea).
+club: Liverpool
+aliases: [Liverpool FC, LFC]
+kits:
+  "2025-26/home":
+    {shirt: "#c8102e", shorts: "#c8102e", socks: "#c8102e", boots: "#1c1c1c", sleeves: short}
+  "2025-26/gk":
+    {shirt: "#2b2f33", shorts: "#2b2f33", socks: "#2b2f33", boots: "#f0f0f0", sleeves: long, gloves: "#e6e6e6", source: approx}
+  # 2018-19 (UEFA Champions League v Barcelona, 4-0): New Balance all-red.
+  "2018-19/home":
+    {shirt: "#d00027", shorts: "#d00027", socks: "#d00027", boots: "#1c1c1c", sleeves: short}

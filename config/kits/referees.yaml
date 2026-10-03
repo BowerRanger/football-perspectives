@@ -1,0 +1,10 @@
+# Match officials. Matched by full kit vector like teams (refs: referees/<name>).
+club: Referees
+aliases: []
+kits:
+  black:
+    {shirt: "#151515", shorts: "#151515", socks: "#151515", boots: "#151515", sleeves: short}
+  yellow:
+    {shirt: "#e8df3a", shorts: "#151515", socks: "#151515", boots: "#151515", sleeves: short}
+  green:
+    {shirt: "#3fae49", shorts: "#151515", socks: "#151515", boots: "#151515", sleeves: short}

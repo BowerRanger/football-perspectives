@@ -1,0 +1,9 @@
+club: Chelsea
+aliases: [Chelsea FC, CFC]
+kits:
+  # Blue shirt and shorts, white socks (sampled on gberch, snapped to brand).
+  "2025-26/home":
+    {shirt: "#034694", shorts: "#034694", socks: "#f2f2f2", boots: "#1c1c1c", sleeves: short}
+  # Goalkeeper (Jorgensen on gberch): charcoal, long sleeves, light gloves, white boots.
+  "2025-26/gk":
+    {shirt: "#33373b", shorts: "#2a2d30", socks: "#2a2d30", boots: "#f0f0f0", sleeves: long, gloves: "#e6e6e6"}

@@ -1,0 +1,11 @@
+club: Coventry City
+aliases: [Coventry, Coventry City FC, Sky Blues]
+kits:
+  # Sky blue / white vertical stripes (saka clip).
+  "2023-24/home":
+    shirt: "#6ec6ee"
+    shorts: "#6ec6ee"
+    socks: "#6ec6ee"
+    boots: "#1c1c1c"
+    sleeves: short
+    pattern: {type: vertical_stripes, colors: ["#6ec6ee", "#ffffff"], width_m: 0.07}

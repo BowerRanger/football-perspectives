@@ -1,0 +1,9 @@
+club: Manchester City
+aliases: [Man City, Manchester City FC, MCFC]
+kits:
+  # 2025-26 away: fluorescent yellow/lime (kroupi clip).
+  "2025-26/away":
+    {shirt: "#d4e600", shorts: "#d4e600", socks: "#d4e600", boots: "#1c1c1c", sleeves: short}
+  # Keeper on kroupi01 wears a teal-green kit.
+  "2025-26/gk":
+    {shirt: "#2a9d6f", shorts: "#2a9d6f", socks: "#2a9d6f", boots: "#1c1c1c", sleeves: long, gloves: "#e6e6e6", source: approx}

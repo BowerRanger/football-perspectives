@@ -15,6 +15,9 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 
+from src.schemas.kit import KitSpecError
+from src.utils.kit_library import resolve_kit
+
 logger = logging.getLogger(__name__)
 
 APPEARANCE_DIR = "appearance"
@@ -29,7 +32,8 @@ def _load_json_kits(path: Path) -> dict[str, dict]:
         logger.warning("[kit_resolution] %s is not valid JSON: %s", path, exc)
         return {}
     kits = raw.get("kits", raw) if isinstance(raw, Mapping) else {}
-    return {k: dict(v) for k, v in kits.items() if isinstance(v, Mapping)}
+    return {k: (dict(v) if isinstance(v, Mapping) else v)
+            for k, v in kits.items() if isinstance(v, (Mapping, str))}
 
 
 def effective_team_kits(output_dir: Path, cfg: Mapping[str, Any] | None) -> dict[str, dict]:
@@ -45,6 +49,19 @@ def effective_team_kits(output_dir: Path, cfg: Mapping[str, Any] | None) -> dict
     ]
     for layer in layers:
         for role, kit in layer.items():
-            if isinstance(kit, Mapping):
-                merged[role] = dict(kit)
+            resolved = _resolve(role, kit)
+            if resolved is not None:
+                merged[role] = resolved
     return merged
+
+
+def _resolve(role: str, kit: Any) -> dict | None:
+    """Library refs / ``{ref: ...}`` stubs become full KitSpecs; legacy
+    ``render.teams.defaults`` dicts pass through untouched."""
+    if isinstance(kit, str) or (isinstance(kit, Mapping) and "shirt" not in kit and "ref" in kit):
+        try:
+            return resolve_kit(kit)
+        except KitSpecError as exc:
+            logger.warning("[kit_resolution] %s: %s", role, exc)
+            return None
+    return dict(kit) if isinstance(kit, Mapping) else None

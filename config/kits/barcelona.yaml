@@ -1,0 +1,6 @@
+club: Barcelona
+aliases: [FC Barcelona, Barca, Barça]
+kits:
+  # 2018-19 away: yellow (seen in the origi clip v Liverpool, Anfield).
+  "2018-19/away":
+    {shirt: "#f5e216", shorts: "#f5e216", socks: "#f5e216", boots: "#1c1c1c", sleeves: short}

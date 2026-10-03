@@ -1201,8 +1201,10 @@ def run_trajectory(
 
     # D6.3 -- shot spans get a bounded Magnus refinement even with the
     # global spin switch off: tag the start frames of shot/volley/spin touches.
+    # Only for shots that end in a goal event: on non-goal shot/volley spans
+    # (s013 gate, 2026-10-03) the unanchored Magnus fit doubled real p50.
     spin_cfg = dict(tcfg.get("spin") or {})
-    if spin_cfg.get("shot_spans"):
+    if spin_cfg.get("shot_spans") and goal_event is not None:
         starts = _shot_start_frames(list(anchors) + list(auto_anchors))
         spin_cfg["shot_start_frames"] = tuple(sorted(starts))
         tcfg = {**tcfg, "spin": spin_cfg}

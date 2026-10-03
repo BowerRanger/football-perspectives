@@ -46,6 +46,11 @@ def cli() -> None:
     "--clean", is_flag=True, default=False,
     help="Wipe legacy artefact directories (calibration, sync, triangulation, smpl, matching) before running.",
 )
+@click.option(
+    "--shots", "shots", default=None,
+    help="Comma-separated shot ids: run the selected stages for only these "
+         "shots (one filtered pass per shot).",
+)
 def run(
     input_path: Path | None,
     output_dir: Path,
@@ -54,6 +59,7 @@ def run(
     config_path: Path | None,
     device: str,
     clean: bool,
+    shots: str | None,
 ) -> None:
     """Run the reconstruction pipeline on a video file."""
     import shutil
@@ -75,7 +81,19 @@ def run(
     click.echo(f"Input:  {input_path}")
     click.echo(f"Output: {output_dir}")
     click.echo(f"Stages: {stages}")
+    shot_ids = [t.strip() for t in shots.split(",") if t.strip()] if shots else None
+    if shots is not None and not shot_ids:
+        raise click.UsageError("--shots needs at least one shot id")
+    try:
+        _run(output_dir, stages, from_stage, cfg, input_path, device, shot_ids)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    click.echo("Done.")
+
+
+def _run(output_dir, stages, from_stage, cfg, input_path, device, shot_ids):
     run_pipeline(
+        shots=shot_ids,
         output_dir=output_dir,
         stages=stages,
         from_stage=from_stage,
@@ -83,7 +101,6 @@ def run(
         video_path=input_path,
         device=device,
     )
-    click.echo("Done.")
 
 
 @cli.command()

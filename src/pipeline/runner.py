@@ -22,8 +22,12 @@ _STAGE_NAMES: list[str] = [
     # land where the actual player limb is, not on raw HMR jitter.
     "refined_poses",
     "ball",
+    # ``appearance`` is a post-hoc suggestion pass (team/kit clustering);
+    # it reads tracks + refined_poses + video and never edits tracks.
+    "appearance",
     "export",
     "render",
+    "shorts",
 ]
 
 
@@ -53,7 +57,38 @@ def _stage_class(name: str) -> type[BaseStage] | None:
     if name == "render":
         from src.stages.render import RenderStage
         return RenderStage
+    if name == "appearance":
+        return _optional_stage("src.stages.appearance", "AppearanceStage")
+    if name == "shorts":
+        return _optional_stage("src.stages.shorts", "ShortsStage")
     raise ValueError(f"Unknown stage: {name!r}")
+
+
+def _optional_stage(module: str, cls_name: str) -> type[BaseStage] | None:
+    """Import a stage whose module may not exist yet (returns None then).
+
+    Only a missing *stage module itself* is tolerated; an ImportError from
+    inside an existing module is a real bug and propagates.
+    """
+    import importlib
+
+    try:
+        mod = importlib.import_module(module)
+    except ModuleNotFoundError as exc:
+        if exc.name == module:
+            return None
+        raise
+    return getattr(mod, cls_name, None)
+
+
+def _known_shot_ids(output_dir: Path) -> list[str]:
+    """Active shot ids from the manifest (empty when no manifest yet)."""
+    from src.schemas.shots import ShotsManifest
+
+    path = output_dir / "shots" / "shots_manifest.json"
+    if not path.exists():
+        return []
+    return [s.id for s in ShotsManifest.load(path).active_shots()]
 
 
 def resolve_stages(stages: str, from_stage: str | None) -> list[str]:
@@ -163,6 +198,7 @@ def run_pipeline(
     config: dict,
     shot_filter: str | None = None,
     player_filter: str | None = None,
+    shots: list[str] | None = None,
     **stage_kwargs,
 ) -> None:
     """Run pipeline stages.
@@ -180,6 +216,39 @@ def run_pipeline(
     /api/run-shot-player endpoint to iterate quickly on one player.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    if shots:
+        # ``--shots a,b``: one filtered pass per shot (single == compare
+        # mode is already handled by each stage's ``shot_filter``).
+        known = _known_shot_ids(output_dir)
+        unknown = [s for s in shots if s not in known]
+        if unknown:
+            raise ValueError(
+                f"Unknown shot id(s) {unknown!r}; active shots: {known!r}"
+            )
+        for shot in shots:
+            _run_stages(output_dir, stages, from_stage, config, shot,
+                        player_filter, skip_prepare=True, **stage_kwargs)
+    else:
+        _run_stages(output_dir, stages, from_stage, config, shot_filter,
+                    player_filter, **stage_kwargs)
+    # Aggregate per-stage diagnostics into output/quality_report.json.
+    # This always runs (each section is independent of stage activation).
+    try:
+        write_quality_report(output_dir)
+    except Exception as exc:  # noqa: BLE001 — diagnostics must never fail the run
+        print(f"  [WARN] quality_report aggregation failed: {exc}")
+
+
+def _run_stages(
+    output_dir: Path,
+    stages: str,
+    from_stage: str | None,
+    config: dict,
+    shot_filter: str | None,
+    player_filter: str | None,
+    skip_prepare: bool = False,
+    **stage_kwargs,
+) -> None:
     active = resolve_stages(stages, from_stage)
     timings = _load_timings(output_dir)
     for name in _STAGE_NAMES:
@@ -190,6 +259,9 @@ def run_pipeline(
             print(f"  [SKIP] {name} (not implemented)")
             continue
         stage = StageClass(config=config, output_dir=output_dir, **stage_kwargs)
+        if skip_prepare and name == "prepare_shots" and stage.is_complete():
+            print(f"  [SKIP] {name} (cached)")
+            continue
         if shot_filter is not None:
             stage.shot_filter = shot_filter
         if player_filter is not None:
@@ -220,10 +292,3 @@ def run_pipeline(
         }
 
     _write_timings(output_dir, timings)
-
-    # Aggregate per-stage diagnostics into output/quality_report.json.
-    # This always runs (each section is independent of stage activation).
-    try:
-        write_quality_report(output_dir)
-    except Exception as exc:  # noqa: BLE001 — diagnostics must never fail the run
-        print(f"  [WARN] quality_report aggregation failed: {exc}")

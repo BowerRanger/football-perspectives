@@ -229,6 +229,9 @@ def solve_appearance(
             res.needs_confirmation.append(f"{pid}:keeper_side_low_margin")
         snap_res, pool_name = None, "sampled"
         for name, pool in gk_pools:
+            if name == "match" and confident and role_slug.get(team_role[team]):
+                # side geometry is decisive: only that club's keeper kits compete
+                pool = {k: v for k, v in pool.items() if _slug(k) == role_slug[team_role[team]]}
             if not pool:
                 continue
             r = kp.snap_kit(sample, pool, snap_de=_limit(name, snap_de),
@@ -267,6 +270,12 @@ def solve_appearance(
     for pid in clustering.referees:
         sample = _parts_hex(player_parts[pid], wb)
         r = kp.snap_kit(sample, ref_pool, **snap_args())
+        if not r.snapped and clip_kits.get("referee"):
+            # sole non-keeper outlier + operator-named referee kit: trust the named kit
+            res.kits.setdefault("referee", _finalise({}, "clip", clip_kits["referee"]))
+            res.needs_confirmation.append("referee_kit_from_clip_unverified")
+            res.player_roles[pid] = "referee"
+            continue
         res.kits.setdefault("referee", _finalise(r.spec, "library" if r.snapped else "sampled", None))
         res.player_roles[pid] = "referee"
     return res

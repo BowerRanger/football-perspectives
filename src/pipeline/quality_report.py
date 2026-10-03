@@ -8,6 +8,7 @@ independent — missing inputs simply omit that section from the report.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from src.schemas.anchor import AnchorSet
 from src.schemas.ball_track import BallTrack
 from src.schemas.camera_track import CameraTrack
 from src.schemas.shots import ShotsManifest
+
+logger = logging.getLogger(__name__)
 
 
 def _prepare_shots_section(output_dir: Path, manifest: ShotsManifest) -> dict:
@@ -136,8 +139,48 @@ def _ball_shot_entry(track_path: Path, shot_id: str) -> dict:
             "cross_replay": diag.get("cross_replay"),
             "mode_search": diag.get("mode_search"),
             "out_of_view_spans": diag.get("out_of_view_spans", []),
+            # D6: where the dense track crossed the goal line (None = no
+            # goal event on this shot) + detections the direction gate
+            # dropped from the hybrid fit.
+            "goal_check": diag.get("goal_check"),
+            "direction_gate_dropped": (
+                (diag.get("hybrid_trajectory") or {})
+                .get("direction_gate", {}).get("n_dropped")
+            ),
         })
     return entry
+
+
+_GOAL_CHECK_MESSAGES = {
+    "misses_mouth": "goal event but the trajectory MISSES THE MOUTH at the line",
+    "over_crossbar": "goal event but the trajectory is OVER THE CROSSBAR at the line",
+    "no_line_cross": "goal event but the trajectory NEVER CROSSES THE GOAL LINE",
+}
+
+
+def _goal_check_alerts(entries: list[dict]) -> list[dict]:
+    """Loud, per-shot failures of the D6 goal check (empty when every goal
+    shot's trajectory crosses the line inside the mouth)."""
+    alerts: list[dict] = []
+    for e in entries:
+        gc = e.get("goal_check")
+        if not gc or gc.get("status") in (None, "ok"):
+            continue
+        status = gc["status"]
+        alerts.append({
+            "shot_id": e.get("shot_id", ""),
+            "status": status,
+            "goal_frame": gc.get("goal_frame"),
+            "line_cross": gc.get("line_cross"),
+            "message": (
+                f"shot {e.get('shot_id') or '(legacy)'}: "
+                f"{_GOAL_CHECK_MESSAGES.get(status, 'goal check failed: ' + status)}"
+                f" (goal_impact frame {gc.get('goal_frame')}, "
+                f"line_cross={gc.get('line_cross')}) — add an airborne anchor near "
+                f"the line or a goal_impact 'mouth' anchor"
+            ),
+        })
+    return alerts
 
 
 def _ball_section(output_dir: Path, manifest: ShotsManifest | None) -> dict | None:
@@ -155,8 +198,13 @@ def _ball_section(output_dir: Path, manifest: ShotsManifest | None) -> dict | No
     if not shots:
         return None
     entries = [_ball_shot_entry(p, sid) for sid, p in shots]
+    goal_alerts = _goal_check_alerts(entries)
+    for a in goal_alerts:
+        logger.warning("quality_report: GOAL CHECK FAILED — %s", a["message"])
     return {
         "shots": entries,
+        "goal_checks": sum(1 for e in entries if e.get("goal_check")),
+        "goal_check_failures": goal_alerts,
         "flight_segments": sum(e["flight_segments"] for e in entries),
         "missing_frames": sum(e["missing_frames"] for e in entries),
         "max_flight_fit_residual_px": max(

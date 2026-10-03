@@ -185,6 +185,17 @@ def test_goal_check_no_line_cross():
     assert gc["status"] == STATUS_NO_LINE_CROSS and gc["line_cross"] is None
 
 
+def test_goal_check_uses_first_crossing_not_net_wobble():
+    # crosses at 15 inside the mouth, then wobbles back out and in again
+    # (post-line fit garbage) -- the first inward crossing is the line-cross.
+    pts = dict(_line_track(34.5, 1.0))
+    pts[17] = (1.0, 34.5, 1.0)    # back out ...
+    pts[18] = (-0.5, 34.5, 3.9)   # ... and in again, high
+    gc = goal_check(_track(pts), GoalEvent(20, 0.0, "back_net"))
+    assert gc["status"] == STATUS_OK
+    assert gc["line_cross"]["frame"] == pytest.approx(15.0, abs=1e-6)
+
+
 def test_goal_check_none_without_event():
     assert goal_check(_track({1: (1.0, 2.0, 3.0)}), None) is None
 

@@ -275,7 +275,10 @@ def goal_check(
             p0 = np.asarray(frames[f0]["xyz"], dtype=float)
             p1 = np.asarray(frames[f1]["xyz"], dtype=float)
             xyz = p0 + a * (p1 - p0)
-            cross = (f0 + a, xyz)  # keep the LAST crossing before the impact
+            # the FIRST inward crossing is the shot's line-cross; later
+            # inward "crossings" are post-line fit wobble in the net
+            cross = (f0 + a, xyz)
+            break
     if cross is None:
         # a knot sitting exactly on the line (beyond == 0 at the first frame)
         for f in fs:

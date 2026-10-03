@@ -21,7 +21,7 @@ slots:
         to: strike-36
         pad: [6, 10]
         subject: "@scorer"
-        framing: {min_subject_px: 100}
+        framing: {min_subject_px: 100, check_ball: false}
       - camera: dolly
         from: strike-135
         to: strike-36

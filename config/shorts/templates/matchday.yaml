@@ -18,7 +18,7 @@ slots:
         to: strike-28
         pad: [32, 29]
         subject: "@scorer"
-        framing: {min_subject_px: 100}
+        framing: {min_subject_px: 100, check_ball: false}
       - camera: dolly
         from: buildup_start
         to: strike-28

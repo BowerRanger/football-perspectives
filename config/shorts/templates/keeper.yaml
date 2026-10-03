@@ -31,6 +31,8 @@ slots:
         from: strike-41
         to: strike-9
         pad: [10, 37]
+        # a keeper's sight line is legitimately crowded by his own box
+        framing: {max_occluded_frames: 30}
         flash: true
         label: KEEPER CAM
         label_style: chip_dark

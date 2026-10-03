@@ -36,9 +36,11 @@ class FramingLimits:
     safe_top_px: int = SAFE_TOP_PX
     safe_bottom_px: int = SAFE_BOTTOM_PX
     max_ball_out_frames: int = 6        # consecutive frames outside the safe area
-    max_occluded_frames: int = 8        # consecutive frames the ball is blocked
+    max_occluded_frames: int = 12       # consecutive frames the ball is blocked
     max_camera_in_player_frames: int = 1
-    capsule_radius_m: float = 0.45      # body + swinging limbs
+    capsule_radius_m: float = 0.45      # body + swinging limbs (camera-inside check)
+    occlusion_radius_m: float = 0.28    # torso-ish: a sight line this close to the axis is blocked
+    check_ball: bool = True             # False for subject-driven establishing shots
     camera_clearance_m: float = 0.10
     min_subject_px: float = 120.0       # projected player height (of 1920)
     min_ball_px: float = 12.0           # projected ball diameter (of 1920)
@@ -194,7 +196,7 @@ def check_framing(
 
     # --- ball in the 9:16 safe area -------------------------------------
     brows = [(i, ball_xyz[int(f)]) for i, f in zip(cam_rows, frames) if int(f) in ball_xyz]
-    if brows:
+    if brows and lim.check_ball:
         bi = np.array([b[0] for b in brows])
         bpts = np.array([b[1] for b in brows], dtype=float).reshape(-1, 3)
         bfr = cam.frames[bi]
@@ -232,7 +234,7 @@ def check_framing(
             a0 = np.concatenate([pos, np.zeros((len(pos), 1))], axis=1)
             a1 = np.concatenate([pos, np.full((len(pos), 1), PLAYER_HEIGHT_M)], axis=1)
             d = _seg_axis_dist(centres, stop, a0, a1)
-            blocked |= valid & (d < lim.capsule_radius_m)
+            blocked |= valid & (d < lim.occlusion_radius_m)
         n, a, b = _longest_run(blocked, bfr)
         metrics["ball_occluded_frames"] = float(blocked.sum())
         if n > lim.max_occluded_frames:

@@ -102,6 +102,18 @@ def test_match_pool_accepts_loose_but_decisive_pairing_and_flags_it():
     assert "away_snap_loose" in r.needs_confirmation
 
 
+def test_contaminated_keeper_sample_trusts_clip_named_keeper_kit_loosely():
+    home, away = LIB.get("bournemouth/2025-26/home"), LIB.get("manchester_city/2025-26/away")
+    ref = LIB.get("referees/black")
+    muddy = {"shirt": "#665c37", "shorts": "#ad7e43", "socks": "#9ba399"}   # grass/board bleed
+    players, px = _world(home, away, muddy, ref, seed=5)
+    clip = {"home": home, "away": away, "away_gk": LIB.get("manchester_city/2025-26/gk")}
+    c, r = _solve(players, px, clip_kits=clip)
+    assert r.player_roles["P020"] == "away_gk"
+    assert r.kits["away_gk"]["shirt"] == LIB.get("manchester_city/2025-26/gk")["shirt"]
+    assert "away_gk_snap_loose" in r.needs_confirmation
+
+
 def test_library_wide_pool_does_not_accept_loose_snaps():
     dull_home = {"shirt": "#623635", "shorts": "#3c3029", "socks": "#313123"}
     dull_away = {"shirt": "#9b9797", "shorts": "#aaa1aa", "socks": "#706f6e"}

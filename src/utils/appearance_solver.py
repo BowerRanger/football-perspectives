@@ -240,6 +240,15 @@ def solve_appearance(
                 elif name == "match" and _slug(r.ref) in (home_slug, away_slug):
                     role = "home_gk" if _slug(r.ref) == home_slug else "away_gk"
                 break
+        if snap_res is None and p1gk and f"clip:{role}" in p1gk:
+            # Operator named this side's keeper kit and the keeper is a colour
+            # outlier by construction: a distant keeper's few pixels are
+            # contaminated (grass/boards), so trust the named kit at 4x radius.
+            r = kp.snap_kit(sample, {f"clip:{role}": p1gk[f"clip:{role}"]}, snap_de=4 * snap_de,
+                            lightness_weight=lightness_weight)
+            if r.snapped:
+                snap_res, pool_name = r, "clip"
+                res.needs_confirmation.append(f"{role}_snap_loose")
         if role in used_gk_roles:                      # two keepers, one role: use the other side's
             other = "away_gk" if role == "home_gk" else "home_gk"
             if other not in used_gk_roles:

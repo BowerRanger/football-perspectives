@@ -57,6 +57,25 @@ slots:
         time_stretch: 3
         hold_s: 1.5
         label: REPLAY
+      # Fallbacks (kroupi01: the 6 m orbit passes through the keeper) —
+      # a wider, higher sweep, then a behind-goal replay that can't clip.
+      - camera: orbit
+        rig: {focus: ball, orbit_radius_m: 9.0, orbit_height_m: 2.6, orbit_fov_deg: 44.0,
+              orbit_sweep_deg: 90.0, orbit_start_frame: "line_cross-10", orbit_end_frame: "impact+8"}
+        from: line_cross-6
+        to: impact+8
+        pad: [4, 0]
+        time_stretch: 3
+        hold_s: 1.5
+        label: REPLAY
+      - camera: "goal:@goal_end"
+        rig: {goal_height_m: 1.8, goal_back_m: 6.0, goal_fov_deg: 42.0, focus: ball}
+        from: line_cross-6
+        to: impact+8
+        pad: [4, 0]
+        time_stretch: 3
+        hold_s: 1.5
+        label: REPLAY
 
 captions:
   - {text: "WHAT GOAL IS THIS?", style: kicker, start: 0}

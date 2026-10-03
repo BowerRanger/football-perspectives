@@ -132,6 +132,11 @@ class CachingBallDetector(BallDetector):
         self._cands: dict[str, list] = {}
         self._dirty = 0
         self._autosave_every = max(1, int(autosave_every))
+        # hit/miss accounting (logged on save): crop-sized candidate calls
+        # (zoom retries) key on pixels that move with the tracker state, so
+        # they are the usual source of misses on an otherwise unchanged clip
+        self.stats: dict[str, int] = {}
+        self._max_area = 0
         self.SUPPORTS_REDETECT = getattr(inner, "SUPPORTS_REDETECT", True)
         self._load()
 
@@ -165,10 +170,19 @@ class CachingBallDetector(BallDetector):
         h.update(str(frame.shape).encode())
         return h.hexdigest()
 
+    def _count(self, kind: str, frame: np.ndarray, hit: bool) -> None:
+        area = int(frame.shape[0]) * int(frame.shape[1])
+        self._max_area = max(self._max_area, area)
+        size = "full" if area >= self._max_area else "crop"
+        name = f"{kind}_{size}_{'hit' if hit else 'miss'}"
+        self.stats[name] = self.stats.get(name, 0) + 1
+
     def detect(self, frame: np.ndarray) -> tuple[float, float, float] | None:
         k = self._key(frame)
         if k in self._detect:
+            self._count("detect", frame, True)
             return self._detect[k]
+        self._count("detect", frame, False)
         det = self._inner.detect(frame)
         self._detect[k] = tuple(det) if det is not None else None
         self._dirty += 1
@@ -181,7 +195,9 @@ class CachingBallDetector(BallDetector):
     ) -> list[tuple[float, float, float]]:
         k = f"{self._key(frame)}:{min_score}:{top_k}"
         if k in self._cands:
+            self._count("cands", frame, True)
             return list(self._cands[k])
+        self._count("cands", frame, False)
         out = self._inner.detect_candidates(frame, min_score, top_k)
         self._cands[k] = [tuple(c) for c in out]
         self._dirty += 1
@@ -201,6 +217,7 @@ class CachingBallDetector(BallDetector):
             payload["fingerprint"] = self._fingerprint
         self._path.write_text(json.dumps(payload))
         self._dirty = 0
+        logger.info("ball detection cache %s: %s", self._path, dict(sorted(self.stats.items())))
 
 
 def wrap_if_enabled(

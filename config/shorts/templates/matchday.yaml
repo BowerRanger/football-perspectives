@@ -46,6 +46,24 @@ slots:
         flash: true
         label: REPLAY
         subject: "@scorer"
+      # fallbacks (origi01: the 6.5 m scorer orbit loses the ball for 8 frames)
+      - camera: orbit
+        rig: {focus: ball, orbit_radius_m: 9.0, orbit_height_m: 2.4, orbit_fov_deg: 46.0,
+              orbit_sweep_deg: 120.0, orbit_start_frame: "strike-11", orbit_end_frame: "strike+9"}
+        from: strike-9
+        to: strike+9
+        pad: [2, 0]
+        time_stretch: 4
+        flash: true
+        label: REPLAY
+      - camera: chase
+        rig: {chase_back_m: 6.0, chase_height_m: 2.0}
+        from: strike-9
+        to: strike+9
+        pad: [2, 0]
+        time_stretch: 4
+        flash: true
+        label: REPLAY
   - id: goal_replay
     candidates:
       - camera: "goal:@goal_end"

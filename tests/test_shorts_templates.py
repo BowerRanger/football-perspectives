@@ -84,6 +84,16 @@ def test_freeze_at_splits_the_cut_and_holds_the_first_half():
         st.resolve_template(_mini(freeze_at="impact+50"), GBERCH)
 
 
+@pytest.mark.parametrize("name", ["matchday", "keeper", "comic"])
+def test_every_shipped_slot_has_a_fallback_candidate(name):
+    """A single-candidate slot drops the whole Short when framing rejects it
+    (kroupi01 net orbit through the keeper; origi01 scorer orbit losing the
+    ball) — every shipped slot needs at least one fallback."""
+    tpl = st.load_template(name)
+    thin = [s["id"] for s in tpl["slots"] if len(s["candidates"]) < 2]
+    assert not thin, f"{name}: slots without a fallback candidate: {thin}"
+
+
 def test_cut_before_clip_start_is_clamped():
     """kroupi01: strike at 114, so strike-135 lands at -21 — clamp to frame 0."""
     kroupi = {**GBERCH, "strike": 114, "impact": 142, "line_cross": 136}

@@ -46,6 +46,14 @@ slots:
         time_stretch: 3
         flash: true
         label: REPLAY
+      - camera: chase
+        rig: {chase_back_m: 7.5, chase_height_m: 2.6, chase_fov_deg: 50.0}
+        from: strike-5
+        to: line_cross+2
+        pad: [0, 8]
+        time_stretch: 3
+        flash: true
+        label: REPLAY
   - id: net_orbit
     candidates:
       - camera: orbit

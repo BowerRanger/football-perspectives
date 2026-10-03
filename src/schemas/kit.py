@@ -27,7 +27,7 @@ _HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _REQUIRED_HEX = ("shirt", "shorts", "socks")
 _OPTIONAL_HEX = ("sleeve_color", "collar", "boots", "gloves")
 # Provenance / bookkeeping keys that may ride along on a spec.
-_PASSTHROUGH = ("source", "name", "ref", "delta_e")
+_PASSTHROUGH = ("source", "name", "ref", "delta_e", "pool")
 
 
 class KitSpecError(ValueError):

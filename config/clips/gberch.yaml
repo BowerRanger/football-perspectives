@@ -2,7 +2,10 @@
 # Merge over config/default.yaml with `--config config/clips/gberch.yaml`
 # (recon.py run / scripts/render_experiments.py).
 #
-# Kit colours: hues confirmed against footage with
+# Kit colours now live in the kit library (config/kits/*.yaml) and are
+# referenced from `appearance.kits` below; the hand palette they replaced is
+# frozen in tests/fixtures/appearance/gberch_hand_palette.json (the
+# acceptance reference for the appearance stage). Hues were confirmed against footage with
 # scripts/sample_kit_colors.py (broadcast samples come out darker and
 # less saturated — shading + compression — so each value is snapped to
 # the club's brand colour rather than pasted raw):
@@ -12,6 +15,13 @@
 #   away_gk (Jorgensen) sampled #565857 all over -> charcoal, long sleeves,
 #         light gloves, white boots (close-up crop)
 #   referee sampled shirt #8c8543 / shorts #20211f -> yellow over black
+appearance:
+  kits:
+    home: liverpool/2025-26/home
+    away: chelsea/2025-26/home
+    away_gk: chelsea/2025-26/gk
+    referee: referees/yellow
+
 ball:
   # Anchor iteration on this clip re-runs the ball stage repeatedly; keep
   # WASB detections cached (default is off) so a re-run is minutes, not ~50.
@@ -27,10 +37,3 @@ render:
       accent_color: "#e6e1d6"
       crowd_colors: ["#c8102e", "#b3141f", "#8f1a20", "#c8102e", "#e9e5dc",
                      "#2a2a2a", "#c8102e", "#d6cdbd"]
-  teams:
-    defaults:
-      home: {shirt: "#c8102e", shorts: "#c8102e", socks: "#c8102e", boots: "#1c1c1c"}
-      away: {shirt: "#034694", shorts: "#034694", socks: "#f2f2f2", boots: "#1c1c1c"}
-      away_gk: {shirt: "#33373b", shorts: "#2a2d30", socks: "#2a2d30", boots: "#f0f0f0",
-                sleeves: long, gloves: "#e6e6e6"}
-      referee: {shirt: "#e8df3a", shorts: "#151515", socks: "#151515", boots: "#151515"}

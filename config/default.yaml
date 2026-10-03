@@ -1681,6 +1681,30 @@ export:
     orbit_fov_deg: 50.0
     orbit_radius_m: 15.0
     orbit_height_m: 6.0
+# Post-hoc kit / team evidence (stage runs after ball; writes SUGGESTIONS to
+# <out>/appearance/ only — operator players.json and kits_operator.json win).
+# Clip configs add `appearance.kits: {home|away|home_gk|away_gk|referee:
+# <library ref like liverpool/2025-26/home, or an inline KitSpec>}` and may add
+# `appearance.match: {home_team, away_team, date}` when the manifest has none.
+appearance:
+  enabled: true
+  sample_frames_per_shot: 16      # frames sampled per shot (evenly, >=3 players tracked)
+  min_keypoint_conf: 0.4          # COCO keypoint confidence for region polygons
+  white_balance:
+    enabled: true
+    target: "#f5f5f0"             # painted pitch lines
+    min_line_pixels: 40           # fewer line pixels -> identity gains
+    gain_clip: [0.8, 1.25]
+    exposure: false               # cast-only (luminance-preserving); the line level under-reads white
+  clustering:
+    keeper_third_m: 35.0          # keepers = colour outliers whose pitch x stays within this of a goal line
+    outlier_min_de: 18.0          # Lab distance floor to peel keepers/officials off the two teams
+    outlier_factor: 3.0           # ... or this many times the median in-team distance
+  library:
+    snap_de: 12.0                 # full-kit-vector CIEDE2000 accept radius (library-wide pool)
+    lightness_weight: 2.0         # kL: broadcast shading moves L more than hue
+                                  # pools named by clip kits / MatchInfo accept 2x (decisive pairings 4x), flagged
+
     orbit_sweep_deg: 180.0
     # Ball-chase cam, falls back to the action centroid (chase).
     chase_fov_deg: 45.0

@@ -1,0 +1,22 @@
+# origi clip overrides — Liverpool v Barcelona, Anfield (UEFA Champions League
+# semi-final 2nd leg, 2019-05-07; 4-0). Merge with `--config config/clips/origi.yaml`.
+#
+# Liverpool in the 2018-19 New Balance all-red home kit; Barcelona in the
+# yellow away kit. Keepers and officials are matched from the library when
+# visible (no keeper kit pinned here — the appearance stage samples them).
+appearance:
+  kits:
+    home: liverpool/2018-19/home
+    away: barcelona/2018-19/away
+    referee: referees/black
+  match:
+    home_team: Liverpool
+    away_team: Barcelona
+    date: "2019-05-07"
+
+ball:
+  detection_cache:
+    enabled: true
+
+render:
+  venue: anfield

@@ -1,0 +1,21 @@
+# saka clip overrides — Arsenal v Coventry City, Emirates Stadium.
+# Merge with `--config config/clips/saka.yaml`.
+#
+# Arsenal: red body with WHITE sleeves, white shorts, red socks.
+# Coventry: sky-blue / white vertical stripes (season key best-effort, from
+# the footage — re-point the refs if the library gains the exact season).
+appearance:
+  kits:
+    home: arsenal/2023-24/home
+    away: coventry_city/2023-24/home
+    referee: referees/black
+  match:
+    home_team: Arsenal
+    away_team: Coventry City
+
+ball:
+  detection_cache:
+    enabled: true
+
+render:
+  venue: emirates_stadium

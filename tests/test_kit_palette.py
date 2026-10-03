@@ -25,6 +25,20 @@ def test_white_balance_recovers_cast():
     assert kp.delta_e_hex(kp.rgb_to_hex(fixed), "#c8102e") < 2.0
 
 
+def test_white_balance_default_preserves_luminance():
+    dark = np.tile(kp.hex_to_rgb("#f5f5f0") * 0.7, (80, 1))     # uniformly dark lines, no cast
+    wb = kp.white_balance_gains(dark)
+    assert wb.applied
+    assert all(abs(g - 1.0) < 0.02 for g in wb.gains)            # exposure NOT applied
+    bright = kp.apply_gains(kp.hex_to_rgb("#d4e600"), wb)
+    assert kp.delta_e_hex(kp.rgb_to_hex(bright), "#d4e600") < 1.5
+
+
+def test_white_balance_gains_clipped():
+    wb = kp.white_balance_gains(np.tile([245.0, 245.0, 60.0], (80, 1)))
+    assert max(wb.gains) <= 1.25 and min(wb.gains) >= 0.8
+
+
 def test_white_balance_identity_when_few_pixels():
     wb = kp.white_balance_gains(np.zeros((5, 3)) + 200)
     assert not wb.applied and wb.gains == (1.0, 1.0, 1.0)
@@ -48,7 +62,8 @@ CANDS = {
 
 def test_snap_dull_broadcast_sample_to_library_after_wb():
     cast = np.array([0.62, 0.75, 0.7])  # dark, slightly cyan-shifted broadcast grade
-    wb = kp.white_balance_gains(np.tile(kp.hex_to_rgb("#f5f5f0") * cast, (80, 1)))
+    wb = kp.white_balance_gains(np.tile(kp.hex_to_rgb("#f5f5f0") * cast, (80, 1)),
+                                gain_clip=(0.5, 2.0), exposure=True)
     raw = {k: kp.rgb_to_hex(kp.hex_to_rgb("#c8102e") * cast) for k in ("shirt", "shorts", "socks")}
     # uncorrected sample is too dull to snap; corrected one snaps
     assert not kp.snap_kit(raw, {"a/home": CANDS["a/home"]}, snap_de=3).snapped

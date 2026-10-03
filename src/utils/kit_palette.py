@@ -155,9 +155,21 @@ def white_balance_gains(
     *,
     target_hex: str = WHITE_TARGET_HEX,
     min_pixels: int = 40,
-    gain_clip: tuple[float, float] = (0.6, 1.8),
+    gain_clip: tuple[float, float] = (0.8, 1.25),
+    percentile: float = 85.0,
+    exposure: bool = False,
 ) -> WhiteBalance:
-    """Per-channel gains mapping the median pitch-line colour to the white target.
+    """Per-channel gains mapping the pitch-line colour to the white target.
+
+    Thin lines blend with grass, so the reference is a HIGH percentile
+    (default 85th, per channel) of the candidate pixels — the unblended
+    core of the paint — not the median.
+
+    By default only the colour CAST is removed (gains are divided by their
+    geometric mean, so luminance is preserved). The absolute line level
+    under-reads white (the paint is a few px wide and blends with grass),
+    and applying it as an exposure gain clipped and desaturated bright kits
+    (Man City lime read lavender), so ``exposure=True`` is opt-in.
 
     ``line_rgb`` is ``(N, 3)`` sRGB 0-255 of pixels believed to be painted
     line. Fewer than ``min_pixels`` -> identity (``applied=False``).
@@ -165,8 +177,10 @@ def white_balance_gains(
     px = np.asarray(line_rgb, dtype=np.float64).reshape(-1, 3)
     if px.shape[0] < min_pixels:
         return WhiteBalance((1.0, 1.0, 1.0), int(px.shape[0]), False, None)
-    ref = np.median(px, axis=0)
+    ref = np.percentile(px, percentile, axis=0)
     gains = hex_to_rgb(target_hex) / np.maximum(ref, 1.0)
+    if not exposure:
+        gains = gains / float(np.exp(np.mean(np.log(gains))))
     gains = np.clip(gains, *gain_clip)
     return WhiteBalance(tuple(float(g) for g in gains), int(px.shape[0]), True, rgb_to_hex(ref))
 
@@ -176,8 +190,8 @@ def apply_gains(rgb: np.ndarray, wb: WhiteBalance) -> np.ndarray:
 
 
 def line_pixel_candidates(frame_rgb: np.ndarray, pts_uv: np.ndarray,
-                          *, patch: int = 3, min_value: float = 150.0,
-                          max_chroma: float = 0.22) -> np.ndarray:
+                          *, patch: int = 3, min_value: float = 165.0,
+                          max_chroma: float = 0.12) -> np.ndarray:
     """Brightest low-chroma pixel in a small patch around each projected line point.
 
     Returns ``(M, 3)`` RGB. Points outside the frame or whose best pixel

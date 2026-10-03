@@ -29,11 +29,6 @@ ball:
     enabled: true
 
 render:
-  style:
-    # Anfield dressing: red seats, a home crowd mostly in red (source
-    # frames show a red-shirted Kop/Main Stand with white/dark mixed in).
-    stadium:
-      seat_color: "#8e1b22"
-      accent_color: "#e6e1d6"
-      crowd_colors: ["#c8102e", "#b3141f", "#8f1a20", "#c8102e", "#e9e5dc",
-                     "#2a2a2a", "#c8102e", "#d6cdbd"]
+  # Anfield dressing comes from the venue library (config/stadiums.yaml);
+  # it replaced the hand-set seat/crowd colours this file used to carry.
+  venue: anfield

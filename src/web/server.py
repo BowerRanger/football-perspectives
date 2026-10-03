@@ -2189,7 +2189,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         player_id: str | None = None
         bone: str | None = None
         # Required only when state == "goal_impact"; one of
-        # "post" | "crossbar" | "back_net" | "side_net".
+        # "post" | "crossbar" | "back_net" | "side_net" | "mouth".
         goal_element: str | None = None
         # Optional on state == "player_touch"; "shot" | "volley" | None.
         # Selecting shot/volley enables the spin sub-tag below.

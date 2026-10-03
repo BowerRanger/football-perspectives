@@ -1768,3 +1768,16 @@ render:
     by_player: {}             # e.g. {P003: away} — overrides the derived kit role
   aov_passes: false
   save_blend: false
+
+# Vertical Shorts (src/stages/shorts.py): moments -> templates -> framing-checked
+# passes (cached under shorts/passes/<fingerprint>/) -> composed mp4 + sidecar.
+shorts:
+  enabled: true
+  shot: auto                  # auto = every active shot with a goal event (strike + impact)
+  templates: [matchday, keeper, comic]   # config/shorts/templates/<name>.yaml
+  quality: clean              # render_pass_runner.QUALITY_PRESETS key (draft|clean)
+  audio:
+    enabled: true             # crowd bed + strike thump + goal roar (shorts_audio DEFAULTS tunable here)
+  # Per-template caption override: string = replace the title text, list = full caption list.
+  # Unset = the template's own captions ("WHAT GOAL IS THIS?" matchday/comic, "WOULD YOU SAVE THIS?" keeper).
+  captions: {}

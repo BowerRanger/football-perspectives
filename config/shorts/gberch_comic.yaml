@@ -14,7 +14,7 @@ segments:
     first_frame: 366
     stretch: 3
     from: 366
-    to: 400
+    to: 396
     flash: true
     label: "REPLAY"
   - src: output-shorts/render_experiments/s3_net_orbit/gberch/orbit_9x16.mp4

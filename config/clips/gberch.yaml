@@ -12,6 +12,12 @@
 #   away_gk (Jorgensen) sampled #565857 all over -> charcoal, long sleeves,
 #         light gloves, white boots (close-up crop)
 #   referee sampled shirt #8c8543 / shorts #20211f -> yellow over black
+ball:
+  # Anchor iteration on this clip re-runs the ball stage repeatedly; keep
+  # WASB detections cached (default is off) so a re-run is minutes, not ~50.
+  detection_cache:
+    enabled: true
+
 render:
   style:
     # Anfield dressing: red seats, a home crowd mostly in red (source

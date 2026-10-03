@@ -16,6 +16,20 @@ refined_poses → ball, re-run with current defaults in `output-shorts/`):
 
 Render passes: `config/shorts/gberch_experiments.yaml`; edits: `config/shorts/gberch_*.yaml`
 (EDLs for `scripts/compose_short.py`); kits: `config/clips/gberch.yaml`.
+Outputs (gitignored scratch): `output-shorts/shorts/gberch_short{1_matchday,2_keeper,3_comic}.mp4`.
+Presentation: https://claude.ai/artifact/MPX9F9gKE66naZicj25fhp
+
+Reproduce (from the main checkout, after copying `output/` inputs to `output-shorts/`):
+
+```bash
+.venv311/bin/python recon.py run --input output-shorts/shots/gberch.mp4 --output output-shorts \
+    --stages ball --from-stage ball --config config/clips/gberch.yaml
+.venv311/bin/python scripts/splice_shot_arc.py output-shorts        # G16 hand fit
+.venv311/bin/python scripts/render_experiments.py --output output-shorts --shot gberch \
+    --experiments config/shorts/gberch_experiments.yaml --config config/clips/gberch.yaml --quality clean
+for s in matchday keeper comic; do .venv311/bin/python scripts/compose_short.py \
+    --edl config/shorts/gberch_$s.yaml --out output-shorts/shorts/gberch_$s.mp4; done
+```
 
 ## Gap log — every step that was intuition or outside the pipeline
 
@@ -35,6 +49,10 @@ Render passes: `config/shorts/gberch_experiments.yaml`; edits: `config/shorts/gb
 | G12 | `pov` rig follows raw head facing — jittery, loses the ball | Picked the keeper from players.json role | **Fixed** (`eyes:<PID>` rig); auto-pick = D2 |
 | G13 | Worktree lacked `data/models/smpl_neutral.npz` → silent capsule-body fallback | Symlinked the asset | Design D4 |
 | G14 | Stadium is generic (grey/blue crowd) | Set Anfield seat/crowd colours | `crowd_colors` key **added**; venue library = D3 |
+| G16 | **Ball flight at the finish was wrong.** The refreshed `hybrid` track put the ball "grounded" at 2.3 m and then at 3.8 m on the goal line (over the bar); the old `reference` track went wide of the far post (y=41) because `airborne_low` pins depth at z=1 m. Root cause: from frame 387 to 393 the detector locked onto a false object moving the *opposite* way (keeper glove / ad board), and nothing checks that a scored ball crosses the line inside the goal mouth | Zoomed frames 384–395 to find the true ball and added operator anchors 388/390/391 (the pipeline's own correction path). That was still ambiguous in depth, so I fitted a two-knot arc (body-pinned strike knot at frame 371 → your frame-394 anchor ray at the goal line, gravity + drag + bounded 8 m/s² curl, 21 px median residual) and spliced it in up to the side-net impact (`scripts/fit_shot_arc.py`, `scripts/splice_shot_arc.py`) | Design D6 |
+| G17 | `--stages ball` reported `[SKIP] ball (cached)` after operator anchors changed; `ball.detection_cache` is off by default, so every anchor tweak costs a full ~50 min WASB pass | Forced with `--from-stage ball`; enabled the cache in the clip config | Design D4 |
+| G18 | Style presets aren't kit-safe: `posterize: 5` crushed Chelsea blue to black and blotched skin; `duotone`/`saturation: 0` erase team identity entirely | Caught on contact sheets; rebuilt the comic look as a 2-band cel ramp + heavy ink + saturation | Design D1 (kit-safety lint) |
+| G19 | Per-pass framing needed eyeballed iteration: 40 m top-down drone unreadable at 9:16, 70° keeper eye-line too wide, goal-line opener showed a defender, OTS at 1.6 m sat inside the striker, chase overran into the ad boards, eye-line clipped through the diving keeper's arm | 7 re-renders (~3–5 min each) and hand-picked cut points | Design D2 (framing check) |
 | G15 | No audio | Silent AAC track (platform-safe); music to be added in-app | Design D5 |
 
 ## Improvement designs
@@ -118,6 +136,28 @@ from low cameras).
   rendering capsule mannequins. Fix the ball detection-cache fingerprint
   so a path-only change (worktree / scratch copy) doesn't force a full
   re-detect.
+
+### D6 — Goal-aware, spin-aware flight solve for the decisive shot
+
+*Closes G16, the accuracy gap that matters most for "what goal is this?".*
+
+1. **Goal-mouth constraint**: when the event list contains a goal (a
+   `goal_impact` anchor, or match-data goal at this time), the flight
+   span ending in it must cross x=0 inside the mouth (|y−34| < 3.66,
+   z < 2.44). An operator anchor near the line becomes a **line-cross
+   knot** (ray ∩ goal-line plane), new goal_element `mouth`. That is the
+   knot that made the fit well-posed here.
+2. **Direction-consistency gate**: reject detections whose image-space
+   velocity reverses against the fitted flight for ≥2 frames (the
+   387–393 glove track) before they reach the hybrid blend.
+3. **Bounded Magnus by default on shots**: `ball.hybrid.spin.enabled`
+   is off; turn it on for spans that start at a `touch_type: shot`
+   (the operator even tagged this one `instep_curl_right`), with the
+   curl bound at about 10 m/s².
+4. **Quality report check** that fails loudly: "goal event but trajectory
+   misses the mouth / exceeds crossbar height at line-cross".
+5. Add gberch's finish as a held-out case in `tests/test_ball_regression.py`
+   (line-cross point within 0.3 m of the operator ray ∩ x=0).
 
 ### D5 — Sound
 

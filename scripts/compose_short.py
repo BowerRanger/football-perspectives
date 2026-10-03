@@ -67,16 +67,16 @@ class CaptionStyle:
 
 def _styles(fonts: dict, height: int) -> dict[str, CaptionStyle]:
     return {
-        "title": CaptionStyle(fonts["title"], 118, "#ffffff", "#000000", 9,
+        "title": CaptionStyle(fonts["title"], 98, "#ffffff", "#000000", 9,
                               None, SAFE_TOP_PX),
-        "kicker": CaptionStyle(fonts["body"], 64, "#111111", "#111111", 0,
+        "kicker": CaptionStyle(fonts["title"], 90, "#111111", "#111111", 0,
                                "#ffd400", SAFE_TOP_PX - 10),
         "sub": CaptionStyle(fonts["body"], 82, "#ffffff", "#000000", 6,
                             None, -(SAFE_BOTTOM_PX + 130)),
         "chip": CaptionStyle(fonts["body"], 54, "#ffffff", "#ffffff", 0,
-                             "#e10600", SAFE_TOP_PX + 290),
+                             "#e10600", SAFE_TOP_PX + 150),
         "chip_dark": CaptionStyle(fonts["body"], 54, "#ffffff", "#ffffff", 0,
-                                  "#111111", SAFE_TOP_PX + 290),
+                                  "#111111", SAFE_TOP_PX + 150),
     }
 
 

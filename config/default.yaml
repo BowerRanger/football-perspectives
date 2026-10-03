@@ -1725,8 +1725,12 @@ render:
       enabled: true
       roof: true
       crowd_density: 0.65   # 0 = empty seats, 1 = full; deterministic layout
-      seat_color: "#294b65"
-      accent_color: "#d6b66e"
+      # Venue dressing (seat_color, accent_color, stand_tone, board_*,
+      # crowd_colors, away_end) comes from config/stadiums.yaml via the clip's
+      # render.venue / AnchorSet.stadium / match venue
+      # (src/utils/stadium_dressing.py); `dressing_default` there holds the
+      # generic values. Set any of those keys here or in a clip config to
+      # override the venue.
   teams:
     defaults:
       home: {shirt: "#c0392b", shorts: "#ffffff", socks: "#c0392b"}

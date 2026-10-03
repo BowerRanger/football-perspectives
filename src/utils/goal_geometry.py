@@ -196,6 +196,17 @@ def _candidates_for_element(
             y_range=(g.post_y_left, g.post_y_right),
         )
         return [hit] if hit is not None else []
+    if element == "mouth":
+        # The goal-line plane itself, bounded by the posts and crossbar:
+        # a "line-cross" marker (the ball is IN the mouth, not touching
+        # anything). Not part of goal_element_candidates' auto-classify
+        # set -- only an explicit operator tag resolves here.
+        hit = _ray_plane_x(
+            C, d, goal_x,
+            y_range=(g.post_y_left, g.post_y_right),
+            z_range=(0.0, g.crossbar_z),
+        )
+        return [hit] if hit is not None else []
     if element == "back_net":
         plane_x = goal_x + sign * g.net_depth
         hit = _ray_plane_x(

@@ -192,6 +192,16 @@ def _px_residuals(
     return out
 
 
+def _rss(resid: np.ndarray, robust_scale_px: float | None) -> float:
+    """Residual sum of squares; soft-L1 robustified (same rho as scipy's
+    ``loss="soft_l1"``, scaled back to pixel^2) when a scale is given."""
+    if robust_scale_px is None:
+        return float(np.sum(resid ** 2))
+    f = float(robust_scale_px)
+    z = (resid / f) ** 2
+    return float(np.sum(f * f * 2.0 * (np.sqrt(1.0 + z) - 1.0)))
+
+
 def fit_span_spin(
     p_a: Vec3,
     t_a: float,
@@ -208,6 +218,7 @@ def fit_span_spin(
     min_obs: int = 8,
     min_delta_bic: float = 6.0,
     min_resid_gain: float = 0.10,
+    robust_scale_px: float | None = None,
 ) -> SpinFit | None:
     """Fit a bounded 2-dof rigid-body spin for the flight span ``p_a`` (at
     ``t_a``) -> ``p_b`` (at ``t_b``), or return ``None`` when spin doesn't
@@ -229,6 +240,13 @@ def fit_span_spin(
     over the no-spin baseline is below ``min_delta_bic``; its fractional
     reprojection-RSS improvement is below ``min_resid_gain``; or the
     fitted magnitude rounds to zero.
+
+    ``robust_scale_px`` (default ``None`` = plain least squares, the
+    validated behaviour) switches the whole fit -- coarse seed, refinement
+    AND the BIC / residual-gain accept test -- to a soft-L1 loss with that
+    pixel scale. Used for SHOT spans (design D6.3), where the plain
+    drag-only arc can't explain a curling shot, so its robust inlier gate
+    collapses and false detections would otherwise dominate the RSS.
     """
     p_a = np.asarray(p_a, dtype=float)
     p_b = np.asarray(p_b, dtype=float)
@@ -261,7 +279,7 @@ def fit_span_spin(
     v0_base = shoot_arc(p_a, 0.0, p_b, duration_s, cd=cd)
     pos_base = simulate(p_a, v0_base, t_rel, cd=cd)
     resid_base = _px_residuals(pos_base, obs_times, obs_uv, weights, project_fn)
-    rss_base = float(np.sum(resid_base ** 2))
+    rss_base = _rss(resid_base, robust_scale_px)
 
     axis_top, axis_side = _spin_axes(v0_base)
     lo, hi = bounds
@@ -288,15 +306,18 @@ def fit_span_spin(
             pos = simulate(p_a, v0_base, t_rel, cd=cd, omega=omega,
                             magnus_coeff=magnus_coeff)
             r = _px_residuals(pos, obs_times, obs_uv, weights, project_fn)
-            cost = float(np.sum(r ** 2))
+            cost = _rss(r, robust_scale_px)
             if cost < best_cost:
                 best_cost = cost
                 best_x0 = trial
 
+    ls_kwargs: dict = {}
+    if robust_scale_px is not None:
+        ls_kwargs = {"loss": "soft_l1", "f_scale": float(robust_scale_px)}
     sol = least_squares(_residual, best_x0, method="trf",
                          bounds=([lo, lo], [hi, hi]), max_nfev=_OUTER_MAX_NFEV,
-                         xtol=1e-8, ftol=1e-8)
-    rss_spin = float(np.sum(sol.fun ** 2))
+                         xtol=1e-8, ftol=1e-8, **ls_kwargs)
+    rss_spin = _rss(sol.fun, robust_scale_px)
 
     if rss_base <= 0.0 or rss_spin <= 0.0:
         return None

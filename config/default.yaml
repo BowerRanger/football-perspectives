@@ -652,11 +652,15 @@ ball:
   # re-running WASB inference. Cache key = frame content hash + a
   # detector fingerprint (checkpoint path/sha256/size, confidence,
   # input_size) so swapping the checkpoint or editing ball.wasb.* auto-
-  # invalidates stale entries. Default off: first-run behaviour is
-  # identical whether this is enabled or not. Cache files are gitignored
-  # — never committed, never treated as model weights.
+  # invalidates stale entries (the checkpoint PATH is not part of the
+  # fingerprint, so a worktree symlink or copied checkout still hits).
+  # ON by default (D4/G17: every anchor tweak used to cost a ~50 min WASB
+  # pass); only real WASB/YOLO detectors are cached -- injected fake/no-op
+  # detectors never read or write it. First-run output is identical with
+  # it on or off. Cache files are gitignored — never committed, never
+  # treated as model weights.
   detection_cache:
-    enabled: false
+    enabled: true
     # Relative paths resolve against the run's --output dir; an absolute
     # path is used as-is.
     path: ball/detection_cache.json
@@ -1249,6 +1253,34 @@ ball:
       min_obs: 8
       min_delta_bic: 6.0
       min_resid_gain: 0.10
+      # D6.3: bounded Magnus on SHOT spans only -- a flight span starting at
+      # a player_touch/kick tagged touch_type shot|volley (or carrying a
+      # spin preset) gets the spin refinement even with `enabled: false`
+      # above, fitted against all span evidence under a soft-L1 loss (the
+      # drag-only arc can't explain a curling shot, so the inlier gate
+      # collapses) and capped so the peak Magnus acceleration stays
+      # <= shot_max_accel_m_s2 at the span's launch speed.
+      shot_spans: true
+      shot_max_accel_m_s2: 10.0
+    # D6.1 goal-mouth constraint: with an operator goal_impact, the latest
+    # operator airborne anchor in the preceding `window_frames` whose ray hits
+    # the goal-line plane inside the mouth (+margins) becomes an in-memory
+    # line-cross knot (anchor file untouched); goal_check lands in the diag
+    # sidecar + quality report (src/utils/ball_goal_constraint.py).
+    goal:
+      enabled: true
+      window_frames: 24
+      mouth_margin_m: 0.6
+      bar_margin_m: 0.4
+    # D6.2 direction-consistency gate: drop runs (>= min_run frames) of
+    # detections that move AGAINST the fitted flight and sit > residual_px
+    # from it, then re-fit once (src/utils/ball_direction_gate.py).
+    direction_gate:
+      enabled: true
+      min_run: 2
+      min_px: 3.0
+      max_gap_frames: 3
+      residual_px: 15.0
     # Single-camera event-cue corroboration (src/utils/ball_cue_audio.py,
     # ball_cue_net.py, ball_cue_blur.py, ball_cue_fusion.py — IC-D).
     # Fused cue events (CueEvidence) ONLY relax the auto-event gate's

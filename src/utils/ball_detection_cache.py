@@ -66,9 +66,10 @@ def build_detector_fingerprint(cfg: dict, detector: BallDetector) -> dict[str, A
     from a ``ball.*`` config dict.
 
     Includes whatever is behaviour-relevant for the configured backend:
-    detector class name, checkpoint path + sha256 + file size for WASB
-    (so a checkpoint swap invalidates), confidence threshold and
-    letterbox input size. Two constructions that would produce different
+    detector class name, checkpoint sha256 + file size for WASB (so a
+    checkpoint swap invalidates -- but NOT the checkpoint *path*: the same
+    weights reached through a worktree symlink or a copied checkout must
+    still hit the cache), confidence threshold and letterbox input size. Two constructions that would produce different
     detections for the same frame should get different fingerprints.
     """
     backend = str(cfg.get("detector", "yolo")).strip().lower()
@@ -78,7 +79,6 @@ def build_detector_fingerprint(cfg: dict, detector: BallDetector) -> dict[str, A
         checkpoint = wasb_cfg.get("checkpoint")
         if checkpoint:
             ckpt_path = Path(checkpoint).expanduser().resolve()
-            fp["checkpoint_path"] = str(ckpt_path)
             if ckpt_path.exists():
                 st = ckpt_path.stat()
                 fp["checkpoint_size"] = st.st_size
@@ -91,6 +91,17 @@ def build_detector_fingerprint(cfg: dict, detector: BallDetector) -> dict[str, A
         fp["yolo_model"] = cfg.get("yolo_model", "yolov8n.pt")
         fp["confidence"] = float(cfg.get("confidence_threshold", 0.3))
     return fp
+
+
+def _comparable(fp: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Fingerprint minus the checkpoint *path* (older caches stored it;
+    identity is the content hash + size), so pre-existing caches still hit."""
+    if not isinstance(fp, dict):
+        return fp
+    return {k: v for k, v in fp.items() if k != "checkpoint_path"}
+
+
+_REAL_DETECTOR_CLASSES = frozenset({"WASBBallDetector", "YOLOBallDetector"})
 
 
 class CachingBallDetector(BallDetector):
@@ -135,7 +146,8 @@ class CachingBallDetector(BallDetector):
                 self._path, exc,
             )
             return
-        if self._fingerprint is not None and data.get("fingerprint") != self._fingerprint:
+        if (self._fingerprint is not None
+                and _comparable(data.get("fingerprint")) != _comparable(self._fingerprint)):
             logger.info(
                 "ball detection cache: fingerprint mismatch at %s — "
                 "stale entries discarded, detector will run fresh",
@@ -198,14 +210,24 @@ def wrap_if_enabled(
     ``ball.detection_cache.enabled`` is true; otherwise return it
     unchanged.
 
-    Default is opt-out (``enabled: false``) so first-run/default
-    behaviour is identical to before this cache existed. ``path``
-    defaults to :data:`DEFAULT_CACHE_RELPATH` under ``output_dir``;
-    a relative path in config is always resolved against the output
-    dir, never the cwd.
+    ``config/default.yaml`` ships ``enabled: true`` (a WASB pass is ~50
+    min and frames decode deterministically, so an anchor tweak should
+    never cost a re-detect); a config with no ``detection_cache`` block
+    at all still defaults to off. Only REAL detectors (WASB / YOLO) are
+    cached unless ``force: true``: injected fake / no-op detectors
+    (tests, the no-op anchor-accuracy harness) must neither read nor
+    write a cache, or a stale file would replay detections the fake
+    never produced.
+
+    ``path`` defaults to :data:`DEFAULT_CACHE_RELPATH` under
+    ``output_dir``; a relative path in config is always resolved against
+    the output dir, never the cwd.
     """
     cache_cfg = cfg.get("detection_cache", {}) or {}
     if not bool(cache_cfg.get("enabled", False)):
+        return detector
+    if (type(detector).__name__ not in _REAL_DETECTOR_CLASSES
+            and not bool(cache_cfg.get("force", False))):
         return detector
     raw_path = cache_cfg.get("path") or DEFAULT_CACHE_RELPATH
     path = Path(raw_path)

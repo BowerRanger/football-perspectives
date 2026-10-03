@@ -1,0 +1,69 @@
+# Short 1 - "What goal is this?" (matchday toon). Replaces the hand-made
+# config/shorts/gberch_matchday.yaml + the s1_* passes of gberch_experiments.yaml.
+# Every frame is a moment expression (src/utils/shorts_moments.py); candidates
+# are tried in order and the first that passes the framing check is rendered.
+name: matchday
+size: [1080, 1920]
+fps: 30
+style_name: matchday
+style:
+  post: {saturation: 1.12}
+
+slots:
+  - id: buildup
+    candidates:
+      - camera: drone
+        rig: {drone_height_m: 16.0, drone_back_m: 20.0, drone_fov_deg: 48.0, drone_smooth_frames: 31}
+        from: buildup_start
+        to: strike-28
+        pad: [32, 29]
+        subject: "@scorer"
+        framing: {min_subject_px: 100}
+      - camera: dolly
+        from: buildup_start
+        to: strike-28
+        pad: [6, 6]
+  - id: chase
+    candidates:
+      - camera: chase
+        from: strike-28
+        to: line_cross+2
+        pad: [13, 9]
+      - camera: orbit
+        rig: {focus: ball, orbit_radius_m: 8.0, orbit_height_m: 2.5}
+        from: strike-28
+        to: line_cross+2
+        pad: [6, 6]
+  - id: orbit_replay
+    candidates:
+      - camera: orbit
+        rig: {focus: "@scorer", orbit_radius_m: 6.5, orbit_height_m: 1.9, orbit_fov_deg: 48.0,
+              orbit_sweep_deg: 150.0, orbit_start_frame: "strike-11", orbit_end_frame: "strike+9"}
+        from: strike-9
+        to: strike+9
+        pad: [2, 0]
+        time_stretch: 4
+        flash: true
+        label: REPLAY
+        subject: "@scorer"
+  - id: goal_replay
+    candidates:
+      - camera: "goal:@goal_end"
+        rig: {goal_height_m: 2.0, goal_back_m: 7.0, goal_fov_deg: 38.0, focus: ball}
+        from: strike+3
+        to: impact+6
+        pad: [18, 2]
+        time_stretch: 3
+        hold_s: 1.6
+        label: REPLAY
+      - camera: "goalline:@goal_end"
+        from: strike+3
+        to: impact+6
+        pad: [6, 2]
+        time_stretch: 3
+        hold_s: 1.6
+        label: REPLAY
+
+captions:
+  - {text: "WHAT GOAL IS THIS?", style: title, start: 0}
+  - {text: "Drop your guess in the comments", style: sub, start: -2.2}

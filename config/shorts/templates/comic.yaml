@@ -1,0 +1,63 @@
+# Short 3 - "What goal is this?" (posterised comic). Replaces
+# config/shorts/gberch_comic.yaml + the s3_* passes of gberch_experiments.yaml.
+name: comic
+size: [1080, 1920]
+fps: 30
+style_name: comic
+# No posterize: it quantised Chelsea blue to black and blotched skin (kits
+# must stay true). Comic = 2-band cel ramp + heavy ink + pop.
+style:
+  outline_width_m: 0.045
+  ramp_steps: 2
+  palette: {outline: "#0b0b0b", sky_top: "#ffd34d", sky_bottom: "#ffefb0"}
+  post: {saturation: 1.3}
+
+slots:
+  - id: buildup
+    candidates:
+      - camera: drone
+        rig: {drone_height_m: 16.0, drone_back_m: 20.0, drone_fov_deg: 48.0, drone_smooth_frames: 31}
+        from: strike-135
+        to: strike-36
+        pad: [6, 10]
+        subject: "@scorer"
+        framing: {min_subject_px: 100}
+      - camera: dolly
+        from: strike-135
+        to: strike-36
+  - id: scorer_ots
+    candidates:
+      - camera: "ots:@scorer"
+        rig: {ots_back_m: 5.5, ots_up_m: 2.0, ots_right_m: 1.0, ots_fov_deg: 46.0}
+        from: strike-36
+        to: strike+4
+        pad: [0, 3]
+        subject: "@scorer"
+      - camera: chase
+        from: strike-36
+        to: strike+4
+  - id: chase_replay
+    candidates:
+      - camera: chase
+        rig: {chase_back_m: 5.0, chase_height_m: 1.4}
+        from: strike-5
+        to: line_cross+2
+        pad: [0, 8]
+        time_stretch: 3
+        flash: true
+        label: REPLAY
+  - id: net_orbit
+    candidates:
+      - camera: orbit
+        rig: {focus: ball, orbit_radius_m: 6.0, orbit_height_m: 1.6, orbit_fov_deg: 50.0,
+              orbit_sweep_deg: 120.0, orbit_start_frame: "line_cross-10", orbit_end_frame: "impact+8"}
+        from: line_cross-6
+        to: impact+8
+        pad: [4, 0]
+        time_stretch: 3
+        hold_s: 1.5
+        label: REPLAY
+
+captions:
+  - {text: "WHAT GOAL IS THIS?", style: kicker, start: 0}
+  - {text: "Name the scorer", style: sub, start: -2.0}

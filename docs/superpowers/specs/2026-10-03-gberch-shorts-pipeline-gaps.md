@@ -177,3 +177,42 @@ choice.
 - Real bullet-time: let a camera track carry a `scene_frame` per frame,
   so time can freeze while the camera moves (the orbit currently fakes
   it with a 4× slow-mo sweep).
+
+---
+
+# Round 2 (2026-10-03/04): designs implemented, repeated on kroupi, origi, saka
+
+## Status of the designs
+
+| Design | Shipped as |
+|---|---|
+| D6 | `src/utils/ball_goal_constraint.py` (line-cross knot inference from operator airborne anchors near a goal_impact, `mouth` goal element, goal_check in diag + quality report, net containment, snap-into-mouth within margin), `ball_direction_gate.py`, shot-span bounded Magnus (only when the span has a goal event) |
+| D4 | `src/pipeline/fingerprint.py` + runner: `[STALE]` re-runs on config/input/operator-file changes, `--stale`, `--shots`, `recon.py status`; ball detection cache on by default; render SMPL preflight (`render.allow_capsule_fallback`) |
+| D1 | `appearance` stage (`src/stages/appearance.py`, `team_clustering`, `kit_palette` with pitch-line white balance, `kit_library` + `config/kits/*.yaml` with stripes/hoops/sleeve colours, `kit_resolution` precedence, `players_suggested.json`); D1.3 skin/hair still manual |
+| D2 | `shorts` stage (`src/stages/shorts.py`, `shorts_moments`, `shorts_templates` + `config/shorts/templates/{matchday,keeper,comic}.yaml` in moment expressions, `shorts_framing`, `short_compositor`, pass cache, sidecar with operator block) |
+| D3 | `config/stadiums.yaml` dressing library (anfield, vitality_stadium, emirates_stadium) via `stadium_dressing.resolve_dressing`; stand-tone floor fixes the black band; away end in the away kit |
+| D5 | `src/utils/shorts_audio.py`: commentary-suppressed crowd bed (~15 dB), synthesised strike thump + net hit, real roar swell, loudnorm |
+
+Plus: `render_pass_runner.resolve_style_payload` (kits + dressing + kit-safety lint),
+`eyes:<PID>` hides the POV body, `--vertical-only`, `--python-exit-code 1` + output checks.
+
+## Round-2 gap log (found running the new clips)
+
+| # | Found | Fix |
+|---|---|---|
+| C1 | Skin/hair for 55 players set by hand (D1.3 deferred) | open — close-up face sampling + operator confirm |
+| C3 | Duplicate saka ball runs raced on one output dir | open — per-output-dir run lock in recon.py |
+| C4/C13 | kroupi line-cross at goal centre (no anchor near the line); with operator anchors 133/135/136 the ray landed 0.5 m outside the post | operator anchors (scratch) + `snap_into_mouth` |
+| C5 | Wall-clock: cache fill 27 min / 4 h / 6.6 h (kroupi/origi/saka) under contention with the 5.5 h gate | open — job queue |
+| C6 | kroupi: comic build-up cut at frame −21 | cuts clamp to the clip; out-of-clip candidates fall through (0df871e) |
+| C6/C11 | Single-candidate slots dropped whole Shorts (kroupi net orbit through the keeper; origi scorer orbit lost the ball) | every slot has a fallback + test (54ad4dc) |
+| C8/C15 | Ball re-runs still slow with the cache on | cause: zoom-crop/strike-window detections key on crop pixels whose origins follow the solver; open — quantise crop origins (needs gate) |
+| C9 | origi: ter Stegen picked as scorer (auto touch at 447) | operator touches first; defending keeper/team excluded (9410821) |
+| C10 | Second synced angles (origi02, s011) unused | open — cross-shot cutting |
+| C12 | Toon shader darkened every kit (red → maroon, yellow → khaki) | lighting-only bands × colour (caee296) |
+| C14 | Ball gate: gberch synth.p95, origi01 synth float_sink fail (goal knot trusts perturbed anchors in the synth mismatch scenario); s013 real p50 from shot curl on non-goal shots | s013 fixed (1ff9847); gberch/origi01 re-baseline = user decision |
+| C16 | Concurrent region edits spliced `appearance:` inside export.virtual_cameras (14 keys swallowed) | moved (7fb8499) + structure test |
+| C17 | Dashboard doesn't list appearance/shorts; `frontend/src/lib` (api.ts) was never committed (root `.gitignore` `lib/`) | open — restore lib, then panels with impeccable review |
+
+Outputs (scratch, gitignored): `output-{shorts,kroupi-shorts,origi-shorts,saka-shorts}/shorts/<shot>_{matchday,keeper,comic}.mp4`.
+Reproduce per clip: `recon.py run --output <dir> --stages ball,appearance,shorts --shots <shot> --config config/clips/<clip>.yaml`.

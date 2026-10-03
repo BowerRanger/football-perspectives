@@ -231,12 +231,63 @@ def merge_style_payload(
     return payload
 
 
+def _kit_safety_path(output_dir: Path, shot: str, safety_dir: Path | None) -> Path:
+    name = f"{shot or 'clip'}_kit_safety.json"
+    return (Path(safety_dir) if safety_dir is not None else Path(output_dir) / "render") / name
+
+
+def resolve_style_payload(
+    output_dir: Path, shot: str, cfg: dict, preset: dict | None = None,
+    *, safety_dir: Path | None = None, write_sidecar: bool = True,
+) -> dict:
+    """Single assembly point for the ``--style-json`` payload.
+
+    base ``render.style`` + ``teams`` (``render.teams`` with ``defaults``
+    replaced by ``effective_team_kits`` — precedence operator > clip config >
+    auto > render.teams.defaults) + venue dressing under ``stadium`` (its
+    ``venue``/``dressing_source`` bookkeeping keys are dropped before Blender
+    and recorded in the sidecar) + ``preset`` deep-merged on top.  Runs
+    ``lint_kit_safety`` on the final kits/post and writes
+    ``<output>/render/<shot>_kit_safety.json`` (or into ``safety_dir``).
+    """
+    from src.utils.kit_resolution import effective_team_kits
+    from src.utils.kit_safety import lint_kit_safety
+    from src.utils.stadium_dressing import resolve_dressing
+
+    output_dir = Path(output_dir)
+    render_cfg = cfg.get("render", {}) or {}
+    payload = copy.deepcopy(render_cfg.get("style", {}) or {})
+    teams = copy.deepcopy(render_cfg.get("teams", {}) or {})
+    kits = effective_team_kits(output_dir, cfg)
+    if kits:
+        teams["defaults"] = copy.deepcopy(kits)
+    payload["teams"] = teams
+    dressing = resolve_dressing(cfg, output_dir, shot)
+    venue = dressing.pop("venue", None)
+    dressing_source = dressing.pop("dressing_source", None)
+    payload["stadium"] = dressing
+    if preset:
+        _deep_merge(payload, preset)
+    final_kits = (payload.get("teams") or {}).get("defaults") or {}
+    warnings = lint_kit_safety(final_kits, payload.get("post"))
+    for w in warnings:
+        logger.warning("[kit_safety] %s", w.get("message", w))
+    if write_sidecar:
+        path = _kit_safety_path(output_dir, shot, safety_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "shot": shot, "venue": venue, "dressing_source": dressing_source,
+            "kit_roles": sorted(final_kits), "warnings": warnings,
+        }, indent=2))
+    return payload
+
+
 # --- Blender command assembly --------------------------------------------
 
 def build_blender_command(
     *, blender_bin: str, output_dir: Path, shot: str, exp: dict,
     quality: dict, style_payload: dict, vertical_only: bool = False,
-    render_root: str | None = None,
+    render_root: str | None = None, allow_capsule_fallback: bool = False,
 ) -> list[str]:
     """Assemble the exact argv for one experiment's Blender invocation.
     Pure — no filesystem/subprocess access — so it's the same command
@@ -247,7 +298,8 @@ def build_blender_command(
     scripts/blender_render_scene.py) so nothing here ever lands under the
     protected ``<output>/render/`` baseline."""
     cmd = [
-        blender_bin, "--background", "--python", str(_BLENDER_SCRIPT), "--",
+        blender_bin, "--background", "--python-exit-code", "1",
+        "--python", str(_BLENDER_SCRIPT), "--",
         "--output-dir", str(output_dir),
         "--shot", shot,
         "--cameras", exp["camera"],
@@ -268,6 +320,8 @@ def build_blender_command(
         # Blender-side flag (scripts/blender_render_scene.py): render only
         # the 9:16 pass, skipping the 16:9 one.
         cmd.append("--vertical-only")
+    if allow_capsule_fallback:
+        cmd.append("--allow-capsule-fallback")
     return cmd
 
 
@@ -379,13 +433,15 @@ def execute_pass(
     ``blender_exit_code`` / ``mp4_paths``."""
     render_cfg = cfg.get("render", {}) or {}
     if style_payload is None:
-        style_payload = merge_style_payload(
-            render_cfg.get("style", {}) or {},
-            render_cfg.get("teams", {}) or {},
-            pass_spec.get("style"))
+        style_payload = None  # resolved below once the out dir is known
     render_root = _render_root_for_out_dir(output_dir, shot, pass_spec["id"], out_dir)
     shot_dir = shot or "clip"
     final_out_dir = output_dir / render_root / shot_dir
+    if style_payload is None:
+        style_payload = resolve_style_payload(
+            output_dir, shot, cfg, pass_spec.get("style"),
+            safety_dir=(final_out_dir if render_root.startswith("render_experiments")
+                        else None))
     cam_id = pass_spec["camera"]
     if cam_id != "broadcast":
         write_camera_track(
@@ -400,7 +456,8 @@ def execute_pass(
         blender_bin=blender_bin or resolve_blender_binary(cfg) or "blender",
         output_dir=output_dir, shot=shot, exp=pass_spec, quality=quality,
         style_payload=style_payload, vertical_only=vertical_only,
-        render_root=render_root)
+        render_root=render_root,
+        allow_capsule_fallback=bool(render_cfg.get("allow_capsule_fallback")))
     logger.info("render_pass: %s -> %s", pass_spec["id"], cmd)
     t0 = time.time()
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -409,11 +466,16 @@ def execute_pass(
         logger.error("render_pass: Blender failed for %s:\n%s",
                      pass_spec["id"], proc.stderr[-4000:])
     result = PassResult(proc.returncode, duration_s, cmd, final_out_dir)
-    result.mp4_paths = [
-        p for p in _candidates(final_out_dir, cam_id,
-                               vertical=bool(pass_spec.get("vertical")),
-                               vertical_only=vertical_only)
-        if p.exists()]
+    expected = _candidates(final_out_dir, cam_id,
+                           vertical=bool(pass_spec.get("vertical")),
+                           vertical_only=vertical_only)
+    result.mp4_paths = [p for p in expected if p.exists() and p.stat().st_size > 0]
+    if proc.returncode == 0 and len(result.mp4_paths) != len(expected):
+        # Blender can exit 0 with nothing written; never report that as success.
+        missing = [str(p) for p in expected if p not in result.mp4_paths]
+        logger.error("render_pass: Blender exited 0 but %s missing/empty: %s",
+                     pass_spec["id"], missing)
+        result.blender_exit_code = 1
     speed = pass_spec.get("speed")
     if apply_speed and speed is not None:
         try:

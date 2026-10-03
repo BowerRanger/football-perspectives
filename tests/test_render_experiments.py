@@ -448,7 +448,7 @@ def test_rig_config_override_applies_on_top_of_config_value():
 @pytest.mark.unit
 def test_resolve_style_payload_no_override_returns_base_plus_teams():
     base_style = {"ramp_steps": 3, "palette": {"grass_light": "#4d9e46"}}
-    payload = rex.resolve_style_payload(base_style, {"defaults": {}}, None)
+    payload = rex.merge_style_payload(base_style, {"defaults": {}}, None)
     assert payload["ramp_steps"] == 3
     assert payload["palette"] == {"grass_light": "#4d9e46"}
     assert payload["teams"] == {"defaults": {}}
@@ -460,7 +460,7 @@ def test_resolve_style_payload_no_override_returns_base_plus_teams():
 def test_resolve_style_payload_deep_merges_partial_palette_override():
     base_style = {"ramp_steps": 3,
                   "palette": {"grass_light": "#4d9e46", "outline": "#1a1a1a"}}
-    payload = rex.resolve_style_payload(
+    payload = rex.merge_style_payload(
         base_style, {}, {"palette": {"grass_light": "#ff0000"}})
     assert payload["palette"]["grass_light"] == "#ff0000"
     assert payload["palette"]["outline"] == "#1a1a1a"  # survives the partial merge

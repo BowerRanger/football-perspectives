@@ -59,7 +59,7 @@ from src.utils.render_pass_runner import (  # noqa: E402,F401
     _BLENDER_SCRIPT, _DEFAULT_FPS, _load_ball_track, _load_broadcast_camera,
     _rig_config, apply_slowmo, build_blender_command, build_camera_track,
     camera_track_dir, camera_track_path, execute_pass,
-    merge_style_payload as resolve_style_payload, mid_duration_thumbnail,
+    merge_style_payload, resolve_style_payload, mid_duration_thumbnail,
     parse_camera_id, probe_duration_s, render_root_for, resolve_blender_binary,
     slowmo_ffmpeg_cmd, write_camera_track,
 )
@@ -246,20 +246,19 @@ def run_experiment(
     """Run (or, if ``dry_run``, just print) one experiment. Returns a
     manifest entry dict, or ``None`` for a dry run (nothing to record)."""
     quality = _QUALITY_PRESETS[quality_name]
-    base_render_cfg = cfg.get("render", {}) or {}
-    style_payload = resolve_style_payload(
-        base_render_cfg.get("style", {}) or {},
-        base_render_cfg.get("teams", {}) or {},
-        exp["style"],
-    )
-    cmd = build_blender_command(
-        blender_bin=blender_bin, output_dir=output_dir, shot=shot, exp=exp,
-        quality=quality, style_payload=style_payload,
-    )
-
     cam_id = exp["camera"]
     shot_dir = shot or "clip"
     render_root = render_root_for(exp["id"])
+    style_payload = resolve_style_payload(
+        output_dir, shot, cfg, exp["style"],
+        safety_dir=output_dir / render_root / shot_dir,
+        write_sidecar=not dry_run)
+    cmd = build_blender_command(
+        blender_bin=blender_bin, output_dir=output_dir, shot=shot, exp=exp,
+        quality=quality, style_payload=style_payload,
+        allow_capsule_fallback=bool(
+            (cfg.get("render", {}) or {}).get("allow_capsule_fallback")),
+    )
     needs_track = cam_id != "broadcast"
     track_path = (
         camera_track_path(output_dir, exp["id"], shot, cam_id)
@@ -278,6 +277,10 @@ def run_experiment(
         exp, output_dir=output_dir, shot=shot, quality=quality, cfg=cfg,
         out_dir=output_dir / render_root / shot_dir, blender_bin=blender_bin,
         style_payload=style_payload, apply_speed=True)
+    if res.blender_exit_code != 0 or not res.mp4_paths:
+        raise RuntimeError(
+            f"Blender produced no output for experiment {exp['id']!r} "
+            f"(exit {res.blender_exit_code}, expected mp4 under {res.out_dir})")
 
     output_paths: list[str] = []
     for mp4_path in res.mp4_paths:

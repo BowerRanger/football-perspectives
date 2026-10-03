@@ -585,20 +585,31 @@ def main(argv: list[str]) -> int:
             _toon_material_count += 1
             return mat
 
+        # The ramp is driven by LIGHTING ONLY (a white diffuse), then
+        # multiplied by the colour. Feeding the coloured diffuse into the
+        # ramp (the v1 wiring) made the band depend on the colour's own
+        # luminance: saturated reds (low luminance) never left the 35% band
+        # and rendered maroon, yellow dropped a band and went olive — kits
+        # never showed their true colour (origi01: Barcelona yellow → khaki).
+        # Same maths as _toon_pattern_material.
         diffuse = nt.nodes.new("ShaderNodeBsdfDiffuse")
-        diffuse.inputs["Color"].default_value = rgba
+        diffuse.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
         to_rgb = nt.nodes.new("ShaderNodeShaderToRGB")
         ramp = nt.nodes.new("ShaderNodeValToRGB")
         ramp.color_ramp.interpolation = "CONSTANT"
         # evenly spaced constant stops from 35% to 100% brightness
         ramp.color_ramp.elements[0].position = 0.0
-        ramp.color_ramp.elements[0].color = tuple(c * 0.35 for c in rgba[:3]) + (1.0,)
+        ramp.color_ramp.elements[0].color = (0.35, 0.35, 0.35, 1.0)
         ramp.color_ramp.elements[1].position = 0.55
-        ramp.color_ramp.elements[1].color = rgba
+        ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
         for k in range(1, ramp_steps - 1):
             el = ramp.color_ramp.elements.new(0.15 + 0.4 * k / max(1, ramp_steps - 1))
             f = 0.35 + 0.65 * k / max(1, ramp_steps - 1)
-            el.color = tuple(c * f for c in rgba[:3]) + (1.0,)
+            el.color = (f, f, f, 1.0)
+        shade = nt.nodes.new("ShaderNodeMixRGB")
+        shade.blend_type = "MULTIPLY"
+        shade.inputs["Fac"].default_value = 1.0
+        shade.inputs["Color1"].default_value = rgba
         emit = nt.nodes.new("ShaderNodeEmission")
         nt.links.new(diffuse.outputs["BSDF"], to_rgb.inputs["Shader"])
         # Blender 5.1.1 adaptation: ValToRGB's factor input socket is
@@ -607,7 +618,8 @@ def main(argv: list[str]) -> int:
         # elsewhere in this file is a different node type and unaffected;
         # verified both against the running Blender before wiring this.)
         nt.links.new(to_rgb.outputs["Color"], ramp.inputs["Factor"])
-        nt.links.new(ramp.outputs["Color"], emit.inputs["Color"])
+        nt.links.new(ramp.outputs["Color"], shade.inputs["Color2"])
+        nt.links.new(shade.outputs["Color"], emit.inputs["Color"])
         nt.links.new(emit.outputs["Emission"], out.inputs["Surface"])
         _toon_material_count += 1
         return mat

@@ -220,14 +220,14 @@ __marimo__/
 /data/models/
 .venv311/
 .venv_physpt/
-third_party/PhysPT/
+third_party/PhysPT
 .DS_Store
 *.pt
 test-media/
 
 # Vendored WASB-SBDT source is tracked; its model checkpoint is not (5.8 MB
 # binary, downloaded once). Path referenced by config/default.yaml ball.detector.
-third_party/wasb_sbdt/pretrained_weights/
+third_party/wasb_sbdt/pretrained_weights
 
 # Ball stage's opt-in persistent detection cache (ball.detection_cache.*,
 # src/utils/ball_detection_cache.py). Per-run iteration artifact, not

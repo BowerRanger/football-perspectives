@@ -1,0 +1,5 @@
+# Minimal override: keep WASB ball detections cached so repeated ball-stage
+# runs (anchor iteration, solver changes) skip the ~50 min detector pass.
+ball:
+  detection_cache:
+    enabled: true

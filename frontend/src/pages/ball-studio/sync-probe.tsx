@@ -2,12 +2,10 @@ import * as React from "react"
 import { Link } from "react-router"
 import { ExternalLinkIcon } from "lucide-react"
 
-import { ToneBadge } from "@/components/status"
 import { Popover, PopoverContent, PopoverDescription, PopoverHeader, PopoverTitle, PopoverTrigger } from "@/components/ui/popover"
 import { Spinner } from "@/components/ui/spinner"
 import { errorMessage } from "@/lib/api"
 import { postTriangulate } from "./api"
-import { residualSeverity } from "./palette"
 import type { TriangulateResult, TruthKey } from "./types"
 
 const DELTAS = [-2, -1, 0, 1, 2] as const
@@ -91,8 +89,7 @@ export function SyncProbe({ groupId, tkey, storedOffset, referenceShot, children
         <PopoverHeader>
           <PopoverTitle>Same click, other camera frame</PopoverTitle>
           <PopoverDescription>
-            The pixel stays where you clicked in {moving ?? "view B"}; only its camera frame moves. This mostly shows camera drift, so it is a hint, not a sync verdict. To
-            test a sync, re-click the ball in B at the candidate frame.
+            The pixel stays where you clicked in {moving ?? "view B"}; only its camera frame moves.
           </PopoverDescription>
         </PopoverHeader>
         {error ? <p className="text-xs text-destructive">{error}</p> : null}
@@ -117,13 +114,11 @@ export function SyncProbe({ groupId, tkey, storedOffset, referenceShot, children
                     {r.offset} <span className="text-muted-foreground">({r.delta > 0 ? `+${r.delta}` : r.delta === 0 ? "stored" : r.delta})</span>
                     {r === best ? <span className="ml-1 text-muted-foreground" title="Lowest residual of the five">·</span> : null}
                   </td>
-                  <td>
+                  <td className="font-mono">
                     {r.max === null ? (
                       "n/a"
                     ) : (
-                      <ToneBadge tone={residualSeverity(r.max)} className="font-mono">
-                        {r.max.toFixed(1)} px
-                      </ToneBadge>
+                      `${r.max.toFixed(1)} px`
                     )}
                   </td>
                   <td className="text-right font-mono">{r.gap === null ? "n/a" : `${r.gap.toFixed(0)} cm`}</td>

@@ -78,3 +78,17 @@ def test_botsort_construction_with_real_weights():
     tracker = _build_tracker(cfg)
     assert isinstance(tracker, _BotSortAdapter)
     assert tracker.name == "botsort"
+
+
+def test_tracker_ids_empty_update_has_no_ids():
+    """A frame where the tracker confirms nothing returns
+    ``sv.Detections.empty()`` whose ``tracker_id`` is None — iterating it
+    must yield nothing rather than crash the stage."""
+    import numpy as np
+    import supervision as sv
+
+    from src.stages.tracking import _tracker_ids
+
+    assert _tracker_ids(sv.Detections.empty()) == []
+    d = sv.Detections(xyxy=np.zeros((2, 4), np.float32), tracker_id=np.array([4, 7]))
+    assert _tracker_ids(d) == [4, 7]

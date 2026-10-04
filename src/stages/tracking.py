@@ -131,6 +131,14 @@ class _BotSortAdapter:
         )
 
 
+def _tracker_ids(tracked) -> list:
+    """Track ids of a tracker update; empty when the tracker confirmed no
+    tracks this frame (``sv.Detections.empty()`` carries ``tracker_id=None``,
+    e.g. on a whip-pan frame of a replay)."""
+    ids = getattr(tracked, "tracker_id", None)
+    return [] if ids is None else list(ids)
+
+
 def _build_tracker(cfg: dict) -> _ByteTrackAdapter | _BotSortAdapter:
     """Construct a per-shot tracker driven by ``tracking.tracker``.
 
@@ -375,7 +383,7 @@ class PlayerTrackingStage(BaseStage):
                     else:
                         team_labels = []
 
-                    for i, tid in enumerate(tracked.tracker_id):
+                    for i, tid in enumerate(_tracker_ids(tracked)):
                         if tid is None:
                             continue
                         x1, y1, x2, y2 = tracked.xyxy[i]

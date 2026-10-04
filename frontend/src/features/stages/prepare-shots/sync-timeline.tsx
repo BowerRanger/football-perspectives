@@ -191,8 +191,8 @@ export function SyncTimeline(props: TimelineProps) {
               <circle cx={x1} cy={yA} r={3.5} fill="white" stroke="black" strokeOpacity={0.55} />
               <circle cx={x2} cy={yB} r={3.5} fill="white" stroke="black" strokeOpacity={0.55} />
               <text
-                x={(x1 + x2) / 2 + 5}
-                y={(yA + yB) / 2 + 3.5}
+                x={x1 + 6}
+                y={rowTop(refRow) + blockH - 3}
                 stroke="black"
                 strokeOpacity={0.7}
                 strokeWidth={3}

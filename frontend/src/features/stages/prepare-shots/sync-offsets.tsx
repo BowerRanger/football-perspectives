@@ -148,7 +148,7 @@ export function SyncOffsetRows({
               label={`Offset frames for ${id}`}
               value={off}
               onCommit={(v) => onSetOffset(id, v)}
-              className={isRef ? "opacity-50" : undefined}
+              className={cn("border-input bg-background dark:bg-input/30", isRef && "opacity-50")}
               disabled={isRef || readOnly || id === lockedShot}
             />
             {!isRef && !readOnly ? renderActions?.(id) : null}

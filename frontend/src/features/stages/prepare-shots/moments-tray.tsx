@@ -88,7 +88,8 @@ function PairRow({
   const interval = prev ? (pair.reference_frame - prev.reference_frame) / (pair.shot_frame - prev.shot_frame) : null
   // Outlier: this pair sits more than 3 reference frames from the fitted line (three or more pairs only).
   const miss = fit && fit.n >= 3 ? Math.abs(pair.reference_frame - (fit.offset + fit.rate * pair.shot_frame)) : 0
-  const off = miss > 3
+  // A detected ramp already explains the misses; flag outliers only when it is not one.
+  const off = miss > 3 && !fit?.ramp
   return (
     <li className="grid grid-cols-[1.5rem_1fr_1fr_6rem_1.5rem] items-center gap-2 px-3 py-1.5 text-sm">
       <span className="text-xs text-muted-foreground tabular-nums">{index + 1}</span>

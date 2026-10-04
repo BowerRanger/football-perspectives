@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-04T09:50:33+00:00",
+  "generatedAt": "2026-10-04T18:00:00+00:00",
   "title": "Design System: Football Perspectives Dashboard",
   "extensions": {
     "colorMeta": {
@@ -382,6 +382,22 @@
       "description": "Floating log panel; stage-well body in mono, warnings amber, traceback lines destructive.",
       "html": "<section class=\"ds-log\"><header>HMR World log <span>24m 40s</span></header><pre><span>[hmr_world] gberch P014: GVHMR chunk 1/2 … ok (41.2s)</span>\n<span class=\"w\">[hmr_world] WARNING P012: ankle confidence below 0.3</span>\n<span class=\"e\">RuntimeError: MPS backend out of memory</span></pre></section>",
       "css": ".ds-log{font-family:'Geist Variable',ui-sans-serif,system-ui,sans-serif;border-radius:14px;border:1px solid color-mix(in oklch,var(--destructive,oklch(0.704 0.191 22.216)) 50%,transparent);background:var(--card,oklch(0.185 0 0));color:var(--foreground,oklch(0.985 0 0));box-shadow:0 10px 15px -3px rgb(0 0 0/.2),0 4px 6px -4px rgb(0 0 0/.2);overflow:hidden;max-width:560px;} .ds-log header{padding:8px 12px;border-bottom:1px solid var(--border,oklch(1 0 0 / 10%));font-size:14px;font-weight:500;} .ds-log header span{margin-left:8px;font-family:'Geist Mono Variable',ui-monospace,monospace;font-size:12px;color:var(--muted-foreground,oklch(0.72 0 0));} .ds-log pre{margin:0;padding:8px 12px;background:var(--stage,oklch(0.11 0 0));color:oklch(0.96 0 0 / 85%);font:12px/1.625 'Geist Mono Variable',ui-monospace,monospace;white-space:pre-wrap;} .ds-log .w{color:oklch(0.82 0.14 78);} .ds-log .e{color:oklch(0.704 0.191 22.216);background:oklch(0.704 0.191 22.216 / 12%);display:block;}"
+    },
+    {
+      "name": "Speed Badge",
+      "kind": "chip",
+      "refersTo": "status-badge",
+      "description": "Replay rate with source and confidence: text first, icon second, tone third. Call-to-action states (no camera, approximate) are buttons that open Match moments.",
+      "html": "<span class=\"ds-speed ds-info\" tabindex=\"0\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"m12 10 2 4v3a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-3a8 8 0 1 0-16 0v3a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-3l2-4h4Z\"/><path d=\"M4.82 7.9 8 10\"/><path d=\"M15.18 7.9 12 10\"/><path d=\"M16.93 10H20a2 2 0 0 1 0 4H2\"/></svg>0.49× slow motion · matched on players · 81 %</span> <span class=\"ds-speed ds-ok\" tabindex=\"0\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"m12 14 4-4\"/><path d=\"M3.34 19a10 10 0 1 1 17.32 0\"/></svg>real time</span> <span class=\"ds-speed ds-warn\" tabindex=\"0\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><polygon points=\"13 19 22 12 13 5 13 19\"/><polygon points=\"2 19 11 12 2 5 2 19\"/></svg>1.20× faster than live · set, check</span> <button type=\"button\" class=\"ds-speed ds-warn\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1\"/><path d=\"M2 12c.6.5 1.2 1 2.5 1C7 13 7 11 9.5 11c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1\"/><path d=\"M2 18c.6.5 1.2 1 2.5 1C7 19 7 17 9.5 17c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1\"/></svg>≈0.49× slow motion · ±12 % · confirm with moments</button> <span class=\"ds-speed ds-warn ds-low\" tabindex=\"0\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3\"/><path d=\"M12 17h.01\"/></svg>0.49×? · matched on players · 52 %, below 60 %: check</span>",
+      "css": ".ds-speed{font-family:'Geist Variable',ui-sans-serif,system-ui,sans-serif;display:inline-flex;align-items:center;gap:4px;height:20px;padding:2px 8px;margin:2px;border-radius:26px;border:1px solid;font-size:12px;font-weight:500;font-variant-numeric:tabular-nums;white-space:nowrap;background:color-mix(in oklch,currentColor 15%,transparent);border-color:color-mix(in oklch,currentColor 25%,transparent);cursor:default;} button.ds-speed{cursor:pointer;} .ds-speed:hover{background:color-mix(in oklch,currentColor 22%,transparent);} .ds-speed:focus-visible{outline:none;box-shadow:0 0 0 3px color-mix(in oklch,var(--ring,oklch(0.556 0 0)) 50%,transparent);} .ds-info{color:var(--info,oklch(0.74 0.12 240));} .ds-ok{color:var(--success,oklch(0.76 0.15 152));} .ds-warn{color:var(--warning,oklch(0.82 0.14 78));} .ds-low{box-shadow:0 0 0 1px color-mix(in oklch,var(--warning,oklch(0.82 0.14 78)) 60%,transparent);}"
+    },
+    {
+      "name": "Sync Timeline (rate)",
+      "kind": "custom",
+      "refersTo": "stage-well",
+      "description": "Blocks sized clip frames × rate on the reference clock; hatch for slow, warning notch for a ramp, ≈ for approximate, id · rate label first, pair connectors on a dark halo ending at block edges.",
+      "html": "<div class=\"ds-tl\"><div class=\"ds-tl-ref\">s042 (ref, frames 0–202)</div><svg class=\"ds-tl-pairs\" width=\"440\" height=\"80\" aria-hidden=\"true\"><line x1=\"250\" y1=\"34\" x2=\"230\" y2=\"42\" stroke=\"black\" stroke-opacity=\".55\" stroke-width=\"4\"/><line x1=\"250\" y1=\"34\" x2=\"230\" y2=\"42\" stroke=\"white\" stroke-width=\"1.5\"/><circle cx=\"250\" cy=\"34\" r=\"3.5\" fill=\"white\"/><circle cx=\"230\" cy=\"42\" r=\"3.5\" fill=\"white\"/><line x1=\"330\" y1=\"34\" x2=\"320\" y2=\"42\" stroke=\"black\" stroke-opacity=\".55\" stroke-width=\"4\"/><line x1=\"330\" y1=\"34\" x2=\"320\" y2=\"42\" stroke=\"white\" stroke-width=\"1.5\"/><circle cx=\"330\" cy=\"34\" r=\"3.5\" fill=\"white\"/><circle cx=\"320\" cy=\"42\" r=\"3.5\" fill=\"white\"/></svg><div class=\"ds-tl-slow\" tabindex=\"0\" role=\"button\" aria-pressed=\"true\">s043 · 0.34× · unsaved</div><div class=\"ds-tl-ramp\" tabindex=\"0\" role=\"button\">s020 · ≈0.41×<i></i></div></div>",
+      "css": ".ds-tl{position:relative;width:440px;height:110px;background:var(--stage,oklch(0.11 0 0));border-radius:8px;font-family:'Geist Variable',ui-sans-serif,system-ui,sans-serif;font-size:12px;font-weight:500;color:#fff;} .ds-tl>div{position:absolute;height:30px;padding:4px 6px;border-radius:4px;border:1px solid rgb(255 255 255/.2);white-space:nowrap;overflow:hidden;box-sizing:border-box;} .ds-tl-ref{left:20px;top:4px;width:400px;background:color-mix(in oklch,var(--info,oklch(0.74 0.12 240)) 80%,transparent);border-color:var(--info,oklch(0.74 0.12 240))!important;} .ds-tl-slow{left:200px;top:42px;width:150px;background-color:color-mix(in oklch,var(--success,oklch(0.76 0.15 152)) 80%,transparent);background-image:repeating-linear-gradient(135deg,transparent 0 6px,rgb(255 255 255/.2) 6px 8px);border-style:dashed!important;border-color:rgb(255 255 255/.8)!important;} .ds-tl-ramp{left:60px;top:76px;width:130px;background:rgb(255 255 255/.2);} .ds-tl-ramp i{position:absolute;top:0;bottom:0;left:50%;width:2px;transform:skewX(-12deg);background:var(--warning,oklch(0.82 0.14 78));} .ds-tl>div:focus-visible{outline:none;box-shadow:0 0 0 2px var(--ring,oklch(0.556 0 0));} .ds-tl-pairs{position:absolute;left:0;top:0;pointer-events:none;z-index:5;}"
     }
   ],
   "narrative": {
@@ -429,6 +445,16 @@
         "name": "The Only-Floaters-Cast Rule",
         "body": "Shadows belong only to things that float over other content (log dock, overlays on media, popovers and dialogs from shadcn). Panels in the flow never cast a shadow.",
         "section": "elevation"
+      },
+      {
+        "name": "The Preview Lock Rule",
+        "body": "While an unsaved derived value previews, the controls it overrides are disabled with a visible reason, and the primary action routes to saving that preview. Two sources of truth are never editable at once.",
+        "section": "components"
+      },
+      {
+        "name": "The Gate-At-Click Rule",
+        "body": "A destructive action re-checks its gate when it is clicked, not when it was rendered: a running job, unsaved pairs and unsaved offsets each block it with a toast that names the reason. Toast actions (Undo, Retime after save) outlive the state they were made in, so they re-check too.",
+        "section": "components"
       }
     ],
     "dos": [
@@ -441,7 +467,11 @@
       "**Do** show why a control is disabled as visible text or a reachable tooltip.",
       "**Do** pair every view colour with its letter badge, and give every data hue a second channel (stroke, glyph or shape).",
       "**Do** make operator picks pending until an explicit commit, and say on screen what the commit will do.",
-      "**Do** route every video seek and frame read through `lib/frame-time.ts`."
+      "**Do** route every video seek and frame read through `lib/frame-time.ts`.",
+      "**Do** write a state badge text first, icon second, tone third, and end a state that needs the operator with what to do.",
+      "**Do** disable every control an unsaved preview overrides, say why on screen, and route the primary action to saving the preview.",
+      "**Do** confirm a re-encode with a mono change list and a downstream re-run warning, offer Undo in the success toast, and re-check its gate at click time.",
+      "**Do** draw a time-mapped clip at the length it covers on the reference clock, with a second channel (hatch, notch, ≈) beside its rate."
     ],
     "donts": [
       "**Don't** colour buttons, titles or decorative accents; the primary stays monochrome.",
@@ -451,7 +481,8 @@
       "**Don't** use `alert()` or `window.confirm`; errors are toasts, destructive actions are confirm dialogs.",
       "**Don't** theme the player palette; a player's colour is identical in both themes and every panel.",
       "**Don't** colour pipeline output by kind or draw it solid; it is the dashed neutral ghost.",
-      "**Don't** reuse a view colour for a segment kind or the reverse."
+      "**Don't** reuse a view colour for a segment kind or the reverse.",
+      "**Don't** let a weak or approximate estimate drive a destructive action; it blocks Retime with the reason until marked moments confirm it."
     ]
   }
 }

@@ -298,11 +298,38 @@ The pattern for editors that pick on synced footage from several angles.
 - **Timeline:** labelled rows (Segments, Keys and events, Footage, Residual, Flags, vs pipeline) in a 96px gutter, painted on `stage`. The Residual row draws the 3/8/15px bands as faint dashed lines. Footage rows show each view's coverage strip in its colour behind a hatch where there is no footage.
 - **Repeat frames:** a frame whose image repeats the previous one (25 to 30 fps pulldown) shows a small "repeat" chip (warning text on a 20% warning tint, with a tooltip) in the view header, and dark ticks in that view's footage strip. If a solve used a repeated frame, the mode bar says so in warning text.
 
+### Group sync timeline (replay speed)
+The pattern for aligning a replay to its live shot when the two play at different speeds (Prepare Shots panel, Group sync). Reference and member videos sit side by side in `stage` wells above the drawn timeline and one row per member.
+- **Speed badge:** a ToneBadge (pill, 12px text, 12px lucide icon, tabular numerals) carrying a replay's rate, its source and its confidence. Text first, icon second, tone third: every state reads with colour removed. Each badge has a one-sentence tooltip; an optional second line carries the automatic estimate behind a manual alignment. The reference shows no speed badge (its info "Reference" badge says it). States:
+  - **Slow** (turtle, info): "0.49× slow motion · matched on players · 81 %". Operator-set reads "· set by you"; an unsaved fit reads "· your pairs, not saved".
+  - **Real time** (gauge, success): "real time", within 0.08 of 1.0; shows "(1.04×)" when not exactly 1.
+  - **Fast** (fast-forward, warning): "1.20× faster than live · …, check".
+  - **Ramp** (trending-up, warning): "speed ramp: 0.27→0.41×, not applied".
+  - **No camera** (video-off, warning): "no camera: mark moments" / "no tracks: mark moments". The badge is a button that opens Match moments.
+  - **Approximate** (waves, warning, also a button): "≈0.49× slow motion · ±12 % · confirm with moments".
+  - **Low confidence** (circle-help, warning, plus a 1px warning ring at 60%): "0.49×? · matched on players · 52 %, below 60 %: check".
+  - **Manual kept** (hand, info): "real time · your offset kept · measured 0.49×".
+  - **Retimed** (history, success): "retimed to real time (was 0.49×) · native kept".
+  - **Unmeasured** (ruler, muted): "speed not measured". **Detecting** (spinning loader, muted): "Detecting speed…".
+- **Badge wording:** rates are two decimals with × (three in the live fit), percentages take a space ("81 %"), the source follows a middle dot, uncertainty is ≈ or "?" on the number, and a state that needs the operator ends with what to do ("check", "mark moments", "confirm with moments"). One confidence number (60 %) drives both the warning and the Retime refusal.
+- **Match moments (place, then commit across two clips):** the same grammar as Ball Studio's picks. A bordered tray (8px radius) toggled with M. 1 marks the reference clip's current frame, 2 the member's; each pending mark shows as an info ToneBadge ("s042 mark 137"). Enter adds the pair only when both marks are placed; Esc discards pending marks, or closes the tray when nothing is pending; Backspace removes the last added pair; Alt+arrows nudge the pending mark; Mod+S saves. Every button shows its Kbd and returns focus to the editor region, so the keys keep working after a click. An aria-live mode line always says what is pending and what Enter will do. Nothing reaches the sync map until Save alignment, which is saved as a manual alignment the automatic pass never overwrites.
+- **Live fit strip:** 0 pairs explains what two and three pairs do; 1 pair says "offset only"; 2 pairs show rate (mono, three decimals) and offset with "2 pairs fit exactly, add a third to check"; three or more add a residual ToneBadge in reference frames on Ball Studio's bands (up to 3 success, up to 8 warning, above destructive). The pair table shows mono frames per clip and each interval's rate; a broken row says "order inverted" or "repeated frame" in destructive text. **Outlier dot:** an 8px warning dot on a pair more than 3 reference frames off the fit (three or more pairs), focusable, with a plain-words tooltip ("This pair disagrees with the others by 9 frames"). **Ramp reveal:** when interval rates differ by more than 1.2× and the residual exceeds 1.5 frames, a warning line names the first and last rate and says a single saved rate is an average.
+- **Preview lock:** from two pairs the fit previews live on the active clip (videos, timeline block, badge). While that unsaved preview stands, every control it overrides is disabled: offset input, nudges, Lock offset, the rate pencil, the member row's slider and input, and timeline drag and arrow slide. A warning "Unsaved pairs" badge replaces the method badge, a warning text line gives the reason ("Your marked pairs set this clip's offset and rate — save or clear them."), and disabled buttons carry it as their tooltip. Save group is disabled and drops to outline, the tray's Save alignment is the primary, and Mod+S saves the pairs.
+- **Timeline rate encoding:** painted on `stage`. A block's width is clip frames × rate on the reference clock, so a slowed replay is as long as the live time it covers. Slow blocks carry a 135° hatch (white at 20%, 2px stripe every 8px) as the second channel beside the rate; a speed ramp is a 2px skewed warning notch at the block's middle (rate not applied); an approximate rate is prefixed with ≈. Labels lead with "id · 0.49×", then the global range and method; a narrow block keeps only id and rate, and a block too narrow for that gets its label beside it. A previewed block has a dashed outline and "· unsaved". **Pair connectors** join each pair's reference frame to the member frame it maps to: a 1.5px white line on a 4px black halo at 55%, 3.5px white end dots, ending on the facing block edges so a line never crosses a label, numbered in 10px semibold white with a dark stroke.
+- **Playback at rate:** when the active clip's rate is not 1, a Fit / 1× outline toggle sits beside the transport. Fit (default) plays the member at 1 / rate (clamped to 0.0625 to 16) so both clips stay in step, following the reference through the time map and re-seeking only on drift over 0.08 s; paused seeks are frame-exact. 1× plays both clips raw and never re-seeks the member on Play. Fit's tooltip names the speed it uses ("Plays s019 at 2.04× so both stay in step"), and the member chip shows the mapped live frame ("live frame 181.4").
+- **Retime / restore:** destructive re-encodes, per member row, as small outline buttons ("Retime to real time", history icon; "Restore native clip", undo icon) with the blocked reason as text beside them. See Dialogs for the confirm.
+
+**The Preview Lock Rule.** While an unsaved derived value previews, the controls it overrides are disabled with a visible reason, and the primary action routes to saving that preview. Two sources of truth are never editable at once.
+
+**The Gate-At-Click Rule.** A destructive action re-checks its gate when it is clicked, not when it was rendered: a running job, unsaved pairs and unsaved offsets each block it with a toast that names the reason. Toast actions (Undo, Retime after save) outlive the state they were made in, so they re-check too.
+
 ### Frame-exact video transport
 Every `<video>`-driven editor (Ball Studio, anchor and ball-anchor editors, kp2d viewer, trajectory playback, sync editor) converts frames and time through `frontend/src/lib/frame-time.ts`. To show frame f, seek to `(f + 0.5) / fps`, the middle of the frame. To read the frame, use `floor(t * fps + 1e-6)`. Never seek to `f / fps` or read with `Math.round`: both land one frame off.
 
 ### Dialogs
 Destructive actions go through a promise-based confirm dialog; re-running a stage first lists the generated outputs it will clear in a mono list, and stages holding operator edits require typing the stage name.
+
+Re-encoding a clip (retime to real time, restore the native clip) follows the same recipe: one paragraph saying what happens and what is kept, a mono change list on a muted well (path, then effect: "shots/s019.mp4  replaced (212 → 104 frames)", "shots/sync_map.json  rate 1.0"), and a downstream warning naming the stage to re-run from. Restore names the rate it returns to. Re-encoding shows a loading toast; success offers Undo in the toast, which restores without a second confirm.
 
 ## Do's and Don'ts
 
@@ -317,6 +344,10 @@ Destructive actions go through a promise-based confirm dialog; re-running a stag
 - **Do** pair every view colour with its letter badge, and give every data hue a second channel (stroke, glyph or shape).
 - **Do** make operator picks pending until an explicit commit, and say on screen what the commit will do.
 - **Do** route every video seek and frame read through `lib/frame-time.ts`.
+- **Do** write a state badge text first, icon second, tone third, and end a state that needs the operator with what to do.
+- **Do** disable every control an unsaved preview overrides, say why on screen, and route the primary action to saving the preview.
+- **Do** confirm a re-encode with a mono change list and a downstream re-run warning, offer Undo in the success toast, and re-check its gate at click time.
+- **Do** draw a time-mapped clip at the length it covers on the reference clock, with a second channel (hatch, notch, ≈) beside its rate.
 
 ### Don't:
 - **Don't** colour buttons, titles or decorative accents; the primary stays monochrome.
@@ -327,3 +358,4 @@ Destructive actions go through a promise-based confirm dialog; re-running a stag
 - **Don't** theme the player palette; a player's colour is identical in both themes and every panel.
 - **Don't** colour pipeline output by kind or draw it solid; it is the dashed neutral ghost.
 - **Don't** reuse a view colour for a segment kind or the reverse.
+- **Don't** let a weak or approximate estimate drive a destructive action; it blocks Retime with the reason until marked moments confirm it.

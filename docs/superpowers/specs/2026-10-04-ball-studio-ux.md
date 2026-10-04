@@ -385,3 +385,32 @@ definition), frame mapping `r = f_shot - frame_offset`.
   key and epipolar line, solve error, focus view, mobile read-only.
 - Run `impeccable-finish-reviewer` until disposition `ship`; update `DESIGN.md` through the documenter; append
   the before/after to this file (or a dated sibling).
+
+## 13. After the build: finish review record (2026-10-04)
+
+Detector: `impeccable detect --json frontend/src/pages/ball-studio` → `[]` on every round.
+Captures: `docs/superpowers/specs/assets/ball-studio/` (1440 dark + light, 1024, 390 dark + light,
+focus, zoom/loupe, pending epipolar, pending triangulation, sync probe, views-not-simultaneous,
+empty group, solve error (simulated 500), single angle, 390 inspector list).
+
+| Round | Commit | Disposition | Material fixes raised |
+|---|---|---|---|
+| 1 | 9ad9b00 | fix | 8: sync probe missing · 1024 layout · 3-D ball unreadable at overview · residual table (reprojected column, toned segment rms) · inspector below the fold + focus gap · rays for the committed key · copy (solve chip, read-only empty state) · missing state captures |
+| 2 | 6294d51 | fix | 6/8 resolved; new: 3-D height/gap labels collided · sync-probe refetch loop · key ids that read as frame numbers · evidence captures |
+| 3 | c337002 | **ship** | all resolved; optional polish (single probe caveat, untoned hypothetical residuals) applied after |
+
+Deviations from this direction, kept on purpose:
+
+- **Sync probe is not a sync verdict.** Fresh re-picks on origi (refs 414/416/417 vs origi02 272–276) showed
+  the stored −142 offset is right, while the held-click probe trended toward −140: a held click measures
+  camera motion. The probe shows residual + skew gap per offset with a neutral marker, says so in a caveat
+  and links to the Prepare Shots sync timeline. It never writes `sync_map.json`.
+- **Content time (25→30 pulldown).** Not in the original direction: every 30-fps test clip repeats one
+  frame in six. The page marks repeated frames (overlay badge, footage-row ticks) and shows the server's
+  `views_not_simultaneous` warning in the pending readout (`2026-10-04-ball-frame-timing-findings.md`).
+- **Frame-exact video.** All `<video>` editors now seek to `(f + 0.5) / fps` and read
+  `floor(t * fps)` via `frontend/src/lib/frame-time.ts` (legacy editors fixed in 1f21ef1 / 533fbf4;
+  anchors already on disk are not relabelled).
+- **Per-view track polyline** stays world-fixed (dense xyz through the current frame's camera); the
+  ball's own-instant position per view is a ring from `projections[shot]`.
+- Not built: mobile pinch-zoom, tablet long-press loupe.

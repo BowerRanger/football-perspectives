@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 REPORT_FILE = "replay_sync.json"
 _ESTIMATE_KEYS = ("rate", "offset", "confidence", "cost_m", "coverage", "ramp",
-                  "rate_first", "rate_second")
+                  "rate_first", "rate_second", "live_window_frames", "rate_uncertainty")
 
 
 def _camera_fn(track: CameraTrack):
@@ -147,6 +147,7 @@ class ReplaySyncStage(BaseStage):
                 "group_id": gid, "reference_shot": ref,
                 "members": [{"shot_id": m.shot_id, "against": m.against,
                              "estimate": _estimate_dict(m), "decision": m.decision,
+                             "approximate": m.approximate,
                              "reason": m.reason} for m in res.members],
             })
         sm.save(sync_path)

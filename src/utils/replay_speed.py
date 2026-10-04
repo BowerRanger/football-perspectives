@@ -39,6 +39,18 @@ _PITCH_Y = (-10.0, 78.0)
 # differing by more than this factor AND lowers the cost by this fraction.
 _RAMP_FACTOR = 1.2
 _RAMP_MIN_GAIN = 0.04
+# ... and only when both sides of the breakpoint cover at least this many
+# live frames: shorter segments are under-determined (a constant 0.34x
+# replay over ~100 live frames splits into "0.15x / 0.30x" halves).
+_RAMP_MIN_SEGMENT_FRAMES = 120.0
+# Rate precision is limited by how much live play the replay spans: a few
+# seconds of player motion (plus ~1 m of disagreement between two cameras'
+# calibrations) pins the time map only so far. Measured on real origi tracks
+# re-sampled at known rates: ~100 live frames -> 5-20 % rate error, 200+ ->
+# ~0.5 %. Precision improves faster than linearly as motion accumulates;
+# relative 1-sigma uncertainty ~ (this many frames / live window) ** 2
+# (100 -> 8 %, 200 -> 2 %, 300 -> 0.9 %).
+_RATE_UNCERTAINTY_FRAMES = 28.0
 
 CameraFn = Callable[[int], "tuple[np.ndarray, np.ndarray, np.ndarray, tuple[float, float]] | None"]
 
@@ -55,6 +67,8 @@ class SpeedEstimate:
     rate_second: float       # rate after it
     ramp: bool               # a two-rate time map fits clearly better
     n_replay_frames: int
+    live_window_frames: float = 0.0   # live play the replay spans (rate x replay span)
+    rate_uncertainty: float = 0.5     # relative 1-sigma rate uncertainty from that window
 
     def frame_offset_at(self, replay_frame: float) -> float:
         """Sync-map style offset (replay frame - live frame) at a replay frame."""
@@ -166,13 +180,14 @@ def _costs_for_times(D: np.ndarray, f0: int, T: np.ndarray, min_cover: float) ->
 def _ramp_fit(D, f0, rep_frames, r0, o0, min_cover):
     """Best continuous two-rate time map (breakpoint at 30-70 % of the replay).
 
-    Returns ``(r1, r2, cost)``; ``r1``/``r2`` are the rates before/after the
-    breakpoint and the map is continuous there.
+    Returns ``(r1, r2, cost, b)``; ``r1``/``r2`` are the rates before/after
+    the breakpoint ``b`` (replay frames from the first sample) and the map is
+    continuous there.
     """
     span = rep_frames[-1] - rep_frames[0]
     r_grid = np.geomspace(r0 / 2.0, r0 * 2.0, 33)
     o_grid = np.arange(o0 - 12.0, o0 + 12.001, 1.0)
-    best = (np.inf, r0, r0)
+    best = (np.inf, r0, r0, 0.5 * span)
     j = rep_frames - rep_frames[0]
     for frac in (0.3, 0.4, 0.5, 0.6, 0.7):
         b = frac * span
@@ -184,8 +199,8 @@ def _ramp_fit(D, f0, rep_frames, r0, o0, min_cover):
         C = _costs_for_times(D, f0, T, min_cover)
         i = int(np.argmin(C))
         if C[i] < best[0]:
-            best = (float(C[i]), float(r1[i]), float(r2[i]))
-    return best[1], best[2], best[0]
+            best = (float(C[i]), float(r1[i]), float(r2[i]), float(b))
+    return best[1], best[2], best[0], best[3]
 
 
 def estimate_speed(
@@ -224,9 +239,23 @@ def estimate_speed(
     margin = max(0.0, (background - cost) / background) if background > 0 else 0.0
     t = o + r * rep_frames - f0
     coverage = float(np.mean((t >= 0) & (t < n_live_frames - 1)))
-    r1, r2, ramp_cost = _ramp_fit(D, f0, rep_frames, r, o, min_cover)
+    span = float(rep_frames[-1] - rep_frames[0])
+    window = r * span
+    r1, r2, ramp_cost, b = _ramp_fit(D, f0, rep_frames, r, o, min_cover)
+    if window >= 2.0 * _RAMP_MIN_SEGMENT_FRAMES:
+        # A strong ramp pulls the single-rate optimum somewhere wrong; with
+        # enough live play each half is reliable alone, so also seed the
+        # two-rate fit from the first half's own optimum.
+        half = len(rep_frames) // 2
+        C1, offs1, (i1, k1) = _search(D[:half], f0, rep_frames[:half], rates,
+                                      n_live_frames, min_cover)
+        if np.isfinite(C1[i1, k1]):
+            seeded = _ramp_fit(D, f0, rep_frames, float(rates[i1]), float(offs1[k1]), min_cover)
+            if seeded[2] < ramp_cost:
+                r1, r2, ramp_cost, b = seeded
     ramp = bool(abs(np.log(r1 / r2)) > np.log(_RAMP_FACTOR)
-                and ramp_cost < cost * (1.0 - _RAMP_MIN_GAIN))
+                and ramp_cost < cost * (1.0 - _RAMP_MIN_GAIN)
+                and min(r1 * b, r2 * (span - b)) >= _RAMP_MIN_SEGMENT_FRAMES)
     if not ramp:
         r1 = r2 = r
     quality = float(np.clip((trunc_m - cost) / (trunc_m - 0.8), 0.0, 1.0))
@@ -234,7 +263,8 @@ def estimate_speed(
     return SpeedEstimate(
         rate=r, offset=o, cost_m=cost, coverage=coverage, margin=margin,
         confidence=confidence, rate_first=r1, rate_second=r2, ramp=ramp,
-        n_replay_frames=len(frames),
+        n_replay_frames=len(frames), live_window_frames=window,
+        rate_uncertainty=float(np.clip((_RATE_UNCERTAINTY_FRAMES / max(window, 1.0)) ** 2, 0.005, 0.5)),
     )
 
 

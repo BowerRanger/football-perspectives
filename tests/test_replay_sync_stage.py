@@ -91,6 +91,7 @@ def test_real_time_replay_stores_rate_and_offset(tmp_path):
     rep, sm = run(tmp_path)
     m = rep["groups"][0]["members"][0]
     assert m["decision"] == "applied" and m["estimate"]["rate"] == pytest.approx(1.0, rel=0.03)
+    assert m["approximate"] is False and m["estimate"]["live_window_frames"] > 100
     a = next(a for a in sm.group("g").alignments if a.shot_id == "b")
     assert a.method == "player_formation" and a.frame_offset == pytest.approx(-60, abs=2)
     assert a.playback_rate == pytest.approx(1.0, rel=0.03)

@@ -130,7 +130,36 @@ Man City g05: the wide live shot s016 auto-calibrated; the tight slow replay
 s017 did **not** (auto-anchors found no usable pitch landmarks — the camera
 stage skips it). Tight close-ups are the common slow-motion framing, so the
 geometric path cannot be the only path. Hence the second, camera-free path
-below. (Liverpool g11 pending.)
+below. Liverpool g11: same — wide live s042 calibrated (as a moving
+camera), the tight slow replay s043 was skipped with no usable anchors.
+**On both real slow-motion pairs the automatic path correctly reports
+`no_camera`, and the operator path (marked moments) is the way in.**
+
+Semi-synthetic slow motion (origi02's real tracks + calibration noise,
+re-sampled at known rates, estimated against the real origi01):
+
+| replay | estimated | true | note |
+|---|---|---|---|
+| 1.0x, 200 frames | 0.996 | 0.991 | offset within 0.6 frame |
+| 1.0x, 100 frames | 0.81–1.09 | 0.991 | same footage, shorter window |
+| 0.34x, ~100 live frames | 0.275–0.36 | 0.337 | offsets 3–14 frames off |
+| 0.5x, ~120 live frames | 0.449 | 0.495 | |
+| 0.2x, ~80 live frames | 0.155 | 0.198 | |
+
+The error tracks the **live window** the replay spans, not slow motion as
+such: a few seconds of player motion plus ~1 m of disagreement between two
+cameras' calibrations pin the time map only so far. A track-consistent
+refinement (each replay track matched to one live track) did not fix it
+reliably and was dropped. So the estimator now reports `live_window_frames`
+and `rate_uncertainty` (relative 1σ ≈ (28 / window)², fitted to the above:
+100 → 8 %, 200 → 2 %, 300 → 0.9 %), and the stage:
+
+- retimes only when the replay is slow even at +2σ;
+- marks rates above 4 % uncertainty `approximate: confirm with marked moments`
+  (applied, but flagged in the report and the dashboard badge);
+- claims a geometric speed ramp only when both sides of the breakpoint span
+  ≥ 120 live frames (short ramps — every real slow-motion ramp in the GT —
+  are the marked-moments path's job).
 
 ## Two paths
 

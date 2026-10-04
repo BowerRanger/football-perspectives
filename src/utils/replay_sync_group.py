@@ -29,6 +29,9 @@ DEFAULTS = {
     "auto_retime": True,
     "retime_tolerance": 0.08,
     "retime_min_confidence": 0.6,
+    # Rates whose relative 1-sigma uncertainty exceeds this are reported as
+    # approximate: confirm them with marked moments for frame-exact sync.
+    "approximate_uncertainty": 0.04,
 }
 
 
@@ -41,6 +44,7 @@ class MemberResult:
     reason: str = ""
     placement: tuple[float, float] | None = None   # (rate, offset) onto the reference
     retime_rate: float | None = None
+    approximate: bool = False   # rate uncertainty too large for frame-exact sync
 
 
 @dataclass
@@ -148,8 +152,15 @@ def _decide(m: MemberResult, prior_manual: Mapping, cfg: Mapping) -> None:
         m.reason = f"speed ramp {est.rate_first:.2f}x -> {est.rate_second:.2f}x"
         m.placement = None
         return
-    slow = est.rate < 1.0 - float(cfg["retime_tolerance"])
+    # Retime only when the replay is slow even at +2 sigma of the rate: a
+    # short replay spans little live play, so its rate is imprecise.
+    unc = float(est.rate_uncertainty)
+    slow = est.rate * (1.0 + 2.0 * unc) < 1.0 - float(cfg["retime_tolerance"])
     if cfg["auto_retime"] and slow and est.confidence >= float(cfg["retime_min_confidence"]):
         m.decision, m.retime_rate = "applied_retimed", est.rate
     else:
         m.decision = "applied"
+    m.approximate = unc > float(cfg.get("approximate_uncertainty", 0.04))
+    if m.approximate:
+        m.reason = (f"approximate rate (+-{100 * unc:.0f} % from {est.live_window_frames:.0f} live "
+                    f"frames): confirm with marked moments")

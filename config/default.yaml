@@ -504,8 +504,9 @@ replay_sync:
   min_confidence: 0.5             # estimate confidence floor to apply
   max_cost_m: 2.2                 # mean player-to-player distance ceiling (m)
   auto_retime: true               # resample confident slow replays to real time
-  retime_tolerance: 0.08          # |rate - 1| beyond this (slow side) is retimed
+  retime_tolerance: 0.08          # slow beyond this even at +2 sigma of the rate is retimed
   retime_min_confidence: 0.6
+  approximate_uncertainty: 0.04   # rate 1-sigma above this -> "approximate: confirm with moments"
 
 hmr_world:
   # Force CPU on macOS: GVHMR's RoPE attention has a slice op that

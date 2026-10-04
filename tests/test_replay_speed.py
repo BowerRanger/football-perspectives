@@ -59,13 +59,16 @@ def test_recovers_rate_and_offset(rate, offset):
     assert not est.ramp
 
 
-def test_flags_a_speed_ramp():
-    traj = _players(22, 320, seed=3)
-    live, replay = _views(traj, 0.27, 60.0, n_rep=220, rate2=0.42, seed=4)
+def test_flags_a_speed_ramp_over_a_long_window():
+    # geometry can only resolve a ramp when both sides cover enough live
+    # play (>= 120 frames each); short slow-motion ramps come from marked
+    # moments instead
+    traj = _players(22, 450, seed=3)
+    live, replay = _views(traj, 0.55, 40.0, n_rep=480, rate2=0.9, seed=4)
     est = rs.estimate_speed(live, replay)
     assert est is not None and est.ramp
-    assert est.rate_first == pytest.approx(0.27, rel=0.1)
-    assert est.rate_second == pytest.approx(0.42, rel=0.1)
+    assert est.rate_first == pytest.approx(0.55, rel=0.1)
+    assert est.rate_second == pytest.approx(0.9, rel=0.1)
 
 
 def test_unrelated_replay_has_low_confidence():
@@ -130,3 +133,25 @@ def test_moments_reveal_a_ramp():
 def test_moments_reject_degenerate_input(pairs):
     with pytest.raises(ValueError):
         rs.rate_from_moments(pairs)
+
+
+# --- precision honesty: short live windows ----------------------------------
+
+def test_uncertainty_shrinks_with_the_live_window():
+    traj = _players(22, 400, seed=11)
+    live, short = _views(traj, 0.34, 80.0, n_rep=150, seed=12)   # ~51 live frames
+    _, long_ = _views(traj, 1.0, 40.0, n_rep=300, seed=13)       # 300 live frames
+    es, el = rs.estimate_speed(live, short), rs.estimate_speed(live, long_)
+    assert es.live_window_frames == pytest.approx(0.34 * 149, rel=0.1)
+    assert el.live_window_frames == pytest.approx(299, rel=0.05)
+    assert es.rate_uncertainty > el.rate_uncertainty
+    assert el.rate_uncertainty <= 0.05
+
+
+def test_short_window_never_reports_a_ramp():
+    # a constant-rate slow replay covering ~70 live frames: halves are
+    # under-determined, so no ramp may be claimed from geometry
+    traj = _players(22, 320, seed=21)
+    live, replay = _views(traj, 0.34, 90.0, n_rep=200, seed=22, noise=0.6)
+    est = rs.estimate_speed(live, replay)
+    assert est is not None and not est.ramp

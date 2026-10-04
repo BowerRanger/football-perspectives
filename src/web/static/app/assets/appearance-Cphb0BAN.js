@@ -1,0 +1,1 @@
+import{b as e}from"./panel-CJY8Z2-r.js";import{t}from"./status-card-ChcS8_Ic.js";var n=e();function r(){return(0,n.jsx)(t,{stage:`appearance`,outputs:`appearance/kits.json`,nextStep:`Clusters team and kit colours from the footage. Suggestions never edit tracks; operator kit labels always win.`})}export{r as default};

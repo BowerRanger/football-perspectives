@@ -28,6 +28,8 @@ interface TimelineProps {
   pairs?: MomentPair[]
   /** The active shot's offset and rate are an unsaved preview (dashed outline). */
   previewActive?: boolean
+  /** Shot driven by unsaved pairs: cannot be dragged or slid. */
+  lockedShot?: string | null
   /** Phone width: no dragging, no keyboard slide. */
   readOnly?: boolean
   cursorFrame: number
@@ -155,7 +157,7 @@ export function SyncTimeline(props: TimelineProps) {
     if (ev.key === "Enter" || ev.key === " ") {
       ev.preventDefault()
       props.onPick(id)
-    } else if ((ev.key === "ArrowLeft" || ev.key === "ArrowRight") && id !== referenceShot && !readOnly) {
+    } else if ((ev.key === "ArrowLeft" || ev.key === "ArrowRight") && id !== referenceShot && !readOnly && id !== props.lockedShot) {
       ev.preventDefault()
       const step = (ev.shiftKey ? 10 : 1) * (ev.key === "ArrowRight" ? -1 : 1)
       props.onCommitOffset(id, off + step)
@@ -178,14 +180,23 @@ export function SyncTimeline(props: TimelineProps) {
         {pairs.map((p, k) => {
           const x1 = px(p.reference_frame)
           const x2 = px(actStart + rateOf(activeShot) * p.shot_frame)
-          const [yA, yB] =
-            refRow < actRow
-              ? [rowTop(refRow) + ROW_HEIGHT - 6, rowTop(actRow)]
-              : [rowTop(refRow), rowTop(actRow) + ROW_HEIGHT - 6]
+          const yA = rowTop(refRow) + (ROW_HEIGHT - 6) / 2
+          const yB = rowTop(actRow) + (ROW_HEIGHT - 6) / 2
           return (
             <g key={`${p.reference_frame}:${p.shot_frame}`}>
-              <line x1={x1} y1={yA} x2={x2} y2={yB} stroke="currentColor" className="text-info" strokeWidth={1.5} />
-              <text x={x1 + 3} y={yA + 10} className="fill-white text-[10px]">
+              <line x1={x1} y1={yA} x2={x2} y2={yB} stroke="black" strokeOpacity={0.55} strokeWidth={4} />
+              <line x1={x1} y1={yA} x2={x2} y2={yB} stroke="white" strokeWidth={1.5} />
+              <circle cx={x1} cy={yA} r={3.5} fill="white" stroke="black" strokeOpacity={0.55} />
+              <circle cx={x2} cy={yB} r={3.5} fill="white" stroke="black" strokeOpacity={0.55} />
+              <text
+                x={x1 + 6}
+                y={yA - 6}
+                stroke="black"
+                strokeOpacity={0.7}
+                strokeWidth={3}
+                paintOrder="stroke"
+                className="fill-white text-[10px] font-semibold"
+              >
                 {k + 1}
               </text>
             </g>
@@ -253,9 +264,16 @@ export function SyncTimeline(props: TimelineProps) {
             const label = isRef
               ? `${id} (ref, frames 0–${native})`
               : `${id}${rateNote} · global ${span}${methodNote(m)}${preview ? " · unsaved" : ""}`
+            // Lead with id and rate; drop the range and method when the block is narrow,
+            // and draw the label beside a block too narrow for even that.
+            const widthPx = Math.max(2, Math.round(len * geo.pxPerFrame))
+            const short = isRef ? `${id} (ref)` : `${id}${rateNote}${preview ? " · unsaved" : ""}`
+            const fits = (text: string) => widthPx >= text.length * 6.6 + 14
+            const inside = fits(label) ? label : fits(short) ? short : ""
+            const rowTopPx = RULER_HEIGHT + 4 + i * ROW_HEIGHT
             return (
+              <React.Fragment key={id}>
               <div
-                key={id}
                 role="button"
                 tabIndex={0}
                 aria-label={label}
@@ -272,8 +290,8 @@ export function SyncTimeline(props: TimelineProps) {
                 )}
                 style={{
                   left: px(start),
-                  top: RULER_HEIGHT + 4 + i * ROW_HEIGHT,
-                  width: Math.max(2, Math.round(len * geo.pxPerFrame)),
+                  top: rowTopPx,
+                  width: widthPx,
                   height: ROW_HEIGHT - 6,
                   backgroundImage: slow ? SLOW_HATCH : undefined,
                 }}
@@ -284,11 +302,11 @@ export function SyncTimeline(props: TimelineProps) {
                 onKeyDown={(ev) => onBlockKey(ev, id, committed)}
                 onPointerDown={(ev) => {
                   ev.stopPropagation()
-                  if (ev.button !== 0 || isRef || readOnly) return
+                  if (ev.button !== 0 || isRef || readOnly || id === props.lockedShot) return
                   beginDrag({ kind: "block", shotId: id, startX: ev.clientX, startOffset: committed, live: committed })
                 }}
               >
-                {label}
+                {inside}
                 {ramp ? (
                   <span
                     aria-hidden
@@ -297,6 +315,16 @@ export function SyncTimeline(props: TimelineProps) {
                   />
                 ) : null}
               </div>
+              {inside === "" ? (
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute text-xs font-medium whitespace-nowrap text-stage-foreground"
+                  style={{ left: px(start) + widthPx + 6, top: rowTopPx + 4 }}
+                >
+                  {short}
+                </span>
+              ) : null}
+              </React.Fragment>
             )
           })}
           {pairConnectors}

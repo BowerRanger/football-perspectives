@@ -22,6 +22,8 @@ interface MomentsTrayProps {
   onSave: () => void
   onClose: () => void
   onClear: () => void
+  /** Return keyboard focus to the editor region so Enter / Esc work after a click. */
+  onActed: () => void
 }
 
 function modeLine(m: MomentsState, reference: string, member: string): string {
@@ -84,20 +86,31 @@ function PairRow({
   onRemove: () => void
 }) {
   const interval = prev ? (pair.reference_frame - prev.reference_frame) / (pair.shot_frame - prev.shot_frame) : null
-  const off = !!fit?.ramp && interval != null && Number.isFinite(interval) && Math.abs(interval / fit.rate - 1) > 0.2
+  // Outlier: this pair sits more than 3 reference frames from the fitted line (three or more pairs only).
+  const miss = fit && fit.n >= 3 ? Math.abs(pair.reference_frame - (fit.offset + fit.rate * pair.shot_frame)) : 0
+  const off = miss > 3
   return (
     <li className="grid grid-cols-[1.5rem_1fr_1fr_6rem_1.5rem] items-center gap-2 px-3 py-1.5 text-sm">
       <span className="text-xs text-muted-foreground tabular-nums">{index + 1}</span>
       <span className="font-mono tabular-nums">{pair.reference_frame}</span>
       <span className="font-mono tabular-nums">{pair.shot_frame}</span>
-      <span className={cn("text-xs tabular-nums", issue ? "text-destructive" : off ? "text-warning" : "text-muted-foreground")}>
+      <span className={cn("flex items-center gap-1.5 text-xs tabular-nums", issue ? "text-destructive" : "text-muted-foreground")}>
         {issue
           ? issue === "order"
             ? "order inverted"
             : "repeated frame"
           : interval != null && Number.isFinite(interval)
-            ? `${interval.toFixed(2)}×${off ? " off" : ""}`
+            ? `${interval.toFixed(2)}×`
             : "—"}
+        {off ? (
+          <span
+            role="img"
+            tabIndex={0}
+            className="size-2 shrink-0 rounded-full bg-warning"
+            aria-label={`This pair disagrees with the others by ${miss.toFixed(0)} frames`}
+            title={`This pair disagrees with the others by ${miss.toFixed(0)} frames`}
+          />
+        ) : null}
       </span>
       <IconButton label={`Remove pair ${index + 1}`} variant="ghost" size="icon-xs" onClick={onRemove}>
         <Trash2Icon />
@@ -122,6 +135,7 @@ export function MomentsTray({
   onSave,
   onClose,
   onClear,
+  onActed,
 }: MomentsTrayProps) {
   const { pairs, fit, pendingRef, pendingShot } = moments
   const issues = pairIssues(pairs)
@@ -145,19 +159,37 @@ export function MomentsTray({
       </p>
 
       <div className="flex flex-wrap items-center gap-2">
-        <Button variant="outline" size="sm" onClick={() => { const f = readReference(); if (f != null) moments.markRef(f) }}>
+        <Button variant="outline" size="sm" onClick={() => {
+            const f = readReference()
+            if (f != null) moments.markRef(f)
+            onActed()
+          }}>
           <CrosshairIcon data-icon="inline-start" />
           Mark {referenceShot} <Kbd>1</Kbd>
         </Button>
-        <Button variant="outline" size="sm" onClick={() => { const f = readMember(); if (f != null) moments.markShot(f) }}>
+        <Button variant="outline" size="sm" onClick={() => {
+            const f = readMember()
+            if (f != null) moments.markShot(f)
+            onActed()
+          }}>
           <CrosshairIcon data-icon="inline-start" />
           Mark {memberShot} <Kbd>2</Kbd>
         </Button>
-        <Button size="sm" disabled={!ready} onClick={() => moments.add()}>
+        <Button
+          size="sm"
+          disabled={!ready}
+          onClick={() => {
+            moments.add()
+            onActed()
+          }}
+        >
           <PlusIcon data-icon="inline-start" />
           Add pair <Kbd>Enter</Kbd>
         </Button>
-        <Button variant="ghost" size="sm" disabled={pendingRef == null && pendingShot == null} onClick={() => moments.discardPending()}>
+        <Button variant="ghost" size="sm" disabled={pendingRef == null && pendingShot == null} onClick={() => {
+            moments.discardPending()
+            onActed()
+          }}>
           Discard <Kbd>Esc</Kbd>
         </Button>
         {pendingRef != null ? (

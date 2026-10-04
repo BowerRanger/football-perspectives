@@ -24,12 +24,18 @@ interface RetimeTarget {
  * Retime / restore with their confirms, toasts and undo. `onChanged` must
  * reload the manifest AND the sync map (the editor reseeds from it).
  */
-export function useRetimeActions(onChanged: () => void | Promise<void>) {
+export function useRetimeActions(onChanged: () => void | Promise<void>, gate: () => string = () => "") {
   const confirm = useConfirm()
   const [busyId, setBusyId] = React.useState<string | null>(null)
 
   const restore = React.useCallback(
-    async (shotId: string, opts: { confirmFirst: boolean } = { confirmFirst: true }): Promise<boolean> => {
+    async (shotId: string, opts: { confirmFirst: boolean; wasRate?: number } = { confirmFirst: true }): Promise<boolean> => {
+      // Re-checked at click time: toast actions outlive the state they were created in.
+      const blocked = gate()
+      if (blocked) {
+        toast.error(`Can't restore ${shotId} now`, { description: blocked })
+        return false
+      }
       if (opts.confirmFirst) {
         const ok = await confirm({
           title: `Restore the native clip for ${shotId}?`,
@@ -37,13 +43,13 @@ export function useRetimeActions(onChanged: () => void | Promise<void>) {
             <div className="flex flex-col gap-3">
               <p>
                 This puts back the original slow-motion clip, its tracks and its camera, and returns the alignment to
-                the native rate. Anything you edited on the retimed tracks since the retime is lost.
+                rate {opts.wasRate ? fmtRate(opts.wasRate) : "the native rate"}. Anything you edited on the retimed tracks since the retime is lost.
               </p>
               <ul className="rounded-md bg-muted px-3 py-2 font-mono text-xs leading-relaxed text-foreground">
                 <li>{`shots/${shotId}.mp4  replaced by shots/native/${shotId}.mp4`}</li>
                 <li>{`tracks/${shotId}_tracks.json  native restored`}</li>
                 <li>{`camera/${shotId}_camera_track.json  native restored`}</li>
-                <li>shots/sync_map.json  rate back to native</li>
+                <li>{`shots/sync_map.json  rate 1.0 → ${opts.wasRate ? fmtRate(opts.wasRate) : "native"}, offset unchanged`}</li>
               </ul>
             </div>
           ),
@@ -64,11 +70,16 @@ export function useRetimeActions(onChanged: () => void | Promise<void>) {
         setBusyId(null)
       }
     },
-    [confirm, onChanged],
+    [confirm, onChanged, gate],
   )
 
   const retime = React.useCallback(
     async ({ shotId, rate, frames }: RetimeTarget): Promise<boolean> => {
+      const blocked = gate()
+      if (blocked) {
+        toast.error(`Can't retime ${shotId} now`, { description: blocked })
+        return false
+      }
       const out = Math.max(1, Math.round(frames * rate))
       const ok = await confirm({
         title: `Retime ${shotId} to real time?`,
@@ -102,7 +113,7 @@ export function useRetimeActions(onChanged: () => void | Promise<void>) {
         toast.success(`Retimed ${shotId} to real time`, {
           id: loading,
           description: res.retime ? `${res.retime.frames_in} → ${res.retime.frames_out} frames; native clip kept.` : undefined,
-          action: { label: "Undo", onClick: () => void restore(shotId, { confirmFirst: false }) },
+          action: { label: "Undo", onClick: () => void restore(shotId, { confirmFirst: false, wasRate: rate }) },
         })
         await onChanged()
         return true
@@ -113,7 +124,7 @@ export function useRetimeActions(onChanged: () => void | Promise<void>) {
         setBusyId(null)
       }
     },
-    [confirm, onChanged, restore],
+    [confirm, onChanged, restore, gate],
   )
 
   return { retime, restore, busyId }

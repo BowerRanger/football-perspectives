@@ -1,1 +1,0 @@
-import{b as e}from"./panel-CJY8Z2-r.js";import{t}from"./status-card-BO6G4UTx.js";var n=e();function r(){return(0,n.jsx)(t,{stage:`replay_sync`,outputs:`shots/replay_sync.json`,nextStep:`Measures each replay's speed from the players on the pitch and retimes confident slow motion to real time. Review and override per replay in Prepare Shots, Group sync.`})}export{r as default};

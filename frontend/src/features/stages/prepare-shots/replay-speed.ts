@@ -7,8 +7,13 @@ import type { ReplaySyncMember, Shot, SyncAlignment } from "./types"
 
 /** Within this of 1.0 a replay counts as real time (config replay_sync.retime_tolerance). */
 export const REAL_TIME_TOLERANCE = 0.08
-/** Confidence below which an estimate is shown as "check". */
-export const LOW_CONFIDENCE = 0.5
+/**
+ * Confidence below which an estimate is shown as "check" AND Retime is refused.
+ * One number for both (the backend's retime_min_confidence); the backend's own
+ * min_confidence (0.5) only decides applied vs low_confidence there.
+ */
+export const LOW_CONFIDENCE = 0.6
+const lowConfidenceBlock = `Confidence is below ${Math.round(LOW_CONFIDENCE * 100)} %: confirm by marking moments first.`
 /** Mirror of the backend's ramp test (replay_speed.py). */
 const RAMP_FACTOR = 1.2
 const RAMP_MIN_RESIDUAL = 1.5
@@ -176,7 +181,7 @@ export function deriveSpeedState({ isReference, shot, alignment, member, detecti
     return base({
       kind: "retimed",
       tone: "success",
-      text: `retimed to real time (was ${fmtRate(was)})`,
+      text: `retimed to real time (was ${fmtRate(was)}) · native kept`,
       detail: "This clip was re-encoded to real time; the native clip is kept and can be restored.",
     })
   }
@@ -223,10 +228,10 @@ export function deriveSpeedState({ isReference, shot, alignment, member, detecti
       return base({
         kind: "low-confidence",
         tone: "warning",
-        text: `${r.toFixed(2)}×? · ${SOURCE_AUTO} · ${pct(est?.confidence ?? 0)}, check`,
+        text: `${r.toFixed(2)}×? · ${SOURCE_AUTO} · ${pct(est?.confidence ?? 0)}, below ${pct(LOW_CONFIDENCE)}: check`,
         detail: member?.reason || "The match is weak. Confirm it by marking moments.",
         rate,
-        retimeBlocked: "Confidence is below 60 %: confirm by marking moments first.",
+        retimeBlocked: lowConfidenceBlock,
       })
     }
     if (alignment && alignment.method === "player_formation") {
@@ -235,10 +240,10 @@ export function deriveSpeedState({ isReference, shot, alignment, member, detecti
         return base({
           kind: "low-confidence",
           tone: "warning",
-          text: `${rate.toFixed(2)}×? · ${SOURCE_AUTO} · ${pct(conf)}, check`,
+          text: `${rate.toFixed(2)}×? · ${SOURCE_AUTO} · ${pct(conf)}, below ${pct(LOW_CONFIDENCE)}: check`,
           detail: "The match is weak. Confirm it by marking moments.",
           rate,
-          retimeBlocked: "Confidence is below 60 %: confirm by marking moments first.",
+          retimeBlocked: lowConfidenceBlock,
         })
       }
       if (member?.approximate && !isRealTime(rate)) {
@@ -252,7 +257,8 @@ export function deriveSpeedState({ isReference, shot, alignment, member, detecti
             member.reason ||
             "The rate is only as precise as the short live window allows. Mark matching moments to confirm it.",
           rate,
-          canRetime: rate < 1,
+          canRetime: false,
+          retimeBlocked: `Approximate rate${sigma != null ? ` (±${Math.round(sigma * 100)} %)` : ""} — confirm it by marking moments first.`,
         })
       }
       if (isRealTime(rate)) {
@@ -264,7 +270,7 @@ export function deriveSpeedState({ isReference, shot, alignment, member, detecti
           rate,
         })
       }
-      return slowOrFast(rate, `${SOURCE_AUTO} · ${pct(conf)}`, `Matched on players, ${pct(conf)} confident.`, "info", conf >= 0.6, conf >= 0.6 ? "" : "Confidence is below 60 %: confirm by marking moments first.")
+      return slowOrFast(rate, `${SOURCE_AUTO} · ${pct(conf)}`, `Matched on players, ${pct(conf)} confident.`, "info", true, "")
     }
   }
 

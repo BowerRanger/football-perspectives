@@ -16,11 +16,13 @@ interface RetimeButtonsProps {
   dirty: boolean
   /** Marked moments not saved yet. */
   pendingPairs?: boolean
+  /** Rate the clip had before it was retimed (for the restore confirm). */
+  wasRate?: number
   actions: ReturnType<typeof useRetimeActions>
 }
 
 /** Per-member Retime / Restore, with the reason text whenever it is blocked. */
-export function RetimeButtons({ shotId, state, frames, retimed, dirty, pendingPairs, actions }: RetimeButtonsProps) {
+export function RetimeButtons({ shotId, state, frames, retimed, dirty, pendingPairs, wasRate, actions }: RetimeButtonsProps) {
   const { isRunning, runningLabel } = usePipeline()
   const busy = actions.busyId === shotId
   if (!retimed && !state.canRetime && !state.retimeBlocked) return null
@@ -40,7 +42,7 @@ export function RetimeButtons({ shotId, state, frames, retimed, dirty, pendingPa
           variant="outline"
           size="xs"
           disabled={!!blocked || busy}
-          onClick={() => void actions.restore(shotId)}
+          onClick={() => void actions.restore(shotId, { confirmFirst: true, wasRate })}
         >
           <Undo2Icon data-icon="inline-start" />
           Restore native clip

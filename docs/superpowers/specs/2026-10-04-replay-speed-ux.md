@@ -333,3 +333,12 @@ Deviations from the direction above (all deliberate, found while building):
 - Added the `replay_sync` stage to `lib/stages.ts` and a status-card panel; the stage deps are tracking and camera.
 
 Not done: server-side progress for retime (a loading toast only); piecewise retiming of ramps; the finish review (left to the coordinator), DESIGN.md update (documenter, after the review).
+
+### Review fixes (finish review "fix" round)
+
+- While marked pairs preview on the active clip, its offset input, nudges, Lock, rate pencil, row slider and timeline drag are disabled, Save group is disabled with the reason, Mod+S saves the pairs, and an "Unsaved pairs" badge replaces the method badge.
+- One confidence number (60 %) drives both the warning badge and the Retime block; an approximate rate also blocks a manual Retime until confirmed by marked moments.
+- The tray's Mark / Add / Discard return focus to the editor region, so Enter and Esc work after a click. Backspace removes the pair added last.
+- Retime and Undo toast actions re-check the busy / unsaved gate at click time. The restore confirm names the rate it returns to.
+- Playback: raw (1x) mode no longer re-seeks the member on Play. The play loop moved into `use-sync-playback.ts`.
+- Timeline labels lead with `id · rate` and move beside narrow blocks; pair connectors are drawn centre to centre with a halo and end dots. Outlier pairs get a warning dot with a plain-words tooltip.

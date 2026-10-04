@@ -20,6 +20,7 @@ import { Kbd } from "@/components/ui/kbd"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useConfirm, usePrompt } from "@/hooks/use-dialogs"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { usePipeline } from "@/hooks/use-pipeline"
 import { useUnsavedGuard } from "@/hooks/use-unsaved-guard"
 import { errorMessage, postJson } from "@/lib/api"
 
@@ -29,9 +30,9 @@ import {
   deriveSpeedState,
   fmtRate,
   isCallToAction,
+  momentsProblem,
   REAL_TIME_TOLERANCE,
   refFrameForShot,
-  shotFrameForRef,
   type SpeedState,
 } from "./replay-speed"
 import { RetimeButtons } from "./retime-actions"
@@ -43,6 +44,7 @@ import type { GroupView, SyncAlignment } from "./types"
 import { useMomentKeys } from "./use-moment-keys"
 import { useMoments } from "./use-moments"
 import { useRetimeActions } from "./use-retime-actions"
+import { usePlaybackSync } from "./use-sync-playback"
 import type { ReplaySyncLookup } from "./use-replay-sync"
 
 interface EditorProps {
@@ -54,9 +56,10 @@ interface EditorProps {
   replaySync: ReplaySyncLookup
 }
 
-const DRIFT_S = 0.08
 const MIN_PLAYBACK = 0.0625
 const MAX_PLAYBACK = 16
+/** Shown wherever a control is locked because marked pairs drive the active clip. */
+const PAIRS_LOCK = "Your marked pairs set this clip's offset and rate — save or clear them."
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n))
 
 function seedState(group: GroupView) {
@@ -111,7 +114,6 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
   const [rates, setRates] = React.useState(seed.rates)
   const [methods, setMethods] = React.useState(seed.methods)
   const [playing, setPlaying] = React.useState(false)
-  const [cursorFrame, setCursorFrame] = React.useState(0)
   const [dirty, setDirty] = React.useState(false)
   const [saving, setSaving] = React.useState(false)
   const [trayOpen, setTrayOpen] = React.useState(false)
@@ -120,9 +122,23 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
   const [focusWell, setFocusWell] = React.useState<"reference" | "active">("reference")
   const refVideo = React.useRef<HTMLVideoElement>(null)
   const actVideo = React.useRef<HTMLVideoElement>(null)
+  const regionRef = React.useRef<HTMLDivElement>(null)
+  const { isRunning, runningLabel } = usePipeline()
 
   const moments = useMoments(activeShot)
-  const retimeActions = useRetimeActions(onReload)
+  // Re-read at click time: toast actions outlive the state they were created in.
+  const gateRef = React.useRef({ isRunning, runningLabel, dirty, hasUnsaved: moments.hasUnsaved })
+  React.useEffect(() => {
+    gateRef.current = { isRunning, runningLabel, dirty, hasUnsaved: moments.hasUnsaved }
+  })
+  const retimeGate = React.useCallback((): string => {
+    const g = gateRef.current
+    if (g.isRunning) return `${g.runningLabel ?? "A job"} is running.`
+    if (g.hasUnsaved) return "Save or clear the marked pairs first."
+    if (g.dirty) return "Save the group first."
+    return ""
+  }, [])
+  const retimeActions = useRetimeActions(onReload, retimeGate)
 
   // The tray's fit previews on the active clip until it is saved or cleared.
   const preview = moments.fit && moments.pairs.length >= 2 ? moments.fit : null
@@ -143,69 +159,18 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
   const fps = (id: string) => fpsByShot[id] || 25
   const offsetOf = (id: string) => effOffsets[id] ?? 0
   const rateOf = (id: string) => (id === referenceShot ? 1 : (effRates[id] ?? 1))
-  const latest = React.useRef({ referenceShot, activeShot, offsets: effOffsets, rates: effRates, speedMode, playing })
-  latest.current = { referenceShot, activeShot, offsets: effOffsets, rates: effRates, speedMode, playing }
+  const { syncActive, readCursor, cursorFrame } = usePlaybackSync({
+    refVideo,
+    actVideo,
+    fpsByShot,
+    state: { referenceShot, activeShot, offsets: effOffsets, rates: effRates, speedMode, playing },
+  })
 
   useUnsavedGuard(dirty || moments.hasUnsaved, { what: moments.hasUnsaved ? "marked moments" : "sync offsets" })
 
-  /** Rate used to map the reference clock onto the member while playing. */
-  const mapRate = (id: string) => (latest.current.speedMode === "fit" ? (latest.current.rates[id] ?? 1) : 1)
-
-  /** Move the active video to the instant matching the reference. */
-  const syncActive = React.useCallback((tolerance?: number) => {
-    const rv = refVideo.current
-    const av = actVideo.current
-    if (!rv || !av) return
-    const { referenceShot: r, activeShot: a, offsets: o, rates: rt, playing: isPlaying } = latest.current
-    const rate = isPlaying ? mapRate(a) : (rt[a] ?? 1)
-    // Continuous position in frames of the reference clip (frame f centre = f).
-    const refPos = rv.currentTime * fps(r) - 0.5
-    const shotPos = shotFrameForRef(refPos, rate, o[a] ?? 0)
-    const target = Math.max(0, frameTime(isPlaying ? shotPos : Math.round(shotPos), fps(a)))
-    const tol = tolerance ?? 0.05
-    if (Math.abs(av.currentTime - target) > tol / Math.min(1, rate || 1)) {
-      try {
-        av.currentTime = target
-      } catch {
-        /* metadata not loaded yet; loadedmetadata re-syncs */
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fpsByShot])
-
-  const readCursor = React.useCallback(() => {
-    const rv = refVideo.current
-    if (rv) setCursorFrame(rv.currentTime * fps(latest.current.referenceShot))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fpsByShot])
-
-  React.useEffect(() => {
-    syncActive()
-  }, [referenceShot, activeShot, effOffsets, effRates, syncActive])
-
-  React.useEffect(() => {
-    if (!playing) return
-    const rv = refVideo.current
-    const av = actVideo.current
-    syncActive()
-    rv?.play().catch(() => undefined)
-    av?.play().catch(() => undefined)
-    let raf = 0
-    const tick = () => {
-      readCursor()
-      syncActive(DRIFT_S)
-      raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => {
-      cancelAnimationFrame(raf)
-      rv?.pause()
-      av?.pause()
-    }
-  }, [playing, syncActive, readCursor])
-
   const setOffset = (shotId: string, value: number) => {
     if (shotId === referenceShot) return // reference is pinned to 0
+    if (preview && shotId === activeShot) return // marked pairs own this clip until saved or cleared
     setOffsets((prev) => ({ ...prev, [shotId]: Math.round(value) }))
     setMethods((prev) => ({ ...prev, [shotId]: { method: "manual", confidence: 1 } }))
     setDirty(true)
@@ -278,6 +243,10 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
   }
 
   const save = async () => {
+    if (preview) {
+      toast.error("Can't save the group yet", { description: PAIRS_LOCK })
+      return
+    }
     const alignments: (SyncAlignment & { playback_rate: number })[] = ids.map((sid) => {
       const isRef = sid === referenceShot
       const m = methods[sid] ?? { method: "manual", confidence: 1 }
@@ -341,7 +310,7 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
       const shotFrames = frameCount(savedShot)
       moments.reset(savedShot)
       onSaved()
-      const canRetime = !res.ramp && res.rate < 1 - REAL_TIME_TOLERANCE && !dirty
+      const canRetime = !res.ramp && res.rate < 1 - REAL_TIME_TOLERANCE
       toast.success(`Saved ${savedShot}: ${fmtRate(res.rate)}, offset ${(-res.offset).toFixed(1)} (marked by you)`, {
         description: res.ramp ? "The pairs show a speed ramp; the average rate was saved." : undefined,
         action: canRetime
@@ -400,12 +369,15 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
     },
     discard: () => moments.discardPending(),
     closeTray: () => setTrayOpen(false),
-    removeLast: () => {
-      if (moments.pairs.length > 0) moments.remove(moments.pairs.length - 1)
-    },
+    removeLast: () => moments.removeLatest(),
     save: () => {
-      if (trayOpen && moments.fit && !momentsBlocked) void saveMoments()
-      else void save()
+      if (!preview) {
+        void save()
+        return
+      }
+      const why = momentsBlocked || momentsProblem(moments.pairs, moments.fit)
+      if (why) toast.error("Can't save the marked pairs", { description: why })
+      else void saveMoments()
     },
   })
 
@@ -451,6 +423,7 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
 
   return (
     <div
+      ref={regionRef}
       role="group"
       aria-label="Group sync editor"
       tabIndex={0}
@@ -553,36 +526,44 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
         <Button
           variant="outline"
           size="sm"
-          title="Set the active clip's offset from both videos' current frames, at its current rate."
+          title={preview ? PAIRS_LOCK : "Set the active clip's offset from both videos' current frames, at its current rate."}
+          disabled={!!preview}
           onClick={lock}
         >
           <LockIcon data-icon="inline-start" />
           Lock offset to current frames
         </Button>
         <span className="text-sm text-muted-foreground">Active offset</span>
-        <OffsetInput label="Active clip offset in frames" value={offsetOf(activeShot)} onCommit={(v) => setOffset(activeShot, v)} />
-        <IconButton label="Nudge active clip 1 frame earlier (offset −1)" onClick={() => setOffset(activeShot, offsetOf(activeShot) - 1)}>
+        <OffsetInput
+          label="Active clip offset in frames"
+          value={offsetOf(activeShot)}
+          disabled={!!preview}
+          onCommit={(v) => setOffset(activeShot, v)}
+        />
+        <IconButton label="Nudge active clip 1 frame earlier (offset −1)" disabled={!!preview} onClick={() => setOffset(activeShot, offsetOf(activeShot) - 1)}>
           <ChevronLeftIcon />
         </IconButton>
-        <IconButton label="Nudge active clip 1 frame later (offset +1)" onClick={() => setOffset(activeShot, offsetOf(activeShot) + 1)}>
+        <IconButton label="Nudge active clip 1 frame later (offset +1)" disabled={!!preview} onClick={() => setOffset(activeShot, offsetOf(activeShot) + 1)}>
           <ChevronRightIcon />
         </IconButton>
         <span className="text-sm text-muted-foreground">Rate</span>
         <span className="font-mono text-sm tabular-nums" data-testid="active-rate">
           {activeRate.toFixed(3)}×
         </span>
-        <IconButton label="Set the playback rate by hand" variant="ghost" size="icon-xs" onClick={() => void editRate()}>
+        <IconButton label="Set the playback rate by hand" variant="ghost" size="icon-xs" disabled={!!preview} onClick={() => void editRate()}>
           <PencilIcon />
         </IconButton>
-        <MethodBadge method={effMethods[activeShot]} />
+        {preview ? <ToneBadge tone="warning">Unsaved pairs</ToneBadge> : <MethodBadge method={effMethods[activeShot]} />}
         <div className="ml-auto flex items-center gap-2">
           {dirty ? <ToneBadge tone="warning">Unsaved changes</ToneBadge> : null}
-          <Button size="sm" variant={trayOpen && moments.pairs.length > 0 ? "outline" : "default"} disabled={saving} onClick={() => void save()}>
+          <Button size="sm" variant={trayOpen && moments.pairs.length > 0 ? "outline" : "default"} disabled={saving || !!preview} title={preview ? PAIRS_LOCK : undefined} onClick={() => void save()}>
             <SaveIcon data-icon="inline-start" />
             Save group
           </Button>
         </div>
       </div>
+
+      {preview && !isMobile ? <p className="text-xs text-warning">{PAIRS_LOCK}</p> : null}
 
       {trayOpen && !isMobile ? (
         <MomentsTray
@@ -593,6 +574,7 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
           blockedReason={momentsBlocked}
           readReference={() => frameOf(refVideo.current, referenceShot)}
           readMember={() => frameOf(actVideo.current, activeShot)}
+          onActed={() => regionRef.current?.focus()}
           onSave={() => void saveMoments()}
           onClose={() => setTrayOpen(false)}
           onClear={() => void clearMoments()}
@@ -612,6 +594,7 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
         approxShots={approxShots}
         pairs={moments.pairs}
         previewActive={!!preview}
+        lockedShot={preview ? activeShot : null}
         readOnly={isMobile}
         cursorFrame={cursorFrame}
         onCommitOffset={setOffset}
@@ -631,6 +614,8 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
         speedStates={speedStates}
         speedNotes={speedNotes}
         readOnly={isMobile}
+        lockedShot={preview ? activeShot : null}
+        lockedReason={PAIRS_LOCK}
         onOpenMoments={(id) => {
           pickActive(id)
           setTrayOpen(true)
@@ -647,6 +632,7 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
               retimed={!!m.retimed}
               dirty={dirty}
               pendingPairs={moments.hasUnsaved}
+              wasRate={m.retimed && m.speed_factor > 0 ? 1 / m.speed_factor : undefined}
               actions={retimeActions}
             />
           )

@@ -18,6 +18,8 @@ export interface MomentsState {
   add: () => boolean
   discardPending: () => boolean
   remove: (index: number) => void
+  /** Remove the pair added most recently (not the one with the highest frame). */
+  removeLatest: () => void
   clear: () => void
   /** Drop the saved member's pairs and any pending marks. */
   reset: (shotId?: string) => void
@@ -30,6 +32,8 @@ export interface MomentsState {
  */
 export function useMoments(activeShot: string): MomentsState {
   const [byShot, setByShot] = React.useState<Record<string, MomentPair[]>>({})
+  // Insertion order per member, so Backspace undoes the last pair ADDED.
+  const [addedOrder, setAddedOrder] = React.useState<Record<string, MomentPair[]>>({})
   const [pending, setPending] = React.useState<{ shot: string; ref: number | null; replay: number | null }>({
     shot: activeShot,
     ref: null,
@@ -57,6 +61,7 @@ export function useMoments(activeShot: string): MomentsState {
     if (p.ref == null || p.replay == null) return false
     const next: MomentPair = { reference_frame: p.ref, shot_frame: p.replay }
     setByShot((prev) => ({ ...prev, [activeShot]: [...(prev[activeShot] ?? []), next] }))
+    setAddedOrder((prev) => ({ ...prev, [activeShot]: [...(prev[activeShot] ?? []), next] }))
     setPending({ shot: activeShot, ref: null, replay: null })
     return true
   }, [p, activeShot])
@@ -69,25 +74,37 @@ export function useMoments(activeShot: string): MomentsState {
 
   const remove = React.useCallback(
     (index: number) => {
-      setByShot((prev) => {
-        const sorted = sortPairs(prev[activeShot] ?? [])
-        return { ...prev, [activeShot]: sorted.filter((_, i) => i !== index) }
-      })
+      const target = sortPairs(byShot[activeShot] ?? [])[index]
+      if (!target) return
+      setByShot((prev) => ({ ...prev, [activeShot]: (prev[activeShot] ?? []).filter((q) => q !== target) }))
+      setAddedOrder((prev) => ({ ...prev, [activeShot]: (prev[activeShot] ?? []).filter((q) => q !== target) }))
     },
-    [activeShot],
+    [byShot, activeShot],
   )
 
-  const clear = React.useCallback(() => setByShot((prev) => ({ ...prev, [activeShot]: [] })), [activeShot])
+  const removeLatest = React.useCallback(() => {
+    const order = addedOrder[activeShot] ?? []
+    const last = order[order.length - 1]
+    if (!last) return
+    setAddedOrder((prev) => ({ ...prev, [activeShot]: order.slice(0, -1) }))
+    setByShot((prev) => ({ ...prev, [activeShot]: (prev[activeShot] ?? []).filter((q) => q !== last) }))
+  }, [addedOrder, activeShot])
+
+  const clear = React.useCallback(() => {
+    setByShot((prev) => ({ ...prev, [activeShot]: [] }))
+    setAddedOrder((prev) => ({ ...prev, [activeShot]: [] }))
+  }, [activeShot])
 
   const reset = React.useCallback(
     (shotId?: string) => {
       const id = shotId ?? activeShot
       setByShot((prev) => ({ ...prev, [id]: [] }))
+      setAddedOrder((prev) => ({ ...prev, [id]: [] }))
       setPending({ shot: activeShot, ref: null, replay: null })
     },
     [activeShot],
   )
 
   const hasUnsaved = Object.values(byShot).some((v) => v.length > 0)
-  return { pairs, fit, pendingRef: p.ref, pendingShot: p.replay, hasUnsaved, markRef, markShot, nudgeShot, add, discardPending, remove, clear, reset }
+  return { pairs, fit, pendingRef: p.ref, pendingShot: p.replay, hasUnsaved, markRef, markShot, nudgeShot, add, discardPending, remove, removeLatest, clear, reset }
 }

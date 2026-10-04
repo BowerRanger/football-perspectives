@@ -126,6 +126,24 @@ describe("deriveSpeedState", () => {
     expect(low.canRetime).toBe(false)
   })
 
+  it("one threshold: warning badge and refused Retime agree at 60 %", () => {
+    const at = (c: number) =>
+      deriveSpeedState({
+        isReference: false,
+        shot,
+        alignment: { method: "player_formation", confidence: c, playback_rate: 0.34 },
+        member: null,
+        detecting: false,
+      })
+    const low = at(0.55)
+    expect(low.kind).toBe("low-confidence")
+    expect(low.canRetime).toBe(false)
+    expect(low.text).toContain("55 %, below 60 %")
+    const ok = at(0.6)
+    expect(ok.kind).toBe("slow")
+    expect(ok.canRetime).toBe(true)
+  })
+
   it("manual rate wins over an auto decision; retimed wins over everything", () => {
     const manual = deriveSpeedState({
       isReference: false,
@@ -144,7 +162,7 @@ describe("deriveSpeedState", () => {
       detecting: false,
     })
     expect(retimed.kind).toBe("retimed")
-    expect(retimed.text).toBe("retimed to real time (was 0.34×)")
+    expect(retimed.text).toBe("retimed to real time (was 0.34×) · native kept")
   })
 
   it("approximate slow rate is a call to action and says so", () => {
@@ -156,6 +174,8 @@ describe("deriveSpeedState", () => {
       detecting: false,
     })
     expect(st.kind).toBe("approximate")
+    expect(st.canRetime).toBe(false)
+    expect(st.retimeBlocked).toContain("±8 %")
     expect(st.text).toBe("≈0.34× slow motion · ±8 % · confirm with moments")
     expect(isCallToAction(st)).toBe(true)
   })

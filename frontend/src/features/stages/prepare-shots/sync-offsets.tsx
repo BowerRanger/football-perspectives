@@ -25,6 +25,9 @@ interface OffsetRowsProps {
   readOnly?: boolean
   /** Opens the Match moments tray for a shot (the "no camera" call to action). */
   onOpenMoments?: (shotId: string) => void
+  /** Shot whose offset is driven by unsaved marked pairs: its controls are disabled. */
+  lockedShot?: string | null
+  lockedReason?: string
   /** Retime / Restore controls for a member row. */
   renderActions?: (shotId: string) => React.ReactNode
 }
@@ -91,6 +94,8 @@ export function SyncOffsetRows({
   speedNotes,
   readOnly,
   onOpenMoments,
+  lockedShot,
+  lockedReason,
   renderActions,
 }: OffsetRowsProps) {
   const bound = Math.max(60, maxFrames + 120, ...shotIds.map((id) => Math.abs(offsets[id] ?? 0)))
@@ -128,7 +133,8 @@ export function SyncOffsetRows({
               min={-bound}
               max={bound}
               step={1}
-              disabled={isRef || readOnly}
+              disabled={isRef || readOnly || id === lockedShot}
+              title={id === lockedShot ? lockedReason : undefined}
               value={[off]}
               onValueChange={([v]) => onSetOffset(id, v)}
             />
@@ -137,7 +143,7 @@ export function SyncOffsetRows({
               value={off}
               onCommit={(v) => onSetOffset(id, v)}
               className={isRef ? "opacity-50" : undefined}
-              disabled={isRef || readOnly}
+              disabled={isRef || readOnly || id === lockedShot}
             />
             {!isRef && !readOnly ? renderActions?.(id) : null}
           </li>

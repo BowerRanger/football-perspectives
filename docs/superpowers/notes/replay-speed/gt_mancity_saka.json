@@ -1,0 +1,485 @@
+[
+ {
+  "reel": "mancity",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-mancity",
+  "group": "g03",
+  "live": "s006",
+  "replay": "s007",
+  "match": true,
+  "events": [
+   {
+    "what": "#3 pass (foot contact) after winning ball",
+    "live_frame": 104,
+    "replay_frame": 13
+   },
+   {
+    "what": "#16 shot strike",
+    "live_frame": 157,
+    "replay_frame": 66
+   }
+  ],
+  "rate": 1.0,
+  "interval_rates": [
+   1.0
+  ],
+  "ramp": false,
+  "grade": "A",
+  "notes": "Real-time second angle (tighter high camera), not slow-mo. live = replay + 91 (pipeline offset -90 is right to ~1 fr)."
+ },
+ {
+  "reel": "mancity",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-mancity",
+  "group": "g04",
+  "live": "s008",
+  "replay": "s009",
+  "match": true,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": "C",
+  "notes": "Second LIVE shot (real-time close-up continuation of s008: #3 crosses at s009~29.5). No overlap with s008, so no rate measurable; s008->s009->s010 look like a contiguous live cut sequence."
+ },
+ {
+  "reel": "mancity",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-mancity",
+  "group": "g04",
+  "live": "s008",
+  "replay": "s010",
+  "match": true,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": "C",
+  "notes": "Second LIVE shot (real-time wide continuation: #22 touch ~20.5, strike 47, ball in net ~69, celebration). Does not overlap s008 (s008 ends before the cross). If contiguous, s010 f0 = s008 f182 (offset -182; pipeline -104)."
+ },
+ {
+  "reel": "mancity",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-mancity",
+  "group": "g04",
+  "live": "s008",
+  "replay": "s013",
+  "match": true,
+  "events": [
+   {
+    "what": "#3 cross (live = s009 f29.5 + 143, contiguous-cut assumption)",
+    "live_frame": 172.5,
+    "replay_frame": 34.5
+   },
+   {
+    "what": "#22 first touch (live = s010 f20.5 + 182)",
+    "live_frame": 202.5,
+    "replay_frame": 68
+   },
+   {
+    "what": "#22 strike (live = s010 f47 + 182)",
+    "live_frame": 229,
+    "replay_frame": 92.5
+   }
+  ],
+  "rate": 0.974,
+  "interval_rates": [
+   0.896,
+   1.082
+  ],
+  "ramp": false,
+  "grade": "B",
+  "notes": "High-camera replay at real time. Live frames mapped into s008 timeline assuming s008/s009/s010 are contiguous live cuts (39 + 143 frames); rate itself only needs s009/s010 to be contiguous. Interval jitter is \u00b11-2 fr on a 24-fr interval, not a ramp."
+ },
+ {
+  "reel": "mancity",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-mancity",
+  "group": "g04",
+  "live": "s008",
+  "replay": "s014",
+  "match": true,
+  "events": [
+   {
+    "what": "#3 cross (live = s009 f29.5 + 143)",
+    "live_frame": 172.5,
+    "replay_frame": 8.5
+   },
+   {
+    "what": "#22 strike (live = s010 f47 + 182)",
+    "live_frame": 229,
+    "replay_frame": 66.5
+   },
+   {
+    "what": "ball crosses goal line into net (live = s010 ~69 + 182)",
+    "live_frame": 251,
+    "replay_frame": 89
+   }
+  ],
+  "rate": 0.975,
+  "interval_rates": [
+   0.974,
+   0.978
+  ],
+  "ramp": false,
+  "grade": "B",
+  "notes": "Goal-line camera replay at real time. Same contiguity assumption as s013."
+ },
+ {
+  "reel": "mancity",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-mancity",
+  "group": "g04",
+  "live": "s008",
+  "replay": "s015",
+  "match": true,
+  "events": [
+   {
+    "what": "#22 strike (live = s010 f47 + 182)",
+    "live_frame": 229,
+    "replay_frame": 60
+   },
+   {
+    "what": "ball into net (live = s010 ~69 + 182)",
+    "live_frame": 251,
+    "replay_frame": 118
+   }
+  ],
+  "rate": 0.379,
+  "interval_rates": [
+   0.379
+  ],
+  "ramp": false,
+  "grade": "B",
+  "notes": "Low behind-defenders SLOW-MO replay, ~0.38x. Deflection at R66. Cross-check vs s014 (real time): strike->net 23 fr vs 58 -> 0.40. Net-entry frame \u00b12 in both views."
+ },
+ {
+  "reel": "mancity",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-mancity",
+  "group": "g05",
+  "live": "s016",
+  "replay": "s017",
+  "match": true,
+  "events": [
+   {
+    "what": "#33 strike",
+    "live_frame": 144.5,
+    "replay_frame": 32.5
+   },
+   {
+    "what": "keeper parry contact",
+    "live_frame": 151.5,
+    "replay_frame": 43.5
+   },
+   {
+    "what": "#11 brings rebound under control at feet",
+    "live_frame": 185,
+    "replay_frame": 109.5
+   }
+  ],
+  "rate": 0.526,
+  "interval_rates": [
+   0.636,
+   0.508
+  ],
+  "ramp": false,
+  "grade": "B",
+  "notes": "Slow-mo replay ~0.53x. First interval only 7 live frames (\u00b11 fr => 0.55-0.75), so the 0.64 vs 0.51 split is within measurement noise; treat as constant ~0.52. ramp flag not set."
+ },
+ {
+  "reel": "mancity",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-mancity",
+  "group": "g06",
+  "live": "s018",
+  "replay": "s019",
+  "match": true,
+  "events": [
+   {
+    "what": "header contest at near post (approx)",
+    "live_frame": 118,
+    "replay_frame": 31
+   },
+   {
+    "what": "#17 overhead/scissor kick contact",
+    "live_frame": 126.5,
+    "replay_frame": 44
+   }
+  ],
+  "rate": 0.654,
+  "interval_rates": [
+   0.654
+  ],
+  "ramp": false,
+  "grade": "C",
+  "notes": "Corner scramble; s019 is a high behind-goal reverse angle in slow motion (~0.6-0.65x). Event correspondence plausible but the first event is hard to identify in both views."
+ },
+ {
+  "reel": "mancity",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-mancity",
+  "group": "g07",
+  "live": "s020",
+  "replay": "s021",
+  "match": true,
+  "events": [
+   {
+    "what": "red #7 low shot strike",
+    "live_frame": 194,
+    "replay_frame": 75.5
+   },
+   {
+    "what": "keeper gets to ball / parries",
+    "live_frame": 206,
+    "replay_frame": 88.5
+   }
+  ],
+  "rate": 0.923,
+  "interval_rates": [
+   0.923
+  ],
+  "ramp": false,
+  "grade": "C",
+  "notes": "Reverse-side elevated replay, appears ~real time (0.92 over a short 13-fr interval). live = replay + ~118.5 => pipeline offset -236 is WRONG (sign and magnitude)."
+ },
+ {
+  "reel": "mancity",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-mancity",
+  "group": "g08",
+  "live": "s022",
+  "replay": "s024",
+  "match": true,
+  "events": [
+   {
+    "what": "red attacker pushes ball past defender near centre circle (approx \u00b12)",
+    "live_frame": 103,
+    "replay_frame": 13
+   },
+   {
+    "what": "keeper slide/dive fully horizontal at ball",
+    "live_frame": 186.5,
+    "replay_frame": 95
+   }
+  ],
+  "rate": 1.018,
+  "interval_rates": [
+   1.018
+  ],
+  "ramp": false,
+  "grade": "B",
+  "notes": "High behind-goal replay of the counter-attack at real time. live = replay + ~90 (pipeline +102 is off by ~12 fr, wrong sign convention?)."
+ },
+ {
+  "reel": "mancity",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-mancity",
+  "group": "g09",
+  "live": "s025",
+  "replay": "s027",
+  "match": true,
+  "events": [
+   {
+    "what": "red player's overhead clearance contact",
+    "live_frame": 194,
+    "replay_frame": 9.5
+   },
+   {
+    "what": "low shot struck from edge of six-yard box",
+    "live_frame": 278.5,
+    "replay_frame": 96
+   },
+   {
+    "what": "scissor/acrobatic follow-up contact",
+    "live_frame": 288.5,
+    "replay_frame": 105
+   }
+  ],
+  "rate": 0.99,
+  "interval_rates": [
+   0.977,
+   1.111
+  ],
+  "ramp": false,
+  "grade": "B",
+  "notes": "Tight goalmouth replay at real time (whip-pan blur R50-57, apparently not a cut \u2014 timing is consistent across it). live = replay + ~184.5 => pipeline offset -302 WRONG."
+ },
+ {
+  "reel": "mancity",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-mancity",
+  "group": "g09",
+  "live": "s025",
+  "replay": "s028",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": "C",
+  "notes": "Different live passage: sparse midfield play with a 1-1 score graphic animating in/out; not the goalmouth scramble in s025. Possibly a later restart; not a replay."
+ },
+ {
+  "reel": "mancity",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-mancity",
+  "group": "g09",
+  "live": "s025",
+  "replay": "s034",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": "C",
+  "notes": "Post-match close-ups of dejected light-kit players (crouching, lying on pitch); no shared play."
+ },
+ {
+  "reel": "saka",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/output-saka",
+  "group": "g04",
+  "live": "s009",
+  "replay": "s011",
+  "match": true,
+  "events": [
+   {
+    "what": "ball pushed ahead by the dribbler after taking it from a team-mate",
+    "live_frame": 41,
+    "replay_frame": 7
+   },
+   {
+    "what": "keeper first dive at full stretch",
+    "live_frame": 320,
+    "replay_frame": 285
+   },
+   {
+    "what": "Saka (#7) strike",
+    "live_frame": 351,
+    "replay_frame": 318
+   },
+   {
+    "what": "ball reaches defender at near post",
+    "live_frame": 358,
+    "replay_frame": 326
+   }
+  ],
+  "rate": 0.994,
+  "interval_rates": [
+   1.004,
+   0.939,
+   0.875
+  ],
+  "ramp": false,
+  "grade": "A",
+  "notes": "High-angle tracking replay of the whole move at REAL TIME (0.994 over 319 fr). Per-event offsets R = L - 34, -35, -33, -32 => best fit shot_frame = ref_frame - 33.5 (\u00b11). Pipeline -32 is consistent within ~1-2 fr; real-time assumption CONFIRMED. R0-18 close-up then zoom-out, no cut."
+ },
+ {
+  "reel": "saka",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/output-saka",
+  "group": "g06",
+  "live": "s014",
+  "replay": "s015",
+  "match": true,
+  "events": [
+   {
+    "what": "blue player's touch deflects the aerial ball back",
+    "live_frame": 161,
+    "replay_frame": 49
+   },
+   {
+    "what": "blue player's overhead/scissor clearance contact",
+    "live_frame": 193,
+    "replay_frame": 82
+   }
+  ],
+  "rate": 0.97,
+  "interval_rates": [
+   0.97
+  ],
+  "ramp": false,
+  "grade": "B",
+  "notes": "High-angle replay at real time (0.97). s015 R0-24 is a close-up + dissolve. R = L - 112 => pipeline offset -207 is WRONG."
+ },
+ {
+  "reel": "saka",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/output-saka",
+  "group": "g08",
+  "live": "s018",
+  "replay": "s019",
+  "match": true,
+  "events": [
+   {
+    "what": "keeper arm goes out",
+    "live_frame": 175,
+    "replay_frame": 15
+   },
+   {
+    "what": "keeper knee down",
+    "live_frame": 183.5,
+    "replay_frame": 34
+   },
+   {
+    "what": "ball lands",
+    "live_frame": 192,
+    "replay_frame": 62
+   }
+  ],
+  "rate": 0.362,
+  "interval_rates": [
+   0.447,
+   0.304
+  ],
+  "ramp": true,
+  "grade": "C",
+  "notes": "Near-post low camera, heavy slow motion ~0.36x overall. Interval rates 0.45/0.30 suggest a possible deceleration ramp, but events are soft (body-pose based); treat ramp as unconfirmed."
+ },
+ {
+  "reel": "saka",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/output-saka",
+  "group": "g08",
+  "live": "s018",
+  "replay": "s021",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": "C",
+  "notes": "Only 26 frames: wide reverse-ish angle of a crowded goalmouth set-piece scramble; could not match to any moment in s018."
+ },
+ {
+  "reel": "saka",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/output-saka",
+  "group": "g09",
+  "live": "s022",
+  "replay": "s023",
+  "match": true,
+  "events": [
+   {
+    "what": "clearance kicked out of the box",
+    "live_frame": 52.5,
+    "replay_frame": 29.5
+   },
+   {
+    "what": "blue player at edge of box receives the clearance",
+    "live_frame": 61.5,
+    "replay_frame": 38.5
+   },
+   {
+    "what": "#17 strike from edge of box",
+    "live_frame": 93,
+    "replay_frame": 69
+   }
+  ],
+  "rate": 1.025,
+  "interval_rates": [
+   1.0,
+   1.033
+  ],
+  "ramp": false,
+  "grade": "B",
+  "notes": "Overhead tactical-cam replay at real time (1.025). R = L - 23..24 => pipeline -152 WRONG."
+ },
+ {
+  "reel": "saka",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/output-saka",
+  "group": "g10",
+  "live": "s024",
+  "replay": "s025",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": "C",
+  "notes": "s025 carries a 'Full time' score bug: post-match slow-mo replay of a byline cross + #5 header. Could not locate the cross/header in s024 (live ends on a player down, then close-up). Unconfirmed \u2014 possibly a different incident."
+ }
+]

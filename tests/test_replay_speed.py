@@ -97,3 +97,36 @@ def test_feet_on_pitch_projects_box_bottoms():
     pts = rs.feet_on_pitch(tracks, lambda f: (K, R, t, (0.0, 0.0)))
     assert set(pts) == {3}
     assert np.allclose(pts[3][0], p[:2], atol=1e-6)
+
+
+# --- operator-marked moments (no camera needed) -----------------------------
+
+def test_two_moments_give_exact_rate_and_offset():
+    # replay frames 28 and 160 show the moments live shows at 137 and 182
+    est = rs.rate_from_moments([(137, 28), (182, 160)])
+    assert est.rate == pytest.approx(45 / 132)
+    assert est.offset == pytest.approx(137 - 28 * 45 / 132)
+    assert est.residual_frames == pytest.approx(0.0)
+    assert not est.ramp
+
+
+def test_three_consistent_moments_fit_least_squares():
+    pairs = [(137, 28), (168, 120), (182, 160)]  # s043 hand labels
+    est = rs.rate_from_moments(pairs)
+    assert est.rate == pytest.approx(0.341, abs=0.01)
+    assert est.residual_frames < 1.5
+    assert not est.ramp
+
+
+def test_moments_reveal_a_ramp():
+    # 0.27x then 0.41x (s012-like)
+    pairs = [(100, 0), (127, 100), (168, 200)]
+    est = rs.rate_from_moments(pairs)
+    assert est.ramp
+    assert est.interval_rates == pytest.approx([0.27, 0.41])
+
+
+@pytest.mark.parametrize("pairs", [[], [(10, 5)], [(10, 5), (20, 5)], [(10, 5), (8, 9)]])
+def test_moments_reject_degenerate_input(pairs):
+    with pytest.raises(ValueError):
+        rs.rate_from_moments(pairs)

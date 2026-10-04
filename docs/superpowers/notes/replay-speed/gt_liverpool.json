@@ -1,0 +1,640 @@
+[
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g11",
+  "live": "s042",
+  "replay": "s043",
+  "match": true,
+  "events": [
+   {
+    "what": "Shaqiri cross leaves foot",
+    "live_frame": 137,
+    "replay_frame": 28
+   },
+   {
+    "what": "Wijnaldum header contact",
+    "live_frame": 168,
+    "replay_frame": 120
+   },
+   {
+    "what": "ball passes keeper into near top corner",
+    "live_frame": 182,
+    "replay_frame": 160
+   }
+  ],
+  "rate": 0.341,
+  "interval_rates": [
+   0.337,
+   0.35
+  ],
+  "ramp": false,
+  "grade": "A",
+  "offset_first_event": 109,
+  "notes": "Continuous slow-mo (~1/3 speed) with zoom/whip moves around R35-40 and R110-115; live header frame is from a far camera (+-1-2)."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g09",
+  "live": "s036",
+  "replay": "s037",
+  "match": true,
+  "events": [
+   {
+    "what": "shot leaves foot",
+    "live_frame": 243,
+    "replay_frame": 35
+   },
+   {
+    "what": "keeper glove contact (save)",
+    "live_frame": 253,
+    "replay_frame": 92
+   }
+  ],
+  "rate": 0.175,
+  "interval_rates": [
+   0.175
+  ],
+  "ramp": false,
+  "grade": "B",
+  "offset_first_event": 208,
+  "notes": "Very slow (~0.18x super-slow). Only 10 live frames between events, so +-1 live frame = +-10% rate. NB s036 itself contains an embedded goal-line slow replay after a dissolve at ~290-296."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g06",
+  "live": "s018",
+  "replay": "s019",
+  "match": true,
+  "events": [
+   {
+    "what": "Mane touch on dribble",
+    "live_frame": 163,
+    "replay_frame": 9
+   },
+   {
+    "what": "Mane cut-back touch",
+    "live_frame": 189,
+    "replay_frame": 35
+   },
+   {
+    "what": "defender lunge",
+    "live_frame": 191,
+    "replay_frame": 37
+   },
+   {
+    "what": "ball clears defender",
+    "live_frame": 195,
+    "replay_frame": 41
+   }
+  ],
+  "rate": 1.0,
+  "interval_rates": [
+   1.0,
+   1.0,
+   1.0
+  ],
+  "ramp": false,
+  "grade": "B",
+  "offset_first_event": 154,
+  "notes": "Real-time alternate (tight) angle of the Mane dribble; constant offset 154 frames on all events."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g06",
+  "live": "s018",
+  "replay": "s020",
+  "match": true,
+  "events": [
+   {
+    "what": "Robertson strike contact",
+    "live_frame": 250,
+    "replay_frame": 26
+   },
+   {
+    "what": "ball rebounds clear of keeper",
+    "live_frame": 267,
+    "replay_frame": 43
+   },
+   {
+    "what": "rebound ball position",
+    "live_frame": 271,
+    "replay_frame": 47
+   }
+  ],
+  "rate": 1.0,
+  "interval_rates": [
+   1.0,
+   1.0
+  ],
+  "ramp": false,
+  "grade": "B",
+  "offset_first_event": 224,
+  "notes": "Real-time tighter angle (MSE check: not a pixel duplicate of live). Whip-pan blur around R38-41 at the keeper contact. Offset 224."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g06",
+  "live": "s018",
+  "replay": "s021",
+  "match": true,
+  "events": [
+   {
+    "what": "keeper sets/starts dive",
+    "live_frame": 257,
+    "replay_frame": 50
+   },
+   {
+    "what": "ball separated after save",
+    "live_frame": 267,
+    "replay_frame": 70
+   }
+  ],
+  "rate": 0.5,
+  "interval_rates": [
+   0.5
+  ],
+  "ramp": false,
+  "grade": "C",
+  "offset_first_event": 207,
+  "notes": "Behind-goal camera; ball hard to see; rate ~0.5 is rough."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g02",
+  "live": "s010",
+  "replay": "s011",
+  "match": true,
+  "events": [
+   {
+    "what": "Origi strike contact",
+    "live_frame": 127,
+    "replay_frame": 15
+   },
+   {
+    "what": "ball reaches near post",
+    "live_frame": 138,
+    "replay_frame": 26
+   }
+  ],
+  "rate": 1.0,
+  "interval_rates": [
+   1.0
+  ],
+  "ramp": false,
+  "grade": "C",
+  "offset_first_event": 112,
+  "notes": "Looks real time (r~1.0); only 11 frames apart, so loose. Tail R44-54 is the Henderson/keeper cluster continuing."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g02",
+  "live": "s010",
+  "replay": "s012",
+  "match": true,
+  "events": [
+   {
+    "what": "Henderson shot meets keeper glove",
+    "live_frame": 114,
+    "replay_frame": 20
+   },
+   {
+    "what": "Origi rebound strike, last foot contact",
+    "live_frame": 127,
+    "replay_frame": 69
+   },
+   {
+    "what": "ball crosses goal line at near post",
+    "live_frame": 135.5,
+    "replay_frame": 89.5
+   }
+  ],
+  "rate": 0.309,
+  "interval_rates": [
+   0.265,
+   0.415
+  ],
+  "ramp": true,
+  "grade": "B",
+  "offset_first_event": 94,
+  "notes": "Ramp: 0.27x over the save-to-rebound span, then ~0.41x up to the goal line. Overall 0.31."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g05",
+  "live": "s016",
+  "replay": "s017",
+  "match": true,
+  "events": [
+   {
+    "what": "Alisson dive onset (hands to turf)",
+    "live_frame": 402,
+    "replay_frame": 18
+   },
+   {
+    "what": "glove on ball",
+    "live_frame": 405.5,
+    "replay_frame": 50
+   }
+  ],
+  "rate": 0.109,
+  "interval_rates": [
+   0.109
+  ],
+  "ramp": false,
+  "grade": "C",
+  "offset_first_event": 384,
+  "notes": "Super-slow (~0.1x). The replay covers only ~6 live frames, so the live events are hard to time; rate is rough."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g08",
+  "live": "s029",
+  "replay": "s030",
+  "match": true,
+  "events": [
+   {
+    "what": "through pass leaves foot",
+    "live_frame": 224,
+    "replay_frame": 91
+   },
+   {
+    "what": "ball reaches sliding Alisson",
+    "live_frame": 233.5,
+    "replay_frame": 101.5
+   }
+  ],
+  "rate": 0.905,
+  "interval_rates": [
+   0.905
+  ],
+  "ramp": false,
+  "grade": "B",
+  "offset_first_event": 133,
+  "notes": "~Real time (0.9); s030's first ~45 frames match a static earlier view (no shared events). Offset 133."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g07",
+  "live": "s022",
+  "replay": "s023",
+  "match": true,
+  "events": [
+   {
+    "what": "long pass leaves foot (Barca midfielder)",
+    "live_frame": 10,
+    "replay_frame": 18.5
+   },
+   {
+    "what": "Messi (#10) receives, ball at foot",
+    "live_frame": 38.5,
+    "replay_frame": 41.5
+   }
+  ],
+  "rate": 1.239,
+  "interval_rates": [
+   1.239
+  ],
+  "ramp": true,
+  "grade": "B",
+  "offset_first_event": -8.5,
+  "notes": "FASTER THAN LIVE: r=1.24. Cross-check from the live stoppage clock: the reel's live shots run ~25.7 frames per clock-second (s022, s029), so live is about 0.97x real time, and that does not explain 1.24. Either the replay is a sped-up re-cut or one of the two events is off by ~3 frames. Flagged as ramp because the start is uncertain."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g07",
+  "live": "s022",
+  "replay": "s025",
+  "match": true,
+  "events": [
+   {
+    "what": "dribbler beats defender",
+    "live_frame": 102,
+    "replay_frame": 6
+   },
+   {
+    "what": "ball pops up after keeper collision",
+    "live_frame": 133.5,
+    "replay_frame": 39.5
+   }
+  ],
+  "rate": 0.94,
+  "interval_rates": [
+   0.94
+  ],
+  "ramp": false,
+  "grade": "C",
+  "offset_first_event": 96,
+  "notes": "Overall ~0.94 (real time), but a middle event (defender lunge L121/R31) is inconsistent, so grade C."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g07",
+  "live": "s022",
+  "replay": "s024",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Near-freeze main-camera frame (no motion over 31 frames); no rate measurable."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g07",
+  "live": "s022",
+  "replay": "s026",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Low camera on a corner; corner not in live s022."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g07",
+  "live": "s022",
+  "replay": "s027",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Corner scramble at the other end; not in live s022."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g07",
+  "live": "s022",
+  "replay": "s028",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Overhead corner scramble; not in live s022."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g08",
+  "live": "s029",
+  "replay": "s031",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Wide main-camera-like build-up; no shared timeable events found (unresolved)."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g08",
+  "live": "s029",
+  "replay": "s032",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "TAA #66 low-camera header/chase; different moment from the live shot (unresolved)."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g08",
+  "live": "s029",
+  "replay": "s033",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Wide build-up from another angle; no shared events identified (unresolved)."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g08",
+  "live": "s029",
+  "replay": "s034",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Other end of the pitch (ter Stegen goal); different incident."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g10",
+  "live": "s038",
+  "replay": "s039",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Post-goal celebration (Origi at the post, then TAA); the live shot ends before it."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g01",
+  "live": "s004",
+  "replay": "s009",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "High wide camera build-up; no shared timeable events established (unresolved)."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g12",
+  "live": "s044",
+  "replay": "s045",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Messi chest control at the corner flag, then dribble at Alisson. Not identifiable in live s044 (TAA #66 near the goal ~250-290); unresolved."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g12",
+  "live": "s044",
+  "replay": "s046",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Messi shot saved by Alisson at the near post, from several angles (cuts inside). Possibly live ~280, but not verified."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g12",
+  "live": "s044",
+  "replay": "s048",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Real-time main camera of the 4th-goal corner (Origi); a different incident."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g12",
+  "live": "s044",
+  "replay": "s049",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Celebration (Shaqiri)."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g12",
+  "live": "s044",
+  "replay": "s053",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Pitch-level goal-line camera of a Pique clearance (ball up ~117-126), then a dissolve ~171 into a pitch-level Liverpool attack. Second live-like content; not the s044 play."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g12",
+  "live": "s044",
+  "replay": "s054",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "ter Stegen, with the net behind; reaction."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g12",
+  "live": "s044",
+  "replay": "s055",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Corner-flag scuffle."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g12",
+  "live": "s044",
+  "replay": "s057",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Celebration."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g12",
+  "live": "s044",
+  "replay": "s058",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Celebration."
+ },
+ {
+  "reel": "liverpool",
+  "output_dir": "/Users/joebower/workplace/football-perspectives/.claude/worktrees/highlights-ingestion/output-highlights",
+  "group": "g12",
+  "live": "s044",
+  "replay": "s061",
+  "match": false,
+  "events": [],
+  "rate": null,
+  "interval_rates": [],
+  "ramp": false,
+  "grade": null,
+  "offset_first_event": null,
+  "notes": "Celebration."
+ }
+]

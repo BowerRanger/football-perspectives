@@ -236,3 +236,51 @@ def estimate_speed(
         confidence=confidence, rate_first=r1, rate_second=r2, ramp=ramp,
         n_replay_frames=len(frames),
     )
+
+
+# ---------------------------------------------------------------------------
+# operator-marked moments: the camera-free path
+# ---------------------------------------------------------------------------
+
+# A ramp from marked moments needs interval rates differing by this factor
+# AND a straight-line fit missing some moment by more than this many live
+# frames (click error alone is about +-1 frame).
+_MOMENT_RAMP_MIN_RESIDUAL = 1.5
+
+
+@dataclass(frozen=True)
+class MomentFit:
+    rate: float                   # live frames per replay frame
+    offset: float                 # live frame at replay frame 0
+    residual_frames: float        # worst |live - fit| over the moments
+    interval_rates: list[float]   # rate between consecutive moments
+    ramp: bool
+    n_moments: int
+
+
+def rate_from_moments(pairs: list[tuple[float, float]]) -> MomentFit:
+    """Rate + offset from operator-marked matching moments.
+
+    ``pairs`` are ``(live_frame, replay_frame)``: the same instant marked in
+    both clips (a ball contact, a net impact). Two pairs fix the time map
+    exactly; more are fitted by least squares, and their interval rates
+    reveal a speed ramp. Raises ``ValueError`` for fewer than two moments,
+    a repeated replay frame, or moments that run backwards.
+    """
+    pts = sorted((float(r), float(lv)) for lv, r in pairs)
+    if len(pts) < 2:
+        raise ValueError("mark at least two matching moments")
+    rep = np.array([p[0] for p in pts])
+    live = np.array([p[1] for p in pts])
+    if np.any(np.diff(rep) <= 0):
+        raise ValueError("each moment needs a different replay frame")
+    if np.any(np.diff(live) <= 0):
+        raise ValueError("moments must run forwards in both clips")
+    rate, offset = np.polyfit(rep, live, 1)
+    resid = float(np.max(np.abs(live - (offset + rate * rep))))
+    intervals = [float(x) for x in np.diff(live) / np.diff(rep)]
+    ramp = bool(len(intervals) >= 2
+                and max(intervals) / min(intervals) > _RAMP_FACTOR
+                and resid > _MOMENT_RAMP_MIN_RESIDUAL)
+    return MomentFit(rate=float(rate), offset=float(offset), residual_frames=resid,
+                     interval_rates=intervals, ramp=ramp, n_moments=len(pts))

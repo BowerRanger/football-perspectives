@@ -4093,6 +4093,15 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
     def serve_ball_anchor_editor():
         return _spa_shell()
 
+    # Ball Studio: multi-angle 3-D ball-truth authoring (see ball_studio.py).
+    from src.web.ball_studio import build_router as _ball_studio_router
+
+    app.include_router(_ball_studio_router(output_dir, config_path))
+
+    @app.get("/ball-studio", include_in_schema=False)
+    def serve_ball_studio():
+        return _spa_shell()
+
     return app
 
 

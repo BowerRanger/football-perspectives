@@ -10,7 +10,7 @@ the implementation, report it.
 All routes live under `/api/ball-studio`. JSON in/out. Errors use FastAPI's
 `{"detail": ...}`: 400 bad id / bad request, 404 unknown group, 422 truth
 failed validation (`detail` is `{"errors": [{"path": "keys[2].frame", "message": "..."}]}`),
-409 never used. The SPA page route is `GET /ball-studio?group=<group_id>`
+409 `PUT truth` optimistic-concurrency conflict (see PUT). The SPA page route is `GET /ball-studio?group=<group_id>`
 (serves the SPA shell).
 
 ## Conventions
@@ -55,7 +55,8 @@ entirely for the common overlay.
       "ref_frame_range": [0, 205],
       "shots": [
         {"shot_id": "origi01", "frame_offset": 0, "n_frames": 206,
-         "fps": 30.0, "image_size": [1920, 1080], "excluded": false,
+         "fps": 30.0, "image_size": [1920, 1080], "width": 1920, "height": 1080,
+         "frame_range": [0, 205], "excluded": false,
          "video_url": "/api/video/origi01",
          "frame_url": "/api/video/origi01/frame"},
         {"shot_id": "origi02", "frame_offset": -142, "n_frames": 340, "...": "..."}
@@ -63,7 +64,8 @@ entirely for the common overlay.
       "has_truth": false,
       "truth_updated_at": null,
       "n_keys": 0,
-      "outcome": "unknown"
+      "outcome": "unknown",
+      "status": "draft"
     }
   ]
 }
@@ -88,6 +90,8 @@ arrays). Cached server-side on file mtimes; send `Cache-Control: no-store`.
   "shots": [
     {
       "shot_id": "origi01", "frame_offset": 0, "image_size": [1920, 1080],
+      "width": 1920, "height": 1080,
+      "frame_range": [0, 205], "n_frames": 206, "fps": 30.0, "excluded": false,
       "distortion": [0.0, 0.0],
       "camera_centre": [52.5, -38.0, 21.0],
       "frames":   [0, 1, 2],
@@ -102,7 +106,13 @@ arrays). Cached server-side on file mtimes; send `Cache-Control: no-store`.
     "goal_line_x_near": 0.0, "goal_line_x_far": 105.0,
     "post_y_left": 30.34, "post_y_right": 37.66,
     "crossbar_z": 2.44, "net_depth": 1.5,
-    "pitch": {"length_m": 105.0, "width_m": 68.0}
+    "pitch": {"length_m": 105.0, "width_m": 68.0},
+    "goal_planes": [
+      {"id": "goal_line_near", "axis": "x", "value": 0.0,
+       "mouth": {"y_range": [30.34, 37.66], "z_range": [0.0, 2.44]}},
+      {"id": "goal_line_far", "axis": "x", "value": 105.0,
+       "mouth": {"y_range": [30.34, 37.66], "z_range": [0.0, 2.44]}}
+    ]
   },
   "bones": ["pelvis","l_foot","r_foot","l_knee","r_knee","chest","head",
             "l_shoulder","r_shoulder","l_hand","r_hand"],
@@ -193,9 +203,13 @@ Stored at `<output>/ball_truth/<group_id>_ball_truth.json`.
   "events": [
     {"frame": 440, "kind": "touch", "player_id": "P023", "bone": "r_foot", "note": ""}
   ],
-  "meta": {"authored_by": "operator", "updated_at": "2026-10-04T12:00:00Z", "notes": ""}
+  "meta": {"authored_by": "operator", "updated_at": "2026-10-04T12:00:00Z", "notes": "",
+           "status": "draft"}
 }
 ```
+
+`meta.status` is `draft | reviewed` (default `draft`); `meta.updated_at` is
+server-owned (overwritten on every PUT, null before the first save).
 
 Field rules (the server validates on `PUT`, returns 422 with all errors):
 
@@ -234,21 +248,32 @@ Field rules (the server validates on `PUT`, returns 422 with all errors):
 
 ## PUT `/api/ball-studio/groups/{g}/truth`
 
-Body: a Truth document (`meta.updated_at` is overwritten by the server).
-Validates, writes `ball_truth/<g>_ball_truth.json` atomically (tmp + replace),
-copies the previous file to `ball_truth/.history/<g>_ball_truth.<UTC
-timestamp>.json` (kept, never pruned by the server), solves the document and
-writes `<g>_ball_truth_dense.json` beside it. Response:
+Body (wrapper, because of optimistic concurrency):
+
+```json
+{"truth": { "...Truth document..." }, "expected_updated_at": "2026-10-04T11:58:00Z"}
+```
+
+* `expected_updated_at` is the `meta.updated_at` the client loaded (`null` =
+  "I believe no file exists"). If the key is **omitted** no concurrency check
+  is made. When present and different from the stored `meta.updated_at` (or
+  `null` while a file exists) the server answers **409** and writes nothing:
+  `{"detail": {"message": "truth changed since it was loaded",
+  "current_updated_at": "...", "expected_updated_at": "..."}}`.
+* Validates the truth (422 with all errors), overwrites `meta.updated_at`,
+  writes `ball_truth/<g>_ball_truth.json` atomically (tmp + replace), copies the
+  previous file to `ball_truth/.history/<g>_ball_truth.<UTC timestamp>.json`
+  (kept, never pruned), solves and writes `<g>_ball_truth_dense.json`.
 
 ```json
 {"ok": true, "updated_at": "2026-10-04T12:00:00Z",
- "history_file": ".history/origi01_ball_truth.20261004T120000Z.json",
+ "history_file": ".history/origi01_ball_truth.20261004T120000000000Z.json",
  "solve_ok": true, "n_flags": 2}
 ```
 
 A document that fails validation is rejected (422), nothing written. A
-document that validates but cannot be solved (e.g. a key is behind the
-camera) is still saved (`solve_ok: false`) — operator data is never dropped.
+document that validates but cannot be solved (e.g. a key is behind the camera)
+is still saved (`solve_ok: false`) - operator data is never dropped.
 
 ## POST `/api/ball-studio/groups/{g}/triangulate`
 
@@ -261,9 +286,17 @@ Live while clicking. Body:
     {"shot_id": "origi01", "shot_frame": 440, "uv": [812.0, 604.5]},
     {"shot_id": "origi02", "shot_frame": 298, "uv": [1203.1, 455.0]}
   ],
-  "constraint": null
+  "constraint": null,
+  "offsets": null
 }
 ```
+
+`offsets` (optional, read-only **sync probe**): `{shot_id: frame_offset}`
+overrides. For an overridden shot the held pixel is re-attributed to camera
+frame `frame + override` (the response's `observations_used[].shot_frame`
+shows the frame actually used) and the epipolar lines use the overridden
+offsets too. Nothing is persisted. The UI calls this at stored offset -2..+2 and
+compares `max_residual_px` / `skew_gap_cm`.
 
 `constraint` (optional, for single-observation requests) is the same object
 as `keys[].constraint` plus `"mode"`: one of `ground | height | plane | depth |
@@ -279,19 +312,30 @@ verdict is in the body):
   "source": "triangulated",
   "residual_px": {"origi01": 0.8, "origi02": 1.4},
   "max_residual_px": 1.4,
+  "reprojected_uv": {"origi01": [812.4, 604.2], "origi02": [1203.8, 455.6]},
   "ray_angle_deg": 37.2,
+  "skew_gap_cm": 3.1,
+  "offsets_used": {"origi01": 0, "origi02": -142},
+  "observations_used": [
+    {"shot_id": "origi01", "shot_frame": 440, "uv": [812.0, 604.5]},
+    {"shot_id": "origi02", "shot_frame": 298, "uv": [1203.1, 455.0]}
+  ],
   "rays": [
     {"shot_id": "origi01", "origin": [52.5, -38.0, 21.0], "direction": [0.1, 0.8, -0.5]},
     {"shot_id": "origi02", "origin": [...], "direction": [...]}
   ],
   "epipolar": [
     {"shot_id": "origi02", "shot_frame": 298,
+     "polyline_uv": [[0, 0], "... up to 24 points, clipped to the image"],
      "segment_uv": [[u0, v0], [u1, v1]]}
   ],
   "flags": [{"level": "warn", "code": "weak_baseline", "message": "rays differ by 1.2 deg"}]
 }
 ```
 
+* `skew_gap_cm`: the largest closest-approach distance between any two of the
+  rays (how far the clicks are from being geometrically consistent, independent
+  of pixel scale); also present on `solve.keys[]` for triangulated keys.
 * `ok: false` + `reason` (`"behind_camera"`, `"no_camera_frame"`,
   `"residual_exceeds_limit"`, `"parallel_rays"`, ...) when it cannot produce a
   key. For `residual_exceeds_limit` (any view > 15 px) `xyz` and residuals are

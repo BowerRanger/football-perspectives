@@ -1,0 +1,1 @@
+import{w as e}from"./panel-CJY8Z2-r.js";var t={name:`chevron-down`,size:24,node:[[`path`,{d:`m6 9 6 6 6-6`,key:`qrunsl`}]]};t.node;var n=e(t);export{n as t};

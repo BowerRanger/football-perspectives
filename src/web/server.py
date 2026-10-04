@@ -94,8 +94,10 @@ STAGE_ORDER: list[str] = [
     "hmr_world",
     "refined_poses",
     "ball",
+    "appearance",
     "export",
     "render",
+    "shorts",
 ]
 
 def _active_manifest_shot_ids(output_dir: Path) -> list[str]:
@@ -256,6 +258,22 @@ def _render_complete(output_dir: Path) -> bool:
     return RenderStage({}, output_dir).is_complete()
 
 
+def _shorts_complete(output_dir: Path) -> bool:
+    """Delegates to ``ShortsStage.is_complete`` (every goal shot has its
+    sidecar and template mp4s). Any import/read failure reads as not complete
+    so a broken sidecar never takes the dashboard's stage list down."""
+    try:
+        from src.stages.shorts import ShortsStage
+
+        stage = ShortsStage({}, output_dir)
+        # No goal shot means nothing was made; the stage's own check is
+        # vacuously true there, which would paint an unrun stage green.
+        return bool(stage._target_shots()) and stage.is_complete()
+    except Exception:
+        logger.exception("shorts completeness check failed")
+        return False
+
+
 # A valid output-directory basename: letters, digits, dash, underscore. No
 # path separators or dots, so it can never escape the parent directory.
 _OUTPUT_DIR_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -281,8 +299,10 @@ _STAGE_COMPLETE = {
     "hmr_world": _hmr_world_complete,
     "ball": lambda d: (d / "ball" / "ball_track.json").exists(),
     "refined_poses": _refined_poses_complete,
+    "appearance": lambda d: (d / "appearance" / "kits.json").exists(),
     "export": lambda d: (d / "export" / "gltf" / "scene.glb").exists(),
     "render": _render_complete,
+    "shorts": _shorts_complete,
 }
 
 # Per-stage outputs that should be wiped on a "re-run" or "clear" action.
@@ -307,7 +327,11 @@ _STAGE_ARTIFACTS: dict[str, list[str]] = {
     "hmr_world": ["hmr_world"],
     "ball": ["ball/*_ball_track.json", "ball/ball_track.json"],
     "refined_poses": ["refined_poses"],
+    # appearance/kits_operator.json and shorts/*_operator.json are operator
+    # input and are deliberately not listed.
+    "appearance": ["appearance/kits.json", "appearance/players_suggested.json"],
     "export": ["export/gltf", "export/fbx", "export/ue_manifest.json"],
+    "shorts": ["shorts/*.mp4", "shorts/*.wav", "shorts/*_shorts.json"],
 }
 
 # Render writes per-shot videos under render/; it has no _STAGE_ARTIFACTS

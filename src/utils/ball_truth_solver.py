@@ -82,11 +82,19 @@ class Cam:
 
     def project(self, pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """``(uv (N,2), depth (N,))``; uv is NaN where the point is behind
-        the camera."""
+        the camera or past the distortion fold radius (where the radial
+        polynomial stops being monotonic and folds far off-image points back
+        into the frame)."""
         pts = np.asarray(pts, dtype=float).reshape(-1, 3)
-        depth = self.depth(pts)
+        cam_pts = pts @ self.R.T + self.t
+        depth = cam_pts[:, 2]
         uv = project_world_to_image(self.K, self.R, self.t, self.dist, pts)
-        uv = np.where((depth > _MIN_DEPTH_M)[:, None], uv, np.nan)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r2 = (cam_pts[:, 0] ** 2 + cam_pts[:, 1] ** 2) / depth ** 2
+        k1, k2 = self.dist
+        monotonic = 1.0 + 3.0 * k1 * r2 + 5.0 * k2 * r2 ** 2 > 0.0
+        valid = (depth > _MIN_DEPTH_M) & monotonic
+        uv = np.where(valid[:, None], uv, np.nan)
         return uv, depth
 
     def ray(self, uv: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:

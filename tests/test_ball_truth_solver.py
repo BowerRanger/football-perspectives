@@ -333,3 +333,35 @@ def test_single_key_and_empty():
 
 def test_magnus_constant_sane():
     assert DEFAULT_MAGNUS_COEFF > 0
+
+
+def test_project_nans_points_past_the_distortion_fold_radius():
+    # k1=-0.2: r_d(r) = r(1 + k1 r^2) peaks at r^2 = 1/(3*0.2); beyond it the
+    # polynomial folds far off-image points back INTO the frame.
+    cam = look_at([0, 0, 10], [0, 50, 10], dist=(-0.2, 0.0))
+    inside = np.array([0.0, 50.0, 10.0])          # optical axis, r = 0
+    folded = np.array([100.0, 50.0, 10.0])        # normalised r = 2 > fold
+    out, _ = cam.project(np.stack([inside, folded]))
+    assert np.isfinite(out[0]).all()
+    assert np.isnan(out[1]).all()
+
+
+def test_epipolar_polyline_has_no_fold_back_branch():
+    # A wide, distorted view whose near-camera stretch of the ray is far off
+    # frame: the unguarded projection folds it back as a second line.
+    other = look_at([0, 0, 10], [0, 50, 0], fx=900.0, dist=(-0.25, 0.0))
+    origin = np.array([-30.0, 10.0, 12.0])
+    target = np.array([5.0, 40.0, 0.11])
+    d = (target - origin) / np.linalg.norm(target - origin)
+    poly = S.epipolar_polyline(origin, d, other, n_samples=2000, max_points=200)
+    assert poly
+    s = np.geomspace(2.0, 250.0, 2000)
+    pts = origin[None, :] + s[:, None] * d[None, :]
+    cam_pts = pts @ other.R.T + other.t
+    r = np.hypot(cam_pts[:, 0], cam_pts[:, 1]) / cam_pts[:, 2]
+    k1, k2 = other.dist
+    fold_ok = (cam_pts[:, 2] > 0) & (1 + 3 * k1 * r**2 + 5 * k2 * r**4 > 0)
+    good_uv, _ = other.project(pts[fold_ok])
+    # every polyline point must lie on the genuine (pre-fold) branch
+    for q in poly:
+        assert np.min(np.hypot(*(good_uv - np.asarray(q)).T)) < 1.0

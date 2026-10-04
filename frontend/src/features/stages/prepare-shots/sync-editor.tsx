@@ -36,6 +36,7 @@ import {
   type SpeedState,
 } from "./replay-speed"
 import { RetimeButtons } from "./retime-actions"
+import { retimeGateReason, type RetimeGateInputs } from "./retime-gate"
 import { SpeedBadge } from "./speed-badge"
 import { MethodBadge, OffsetInput, SyncOffsetRows } from "./sync-offsets"
 import { SyncTimeline, type AlignMethod } from "./sync-timeline"
@@ -54,6 +55,11 @@ interface EditorProps {
   /** Full reload of manifest + sync (reseeds this editor); used after retime / restore. */
   onReload: () => Promise<void>
   replaySync: ReplaySyncLookup
+  /**
+   * Gate inputs, owned by GroupSync so they survive the re-key that follows a
+   * retime: an Undo toast made by the old editor must see the new state.
+   */
+  gateRef: React.MutableRefObject<RetimeGateInputs>
 }
 
 const MIN_PLAYBACK = 0.0625
@@ -101,7 +107,7 @@ function seedState(group: GroupView) {
  * at rate 1 that is frame_offset = frame_in_active - frame_in_reference.
  * Any edit becomes `manual` and survives re-alignment.
  */
-export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps) {
+export function SyncEditor({ group, onSaved, onReload, replaySync, gateRef }: EditorProps) {
   // Seeded once per mount; the parent re-keys the editor to reseed.
   const [seed] = React.useState(() => seedState(group))
   const { ids, framesByShot, fpsByShot } = seed
@@ -127,17 +133,10 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
 
   const moments = useMoments(activeShot)
   // Re-read at click time: toast actions outlive the state they were created in.
-  const gateRef = React.useRef({ isRunning, runningLabel, dirty, hasUnsaved: moments.hasUnsaved })
   React.useEffect(() => {
     gateRef.current = { isRunning, runningLabel, dirty, hasUnsaved: moments.hasUnsaved }
   })
-  const retimeGate = React.useCallback((): string => {
-    const g = gateRef.current
-    if (g.isRunning) return `${g.runningLabel ?? "A job"} is running.`
-    if (g.hasUnsaved) return "Save or clear the marked pairs first."
-    if (g.dirty) return "Save the group first."
-    return ""
-  }, [])
+  const retimeGate = React.useCallback((): string => retimeGateReason(gateRef.current), [gateRef])
   const retimeActions = useRetimeActions(onReload, retimeGate)
 
   // The tray's fit previews on the active clip until it is saved or cleared.
@@ -574,7 +573,7 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
           blockedReason={momentsBlocked}
           readReference={() => frameOf(refVideo.current, referenceShot)}
           readMember={() => frameOf(actVideo.current, activeShot)}
-          onActed={() => regionRef.current?.focus()}
+          onActed={() => regionRef.current?.focus({ preventScroll: true })}
           onSave={() => void saveMoments()}
           onClose={() => setTrayOpen(false)}
           onClear={() => void clearMoments()}

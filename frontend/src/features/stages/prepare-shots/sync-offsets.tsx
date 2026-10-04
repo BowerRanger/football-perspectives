@@ -119,7 +119,13 @@ export function SyncOffsetRows({
             >
               {id}
             </button>
-            {isRef ? <ToneBadge tone="info">Reference</ToneBadge> : <MethodBadge method={methods[id]} />}
+            {isRef ? (
+              <ToneBadge tone="info">Reference</ToneBadge>
+            ) : id === lockedShot ? (
+              <ToneBadge tone="warning">Unsaved pairs</ToneBadge>
+            ) : (
+              <MethodBadge method={methods[id]} />
+            )}
             {!isRef && speedStates?.[id] ? (
               <SpeedBadge
                 state={speedStates[id]}

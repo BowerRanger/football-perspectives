@@ -180,8 +180,10 @@ export function SyncTimeline(props: TimelineProps) {
         {pairs.map((p, k) => {
           const x1 = px(p.reference_frame)
           const x2 = px(actStart + rateOf(activeShot) * p.shot_frame)
-          const yA = rowTop(refRow) + (ROW_HEIGHT - 6) / 2
-          const yB = rowTop(actRow) + (ROW_HEIGHT - 6) / 2
+          // End on the facing block edges so the line never crosses a label.
+          const blockH = ROW_HEIGHT - 6
+          const [yA, yB] =
+            refRow < actRow ? [rowTop(refRow) + blockH, rowTop(actRow)] : [rowTop(refRow), rowTop(actRow) + blockH]
           return (
             <g key={`${p.reference_frame}:${p.shot_frame}`}>
               <line x1={x1} y1={yA} x2={x2} y2={yB} stroke="black" strokeOpacity={0.55} strokeWidth={4} />
@@ -189,8 +191,8 @@ export function SyncTimeline(props: TimelineProps) {
               <circle cx={x1} cy={yA} r={3.5} fill="white" stroke="black" strokeOpacity={0.55} />
               <circle cx={x2} cy={yB} r={3.5} fill="white" stroke="black" strokeOpacity={0.55} />
               <text
-                x={x1 + 6}
-                y={yA - 6}
+                x={(x1 + x2) / 2 + 5}
+                y={(yA + yB) / 2 + 3.5}
                 stroke="black"
                 strokeOpacity={0.7}
                 strokeWidth={3}

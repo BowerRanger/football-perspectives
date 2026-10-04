@@ -22,6 +22,7 @@ from fastapi import APIRouter, Body, HTTPException, Response
 from src.schemas import ball_truth as bt
 from src.schemas.camera_track import CameraTrack
 from src.utils import ball_truth_solver as solver
+from src.utils import frame_cadence
 from src.utils.ball_anchor_heights import BONE_TO_SMPL_INDEX
 from src.utils.goal_geometry import GoalGeometry
 from src.utils.smpl_skeleton import compute_all_joint_worlds_batch
@@ -30,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 _ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 SCENE_BONES = ("pelvis",) + tuple(BONE_TO_SMPL_INDEX)
+# Triangulating views whose content instants differ by more than this many
+# display frames (a repeated frame in one view) gets a warning.
+VIEW_INSTANT_TOL_FRAMES = 0.3
 _BONE_INDEX = {"pelvis": 0, **BONE_TO_SMPL_INDEX}
 
 
@@ -114,6 +118,7 @@ class StudioData:
         self._lock = threading.Lock()
         self._cams: dict[str, tuple[float, ShotCams | None]] = {}
         self._players: tuple[float, _Players] | None = None
+        self._cadence: dict[str, tuple[float, frame_cadence.Cadence | None]] = {}
 
     # -- cameras ----------------------------------------------------------
     def shot_cams(self, shot_id: str) -> ShotCams | None:
@@ -147,6 +152,35 @@ class StudioData:
         with self._lock:
             self._cams[shot_id] = (mtime, sc)
         return sc
+
+    # -- frame cadence ----------------------------------------------------
+    def cadence(self, shot_id: str) -> frame_cadence.Cadence | None:
+        """Repeated frames of the shot video (25->30 pulldown); None when
+        the video is missing or unreadable (= uniform time)."""
+        video = self.output_dir / "shots" / f"{shot_id}.mp4"
+        if not video.exists():
+            return None
+        mtime = video.stat().st_mtime
+        with self._lock:
+            hit = self._cadence.get(shot_id)
+            if hit and hit[0] == mtime:
+                return hit[1]
+        try:
+            cad = frame_cadence.load_or_detect(
+                video, self.output_dir / "ball_truth" / ".cache" / "cadence")
+        except Exception as exc:  # best effort: uniform time is the fallback
+            logger.warning("ball-studio: cadence scan failed for %s (%s)", video, exc)
+            cad = None
+        with self._lock:
+            self._cadence[shot_id] = (mtime, cad)
+        return cad
+
+    def time_shift(self, shot_id: str) -> np.ndarray | None:
+        cad = self.cadence(shot_id)
+        sc = self.shot_cams(shot_id)
+        if cad is None or not cad.repeats or sc is None:
+            return None
+        return frame_cadence.content_time_shift(cad.n_frames, cad.repeats, sc.fps)
 
     # -- players ----------------------------------------------------------
     def players(self) -> _Players:
@@ -245,8 +279,15 @@ class StudioData:
             sc = cams.get(shot_id)
             return sc.cam(shot_frame) if sc else None
 
+        shifts = {sid: s for sid in offs if (s := self.time_shift(sid)) is not None}
+
+        def time_shift(shot_id: str, shot_frame: int) -> float:
+            s = shifts.get(shot_id)
+            return float(s[shot_frame]) if s is not None and 0 <= shot_frame < len(s) else 0.0
+
         return solver.SolveContext(fps=fps, offsets=offs, camera=camera,
-                                   joint=pl.joint)
+                                   joint=pl.joint, reference_shot=g.reference_shot,
+                                   time_shift=time_shift if shifts else None)
 
     def goals(self) -> dict[str, Any]:
         from src.pipeline.config import load_config
@@ -426,6 +467,9 @@ def build_router(output_dir: Path, config_path: Path | None = None) -> APIRouter
                 "t": _round(sc.t, 4),
                 "confidence": _round(sc.confidence, 3),
             })
+            cad = data.cadence(sid)
+            # shot frames whose image repeats the previous one (pulldown)
+            meta["repeat_frames"] = list(cad.repeats) if cad else []
             shots.append(meta)
         pl = data.players()
         players = []
@@ -546,7 +590,17 @@ def build_router(output_dir: Path, config_path: Path | None = None) -> APIRouter
                         "residual_px": {}, "flags": [{"level": "error", "code": "no_camera_frame",
                                                         "message": f"no camera for {sid} frame {sf}"}]}
             views.append((cam, uv))
-            used.append({"shot_id": sid, "shot_frame": sf, "uv": uv})
+            cad = data.cadence(sid)
+            used.append({"shot_id": sid, "shot_frame": sf, "uv": uv,
+                         "repeat": bool(cad and sf in cad.repeats)})
+        if len(used) >= 2 and ctx.time_shift is not None:
+            times = [ctx.obs_time(u["shot_id"], u["shot_frame"]) for u in used]
+            gap_ms = 1000.0 * (max(times) - min(times))
+            if gap_ms > 1000.0 * VIEW_INSTANT_TOL_FRAMES / ctx.fps:
+                flags.append({
+                    "level": "warn", "code": "views_not_simultaneous",
+                    "message": f"the views show instants {gap_ms:.0f} ms apart (repeated "
+                               "frame) - pick a frame that is fresh in every view"})
         offsets_used = {sid: off for sid, off in ctx.offsets.items()}
         constraint = body.get("constraint")
         resp: dict[str, Any] = {"offsets_used": offsets_used, "observations_used": used}

@@ -31,6 +31,23 @@ failed validation (`detail` is `{"errors": [{"path": "keys[2].frame", "message":
   the sync reference shot id (e.g. `origi01`, `gberch`, `kroupi01`).
   Pattern `[A-Za-z0-9_-]+`.
 * Floats are rounded to 4 decimals (positions/uv) in responses.
+* **Content time (pulldown).** The 30-fps test clips are 25-fps content with
+  one repeated display frame in six (`scene.shots[].repeat_frames`, detected
+  once per video and cached under `ball_truth/.cache/cadence/`). The solver
+  therefore works on content time, not `frame / fps`: a shot frame shows the
+  instant `r / fps + shift(shot, shot_frame)` (`src/utils/frame_cadence.py`,
+  a locally zero-mean sawtooth, |shift| < 1 frame). A key's instant is the
+  mean of its observations' instants; soft observations are fitted at their
+  own instant; `dense` holds still on the reference shot's repeated frames
+  (it is what the reference video shows); `projections[shot]` evaluates the
+  track at that shot's own instant. Shots without a video, or without
+  repeats, reduce exactly to `frame / fps`. `solve.segments[].time_range_s`
+  reports the content-time span. Two keys on images of the same instant get
+  a `keys_same_instant` warning (timing falls back to frame numbers).
+* **Choosing key frames.** Pick a frame that is fresh (not in
+  `repeat_frames`) in every view: `/triangulate` warns
+  `views_not_simultaneous` when the views' instants differ by more than 0.3
+  frame, and marks `observations_used[].repeat`.
 
 ## Camera model (for client-side drawing)
 

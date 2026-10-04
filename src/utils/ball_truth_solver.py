@@ -103,6 +103,7 @@ class Cam:
 
 CameraFn = Callable[[str, int], "Cam | None"]
 JointFn = Callable[[str, str, int], "np.ndarray | None"]
+TimeShiftFn = Callable[[str, int], float]
 
 
 @dataclass(frozen=True)
@@ -111,12 +112,40 @@ class SolveContext:
     offsets: dict[str, int]          # shot_id -> frame_offset (shot = ref + off)
     camera: CameraFn                 # (shot_id, shot_frame) -> Cam | None
     joint: JointFn = lambda pid, bone, ref_frame: None  # type: ignore[assignment]
+    # Content-time correction (seconds) per (shot_id, shot_frame): pulldown
+    # clips show the instant ``f / fps + shift``, not ``f / fps`` (see
+    # src/utils/frame_cadence.py). None = uniform time.
+    reference_shot: str | None = None
+    time_shift: TimeShiftFn | None = None
 
     def shot_frame(self, shot_id: str, ref_frame: int) -> int:
         return int(ref_frame) + int(self.offsets.get(shot_id, 0))
 
     def ref_frame(self, shot_id: str, shot_frame: int) -> int:
         return int(shot_frame) - int(self.offsets.get(shot_id, 0))
+
+    def obs_time(self, shot_id: str, shot_frame: int) -> float:
+        """Content instant (reference clock, seconds) shown by a shot frame."""
+        t = self.ref_frame(shot_id, shot_frame) / self.fps
+        if self.time_shift is not None:
+            t += float(self.time_shift(shot_id, int(shot_frame)))
+        return t
+
+    def ref_time(self, ref_frame: int) -> float:
+        """Content instant shown by the reference shot at a reference frame."""
+        if self.reference_shot is None or self.time_shift is None:
+            return int(ref_frame) / self.fps
+        return self.obs_time(self.reference_shot,
+                             self.shot_frame(self.reference_shot, int(ref_frame)))
+
+    def key_time(self, key: dict) -> float:
+        """A key's instant: the mean content time of its observations (all
+        picked at the same reference frame), else the reference shot's."""
+        obs = key.get("observations") or []
+        if obs and self.time_shift is not None:
+            return float(np.mean([self.obs_time(o["shot_id"], int(o["shot_frame"]))
+                                  for o in obs]))
+        return self.ref_time(int(key["frame"]))
 
 
 # ---------------------------------------------------------------------------
@@ -425,49 +454,48 @@ def _magnus_accel(omega: np.ndarray, v: np.ndarray) -> float:
     return float(np.linalg.norm(DEFAULT_MAGNUS_COEFF * np.cross(omega, v)))
 
 
-def _eval_flight(
-    pa: np.ndarray, pb: np.ndarray, times: np.ndarray, duration: float,
-    cd: float, omega: np.ndarray | None,
-) -> tuple[np.ndarray, np.ndarray]:
-    v0 = shoot_arc(pa, 0.0, pb, duration, cd=cd, omega=omega)
-    return simulate(pa, v0, times, cd=cd, omega=omega), v0
+Evaluator = Callable[[np.ndarray], np.ndarray]
 
 
 @dataclass
 class _SegResult:
-    positions: np.ndarray   # (n_frames_inclusive, 3)
+    evaluate: Evaluator     # positions at times relative to the segment start (s)
     params: dict
     flags: list[dict]
 
 
 def _soft_obs_in_span(
-    soft: Sequence[dict], ctx: SolveContext, fa: int, fb: int,
-) -> list[tuple[int, str, list[float], Cam]]:
+    soft: Sequence[dict], ctx: SolveContext, ta: float, tb: float,
+) -> list[tuple[float, str, list[float], Cam]]:
+    """Soft observations strictly inside the span, as
+    ``(content_time_s, shot_id, uv, cam)``."""
     out = []
     for ob in soft:
-        r = ctx.ref_frame(ob["shot_id"], ob["shot_frame"])
-        if fa < r < fb:
+        t = ctx.obs_time(ob["shot_id"], int(ob["shot_frame"]))
+        if ta < t < tb:
             cam = ctx.camera(ob["shot_id"], ob["shot_frame"])
             if cam is not None:
-                out.append((r, ob["shot_id"], ob["uv"], cam))
+                out.append((t, ob["shot_id"], ob["uv"], cam))
     return out
 
 
-def _solve_flight(a: dict, b: dict, seg: dict, ctx: SolveContext,
+def _span_fraction(t_rel: np.ndarray, duration: float) -> np.ndarray:
+    return np.clip(np.asarray(t_rel, float) / duration, 0.0, 1.0)
+
+
+def _solve_flight(a: dict, b: dict, ta: float, tb: float, seg: dict, ctx: SolveContext,
                   soft: Sequence[dict], idx: int) -> _SegResult:
-    fa, fb = a["frame"], b["frame"]
+    fa = a["frame"]
     pa, pb = np.asarray(a["xyz"], float), np.asarray(b["xyz"], float)
-    frames = np.arange(fa, fb + 1)
-    times = (frames - fa) / ctx.fps
-    duration = (fb - fa) / ctx.fps
+    duration = tb - ta
     prm = seg["params"]
     cd = 0.0 if not prm["drag"] else (prm["cd"] if prm["cd"] is not None else CD_DEFAULT)
     flags: list[dict] = []
     omega = None
     spin_info = None
-    obs = _soft_obs_in_span(soft, ctx, fa, fb)
+    obs = _soft_obs_in_span(soft, ctx, ta, tb)
     if prm["magnus"] == "auto" and len(obs) >= 3:
-        obs_t = np.array([(r - fa) / ctx.fps + i * 1e-9 for i, (r, *_rest) in enumerate(obs)])
+        obs_t = np.array([t - ta + i * 1e-9 for i, (t, *_rest) in enumerate(obs)])
         lookup = {float(t): o for t, o in zip(obs_t, obs)}
 
         def project_fn(t_s: float, xyz: np.ndarray) -> np.ndarray:
@@ -486,9 +514,15 @@ def _solve_flight(a: dict, b: dict, seg: dict, ctx: SolveContext,
             omega = np.asarray(fit.omega_world, float)
             spin_info = {"omega": [round(float(x), 3) for x in omega],
                          "delta_bic": round(float(fit.delta_bic), 2)}
-    pos, v0 = _eval_flight(pa, pb, times, duration, cd, omega)
+    v0 = shoot_arc(pa, 0.0, pb, duration, cd=cd, omega=omega)
+
+    def evaluate(t_rel: np.ndarray) -> np.ndarray:
+        t = np.clip(np.asarray(t_rel, float), 0.0, duration)
+        return simulate(pa, v0, t, cd=cd, omega=omega)
+
     if omega is not None:
-        vel = np.gradient(pos, times, axis=0) if len(times) > 2 else np.array([v0])
+        ts = np.linspace(0.0, duration, max(3, int(round(duration * ctx.fps)) + 1))
+        vel = np.gradient(evaluate(ts), ts, axis=0)
         curl = max(_magnus_accel(omega, v) for v in vel)
         spin_info["max_curl_accel_m_s2"] = round(curl, 2)
         if curl > MAX_CURL_ACCEL_M_S2:
@@ -500,16 +534,14 @@ def _solve_flight(a: dict, b: dict, seg: dict, ctx: SolveContext,
               "accel_xy": None}
     if spin_info is not None:
         params.update(spin_info)
-    return _SegResult(pos, params, flags)
+    return _SegResult(evaluate, params, flags)
 
 
-def _solve_roll(a: dict, b: dict, seg: dict, ctx: SolveContext,
+def _solve_roll(a: dict, b: dict, ta: float, tb: float, seg: dict, ctx: SolveContext,
                 soft: Sequence[dict], idx: int) -> _SegResult:
-    fa, fb = a["frame"], b["frame"]
+    fa = a["frame"]
     pa, pb = np.asarray(a["xyz"], float), np.asarray(b["xyz"], float)
-    frames = np.arange(fa, fb + 1)
-    times = (frames - fa) / ctx.fps
-    duration = (fb - fa) / ctx.fps
+    duration = tb - ta
     flags: list[dict] = []
     if pa[2] > ROLL_MAX_Z or pb[2] > ROLL_MAX_Z:
         flags.append(_flag("error", "segment_infeasible",
@@ -517,30 +549,43 @@ def _solve_roll(a: dict, b: dict, seg: dict, ctx: SolveContext,
                            frame=fa, ref={"segment": idx}))
     z_mean = 0.5 * (pa[2] + pb[2])
     obs_xy = []
-    for r, _sid, uv, cam in _soft_obs_in_span(soft, ctx, fa, fb):
+    for t, _sid, uv, cam in _soft_obs_in_span(soft, ctx, ta, tb):
         C, d = cam.ray(uv)
         p = ray_plane_point(C, d, "z", z_mean)
         if p is not None:
-            obs_xy.append(((r - fa) / ctx.fps, p[:2], 1.0))
+            obs_xy.append((t - ta, p[:2], 1.0))
     fit = fit_roll_segment(pa[:2], pb[:2], duration, obs=obs_xy)
-    pos = fit.eval(times, z_mean)
-    # z follows the endpoints (a roll that starts at 0.11 and ends at 0.11
-    # stays flat; slightly different endpoints blend linearly)
-    pos[:, 2] = pa[2] + (pb[2] - pa[2]) * (times / duration)
+
+    def evaluate(t_rel: np.ndarray) -> np.ndarray:
+        t = np.clip(np.asarray(t_rel, float), 0.0, duration)
+        pos = np.asarray(fit.eval(t, z_mean), float).reshape(-1, 3).copy()
+        # z follows the endpoints (a roll that starts at 0.11 and ends at
+        # 0.11 stays flat; slightly different endpoints blend linearly)
+        pos[:, 2] = pa[2] + (pb[2] - pa[2]) * (t / duration)
+        return pos
+
     params = {"cd": None, "accel_xy": [round(x, 4) for x in fit.accel_xy],
               "v0": None, "omega": None}
-    return _SegResult(pos, params, flags)
+    return _SegResult(evaluate, params, flags)
 
 
-def _solve_carried(a: dict, b: dict, seg: dict, ctx: SolveContext, idx: int) -> _SegResult:
+def _lerp_eval(pa: np.ndarray, pb: np.ndarray, duration: float) -> Evaluator:
+    def evaluate(t_rel: np.ndarray) -> np.ndarray:
+        u = _span_fraction(t_rel, duration)
+        return pa[None, :] + (pb - pa)[None, :] * u[:, None]
+    return evaluate
+
+
+def _solve_carried(a: dict, b: dict, ta: float, tb: float, seg: dict, ctx: SolveContext,
+                   idx: int) -> _SegResult:
     fa, fb = a["frame"], b["frame"]
     pa, pb = np.asarray(a["xyz"], float), np.asarray(b["xyz"], float)
-    frames = np.arange(fa, fb + 1)
+    duration = tb - ta
     prm = seg["params"]
     pid = prm["player_id"] or a["constraint"].get("player_id") or b["constraint"].get("player_id")
     bone = prm["bone"] or a["constraint"].get("bone") or b["constraint"].get("bone")
     flags: list[dict] = []
-    lin = pa[None, :] + (pb - pa)[None, :] * ((frames - fa) / (fb - fa))[:, None]
+    lin = _lerp_eval(pa, pb, duration)
     if not pid or not bone:
         flags.append(_flag("error", "unknown_player_joint",
                            "carried segment needs player_id and bone",
@@ -553,43 +598,45 @@ def _solve_carried(a: dict, b: dict, seg: dict, ctx: SolveContext, idx: int) -> 
                            frame=fa, ref={"segment": idx}))
         return _SegResult(lin, {}, flags)
     off_a, off_b = pa - np.asarray(ja, float), pb - np.asarray(jb, float)
-    pos = np.empty_like(lin)
-    missing = 0
-    for i, f in enumerate(frames):
-        j = ctx.joint(pid, bone, int(f))
-        u = (f - fa) / (fb - fa)
-        if j is None:
-            pos[i] = lin[i]
-            missing += 1
-        else:
-            pos[i] = np.asarray(j, float) + (1 - u) * off_a + u * off_b
+    missing = sum(ctx.joint(pid, bone, f) is None for f in range(fa, fb + 1))
+
+    def evaluate(t_rel: np.ndarray) -> np.ndarray:
+        # joints live on reference frames: follow the nearest one
+        u = _span_fraction(t_rel, duration)
+        out = lin(t_rel)
+        for i, ui in enumerate(u):
+            j = ctx.joint(pid, bone, int(round(fa + ui * (fb - fa))))
+            if j is not None:
+                out[i] = np.asarray(j, float) + (1 - ui) * off_a + ui * off_b
+        return out
+
     if missing:
         flags.append(_flag("warn", "unknown_player_joint",
                            f"{missing} frame(s) without joint data, linear fill",
                            frame=fa, ref={"segment": idx}))
-    return _SegResult(pos, {"player_id": pid, "bone": bone}, flags)
+    return _SegResult(evaluate, {"player_id": pid, "bone": bone}, flags)
 
 
-def _solve_linear(a: dict, b: dict) -> _SegResult:
-    fa, fb = a["frame"], b["frame"]
+def _solve_linear(a: dict, b: dict, ta: float, tb: float) -> _SegResult:
     pa, pb = np.asarray(a["xyz"], float), np.asarray(b["xyz"], float)
-    frames = np.arange(fa, fb + 1)
-    pos = pa[None, :] + (pb - pa)[None, :] * ((frames - fa) / (fb - fa))[:, None]
-    return _SegResult(pos, {}, [])
+    return _SegResult(_lerp_eval(pa, pb, tb - ta), {}, [])
 
 
-def _solve_static(a: dict, b: dict, idx: int) -> _SegResult:
-    fa, fb = a["frame"], b["frame"]
+def _solve_static(a: dict, b: dict, ta: float, tb: float, idx: int) -> _SegResult:
+    fa = a["frame"]
     pa, pb = np.asarray(a["xyz"], float), np.asarray(b["xyz"], float)
-    frames = np.arange(fa, fb + 1)
-    pos = np.tile(pa, (len(frames), 1))
-    pos[-1] = pb
+    duration = tb - ta
+
+    def evaluate(t_rel: np.ndarray) -> np.ndarray:
+        u = _span_fraction(t_rel, duration)
+        return np.where((u >= 1.0)[:, None], pb[None, :], pa[None, :])
+
     flags = []
     if np.linalg.norm(pb - pa) > STATIC_MAX_DRIFT_M:
         flags.append(_flag("warn", "segment_infeasible",
                            f"static segment keys are {np.linalg.norm(pb - pa):.2f} m apart",
                            frame=fa, ref={"segment": idx}))
-    return _SegResult(pos, {}, flags)
+    return _SegResult(evaluate, {}, flags)
 
 
 # ---------------------------------------------------------------------------
@@ -620,9 +667,21 @@ def solve_truth(doc: dict, ctx: SolveContext) -> dict:
     dense_seg: list[int] = []
     dense_kind: list[str] = []
     soft = doc["observations"]
+    # content instants of the keys (pulldown-aware; == frame / fps otherwise)
+    key_t = [ctx.key_time(k) for k in keys_in]
+    spans: list[tuple[float, float, Evaluator]] = []
 
     for i in range(len(resolved) - 1):
         a, b = resolved[i], resolved[i + 1]
+        ta, tb = key_t[i], key_t[i + 1]
+        if tb - ta < 0.25 / ctx.fps:
+            # both keys sit on images of the same instant (a repeated frame)
+            flags.append(_flag(
+                "warn", "keys_same_instant",
+                f"keys {a['id']} and {b['id']} show the same content instant "
+                "(repeated frame) - timing falls back to frame numbers",
+                frame=b["frame"], ref={"segment": i}))
+            ta, tb = a["frame"] / ctx.fps, b["frame"] / ctx.fps
         a_full = {**a, "constraint": by_id_in[a["id"]]["constraint"]}
         b_full = {**b, "constraint": by_id_in[b["id"]]["constraint"]}
         declared = seg_in.get(a["id"])
@@ -641,29 +700,34 @@ def solve_truth(doc: dict, ctx: SolveContext) -> dict:
         )
         kind = seg["kind"]
         if kind == "flight":
-            res = _solve_flight(a_full, b_full, seg, ctx, soft, i)
+            res = _solve_flight(a_full, b_full, ta, tb, seg, ctx, soft, i)
         elif kind == "roll":
-            res = _solve_roll(a_full, b_full, seg, ctx, soft, i)
+            res = _solve_roll(a_full, b_full, ta, tb, seg, ctx, soft, i)
         elif kind == "carried":
-            res = _solve_carried(a_full, b_full, seg, ctx, i)
+            res = _solve_carried(a_full, b_full, ta, tb, seg, ctx, i)
         elif kind == "static":
-            res = _solve_static(a_full, b_full, i)
+            res = _solve_static(a_full, b_full, ta, tb, i)
         else:
-            res = _solve_linear(a_full, b_full)
+            res = _solve_linear(a_full, b_full, ta, tb)
         flags.extend(res.flags)
-        frames = list(range(a["frame"], b["frame"] + 1))
+        spans.append((ta, tb, res.evaluate))
+        frames = np.arange(a["frame"], b["frame"] + 1)
+        # the reference video's content instant at each frame (holds on repeats)
+        t_rel = np.clip([ctx.ref_time(int(f)) for f in frames], ta, tb) - ta
+        positions = res.evaluate(t_rel)
         # drop the shared end frame of the previous segment
         start = 1 if dense_frames and dense_frames[-1] == frames[0] else 0
-        for f, p in zip(frames[start:], res.positions[start:]):
-            dense_frames.append(f)
+        for f, p in zip(frames[start:], positions[start:]):
+            dense_frames.append(int(f))
             dense_xyz.append([_r4(v) for v in p])
             dense_seg.append(i)
             dense_kind.append(kind)
         seg_results.append({
             "index": i, "from": a["id"], "to": b["id"], "kind": kind,
             "auto": bool(auto), "frame_range": [a["frame"], b["frame"]],
+            "time_range_s": [round(ta, 5), round(tb, 5)],
             "params": res.params,
-            "n_soft_obs": len(_soft_obs_in_span(soft, ctx, a["frame"], b["frame"])),
+            "n_soft_obs": len(_soft_obs_in_span(soft, ctx, ta, tb)),
             "rms_obs_px": None, "max_speed_m_s": None, "status": "ok",
         })
     if len(resolved) == 1:
@@ -675,14 +739,28 @@ def solve_truth(doc: dict, ctx: SolveContext) -> dict:
     frames_arr = np.asarray(dense_frames, dtype=int)
     xyz_arr = np.asarray(dense_xyz, dtype=float).reshape(-1, 3)
 
-    # speeds (finite difference) + sanity flags
+    def track_at(t: float) -> np.ndarray:
+        """Solved position at a content instant (clamped to the keyed span)."""
+        if not spans:
+            return xyz_arr[0] if len(xyz_arr) else np.full(3, np.nan)
+        for ta, tb, ev in spans:
+            if t <= tb:
+                return ev(np.array([max(t, ta) - ta]))[0]
+        ta, tb, ev = spans[-1]
+        return ev(np.array([tb - ta]))[0]
+
+    t_first = spans[0][0] if spans else None
+    t_last = spans[-1][1] if spans else None
+    dense_t = np.array([ctx.ref_time(int(f)) for f in frames_arr], dtype=float)
+
+    # speeds (central difference in content time) + sanity flags
     speed = np.zeros(len(frames_arr))
-    if len(frames_arr) > 1:
-        step = np.diff(xyz_arr, axis=0) * ctx.fps / np.diff(frames_arr)[:, None]
-        sp = np.linalg.norm(step, axis=1)
-        speed[0], speed[-1] = sp[0], sp[-1]
-        if len(sp) > 1:
-            speed[1:-1] = 0.5 * (sp[:-1] + sp[1:])
+    if len(frames_arr) > 1 and spans:
+        h = 0.5 / ctx.fps
+        for j, t in enumerate(np.clip(dense_t, t_first, t_last)):
+            lo, hi = max(t - h, t_first), min(t + h, t_last)
+            if hi > lo:
+                speed[j] = float(np.linalg.norm(track_at(hi) - track_at(lo)) / (hi - lo))
         for si in range(len(seg_results)):
             m = np.asarray(dense_seg) == si
             if m.any():
@@ -693,12 +771,16 @@ def solve_truth(doc: dict, ctx: SolveContext) -> dict:
                         f"speed {speed[m].max():.1f} m/s > {MAX_SPEED_M_S:.0f}",
                         frame=int(frames_arr[m][np.argmax(speed[m])]), ref={"segment": si}))
         event_frames = {e["frame"] for e in doc["events"]}
+        dt = 1.0 / ctx.fps
         for ki in range(1, len(resolved) - 1):
             f = resolved[ki]["frame"]
-            j = int(np.nonzero(frames_arr == f)[0][0]) if (frames_arr == f).any() else None
-            if j is None or j == 0 or j >= len(sp):
-                continue
-            jump = float(np.linalg.norm(step[j] - step[j - 1]))
+            (pa_, pb_, ev_in), (qa_, qb_, ev_out) = spans[ki - 1], spans[ki]
+            d_in, d_out = pb_ - pa_, qb_ - qa_
+            v_in = (ev_in(np.array([d_in]))[0] - ev_in(np.array([max(d_in - dt, 0.0)]))[0]) \
+                / max(min(dt, d_in), 1e-9)
+            v_out = (ev_out(np.array([min(dt, d_out)]))[0] - ev_out(np.array([0.0]))[0]) \
+                / max(min(dt, d_out), 1e-9)
+            jump = float(np.linalg.norm(v_out - v_in))
             if jump > EVENT_JUMP_M_S and not any(abs(f - ef) <= 1 for ef in event_frames):
                 flags.append(_flag(
                     "warn", "discontinuity",
@@ -713,7 +795,6 @@ def solve_truth(doc: dict, ctx: SolveContext) -> dict:
 
     # projections + observation residuals
     projections: dict[str, dict] = {}
-    dense_lookup = {int(f): xyz_arr[i] for i, f in enumerate(frames_arr)}
     for sid in ctx.offsets:
         fr_l, sf_l, uv_l, dp_l = [], [], [], []
         for i, f in enumerate(frames_arr):
@@ -721,7 +802,9 @@ def solve_truth(doc: dict, ctx: SolveContext) -> dict:
             cam = ctx.camera(sid, sf)
             if cam is None:
                 continue
-            uv, dep = cam.project(xyz_arr[i])
+            # each view shows its own content instant (pulldown phases differ)
+            p = xyz_arr[i] if not spans else track_at(ctx.obs_time(sid, sf))
+            uv, dep = cam.project(p)
             fr_l.append(int(f))
             sf_l.append(sf)
             ok = np.isfinite(uv).all()
@@ -749,15 +832,18 @@ def solve_truth(doc: dict, ctx: SolveContext) -> dict:
         for ob in k_in["observations"]:
             _score("key", ob, np.asarray(rk["xyz"]), {"key_id": rk["id"]})
     seg_resid: dict[int, list[float]] = {}
+    eps = 1e-6
     for i, ob in enumerate(soft):
         r = ctx.ref_frame(ob["shot_id"], ob["shot_frame"])
-        p = dense_lookup.get(r)
+        t = ctx.obs_time(ob["shot_id"], int(ob["shot_frame"]))
+        inside = bool(spans) and t_first - eps <= t <= t_last + eps
+        p = track_at(t) if inside else None
         resid = _score("soft", ob, p, {"index": i})
         if p is None:
             continue
         if resid is not None:
-            si = next((s["index"] for s in seg_results
-                       if s["frame_range"][0] <= r <= s["frame_range"][1]), None)
+            si = next((k for k, (ta, tb, _ev) in enumerate(spans)
+                       if ta - eps <= t <= tb + eps), None)
             if si is not None:
                 seg_resid.setdefault(si, []).append(resid)
             if resid > SOFT_OUTLIER_PX:

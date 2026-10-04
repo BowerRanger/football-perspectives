@@ -8,6 +8,7 @@ import pytest
 from src.schemas import ball_truth as bt
 from src.utils import ball_truth_solver as S
 from src.utils.ball_hybrid_physics import DEFAULT_MAGNUS_COEFF, shoot_arc, simulate
+from src.utils.frame_cadence import content_time_shift
 
 FPS = 30.0
 IMG = (1920, 1080)
@@ -365,3 +366,88 @@ def test_epipolar_polyline_has_no_fold_back_branch():
     # every polyline point must lie on the genuine (pre-fold) branch
     for q in poly:
         assert np.min(np.hypot(*(good_uv - np.asarray(q)).T)) < 1.0
+
+
+# --- cadence-aware time (25->30 pulldown) ----------------------------------
+
+N_CAD = 120
+SHIFT_A = content_time_shift(N_CAD, [f for f in range(1, N_CAD) if f % 6 == 5], FPS)
+SHIFT_B = content_time_shift(N_CAD, [f for f in range(1, N_CAD) if f % 6 == 2], FPS)
+
+
+def cadence_ctx(offset_b=-10, with_shift=True):
+    base = make_ctx(offset_b=offset_b)
+    shifts = {"a": SHIFT_A, "b": SHIFT_B}
+
+    def time_shift(sid, sf):
+        return float(shifts[sid][sf]) if 0 <= sf < N_CAD else 0.0
+
+    return S.SolveContext(FPS, base.offsets, base.camera, base.joint,
+                          reference_shot="a",
+                          time_shift=time_shift if with_shift else None)
+
+
+PA, PB = np.array([30.0, 5.0, 0.11]), np.array([45.0, 28.0, 0.11])
+FA, FB = 12, 42
+
+
+def truth_at(ctx, t):
+    ta, tb = ctx.ref_time(FA), ctx.ref_time(FB)
+    return PA + (PB - PA) * (t - ta) / (tb - ta)
+
+
+def cadence_doc(ctx):
+    keys = [{"id": "k0", "frame": FA, "xyz": list(PA), "source": "manual", "constraint": {},
+             "observations": []},
+            {"id": "k1", "frame": FB, "xyz": list(PB), "source": "manual", "constraint": {},
+             "observations": []}]
+    soft = [{"shot_id": "a", "shot_frame": f, "uv": uv(CAM_A, truth_at(ctx, ctx.obs_time("a", f)))}
+            for f in range(FA + 2, FB - 1, 3)]
+    return norm(make_doc(keys, [{"from": "k0", "to": "k1", "kind": "roll"}], soft))
+
+
+def test_uniform_context_has_no_time_shift():
+    ctx = make_ctx()
+    assert ctx.ref_time(30) == pytest.approx(1.0)
+    assert ctx.obs_time("b", 20) == pytest.approx(30 / FPS)
+
+
+def test_soft_observations_fit_at_content_time():
+    ctx = cadence_ctx()
+    doc = cadence_doc(ctx)
+    good = S.solve_truth(doc, ctx)
+    soft = [o["residual_px"] for o in good["observations"] if o["kind"] == "soft"]
+    assert max(soft) < 0.5
+    naive = S.solve_truth(doc, cadence_ctx(with_shift=False))
+    soft_naive = [o["residual_px"] for o in naive["observations"] if o["kind"] == "soft"]
+    assert max(soft_naive) > 5 * max(max(soft), 0.1)
+
+
+def test_dense_track_holds_on_reference_repeat_frames():
+    ctx = cadence_ctx()
+    out = S.solve_truth(cadence_doc(ctx), ctx)
+    frames, xyz = out["dense"]["frames"], np.array(out["dense"]["xyz"])
+    rep = next(f for f in range(FA + 1, FB) if f % 6 == 5)
+    i = frames.index(rep)
+    assert np.allclose(xyz[i], xyz[i - 1], atol=1e-3)
+    assert np.isfinite(out["dense"]["speed_m_s"]).all()
+
+
+def test_projection_uses_each_views_own_instant():
+    ctx = cadence_ctx()
+    out = S.solve_truth(cadence_doc(ctx), ctx)
+    pb = out["projections"]["b"]
+    for r, sf, q in zip(pb["frames"], pb["shot_frames"], pb["uv"]):
+        if FA + 1 < r < FB - 1 and abs(SHIFT_A[r] - SHIFT_B[sf]) > 0.01:
+            want = uv(CAM_B, truth_at(ctx, ctx.obs_time("b", sf)))
+            assert np.hypot(*(np.asarray(q) - want)) < 0.5
+            break
+    else:
+        pytest.fail("no out-of-phase frame found")
+
+
+def test_triangulated_key_time_is_the_mean_of_its_views():
+    ctx = cadence_ctx()
+    k = tri_key(ctx, "k", 30, np.array([40.0, 25.0, 0.11]))
+    t = ctx.key_time(k)
+    assert t == pytest.approx(0.5 * (ctx.obs_time("a", 30) + ctx.obs_time("b", 20)))

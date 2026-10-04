@@ -250,3 +250,82 @@ def test_spa_page_route(env):
     c, _ = env
     r = c.get("/ball-studio?group=a")
     assert r.status_code in (200, 404)  # 404 only when the SPA build is absent
+
+
+# --- frame cadence (25->30 pulldown) ----------------------------------------
+
+def write_pulldown_video(path: Path, n: int, phase: int) -> list[int]:
+    import cv2
+
+    rng = np.random.default_rng(phase)
+    vw = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), FPS, (96, 64))
+    reps, prev = [], None
+    for f in range(n):
+        if prev is not None and f % 6 == phase:
+            img = prev
+            reps.append(f)
+        else:
+            img = rng.integers(0, 255, (64, 96, 3), dtype=np.uint8)
+        vw.write(img)
+        prev = img
+    vw.release()
+    return reps
+
+
+@pytest.fixture
+def cad_env(env):
+    c, out = env
+    # MJPG under an .mp4 name: cv2 sniffs the container; the name is all
+    # the studio needs to find a shot's video
+    reps_a = write_pulldown_video(out / "shots" / "a.mp4", 90, 5)
+    reps_b = write_pulldown_video(out / "shots" / "b.mp4", 80, 2)
+    return c, out, reps_a, reps_b
+
+
+def tri_body(ref, p):
+    return {"frame": ref, "observations": [
+        {"shot_id": "a", "shot_frame": ref, "uv": uv("a", p)},
+        {"shot_id": "b", "shot_frame": ref + OFF_B, "uv": uv("b", p)}]}
+
+
+def test_scene_reports_repeat_frames(cad_env):
+    c, _out, reps_a, reps_b = cad_env
+    shots = {s["shot_id"]: s for s in c.get("/api/ball-studio/groups/a/scene").json()["shots"]}
+    assert shots["a"]["repeat_frames"] == reps_a
+    assert shots["b"]["repeat_frames"] == reps_b
+
+
+def test_scene_without_video_has_no_repeat_frames(env):
+    c, _ = env
+    shots = c.get("/api/ball-studio/groups/a/scene").json()["shots"]
+    assert all(s["repeat_frames"] == [] for s in shots)
+
+
+def test_triangulate_flags_views_not_simultaneous(cad_env):
+    from src.utils.frame_cadence import content_time_shift
+
+    c, _out, reps_a, reps_b = cad_env
+    sa, sb = content_time_shift(90, reps_a, FPS), content_time_shift(80, reps_b, FPS)
+    # the reference frame where the two views' content instants differ most
+    ref = max(range(20, 70), key=lambda r: abs(sa[r] - sb[r + OFF_B]))
+    assert abs(sa[ref] - sb[ref + OFF_B]) > 0.3 / FPS
+    r = c.post("/api/ball-studio/groups/a/triangulate", json=tri_body(ref, [40.0, 25.0, 0.11])).json()
+    assert r["ok"]
+    assert "views_not_simultaneous" in [f["code"] for f in r["flags"]]
+
+
+def test_triangulate_marks_repeated_observation_frames(cad_env):
+    c, _out, reps_a, reps_b = cad_env
+    ref = next(r for r in range(20, 70) if (r + OFF_B) in reps_b and r not in reps_a)
+    r = c.post("/api/ball-studio/groups/a/triangulate", json=tri_body(ref, [40.0, 25.0, 0.11])).json()
+    used = {o["shot_id"]: o for o in r["observations_used"]}
+    assert used["b"]["repeat"] is True and used["a"]["repeat"] is False
+
+
+def test_triangulate_fresh_in_both_views_has_no_cadence_flag(cad_env):
+    c, _out, reps_a, reps_b = cad_env
+    ref = next(r for r in range(20, 70)
+               if r not in reps_a and (r + OFF_B) not in reps_b
+               and (r - 1) not in reps_a and (r - 1 + OFF_B) not in reps_b)
+    r = c.post("/api/ball-studio/groups/a/triangulate", json=tri_body(ref, [40.0, 25.0, 0.11])).json()
+    assert "views_not_simultaneous" not in [f["code"] for f in r["flags"]]

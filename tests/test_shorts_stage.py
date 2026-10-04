@@ -34,6 +34,7 @@ def env(tmp_path, monkeypatch):
     (tmp_path / "ball" / "g1_ball_track.json").write_text("{}")
 
     monkeypatch.setattr(stage_mod, "derive_moments", lambda out, shot: dict(MOMENTS))
+    monkeypatch.setattr(stage_mod, "shot_is_goal", lambda out, shot: True)
     monkeypatch.setattr(stage_mod, "make_framing_check",
                         lambda *a, **k: (lambda spec, a_, b_, subj, excl, ov:
                                          FramingResult(True, (), {"m": 1.0})))

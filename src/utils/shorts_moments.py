@@ -358,3 +358,22 @@ def derive_moments(output_dir: Path, shot: str) -> dict:
         ball_frames=frames, fps=fps, events=diag.get("events", []),
         operator_anchors=anchors, roles=roles, root_xy=root_xy,
         goal_check=diag.get("goal_check"))
+
+
+def diag_is_goal(diag: Mapping | None) -> bool:
+    """A ball diag describes an actual goal: the ball stage only emits
+    ``goal_check`` for goals (operator back_net/mouth impact, or an explicit
+    ``ball.goal.outcome: goal``); woodwork / side-net / ``no_goal`` shots
+    carry none."""
+    if not diag:
+        return False
+    if diag.get("goal_check"):
+        return True
+    return bool((diag.get("goal") or {}).get("is_goal"))
+
+
+def shot_is_goal(output_dir: Path, shot: str) -> bool:
+    """Whether ``shot``'s ball diag classifies it as a goal (False when the
+    diag is missing or predates the classification)."""
+    diag = _read_json(Path(output_dir) / "ball" / f"{shot}_ball_diag.json")
+    return diag_is_goal(diag)

@@ -21,7 +21,7 @@ from src.schemas.shots import ShotsManifest
 from src.utils import render_pass_runner as rpr
 from src.utils import shorts_audio
 from src.utils.short_compositor import compose
-from src.utils.shorts_moments import derive_moments
+from src.utils.shorts_moments import derive_moments, shot_is_goal
 from src.utils.shorts_pipeline import (
     audio_plan, inputs_digest, make_framing_check, pass_fingerprint, resolve_captions)
 from src.utils.shorts_templates import fill_sources, load_template, resolve_template
@@ -56,6 +56,11 @@ class ShortsStage(BaseStage):
             return [i for i in ids if i == want]
         out = []
         for sid in ids:
+            if not shot_is_goal(self.output_dir, sid):
+                logger.info("[shorts] skip %s: not a goal (no goal_check in ball diag -- "
+                            "woodwork/save/side-net, or ball.goal.outcome: no_goal); pin "
+                            "shorts.shot to force", sid)
+                continue
             m = derive_moments(self.output_dir, sid)
             if m.get("impact") is not None and m.get("strike") is not None:
                 out.append(sid)

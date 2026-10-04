@@ -1187,6 +1187,16 @@ ball:
   # flight-heavy origi01/kroupi01 clips (real held-out p50 0.36 vs 0.56 m,
   # 2.97 vs 3.54 m) — see docs/superpowers/specs/2026-09-25-ball-hybrid-trajectory.md.
   trajectory: hybrid
+  # Goal classification (src/utils/ball_goal_constraint.find_goal_event). The
+  # goal path (line-cross knot, shot-span spin, net containment, goal_check,
+  # shorts auto-selection) runs ONLY for an actual goal: an operator
+  # goal_impact on `back_net` or `mouth`. post/crossbar/side_net alone, and
+  # auto goal_impact knots alone, are NOT goals. `outcome` overrides per shot:
+  #   {<shot_id>: goal}     force the goal path (e.g. a post hit that went in)
+  #   {<shot_id>: no_goal}  never use it (e.g. disallowed goal)
+  # Empty = infer from the anchors.
+  goal:
+    outcome: {}
   hybrid:
     cd: 0.25
     fit_cd: true

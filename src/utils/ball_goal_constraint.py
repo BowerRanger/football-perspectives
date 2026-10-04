@@ -125,15 +125,57 @@ def ray_goal_line_hit(
     return p
 
 
+# Goal classification (2026-10-04). Only a ball that ENTERS the goal is a
+# goal: an operator ``goal_impact`` on the back net or an explicit ``mouth``
+# click. ``post`` / ``crossbar`` (woodwork) and ``side_net`` (outside
+# netting) alone are NOT goals; the per-shot ``ball.goal.outcome`` override
+# can force either way. Auto goal_impact knots never decide on their own.
+GOAL_ELEMENTS = frozenset({"back_net", "mouth"})
+OUTCOME_GOAL = "goal"
+OUTCOME_NO_GOAL = "no_goal"
+
+
+def normalize_outcome(outcome: Any) -> str | None:
+    """``goal`` / ``no_goal`` / ``None`` (infer). Anything else raises."""
+    if outcome is None or outcome == "" or outcome == "infer":
+        return None
+    o = str(outcome).strip().lower()
+    if o in (OUTCOME_GOAL, OUTCOME_NO_GOAL):
+        return o
+    raise ValueError(
+        f"ball.goal.outcome must be 'goal' or 'no_goal', got {outcome!r}")
+
+
+def outcome_for_shot(ball_cfg: Mapping[str, Any] | None, shot_id: str | None) -> str | None:
+    """The explicit ``ball.goal.outcome[<shot_id>]`` override, or ``None``."""
+    table = ((ball_cfg or {}).get("goal") or {}).get("outcome") or {}
+    if not shot_id or shot_id not in table:
+        return None
+    return normalize_outcome(table[shot_id])
+
+
+def is_goal_element(element: str | None) -> bool:
+    return element in GOAL_ELEMENTS
+
+
 def find_goal_event(
-    ctx: HybridShotCtx, anchors: Sequence[Any],
+    ctx: HybridShotCtx, anchors: Sequence[Any], outcome: str | None = None,
 ) -> GoalEvent | None:
     """The shot's goal: the latest operator ``goal_impact`` anchor that
-    resolves to a goal line, or ``None``."""
+    resolves to a goal line, or ``None``.
+
+    Only ``back_net`` / ``mouth`` impacts make a goal; woodwork and
+    ``side_net`` impacts do not unless ``outcome == "goal"``. ``outcome ==
+    "no_goal"`` always returns ``None``."""
+    outcome = normalize_outcome(outcome)
+    if outcome == OUTCOME_NO_GOAL:
+        return None
     best: GoalEvent | None = None
     for a in sorted(anchors, key=lambda x: _attrs(x)[0]):
         frame, xy, state, element = _attrs(a)
         if state != "goal_impact" or xy is None or not element:
+            continue
+        if outcome != OUTCOME_GOAL and not is_goal_element(element):
             continue
         if not ctx.has_frame(frame):
             continue
@@ -145,6 +187,9 @@ def find_goal_event(
         best = GoalEvent(frame=frame, goal_end_x=_goal_end_for_x(float(world[0])),
                          element=element, knot_source=source)
     return best
+
+
+classify_goal = find_goal_event  # the single goal classification
 
 
 SNAP_REPORT_M = 0.01
@@ -163,13 +208,14 @@ def infer_line_cross_knots(
     ctx: HybridShotCtx,
     anchors: Sequence[Any],
     cfg: Mapping[str, Any] | None = None,
+    outcome: str | None = None,
 ) -> tuple[list[Knot], GoalEvent | None]:
     """In-memory line-cross knot(s) inferred from operator ``anchors``
     (never mutated). Returns ``(extra_knots, goal_event)``; the event's
     ``knot_source`` is ``operator_airborne_ray`` when a knot was inferred,
     the on-line source when none was needed, else ``None``."""
     c = constraint_cfg(cfg)
-    event = find_goal_event(ctx, anchors)
+    event = find_goal_event(ctx, anchors, outcome)
     if event is None or not c["enabled"]:
         return [], event
     if event.knot_source is not None:  # impact already on the line

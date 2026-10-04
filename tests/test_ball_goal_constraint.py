@@ -138,7 +138,8 @@ def test_on_line_elements_need_no_inferred_knot(ctx, element, source):
         _anchor(394, "airborne_low", _pixel_of(ctx, (0.0, 36.0, 1.5))),
         _anchor(396, "goal_impact", _pixel_of(ctx, pt), element),
     ]
-    knots, event = infer_line_cross_knots(ctx, anchors)
+    knots, event = infer_line_cross_knots(
+        ctx, anchors, outcome=None if element == "mouth" else "goal")
     assert knots == []
     assert event.knot_source == source
 

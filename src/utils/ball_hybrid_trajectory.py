@@ -1160,6 +1160,7 @@ def run_trajectory(
     cfg: Mapping[str, Any] | None = None,
     gating_cfg: Mapping[str, Any] | None = None,
     player_context: Any = None,
+    goal_outcome: str | None = None,
 ) -> tuple[dict[int, dict], dict]:
     """Convenience one-call entry point: resolve manual ``anchors``/
     ``fixes`` into knots, gate ``auto_anchors`` through
@@ -1183,7 +1184,7 @@ def run_trajectory(
     from src.utils.ball_direction_gate import filter_reversed_observations
     from src.utils.ball_goal_constraint import (
         GoalEvent, _goal_end_for_x, contain_in_net, goal_check,
-        infer_line_cross_knots)
+        infer_line_cross_knots, normalize_outcome)
 
     tcfg = full_cfg(cfg)
     hard, ray = resolve_knots(ctx, anchors, fixes, source="manual",
@@ -1194,7 +1195,8 @@ def run_trajectory(
     goal_cfg = tcfg.get("goal") or {}
     goal_event = None
     if goal_cfg.get("enabled", True):
-        extra, goal_event = infer_line_cross_knots(ctx, anchors, goal_cfg)
+        extra, goal_event = infer_line_cross_knots(
+            ctx, anchors, goal_cfg, goal_outcome)
         have = {k.frame for k in hard}
         hard = sorted(list(hard) + [k for k in extra if k.frame not in have],
                       key=lambda k: k.frame)
@@ -1252,9 +1254,11 @@ def run_trajectory(
         "n_rejected_implausible_velocity": gate_result.n_rejected_implausible_velocity,
     }
 
-    if goal_event is None and goal_cfg.get("enabled", True):
-        # No operator goal_impact: an accepted AUTO goal_impact knot still
-        # makes this a goal shot (checked, but no line-cross knot inferred).
+    if (goal_event is None and goal_cfg.get("enabled", True)
+            and normalize_outcome(goal_outcome) == "goal"):
+        # No operator goal_impact but the shot is explicitly a goal: an
+        # accepted AUTO goal_impact knot locates it (checked, no line-cross
+        # knot inferred). Auto knots never make a goal on their own.
         auto_gi = [k for k in gate_result.accepted_hard if k.kind == "goal_impact"]
         if auto_gi:
             goal_event = GoalEvent(auto_gi[0].frame,

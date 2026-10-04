@@ -30,3 +30,9 @@ def test_pipeline_stage_blocks_present_at_top_level():
     for block in ("pipeline", "tracking", "camera", "hmr_world", "refined_poses", "ball",
                   "appearance", "export", "render", "shorts"):
         assert isinstance(CFG.get(block), dict), block
+
+
+@pytest.mark.unit
+def test_replay_sync_block_is_top_level_and_complete():
+    assert set(CFG["replay_sync"]) == {"enabled", "min_confidence", "max_cost_m", "auto_retime",
+                                       "retime_tolerance", "retime_min_confidence"}

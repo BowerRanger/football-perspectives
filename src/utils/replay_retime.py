@@ -17,7 +17,7 @@ import json
 import math
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -36,6 +36,7 @@ class RetimeResult:
     frame_map: list[int]     # new frame k -> native frame
     tracks_remapped: bool
     camera_remapped: bool
+    files_written: list[str] = field(default_factory=list)
 
 
 def _paths(output_dir: Path, shot_id: str, clip_file: str) -> dict[str, Path]:
@@ -189,8 +190,10 @@ def retime_shot(output_dir: Path, shot_id: str, rate: float) -> RetimeResult:
     manifest = _replace_shot(manifest, shot_id, speed_factor=1.0 / rate,
                              retimed=True, native_frames=n_native)
     manifest.save(manifest_path)
+    written = [shot.clip_file] + [
+        str(p[k].relative_to(output_dir)) for k in ("tracks", "camera") if done[k]]
     return RetimeResult(shot_id, rate, n_native, len(idx), idx,
-                        done["tracks"], done["camera"])
+                        done["tracks"], done["camera"], written)
 
 
 def restore_native(output_dir: Path, shot_id: str) -> bool:

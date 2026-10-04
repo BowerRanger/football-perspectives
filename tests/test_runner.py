@@ -20,6 +20,7 @@ def test_resolve_all():
         "prepare_shots",
         "tracking",
         "camera",
+        "replay_sync",
         "hmr_world",
         "refined_poses",
         "ball",

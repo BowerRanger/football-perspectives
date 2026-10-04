@@ -254,6 +254,31 @@ def _render_section(output_dir: Path) -> dict | None:
     return {"shots": shots}
 
 
+def _replay_sync_section(output_dir: Path) -> dict | None:
+    """Decision counts + per-member lines from ``shots/replay_sync.json``."""
+    path = output_dir / "shots" / "replay_sync.json"
+    if not path.exists():
+        return None
+    try:
+        doc = json.loads(path.read_text())
+    except Exception:
+        return None
+    counts: dict[str, int] = {}
+    members = []
+    for g in doc.get("groups", []):
+        for m in g.get("members", []):
+            counts[m["decision"]] = counts.get(m["decision"], 0) + 1
+            est = m.get("estimate") or {}
+            members.append({
+                "group_id": g.get("group_id"), "shot_id": m["shot_id"],
+                "decision": m["decision"], "rate": est.get("rate"),
+                "confidence": est.get("confidence"), "reason": m.get("reason", ""),
+            })
+    return {"decisions": counts, "members": members,
+            "needs_review": [m for m in members if m["decision"] in
+                             ("low_confidence", "ramp_not_applied")]}
+
+
 def write_quality_report(output_dir: Path) -> None:
     """Aggregate diagnostics from camera/, hmr_world/, ball/ into a single JSON."""
     report: dict = {}
@@ -278,6 +303,10 @@ def write_quality_report(output_dir: Path) -> None:
     if manifest is not None and (manifest.groups
                                  or any(s.excluded for s in manifest.shots)):
         report["prepare_shots"] = _prepare_shots_section(output_dir, manifest)
+
+    replay_sync_section = _replay_sync_section(output_dir)
+    if replay_sync_section is not None:
+        report["replay_sync"] = replay_sync_section
 
     cam_path = output_dir / "camera" / "camera_track.json"
     anchors_path = output_dir / "camera" / "anchors.json"

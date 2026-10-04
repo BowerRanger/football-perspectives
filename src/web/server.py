@@ -91,6 +91,7 @@ STAGE_ORDER: list[str] = [
     "prepare_shots",
     "tracking",
     "camera",
+    "replay_sync",
     "hmr_world",
     "refined_poses",
     "ball",
@@ -296,6 +297,7 @@ _STAGE_COMPLETE = {
     "prepare_shots": lambda d: (d / "shots" / "shots_manifest.json").exists(),
     "tracking": lambda d: any((d / "tracks").glob("*_tracks.json")),
     "camera": _camera_complete,
+    "replay_sync": lambda d: (d / "shots" / "replay_sync.json").exists(),
     "hmr_world": _hmr_world_complete,
     "ball": lambda d: (d / "ball" / "ball_track.json").exists(),
     "refined_poses": _refined_poses_complete,
@@ -324,6 +326,9 @@ _STAGE_ARTIFACTS: dict[str, list[str]] = {
         "camera/camera_track.json",
         "camera/debug",
     ],
+    # Clearing only drops the report: retimed clips keep their natives in
+    # shots/native/ (restore via /api/shots/{id}/restore-native).
+    "replay_sync": ["shots/replay_sync.json"],
     "hmr_world": ["hmr_world"],
     "ball": ["ball/*_ball_track.json", "ball/ball_track.json"],
     "refined_poses": ["refined_poses"],
@@ -4114,6 +4119,10 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
     from src.web.ball_studio import build_router as _ball_studio_router
 
     app.include_router(_ball_studio_router(output_dir, config_path))
+
+    # Replay speed: operator moments, retime / restore-native, stage report.
+    from src.web.replay_sync import build_router as _replay_sync_router
+    app.include_router(_replay_sync_router(output_dir, _match_manifest_lock, config_path))
 
     @app.get("/ball-studio", include_in_schema=False)
     def serve_ball_studio():

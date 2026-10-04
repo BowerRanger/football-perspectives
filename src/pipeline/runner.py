@@ -16,6 +16,10 @@ _STAGE_NAMES: list[str] = [
     "prepare_shots",
     "tracking",
     "camera",
+    # ``replay_sync`` estimates replay speed + offsets from players' pitch
+    # positions (needs tracks + camera) and retimes slow-motion replays to
+    # real time, so everything from hmr_world on sees real-time footage.
+    "replay_sync",
     "hmr_world",
     # ``refined_poses`` runs before ``ball`` so the ball stage's
     # player_touch anchors resolve to bone positions on the cleaned
@@ -43,6 +47,9 @@ def _stage_class(name: str) -> type[BaseStage] | None:
     if name == "camera":
         from src.stages.camera import CameraStage
         return CameraStage
+    if name == "replay_sync":
+        from src.stages.replay_sync import ReplaySyncStage
+        return ReplaySyncStage
     if name == "hmr_world":
         from src.stages.hmr_world import HmrWorldStage
         return HmrWorldStage

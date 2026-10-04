@@ -57,10 +57,16 @@ STAGE_TABLE: dict[str, dict] = {
         "upstream": ["prepare_shots"],
         "module": "src/stages/camera.py",
     },
+    "replay_sync": {
+        "config": ["replay_sync"],
+        "inputs": [_MANIFEST, _SYNC, "tracks/*_tracks.json", _CAM_TRACK],
+        "upstream": ["tracking", "camera"],
+        "module": "src/stages/replay_sync.py",
+    },
     "hmr_world": {
         "config": ["hmr_world", "pitch"],
         "inputs": [_MANIFEST, "tracks/*_tracks.json", _CAM_TRACK],
-        "upstream": ["tracking", "camera"],
+        "upstream": ["tracking", "camera", "replay_sync"],
         "module": "src/stages/hmr_world.py",
     },
     "refined_poses": {

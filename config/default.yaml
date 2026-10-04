@@ -495,6 +495,18 @@ camera:
       kp_threshold: 0.3434
       line_threshold: 0.7867
 
+# Replay playback speed + offset from players' pitch positions (needs tracks +
+# camera on both shots of a pair). Writes player_formation alignments with
+# playback_rate (manual ones are never touched) and retimes confidently slow
+# replays to real time (natives kept in shots/native/).
+replay_sync:
+  enabled: true
+  min_confidence: 0.5             # estimate confidence floor to apply
+  max_cost_m: 2.2                 # mean player-to-player distance ceiling (m)
+  auto_retime: true               # resample confident slow replays to real time
+  retime_tolerance: 0.08          # |rate - 1| beyond this (slow side) is retimed
+  retime_min_confidence: 0.6
+
 hmr_world:
   # Force CPU on macOS: GVHMR's RoPE attention has a slice op that
   # trips an MPS assertion (dimension[1] (120) ... subRange) at exactly

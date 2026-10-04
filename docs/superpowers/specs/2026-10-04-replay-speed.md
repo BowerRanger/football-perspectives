@@ -200,3 +200,44 @@ tracks; upstream tracking + camera; hmr_world cascades from it), server
 - `POST /api/shots/{shot_id}/retime` `{"rate"}` and
   `POST /api/shots/{shot_id}/restore-native` — the same utilities, for the
   speed badge's actions.
+
+## Build notes (as shipped; deviations from the contract above)
+
+- **Modules**: the stage (`src/stages/replay_sync.py`) is IO only; chain/decision
+  logic is the pure `src/utils/replay_sync_group.py`; endpoints are the router
+  `src/web/replay_sync.py` mounted by `create_app`, sharing the dashboard's
+  manifest/sync lock. Registered after `camera` in the runner, fingerprint
+  table (hmr_world's upstream now includes it), server `STAGE_ORDER`/complete
+  check/clear artefacts (`shots/replay_sync.json` only; natives are never
+  cleared) and a `replay_sync` block in `quality_report.json`.
+- **Decisions**: `kept_manual` is decided first for operator alignments, but
+  the estimate is still computed and reported (so the dashboard can show
+  "measured 0.99x" next to a manual offset). Chaining composes the pair
+  estimate with the placed member's `(rate, offset)`
+  (`ref = O + R * (o + r * f)`). Retiming is only for slow replays
+  (`rate < 1 - retime_tolerance`); sped-up rates are stored as
+  `playback_rate`. Ramps are never retimed or applied.
+- **Offset rounding**: `frame_offset = round(-offset)` (Python rounding), e.g.
+  saka s011 offset 34.5 -> -34.
+- **Rate reference**: `POST /api/shots/{id}/retime {"rate"}` takes the rate
+  relative to the NATIVE clip (0.02 < rate <= 1.0, else 422). The moments
+  endpoint measures against the clip as it currently is and converts
+  (`native_rate = rate / speed_factor` when already retimed). Retime and
+  restore also re-base an alignment whose `playback_rate` matched
+  (retime: -> 1.0; restore: -> `1 / speed_factor`; offset unchanged).
+- **UX audit answers**
+  1. `POST /api/sync` accepts an optional `playback_rate` (> 0); when omitted
+     the saved rate is kept, so an offset-only save never resets it to 1.
+     `GET /api/sync` returns `playback_rate` for every alignment.
+  2. `POST /api/sync/groups/{g}/moments` returns `rate`, `offset`,
+     `residual_frames`, `interval_rates`, `ramp`, `n_moments`, the saved
+     `alignment`, plus `retimed`, `retime` (the retime result) and `note`
+     (why a requested retime was skipped: ramp / within tolerance). A ramp is
+     never retimed. 422 for fewer than 2 moments, repeated/backwards frames,
+     negative frames, the reference shot, or a shot outside the group; 404 for
+     an unknown group.
+  3. Retime is synchronous (seconds for a replay clip); there is no progress
+     channel. The response carries the result: `retime = {rate, frames_in,
+     frames_out, tracks_remapped, camera_remapped, files_written, ...}`
+     (`frame_map` is summarised, not echoed). `restore-native` returns 409
+     when the shot is not retimed.

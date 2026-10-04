@@ -272,7 +272,7 @@ function PendingReadout({ studio }: { studio: Studio }) {
       ) : null}
       {live?.flags.map((f) => (
         <span key={f.code} className="text-warning">
-          {f.code === "views_not_simultaneous" ? `Views show instants apart (${f.message}). Pick a frame fresh in both.` : f.message}
+          {f.message.charAt(0).toUpperCase() + f.message.slice(1)}
         </span>
       ))}
       {live?.observations_used?.some((o) => o.repeat) ? (

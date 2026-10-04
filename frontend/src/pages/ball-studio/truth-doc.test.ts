@@ -51,8 +51,16 @@ describe("keys", () => {
     d = addKey(d, draft(20)).doc
     d = addKey(d, draft(80)).doc
     expect(d.keys.map((k) => k.frame)).toEqual([20, 50, 80])
-    expect(new Set(d.keys.map((k) => k.id)).size).toBe(3)
-    expect(nextKeyId(d)).toBe("k4")
+    expect(d.keys.map((k) => k.id)).toEqual(["k20", "k50", "k80"])
+    expect(nextKeyId(d)).toBe("k81")
+  })
+
+  it("falls back to max+1 when the frame-named id is taken by a key that moved", () => {
+    let d = addKey(base, draft(10)).doc
+    d = updateKey(d, "k10", { frame: 99 })
+    const r = addKey(d, draft(10))
+    expect(r.id).toBe("k11")
+    expect(new Set(r.doc.keys.map((k) => k.id)).size).toBe(2)
   })
 
   it("replaces the key already on a frame instead of duplicating", () => {

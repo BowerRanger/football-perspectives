@@ -28,6 +28,8 @@ const fmt3 = (n: number) => n.toFixed(2)
 
 function KeyInspector({ studio, id }: { studio: Studio; id: string }) {
   const { docApi, solvedKeyById, solver } = studio
+  const shotsInScene = studio.scene.shots
+  const storedOffsets = React.useMemo(() => Object.fromEntries(shotsInScene.map((s) => [s.shot_id, s.frame_offset])), [shotsInScene])
   const key = docApi.doc.keys.find((k) => k.id === id)
   if (!key) return <p className="text-sm text-muted-foreground">That key no longer exists.</p>
   const solvedKey = solvedKeyById.get(id)
@@ -164,7 +166,7 @@ function KeyInspector({ studio, id }: { studio: Studio; id: string }) {
                     <SyncProbe
                       groupId={studio.group.group_id}
                       tkey={key}
-                      offsets={Object.fromEntries(studio.scene.shots.map((s) => [s.shot_id, s.frame_offset]))}
+                      storedOffset={storedOffsets}
                       referenceShot={studio.scene.reference_shot}
                     >
                       <ToneBadge tone={residualSeverity(o.residual_px)} className="font-mono">

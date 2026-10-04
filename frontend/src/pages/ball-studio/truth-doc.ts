@@ -51,7 +51,9 @@ const byFrame = (a: { frame: number }, b: { frame: number }) => a.frame - b.fram
  */
 export function addKey(doc: TruthDoc, draft: KeyDraft): { doc: TruthDoc; id: string } {
   const existing = doc.keys.find((k) => k.frame === draft.frame)
-  const id = existing?.id ?? nextKeyId(doc)
+  // New keys are named after their frame ("k449" is frame 449) when that id is free.
+  const frameId = `k${draft.frame}`
+  const id = existing?.id ?? (doc.keys.some((k) => k.id === frameId) || draft.frame < 0 ? nextKeyId(doc) : frameId)
   const key: TruthKey = {
     id,
     frame: draft.frame,

@@ -205,6 +205,9 @@ export class StudioEngine {
     this.ballDot = px(markerTexture("disc"), 12, 12, 11)
     this.dropDot = px(markerTexture("ring"), 16, 16, 11)
     this.pxItems.push({ s: this.heightLabel.sprite, w: 104, h: 26 }, { s: this.gapLabel.sprite, w: 104, h: 26 })
+    // Screen-space anchors keep the two labels apart at any zoom: height above the ball, skew gap below.
+    this.heightLabel.sprite.center.set(0.5, -0.9)
+    this.gapLabel.sprite.center.set(0.5, 1.9)
     this.ghostMesh = new THREE.Mesh(
       new THREE.SphereGeometry(0.4, 12, 12),
       new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.8 }),
@@ -555,7 +558,7 @@ export class StudioEngine {
       this.skewLine.geometry.dispose()
       this.skewLine.geometry = new THREE.BufferGeometry().setFromPoints([a, b])
       this.gapLabel.set(`gap ${Math.round(sk.gap_m * 100)} cm`, "#f87171")
-      this.gapLabel.sprite.position.copy(a.clone().lerp(b, 0.5)).add(new THREE.Vector3(0, 1.2, 0))
+      this.gapLabel.sprite.position.copy(a.clone().lerp(b, 0.5))
     }
     // ghost
     this.ghostMesh.visible = !!inp.ghost
@@ -584,7 +587,7 @@ export class StudioEngine {
     this.ballDot.position.copy(p)
     this.dropDot.position.copy(ground)
     this.heightLabel.set(`${b[2].toFixed(2)} m`, "#ffffff")
-    this.heightLabel.sprite.position.copy(p).add(new THREE.Vector3(0, 1.4, 0))
+    this.heightLabel.sprite.position.copy(p)
   }
 
   // ---- depth handle drag --------------------------------------------------

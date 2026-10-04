@@ -24,7 +24,8 @@ interface SyncProbeProps {
   groupId: string
   tkey: TruthKey
   /** Stored frame_offset per shot (the sync map's current values). */
-  offsets: Record<string, number>
+  /** Stored frame_offset of the moving view (the sync map's current value). */
+  storedOffset: Record<string, number>
   referenceShot: string
   children: React.ReactNode
 }
@@ -35,23 +36,29 @@ interface SyncProbeProps {
  * measures camera drift - it is not a sync verdict. The Studio never writes
  * sync_map.json; the link goes to the Prepare Shots sync timeline.
  */
-export function SyncProbe({ groupId, tkey, offsets, referenceShot, children }: SyncProbeProps) {
+export function SyncProbe({ groupId, tkey, storedOffset, referenceShot, children }: SyncProbeProps) {
   const [open, setOpen] = React.useState(false)
   const [rows, setRows] = React.useState<Row[] | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const moving = tkey.observations.map((o) => o.shot_id).find((s) => s !== referenceShot)
+  const stored = moving ? (storedOffset[moving] ?? 0) : 0
+  // Latest key payload without making the effect depend on its identity.
+  const keyRef = React.useRef(tkey)
+  React.useEffect(() => {
+    keyRef.current = tkey
+  })
 
   React.useEffect(() => {
     if (!open || !moving) return
     let cancelled = false
     setRows(null)
     setError(null)
-    const stored = offsets[moving] ?? 0
+    const k = keyRef.current
     Promise.all(
       DELTAS.map(async (delta): Promise<Row> => {
         const r: TriangulateResult = await postTriangulate(groupId, {
-          frame: tkey.frame,
-          observations: tkey.observations,
+          frame: k.frame,
+          observations: k.observations,
           constraint: null,
           offsets: { [moving]: stored + delta },
         })
@@ -69,7 +76,7 @@ export function SyncProbe({ groupId, tkey, offsets, referenceShot, children }: S
     return () => {
       cancelled = true
     }
-  }, [open, moving, groupId, tkey, offsets])
+  }, [open, moving, stored, groupId, tkey.id, tkey.frame])
 
   const best = rows?.reduce<Row | null>((b, r) => (r.max !== null && (b === null || (b.max ?? Infinity) > r.max) ? r : b), null)
 
@@ -105,9 +112,10 @@ export function SyncProbe({ groupId, tkey, offsets, referenceShot, children }: S
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={r.delta} className={r === best ? "font-medium" : undefined}>
+                <tr key={r.delta}>
                   <td className="py-1 font-mono">
                     {r.offset} <span className="text-muted-foreground">({r.delta > 0 ? `+${r.delta}` : r.delta === 0 ? "stored" : r.delta})</span>
+                    {r === best ? <span className="ml-1 text-muted-foreground" title="Lowest residual of the five">·</span> : null}
                   </td>
                   <td>
                     {r.max === null ? (
@@ -124,13 +132,10 @@ export function SyncProbe({ groupId, tkey, offsets, referenceShot, children }: S
             </tbody>
           </table>
         ) : null}
-        {best && best.delta !== 0 ? (
-          <p className="text-xs text-warning">
-            Lowest at {best.offset} ({best.delta > 0 ? "+" : ""}
-            {best.delta}). Treat as a lead to check by re-clicking.
+        {rows ? (
+          <p className="text-xs text-muted-foreground">
+            A held click mostly measures camera motion. To check sync, re-pick the ball on a neighbouring frame of this view.
           </p>
-        ) : best ? (
-          <p className="text-xs text-muted-foreground">The stored offset is the lowest of the five.</p>
         ) : null}
         <Link to="/?stage=prepare_shots" className="inline-flex items-center gap-1 text-xs underline underline-offset-2">
           Open sync timeline <ExternalLinkIcon className="size-3" aria-hidden />

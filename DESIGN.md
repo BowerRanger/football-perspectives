@@ -32,6 +32,15 @@ colors:
   warning-light: "oklch(0.49 0.12 65)"
   destructive-light: "oklch(0.577 0.245 27.325)"
   info-light: "oklch(0.47 0.15 250)"
+  data-view-a: "#f0abfc"
+  data-view-b: "#5eead4"
+  data-view-c: "#93c5fd"
+  data-segment-flight: "#38bdf8"
+  data-segment-roll: "#34d399"
+  data-segment-carried: "#a78bfa"
+  data-segment-linear: "#94a3b8"
+  data-segment-static: "#64748b"
+  data-pipeline-ghost: "#e2e8f0"
 typography:
   headline:
     fontFamily: "'Geist Variable', ui-sans-serif, system-ui, sans-serif"
@@ -178,10 +187,21 @@ Light-theme semantic values are darker (lightness 0.45 to 0.58) so text on white
 ### Data colours
 The player palette (16 fixed hex values in `frontend/src/lib/format.ts`) is data, not theme: a player keeps the same colour in tables, overlays, trajectories and the 3D viewer, in both themes. Chart tokens (`--chart-1..5`) mirror the semantic hues. Hex is allowed only for data colours and canvas drawing.
 
+Ball Studio adds three more data sets, defined once in `frontend/src/pages/ball-studio/palette.ts` (canvas views, timeline and 3-D all read from it; the `data-*` frontmatter keys are its values):
+- **View identity** (Orchid A, Seafoam B, Sky C; `data-view-a..c`): rays, frusta, epipolar lines and view badges, at most three views. A view colour never appears without its letter badge (A, B, C), so identity is never colour-only.
+- **Segment kind** (`data-segment-*`), colour plus stroke so kind reads without hue: flight solid 3px with a dot every 5 frames along the gravity arc; roll solid 2px; carried dotted 2px; linear dashed 2px; static a hollow ring with no line. Used for timeline bars, the projected solved track and the 3-D track.
+- **Residual severity** (reprojection error in px): up to 3px is success, up to 8px warning, above 8px destructive; above 15px the server rejects the key. Chrome shows it as a ToneBadge; canvases use hex mirrors of the same three semantic hues.
+- **Events** reuse the ball-anchor editor's tag colours (one vocabulary for both editors), each with a glyph (circle, ring, bar, line, hand, x).
+- **Key source** is encoded by marker shape, never hue: filled diamond (triangulated), hollow diamond with a constraint glyph (ray), tethered diamond (player joint), square (manual 3-D).
+
 ### Named Rules
 **The Colour-Is-Meaning Rule.** Chrome is achromatic. If a hue appears, it is a state (success / warning / destructive / info) or a data identity (player, pitch). A coloured button, heading or decorative accent is off-system.
 
-**The Fixed Surround Rule.** Footage and canvases sit in `stage` in both themes; theme switching never changes what surrounds the image.
+**The Fixed Surround Rule.** Footage and canvases sit in `stage` in both themes; theme switching never changes what surrounds the image. This covers drawn canvases as well as video: the Ball Studio timeline is painted on `stage` and stays dark in the light theme, so its data hues keep one contrast background.
+
+**The Disjoint Channels Rule.** One channel per meaning. View identity and segment kind use separate hue sets that never share a value; key source is shape; severity is the semantic hues. A new data meaning gets its own channel, not a colour borrowed from another set.
+
+**The Truth Bold, Pipeline Ghost Rule.** Operator-authored truth is drawn in full data colour at full strength. Pipeline output for comparison is always the neutral ghost (`data-pipeline-ghost` at 55% alpha, 1.5px, dashed, no markers), never coloured by kind, and can be toggled off. If the pipeline line is as loud as the truth, the hierarchy is wrong.
 
 ## Typography
 
@@ -268,6 +288,19 @@ A floating Panel at the bottom of the content column: header row with terminal i
 ### Stage well
 Near-black `stage` surface for video, canvases, three.js and thumbnails. Canvas chrome (axes, labels) reads theme tokens at draw time; data marks use the player palette.
 
+### Multi-view editor (Ball Studio)
+The pattern for editors that pick on synced footage from several angles.
+- **Wells:** each view is a `stage` well (8px radius, hairline ring) with a video plus overlay canvas; the active view gets an info ring. A header chip carries the view's letter badge, shot id, offset and mono frame number. The 3-D well and the timeline are `stage` wells too.
+- **Place, then commit:** a click only ever creates a pending pick: a ring in the view colour with a small plus inside, on a dark halo. Nothing is saved until commit. Enter commits the natural kind (a key when two views or a constraint pin it, otherwise an observation), K forces a key, O forces a soft observation, Esc discards. The optional auto-commit toggle only commits a two-view triangulation with every residual within 8px. Alt+arrows nudge the pending pick 1px (5px with Shift). The mode bar always says in one line what is pending and what Enter will do, with Commit and Discard buttons that show their keys.
+- **Epipolar polyline:** after a pick in one view, the other views draw that pick's ray in the source view's colour: a 1.5px line on a 6px halo at 18% alpha, projected through the full lens model so it bends with distortion. Height ticks (3px dots with small mono labels such as "2 m") let the operator read the height they choose while sliding along the line.
+- **Residual vector:** picked pixel to reprojected pixel in severity colour with a mono "1.4 px" label; below 2px a dashed 4x-magnified ghost keeps the miss visible.
+- **3-D labels and markers in screen space:** the ball (12px), its ground drop ring (16px) and the two labels are sprites with no size attenuation, so they stay readable at any zoom. The height label sits above the ball and the skew-gap label below it, so they never collide. Labels are mono semibold with a dark stroke.
+- **Timeline:** labelled rows (Segments, Keys and events, Footage, Residual, Flags, vs pipeline) in a 96px gutter, painted on `stage`. The Residual row draws the 3/8/15px bands as faint dashed lines. Footage rows show each view's coverage strip in its colour behind a hatch where there is no footage.
+- **Repeat frames:** a frame whose image repeats the previous one (25 to 30 fps pulldown) shows a small "repeat" chip (warning text on a 20% warning tint, with a tooltip) in the view header, and dark ticks in that view's footage strip. If a solve used a repeated frame, the mode bar says so in warning text.
+
+### Frame-exact video transport
+Every `<video>`-driven editor (Ball Studio, anchor and ball-anchor editors, kp2d viewer, trajectory playback, sync editor) converts frames and time through `frontend/src/lib/frame-time.ts`. To show frame f, seek to `(f + 0.5) / fps`, the middle of the frame. To read the frame, use `floor(t * fps + 1e-6)`. Never seek to `f / fps` or read with `Math.round`: both land one frame off.
+
 ### Dialogs
 Destructive actions go through a promise-based confirm dialog; re-running a stage first lists the generated outputs it will clear in a mono list, and stages holding operator edits require typing the stage name.
 
@@ -281,6 +314,9 @@ Destructive actions go through a promise-based confirm dialog; re-running a stag
 - **Do** keep one primary button per header or dialog; make the non-destructive path the primary.
 - **Do** use Geist Mono with tabular numerals for ids, frames, coordinates and logs, and nowhere else.
 - **Do** show why a control is disabled as visible text or a reachable tooltip.
+- **Do** pair every view colour with its letter badge, and give every data hue a second channel (stroke, glyph or shape).
+- **Do** make operator picks pending until an explicit commit, and say on screen what the commit will do.
+- **Do** route every video seek and frame read through `lib/frame-time.ts`.
 
 ### Don't:
 - **Don't** colour buttons, titles or decorative accents; the primary stays monochrome.
@@ -289,3 +325,5 @@ Destructive actions go through a promise-based confirm dialog; re-running a stag
 - **Don't** use unicode glyphs as icons; icons are lucide.
 - **Don't** use `alert()` or `window.confirm`; errors are toasts, destructive actions are confirm dialogs.
 - **Don't** theme the player palette; a player's colour is identical in both themes and every panel.
+- **Don't** colour pipeline output by kind or draw it solid; it is the dashed neutral ghost.
+- **Don't** reuse a view colour for a segment kind or the reverse.

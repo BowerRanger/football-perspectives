@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-09-28T23:32:06+00:00",
+  "generatedAt": "2026-10-04T09:50:33+00:00",
   "title": "Design System: Football Perspectives Dashboard",
   "extensions": {
     "colorMeta": {
@@ -183,6 +183,51 @@
           "oklch(82% 0.12 240)",
           "oklch(95% 0.12 240)"
         ]
+      },
+      "data-view-a": {
+        "role": "data",
+        "displayName": "Orchid A",
+        "purpose": "View A identity: rays, frustum, epipolar line, view badge. Always with the letter badge."
+      },
+      "data-view-b": {
+        "role": "data",
+        "displayName": "Seafoam B",
+        "purpose": "View B identity."
+      },
+      "data-view-c": {
+        "role": "data",
+        "displayName": "Sky C",
+        "purpose": "View C identity (third angle)."
+      },
+      "data-segment-flight": {
+        "role": "data",
+        "displayName": "Flight",
+        "purpose": "Segment kind: solid 3px with gravity-arc dots every 5 frames."
+      },
+      "data-segment-roll": {
+        "role": "data",
+        "displayName": "Roll",
+        "purpose": "Segment kind: solid 2px."
+      },
+      "data-segment-carried": {
+        "role": "data",
+        "displayName": "Carried",
+        "purpose": "Segment kind: dotted 2px."
+      },
+      "data-segment-linear": {
+        "role": "data",
+        "displayName": "Linear",
+        "purpose": "Segment kind: dashed 2px."
+      },
+      "data-segment-static": {
+        "role": "data",
+        "displayName": "Static",
+        "purpose": "Segment kind: hollow ring, no line."
+      },
+      "data-pipeline-ghost": {
+        "role": "data",
+        "displayName": "Pipeline Ghost",
+        "purpose": "Pipeline comparison track: 55% alpha, 1.5px dashed, never kind-coloured."
       }
     },
     "typographyMeta": {
@@ -357,7 +402,17 @@
       },
       {
         "name": "The Fixed Surround Rule",
-        "body": "Footage and canvases sit in `stage` in both themes; theme switching never changes what surrounds the image.",
+        "body": "Footage and canvases sit in `stage` in both themes; theme switching never changes what surrounds the image. This covers drawn canvases as well as video: the Ball Studio timeline is painted on `stage` and stays dark in the light theme, so its data hues keep one contrast background.",
+        "section": "colors"
+      },
+      {
+        "name": "The Disjoint Channels Rule",
+        "body": "One channel per meaning. View identity and segment kind use separate hue sets that never share a value; key source is shape; severity is the semantic hues. A new data meaning gets its own channel, not a colour borrowed from another set.",
+        "section": "colors"
+      },
+      {
+        "name": "The Truth Bold, Pipeline Ghost Rule",
+        "body": "Operator-authored truth is drawn in full data colour at full strength. Pipeline output for comparison is always the neutral ghost (55% alpha, 1.5px, dashed, no markers), never coloured by kind, and can be toggled off.",
         "section": "colors"
       },
       {
@@ -383,7 +438,10 @@
       "**Do** wrap every content block in a Panel with a sentence-case title; give empty states a next step.",
       "**Do** keep one primary button per header or dialog; make the non-destructive path the primary.",
       "**Do** use Geist Mono with tabular numerals for ids, frames, coordinates and logs, and nowhere else.",
-      "**Do** show why a control is disabled as visible text or a reachable tooltip."
+      "**Do** show why a control is disabled as visible text or a reachable tooltip.",
+      "**Do** pair every view colour with its letter badge, and give every data hue a second channel (stroke, glyph or shape).",
+      "**Do** make operator picks pending until an explicit commit, and say on screen what the commit will do.",
+      "**Do** route every video seek and frame read through `lib/frame-time.ts`."
     ],
     "donts": [
       "**Don't** colour buttons, titles or decorative accents; the primary stays monochrome.",
@@ -391,7 +449,9 @@
       "**Don't** use uppercase tracked titles or labels.",
       "**Don't** use unicode glyphs as icons; icons are lucide.",
       "**Don't** use `alert()` or `window.confirm`; errors are toasts, destructive actions are confirm dialogs.",
-      "**Don't** theme the player palette; a player's colour is identical in both themes and every panel."
+      "**Don't** theme the player palette; a player's colour is identical in both themes and every panel.",
+      "**Don't** colour pipeline output by kind or draw it solid; it is the dashed neutral ghost.",
+      "**Don't** reuse a view colour for a segment kind or the reverse."
     ]
   }
 }

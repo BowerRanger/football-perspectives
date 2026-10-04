@@ -25,7 +25,7 @@ export function Timeline({ studio, onboarding }: { studio: Studio; onboarding?: 
       selectedKey: selection?.type === "key" ? selection.id : null,
       selectedEvent: selection?.type === "event" ? selection.index : null,
       hoverFrame: hover?.frame ?? null,
-      views: studio.shots.map((s) => ({ shotId: s.shot_id, offset: s.frame_offset, nFrames: shotVideoRange(s)[1] + 1 })),
+      views: studio.shots.map((s) => ({ shotId: s.shot_id, offset: s.frame_offset, nFrames: shotVideoRange(s)[1] + 1, repeats: s.repeat_frames })),
       pipeline: scene.pipeline_tracks[0] ? { frames: scene.pipeline_tracks[0].frames, xyz: scene.pipeline_tracks[0].xyz } : null,
       keyKinds: studio.keyKinds,
     }),

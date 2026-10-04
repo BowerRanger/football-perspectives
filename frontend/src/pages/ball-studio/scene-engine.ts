@@ -10,7 +10,7 @@ import { unproject, rayAt, type FrameCam } from "./camera-model"
 import { PIPELINE_GHOST, SEGMENT_STYLE, viewColour } from "./palette"
 import type { Scene, ScenePlayer, SegmentKind, Vec2, Vec3 } from "./types"
 
-export type CameraPreset = "overview" | "top" | "view-a" | "view-b" | "goal-near" | "goal-far" | "follow" | "free"
+export type CameraPreset = "fit" | "overview" | "top" | "view-a" | "view-b" | "goal-near" | "goal-far" | "follow" | "free"
 
 export interface EngineTrack {
   frames: readonly number[]
@@ -46,13 +46,38 @@ const v3 = (p: readonly number[]): THREE.Vector3 => {
   return new THREE.Vector3(t[0], t[1], t[2])
 }
 
+/** Disc or ring texture for screen-space markers. */
+function markerTexture(kind: "disc" | "ring"): THREE.CanvasTexture {
+  const c = document.createElement("canvas")
+  c.width = c.height = 64
+  const ctx = c.getContext("2d")!
+  ctx.lineWidth = 6
+  if (kind === "disc") {
+    ctx.beginPath()
+    ctx.arc(32, 32, 24, 0, Math.PI * 2)
+    ctx.fillStyle = "#ffffff"
+    ctx.fill()
+    ctx.strokeStyle = "rgba(0,0,0,0.85)"
+    ctx.stroke()
+  } else {
+    ctx.beginPath()
+    ctx.arc(32, 32, 24, 0, Math.PI * 2)
+    ctx.strokeStyle = "rgba(0,0,0,0.85)"
+    ctx.lineWidth = 9
+    ctx.stroke()
+    ctx.strokeStyle = "#ffffff"
+    ctx.lineWidth = 5
+    ctx.stroke()
+  }
+  return new THREE.CanvasTexture(c)
+}
+
 function labelSprite(): { sprite: THREE.Sprite; set: (text: string, colour: string) => void } {
   const canvas = document.createElement("canvas")
   canvas.width = 256
   canvas.height = 64
   const tex = new THREE.CanvasTexture(canvas)
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }))
-  sprite.scale.set(6, 1.5, 1)
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true, sizeAttenuation: false }))
   sprite.renderOrder = 10
   let last = ""
   return {
@@ -106,6 +131,10 @@ export class StudioEngine {
   private readonly ballMesh: THREE.Mesh
   private readonly stem: THREE.Line
   private readonly dropRing: THREE.Mesh
+  private readonly ballDot: THREE.Sprite
+  private readonly dropDot: THREE.Sprite
+  private readonly pxItems: { s: THREE.Sprite; w: number; h: number }[] = []
+  private fitPending = false
   private readonly heightLabel = labelSprite()
   private readonly gapLabel = labelSprite()
   private readonly ghostMesh: THREE.Mesh
@@ -166,6 +195,16 @@ export class StudioEngine {
       new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.8 }),
     )
     this.dropRing.rotation.x = -Math.PI / 2
+    const px = (tex: THREE.Texture, w: number, h: number, order: number) => {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true, sizeAttenuation: false }))
+      s.renderOrder = order
+      this.pxItems.push({ s, w, h })
+      return s
+    }
+    // Screen-space minimum sizes: the ball (12 px), its ground drop ring (16 px) and the height label stay readable at any zoom.
+    this.ballDot = px(markerTexture("disc"), 12, 12, 11)
+    this.dropDot = px(markerTexture("ring"), 16, 16, 11)
+    this.pxItems.push({ s: this.heightLabel.sprite, w: 104, h: 26 }, { s: this.gapLabel.sprite, w: 104, h: 26 })
     this.ghostMesh = new THREE.Mesh(
       new THREE.SphereGeometry(0.4, 12, 12),
       new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.8 }),
@@ -176,7 +215,7 @@ export class StudioEngine {
       new THREE.MeshBasicMaterial({ color: 0xfbbf24, depthTest: false, transparent: true, opacity: 0.9 }),
     )
     this.handle.renderOrder = 9
-    for (const o of [this.ballMesh, this.stem, this.dropRing, this.ghostMesh, this.skewLine, this.handle, this.heightLabel.sprite, this.gapLabel.sprite]) {
+    for (const o of [this.ballMesh, this.stem, this.dropRing, this.ghostMesh, this.skewLine, this.handle, this.heightLabel.sprite, this.gapLabel.sprite, this.ballDot, this.dropDot]) {
       o.visible = false
       this.dyn.add(o)
     }
@@ -188,7 +227,7 @@ export class StudioEngine {
       this.pristine = false
       if (this.preset !== "follow") this.setPreset("free", false)
     })
-    this.setPreset("overview")
+    this.setPreset("fit")
 
     const el = this.renderer.domElement
     el.addEventListener("pointerdown", this.onPointerDown)
@@ -217,7 +256,14 @@ export class StudioEngine {
     this.camera.updateProjectionMatrix()
     this.renderer.setSize(w, h, false)
     if (this.preset === "overview" && this.pristine) this.applyPreset("overview")
+    this.rescalePx()
     this.dirty = true
+  }
+
+  private rescalePx(): void {
+    const H = Math.max(1, this.container.clientHeight)
+    const k = (2 * Math.tan((this.camera.fov * Math.PI) / 360)) / H
+    for (const it of this.pxItems) it.s.scale.set(it.w * k, it.h * k, 1)
   }
 
   private readonly tick = () => {
@@ -264,6 +310,24 @@ export class StudioEngine {
       c.update()
     }
     switch (p) {
+      case "fit": {
+        const pts = this.authoredPoints()
+        if (!pts.length) {
+          this.fitPending = true
+          this.applyPreset("overview")
+          this.preset = "fit"
+          break
+        }
+        this.fitPending = false
+        const box = new THREE.Box3().setFromPoints(pts)
+        const centre = box.getCenter(new THREE.Vector3())
+        const radius = Math.max(6, box.getSize(new THREE.Vector3()).length() / 2)
+        const half = (this.camera.fov * Math.PI) / 360
+        const d = (radius / Math.sin(Math.min(half, Math.atan(Math.tan(half) * Math.min(1, this.camera.aspect))))) * 1.7
+        const dir = new THREE.Vector3(-0.3, 0.55, 0.78).normalize()
+        set([centre.x + dir.x * d, centre.y + dir.y * d, centre.z + dir.z * d], [centre.x, centre.y, centre.z])
+        break
+      }
       case "overview": {
         // Fit the whole pitch to the well: distance from the narrower of width / height at a 40 degree tilt.
         const half = (this.camera.fov * Math.PI) / 360
@@ -297,6 +361,14 @@ export class StudioEngine {
     }
   }
 
+  private authoredPoints(): THREE.Vector3[] {
+    const inp = this.input
+    if (!inp) return []
+    const pts = inp.keys.map((k) => v3(k.xyz))
+    for (const p of inp.dense?.xyz ?? []) if (p) pts.push(v3(p))
+    return pts
+  }
+
   private lookThrough(cam: FrameCam, size: Vec2): void {
     const ray = unproject(cam, size[0] / 2, size[1] / 2)
     const pos = v3(cam.C)
@@ -310,6 +382,7 @@ export class StudioEngine {
 
   update(inp: EngineInput): void {
     this.input = inp
+    if (this.fitPending && this.preset === "fit" && inp.keys.length) this.applyPreset("fit")
     this.syncTrack(inp)
     this.syncKeys(inp)
     this.syncPipeline(inp)
@@ -498,6 +571,8 @@ export class StudioEngine {
     this.ballMesh.visible = !!b
     this.stem.visible = !!b
     this.dropRing.visible = !!b
+    this.ballDot.visible = !!b
+    this.dropDot.visible = !!b
     this.heightLabel.sprite.visible = !!b
     if (!b) return
     const p = v3(b)
@@ -506,6 +581,8 @@ export class StudioEngine {
     this.stem.geometry.dispose()
     this.stem.geometry = new THREE.BufferGeometry().setFromPoints([p, ground])
     this.dropRing.position.copy(ground)
+    this.ballDot.position.copy(p)
+    this.dropDot.position.copy(ground)
     this.heightLabel.set(`${b[2].toFixed(2)} m`, "#ffffff")
     this.heightLabel.sprite.position.copy(p).add(new THREE.Vector3(0, 1.4, 0))
   }

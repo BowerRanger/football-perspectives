@@ -10,11 +10,12 @@ interface StudioViewProps {
   interactive?: boolean
   focused?: boolean
   canFocus?: boolean
+  maxHeight?: string
   className?: string
 }
 
 /** One ViewWell wired to the studio controller. */
-export function StudioView({ studio, index, interactive = true, focused = false, canFocus = true, className }: StudioViewProps) {
+export function StudioView({ studio, index, interactive = true, focused = false, canFocus = true, maxHeight, className }: StudioViewProps) {
   const shot = studio.shots[index]
   const cam = studio.cams[index]
   const shotFrame = refToShot(studio.frame, cam.frameOffset)
@@ -27,6 +28,7 @@ export function StudioView({ studio, index, interactive = true, focused = false,
   return (
     <ViewWell
       className={className}
+      maxHeight={maxHeight}
       index={index}
       shot={shot}
       shotFrame={shotFrame}
@@ -47,6 +49,7 @@ export function StudioView({ studio, index, interactive = true, focused = false,
       onActivate={() => studio.setActiveView(index)}
       onToggleFocus={canFocus && studio.cams.length > 1 ? () => studio.setLayout(focused ? "compare" : "focus") : undefined}
       onVideoError={() => studio.videos.markError(shot.shot_id)}
+      isRepeat={studio.repeatSets[index]?.has(shotFrame) ?? false}
       note={
         status !== "out_of_range" && !hasCamera
           ? "No solved camera for this frame, so picks are disabled here"

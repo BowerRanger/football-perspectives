@@ -112,39 +112,37 @@ function StudioReady({ group, groups, scene, truth, onChangeGroup }: ReadyProps)
       ) : (
         <div className="flex min-w-0 flex-col gap-3 p-4">
           <ModeBar studio={studio} />
-          <div
-            className={
-              focus
-                ? "grid items-start gap-3 md:grid-cols-[minmax(0,1fr)_320px] xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_360px]"
-                : "grid items-stretch gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_360px]"
-            }
-          >
-            {focus ? (
-              <>
-                <StudioView studio={studio} index={focusIdx} focused className="md:col-start-1 xl:col-span-2" />
-                <div className="flex flex-col gap-3 md:col-start-2 xl:col-start-3">
-                  <StudioView studio={studio} index={pipIdx} canFocus={false} />
-                  <div className="relative h-64 overflow-hidden rounded-lg bg-stage ring-1 ring-border">
-                    <Studio3D studio={studio} className="absolute inset-0" />
-                  </div>
-                </div>
-              </>
-            ) : (
-              <>
-                <StudioView studio={studio} index={0} />
-                {studio.cams.length > 1 ? <StudioView studio={studio} index={1} /> : null}
-                <div className="relative h-72 overflow-hidden rounded-lg bg-stage ring-1 ring-border md:col-span-2 xl:col-span-1 xl:h-auto xl:min-h-64">
+          <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_360px]">
+            {/* Left: the views, then transport and timeline. Below xl the wrapper dissolves so the
+                order is views, 3-D + inspector, transport + timeline. */}
+            <div className="contents xl:flex xl:min-w-0 xl:flex-col xl:gap-3">
+              <div className="order-1 grid gap-3 md:grid-cols-2">
+                {focus || studio.cams.length < 2 ? (
+                  <StudioView studio={studio} index={focusIdx} focused={focus} maxHeight="calc(100svh - 29rem)" className="md:col-span-2" />
+                ) : (
+                  <>
+                    <StudioView studio={studio} index={0} />
+                    {studio.cams.length > 1 ? <StudioView studio={studio} index={1} /> : null}
+                  </>
+                )}
+              </div>
+              <div className="order-3 flex min-w-0 flex-col gap-3">
+                {transport}
+                <Timeline studio={studio} onboarding={onboarding} />
+              </div>
+            </div>
+            {/* Right: 3-D well, then the inspector bounded to the remaining viewport. */}
+            <div className="order-2 grid min-h-0 gap-3 md:grid-cols-[minmax(0,1fr)_360px] xl:sticky xl:top-[4.75rem] xl:flex xl:max-h-[calc(100svh-5.5rem)] xl:flex-col">
+              <div className="flex min-h-0 flex-col gap-3 xl:contents">
+                {focus ? <StudioView studio={studio} index={pipIdx} canFocus={false} className="xl:shrink-0" /> : null}
+                <div className="relative h-64 shrink-0 overflow-hidden rounded-lg bg-stage ring-1 ring-border xl:h-72">
                   <Studio3D studio={studio} className="absolute inset-0" />
                 </div>
-              </>
-            )}
-          </div>
-          <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,2fr)_360px]">
-            <div className="flex min-w-0 flex-col gap-3">
-              {transport}
-              <Timeline studio={studio} onboarding={onboarding} />
+              </div>
+              <div className="min-h-0 xl:flex-1 xl:overflow-auto">
+                <Inspector studio={studio} onHelp={() => setHelpOpen(true)} />
+              </div>
             </div>
-            <Inspector studio={studio} onHelp={() => setHelpOpen(true)} />
           </div>
         </div>
       )}

@@ -5,6 +5,7 @@ import type { Scene } from "./types"
 import { StudioEngine, type CameraPreset, type EngineInput } from "./scene-engine"
 
 const PRESETS: { id: CameraPreset; label: string }[] = [
+  { id: "fit", label: "Fit track" },
   { id: "overview", label: "Overview" },
   { id: "view-a", label: "Through view A" },
   { id: "view-b", label: "Through view B" },
@@ -27,7 +28,7 @@ interface Scene3DProps {
 export function Scene3D({ scene, input, hasViewB, onDepth, className }: Scene3DProps) {
   const hostRef = React.useRef<HTMLDivElement | null>(null)
   const engineRef = React.useRef<StudioEngine | null>(null)
-  const [preset, setPreset] = React.useState<CameraPreset>("overview")
+  const [preset, setPreset] = React.useState<CameraPreset>("fit")
   const [failed, setFailed] = React.useState(false)
   const depthRef = React.useRef(onDepth)
   React.useEffect(() => {

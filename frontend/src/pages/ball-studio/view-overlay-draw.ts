@@ -52,6 +52,8 @@ export interface ViewDrawInput {
   keys: readonly DrawKey[]
   soft: readonly { uv: Vec2; projectedUv: Vec2 | null; selected: boolean }[]
   pipelineAnchors: readonly Vec2[]
+  /** Solver projection of the ball at this view's own instant. */
+  nowUv: Vec2 | null
   pending: Vec2 | null
   ghost: Vec3 | null
   epipolar: readonly DrawEpipolar[]
@@ -347,6 +349,22 @@ export function drawView(canvas: HTMLCanvasElement, inp: ViewDrawInput): void {
   if (inp.showRays) for (const e of inp.epipolar) drawEpipolar(ctx, inp, e, toScreen)
 
   for (const k of inp.keys) drawKey(ctx, inp, k, toScreen)
+
+  if (inp.nowUv) {
+    const [x, y] = toScreen(inp.nowUv)
+    ctx.save()
+    ctx.lineWidth = 1.5
+    halo(ctx, () => {
+      ctx.beginPath()
+      ctx.arc(x, y, 7, 0, Math.PI * 2)
+      ctx.stroke()
+    })
+    ctx.strokeStyle = "#ffffff"
+    ctx.beginPath()
+    ctx.arc(x, y, 7, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.restore()
+  }
 
   const colour = viewColour(inp.viewIndex)
   for (const o of inp.soft) {

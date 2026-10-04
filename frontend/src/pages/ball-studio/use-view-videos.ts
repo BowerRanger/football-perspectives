@@ -62,6 +62,7 @@ export function useViewVideos({ shots, frame, fps, maxFrame, onFrame }: Options)
     if (!cb) {
       cb = (el) => {
         if (el) {
+          if (els.current.get(shotId) === el) return
           els.current.set(shotId, el)
           const onSeeked = () => {
             const sf = Math.floor(el.currentTime * fpsRef.current)

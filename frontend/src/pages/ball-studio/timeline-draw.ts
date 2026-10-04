@@ -28,7 +28,7 @@ export interface TimelineModel {
   selectedKey: string | null
   selectedEvent: number | null
   hoverFrame: number | null
-  views: { shotId: string; offset: number; nFrames: number }[]
+  views: { shotId: string; offset: number; nFrames: number; repeats?: readonly number[] }[]
   /** Pipeline track on the reference timeline (for the delta row). */
   pipeline: { frames: readonly number[]; xyz: readonly (readonly number[] | null)[] } | null
   keyKinds: ReadonlyMap<string, SegmentKind>
@@ -264,6 +264,15 @@ export function drawTimeline(canvas: HTMLCanvasElement, width: number, height: n
     ctx.font = '600 9px "Geist Mono Variable", ui-monospace'
     ctx.textAlign = "right"
     ctx.fillText(viewLetter(i), GUTTER - 4, y + 3)
+    // Repeated (pulldown) frames: dark ticks in the strip.
+    if (v.repeats?.length) {
+      ctx.fillStyle = "rgba(0,0,0,0.55)"
+      for (const sf of v.repeats) {
+        const r = sf - v.offset
+        if (r >= m.range[0] && r <= m.range[1]) ctx.fillRect(X(r), y, Math.max(1, X(r + 1) - X(r)), 6)
+      }
+      ctx.fillStyle = viewColour(i)
+    }
     const mark = (shotFrame: number) => {
       ctx.fillRect(X(shotFrame - v.offset) - 1, y - 2, 2, 10)
     }

@@ -1,4 +1,5 @@
 import * as React from "react"
+import { toast } from "sonner"
 
 import { errorMessage } from "@/lib/api"
 import { postSolve } from "./api"
@@ -39,6 +40,7 @@ export function useSolver(groupId: string, doc: TruthDoc, enabled: boolean): Sol
         })
         .catch((err: unknown) => {
           if (ctrl.signal.aborted) return
+          toast.error("Solve failed", { description: errorMessage(err), id: "ball-studio-solve" })
           setState((s) => ({ status: "error", result: s.result, stale: s.result !== null, error: errorMessage(err), ms: null }))
         })
     }, DEBOUNCE_MS)

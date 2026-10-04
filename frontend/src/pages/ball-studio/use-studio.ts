@@ -4,7 +4,7 @@ import { toast } from "sonner"
 import { ApiError, errorMessage } from "@/lib/api"
 import { useConfirm } from "@/hooks/use-dialogs"
 import { describeDetail, postTriangulate, putTruth } from "./api"
-import { ShotCameras, refToShot } from "./camera-model"
+import { ShotCameras, closestBetweenRays, refToShot, unproject } from "./camera-model"
 import {
   computePreview,
   constraintPayload,
@@ -406,6 +406,13 @@ export function useStudio(group: GroupInfo, scene: Scene, initialTruth: TruthDoc
       keys,
       soft,
       pipelineAnchors: anchors,
+      nowUv: (() => {
+        // Ball position at this view's own instant, straight from the solver's projections.
+        const pj = solved?.projections[shot.shot_id]
+        const i = pj ? pj.shot_frames.indexOf(shotFrame) : -1
+        const uv = i >= 0 ? pj!.uv[i] : null
+        return uv ? ([uv[0], uv[1]] as const) : null
+      })(),
       pending: pick.picks[shot.shot_id] ?? null,
       ghost: preview.ghost,
       epipolar,
@@ -427,6 +434,8 @@ export function useStudio(group: GroupInfo, scene: Scene, initialTruth: TruthDoc
     return [...fs].sort((a, b) => a - b)
   }, [solved])
 
+  const repeatSets = React.useMemo(() => shots.map((s) => new Set(s.repeat_frames ?? [])), [shots])
+
   const ball = denseAt(frame)
 
   const engineViews = cams.map((c, i) => ({ index: i, cam: c.atRef(frame), imageSize: c.imageSize }))
@@ -441,6 +450,32 @@ export function useStudio(group: GroupInfo, scene: Scene, initialTruth: TruthDoc
     [doc.keys, keyXyz, keyKinds, selection],
   )
   const pipelineMain = React.useMemo(() => pipelineFor(scene.reference_shot), [pipelineFor, scene.reference_shot])
+  // With nothing pending, show the selected committed key's per-view rays and their skew gap.
+  const keyGeom = React.useMemo(() => {
+    if (Object.keys(pick.picks).length || selection?.type !== "key") return null
+    const k = doc.keys.find((kk) => kk.id === selection.id)
+    if (!k) return null
+    const rays = k.observations.flatMap((o) => {
+      const cam = cams.find((c) => c.shotId === o.shot_id)
+      const fc = cam?.at(o.shot_frame)
+      return cam && fc ? [{ shotId: o.shot_id, ray: unproject(fc, o.uv[0], o.uv[1]) }] : []
+    })
+    const pair = rays.length >= 2 ? closestBetweenRays(rays[0].ray, rays[1].ray) : null
+    const reach = (r: { ray: { origin: Vec3 } }) => {
+      const x = keyXyz(k.id)
+      return Math.hypot(x[0] - r.ray.origin[0], x[1] - r.ray.origin[1], x[2] - r.ray.origin[2])
+    }
+    return {
+      rays: rays.map((r) => ({ viewIndex: cams.findIndex((c) => c.shotId === r.shotId), origin: r.ray.origin, dir: r.ray.dir, reach: reach(r) })),
+      skew: pair
+        ? {
+            a: [rays[0].ray.origin[0] + rays[0].ray.dir[0] * pair.s1, rays[0].ray.origin[1] + rays[0].ray.dir[1] * pair.s1, rays[0].ray.origin[2] + rays[0].ray.dir[2] * pair.s1] as Vec3,
+            b: [rays[1].ray.origin[0] + rays[1].ray.dir[0] * pair.s2, rays[1].ray.origin[1] + rays[1].ray.dir[1] * pair.s2, rays[1].ray.origin[2] + rays[1].ray.dir[2] * pair.s2] as Vec3,
+            gap_m: pair.gap_m,
+          }
+        : null,
+    }
+  }, [pick.picks, selection, doc.keys, cams, keyXyz])
   const depthRay = pick.mode === "constraint" && pick.constraint === "depth" ? preview.rays[0] : undefined
   const engineInput: EngineInput = {
     frame,
@@ -452,14 +487,14 @@ export function useStudio(group: GroupInfo, scene: Scene, initialTruth: TruthDoc
     showPipeline: layers.pipeline,
     showRays: layers.rays,
     showFrusta: true,
-    rays: preview.rays.map((r) => ({
+    rays: keyGeom ? keyGeom.rays : preview.rays.map((r) => ({
       viewIndex: cams.findIndex((c) => c.shotId === r.shotId),
       origin: r.ray.origin,
       dir: r.ray.dir,
       reach: preview.ghost ? Math.hypot(preview.ghost[0] - r.ray.origin[0], preview.ghost[1] - r.ray.origin[1], preview.ghost[2] - r.ray.origin[2]) : null,
     })),
     ghost: preview.ghost,
-    skew: preview.skew,
+    skew: keyGeom ? keyGeom.skew : preview.skew,
     ball,
     depthHandle: depthRay
       ? { viewIndex: cams.findIndex((c) => c.shotId === depthRay.shotId), origin: depthRay.ray.origin, dir: depthRay.ray.dir, depth: pick.params.depthM }
@@ -586,6 +621,7 @@ export function useStudio(group: GroupInfo, scene: Scene, initialTruth: TruthDoc
     drawPropsFor,
     engineInput,
     attention,
+    repeatSets,
     denseAt,
     keyKinds,
     solvedKeyById,

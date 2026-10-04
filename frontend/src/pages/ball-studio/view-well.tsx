@@ -48,6 +48,10 @@ interface ViewWellProps {
   onVideoError: () => void
   /** Short inline note under the header, e.g. "A's ray does not reach this view". */
   note?: string | null
+  /** The displayed frame repeats the previous image (pulldown). */
+  isRepeat?: boolean
+  /** Cap the well height (focus view); the picture letterboxes in its aspect ratio. */
+  maxHeight?: string
   className?: string
 }
 
@@ -65,6 +69,15 @@ export function ViewWell(props: ViewWellProps) {
   const panning = React.useRef<{ x: number; y: number; tx: number; ty: number; moved: boolean } | null>(null)
   const colour = viewColour(index)
   const imageSize = shot.image_size
+  const registerVideo = props.videoRef
+  // Stable callback ref: an inline one would detach/re-attach (and re-add listeners) on every render.
+  const setVideoEl = React.useCallback(
+    (el: HTMLVideoElement | null) => {
+      videoElRef.current = el
+      registerVideo(el)
+    },
+    [registerVideo],
+  )
 
   React.useEffect(() => {
     const el = wrapRef.current
@@ -216,7 +229,10 @@ export function ViewWell(props: ViewWellProps) {
         props.className,
       )}
     >
-      <div ref={wrapRef} className="relative w-full overflow-hidden" style={{ aspectRatio: `${imageSize[0]} / ${imageSize[1]}` }}>
+      <div ref={wrapRef} className="relative w-full overflow-hidden" style={{
+          aspectRatio: `${imageSize[0]} / ${imageSize[1]}`,
+          ...(props.maxHeight ? { width: `min(100%, calc(${props.maxHeight} * ${imageSize[0] / imageSize[1]}))`, marginInline: "auto" } : {}),
+        }}>
         <div
           className="absolute inset-0 origin-top-left"
           style={{ transform: `translate(${tf.tx}px, ${tf.ty}px) scale(${tf.zoom})` }}
@@ -225,10 +241,7 @@ export function ViewWell(props: ViewWellProps) {
             <img src={frameUrl} alt={`Shot ${shot.shot_id} frame ${shotFrame}`} className="size-full object-fill" />
           ) : (
             <video
-              ref={(el) => {
-                videoElRef.current = el
-                props.videoRef(el)
-              }}
+              ref={setVideoEl}
               src={shot.video_url}
               preload="auto"
               muted
@@ -289,6 +302,11 @@ export function ViewWell(props: ViewWellProps) {
             frame <span className="font-mono tabular-nums">{shotFrame}</span>
           </span>
           {tf.zoom > 1.01 ? <span className="font-mono text-muted-foreground tabular-nums">{tf.zoom.toFixed(1)}x</span> : null}
+          {props.isRepeat ? (
+            <span className="rounded-sm bg-warning/20 px-1 text-warning" title="This frame repeats the previous image (25 to 30 fps pulldown). Pick on a fresh frame.">
+              repeat
+            </span>
+          ) : null}
           {shot.excluded ? <span className="text-warning">excluded shot</span> : null}
         </div>
         {props.onToggleFocus ? (

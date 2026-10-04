@@ -272,9 +272,12 @@ function PendingReadout({ studio }: { studio: Studio }) {
       ) : null}
       {live?.flags.map((f) => (
         <span key={f.code} className="text-warning">
-          {f.message}
+          {f.code === "views_not_simultaneous" ? `Views show instants apart (${f.message}). Pick a frame fresh in both.` : f.message}
         </span>
       ))}
+      {live?.observations_used?.some((o) => o.repeat) ? (
+        <span className="text-warning">A picked frame repeats the previous image; pick on a fresh frame.</span>
+      ) : null}
       <span className="ml-auto flex items-center gap-1.5">
         {label ? (
           <Tooltip>

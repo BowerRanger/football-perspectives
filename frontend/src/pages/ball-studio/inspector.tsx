@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
+import { SyncProbe } from "./sync-probe"
 import { EVENT_KINDS, EVENT_STYLE, KEY_SOURCE_STYLE, SEGMENT_KINDS, SEGMENT_STYLE, residualSeverity } from "./palette"
 import { removeSegment, setNotes, setOutcome, setSegmentKind, setStatus, updateEvent, updateKey } from "./truth-doc"
 import type { EventKind, Outcome, SegmentKind, TruthStatus } from "./types"
@@ -119,10 +120,16 @@ function KeyInspector({ studio, id }: { studio: Studio; id: string }) {
             </SelectContent>
           </Select>
           {seg ? (
-            <p className="mt-1 text-xs text-muted-foreground">
-              {seg.frame_range[0]}–{seg.frame_range[1]}
-              {seg.max_speed_m_s !== null ? ` · up to ${seg.max_speed_m_s.toFixed(1)} m/s` : ""}
-              {seg.rms_obs_px !== null ? ` · ${seg.rms_obs_px.toFixed(1)} px rms on ${seg.n_soft_obs} soft` : ""}
+            <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs whitespace-nowrap text-muted-foreground">
+              <span className="font-mono tabular-nums">
+                {seg.frame_range[0]}–{seg.frame_range[1]}
+              </span>
+              {seg.max_speed_m_s !== null ? <span>up to {seg.max_speed_m_s.toFixed(1)} m/s</span> : null}
+              {seg.rms_obs_px !== null ? (
+                <ToneBadge tone={residualSeverity(seg.rms_obs_px)} className="font-mono">
+                  {seg.rms_obs_px.toFixed(1)} px rms · {seg.n_soft_obs} soft pick{seg.n_soft_obs === 1 ? "" : "s"}
+                </ToneBadge>
+              ) : null}
             </p>
           ) : null}
         </Row>
@@ -132,27 +139,38 @@ function KeyInspector({ studio, id }: { studio: Studio; id: string }) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>View</TableHead>
-              <TableHead>Shot frame</TableHead>
-              <TableHead>Picked</TableHead>
-              <TableHead className="text-right">Residual</TableHead>
+              <TableHead className="px-1">View · frame</TableHead>
+              <TableHead className="px-1">Picked</TableHead>
+              <TableHead className="px-1">Reprojected</TableHead>
+              <TableHead className="px-1 text-right">Residual</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {obs.map((o) => (
               <TableRow key={o.shot_id}>
-                <TableCell className="font-mono text-xs">{o.shot_id}</TableCell>
-                <TableCell className="font-mono text-xs">{o.shot_frame}</TableCell>
-                <TableCell className="font-mono text-xs">
+                <TableCell className="px-1 font-mono text-[11px]">
+                  {o.shot_id} · {o.shot_frame}
+                </TableCell>
+                <TableCell className="px-1 font-mono text-[11px]">
                   {o.uv[0].toFixed(0)}, {o.uv[1].toFixed(0)}
                 </TableCell>
-                <TableCell className="text-right">
+                <TableCell className="px-1 font-mono text-[11px]">
+                  {o.projected_uv ? `${o.projected_uv[0].toFixed(1)}, ${o.projected_uv[1].toFixed(1)}` : "n/a"}
+                </TableCell>
+                <TableCell className="px-1 text-right">
                   {o.residual_px === null ? (
                     "n/a"
                   ) : (
-                    <ToneBadge tone={residualSeverity(o.residual_px)} className="font-mono">
-                      {o.residual_px.toFixed(1)} px
-                    </ToneBadge>
+                    <SyncProbe
+                      groupId={studio.group.group_id}
+                      tkey={key}
+                      offsets={Object.fromEntries(studio.scene.shots.map((s) => [s.shot_id, s.frame_offset]))}
+                      referenceShot={studio.scene.reference_shot}
+                    >
+                      <ToneBadge tone={residualSeverity(o.residual_px)} className="font-mono">
+                        {o.residual_px.toFixed(1)} px
+                      </ToneBadge>
+                    </SyncProbe>
                   )}
                 </TableCell>
               </TableRow>
@@ -293,11 +311,11 @@ function ObservationInspector({ studio, index }: { studio: Studio; index: number
   )
 }
 
-function Lists({ studio }: { studio: Studio }) {
+function Lists({ studio, readOnly }: { studio: Studio; readOnly: boolean }) {
   const { docApi } = studio
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-sm text-muted-foreground">Select a key, event or soft pick on the timeline or a view to edit it.</p>
+      <p className="text-sm text-muted-foreground">{readOnly ? "Tap a key or event to seek to it." : "Select a key, event or soft pick on the timeline or a view to edit it."}</p>
       <ul className="flex flex-col gap-1 text-sm" aria-label="Keys and events">
         {docApi.doc.keys.map((k) => (
           <li key={k.id}>
@@ -349,7 +367,10 @@ function FlagsTab({ studio }: { studio: Studio }) {
   return (
     <ul className="flex flex-col gap-1.5">
       {flags.map((f, i) => {
-        const frame = f.frame ?? (f.ref?.segment !== undefined ? solver.result?.segments[f.ref.segment]?.frame_range[0] : undefined)
+        const frame =
+          f.frame ??
+          (f.ref?.segment !== undefined ? solver.result?.segments[f.ref.segment]?.frame_range[0] : undefined) ??
+          (f.ref?.key ? studio.docApi.doc.keys.find((k) => k.id === f.ref?.key)?.frame : undefined)
         return (
           <li key={i}>
             <Button
@@ -440,7 +461,7 @@ export function Inspector({ studio, onHelp, readOnly = false }: { studio: Studio
           {!readOnly && sel?.type === "key" ? <KeyInspector studio={studio} id={sel.id} /> : null}
           {!readOnly && sel?.type === "event" ? <EventInspector studio={studio} index={sel.index} /> : null}
           {!readOnly && sel?.type === "observation" ? <ObservationInspector studio={studio} index={sel.index} /> : null}
-          {readOnly || !sel || sel.type === "segment" ? <Lists studio={studio} /> : null}
+          {readOnly || !sel || sel.type === "segment" ? <Lists studio={studio} readOnly={readOnly} /> : null}
         </TabsContent>
         <TabsContent value="flags" className="pt-1">
           <FlagsTab studio={studio} />

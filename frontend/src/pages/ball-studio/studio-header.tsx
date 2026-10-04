@@ -44,9 +44,8 @@ function SolveChip({ studio }: { studio: Studio }) {
     return (
       <ToneBadge tone={nFlags ? "warning" : "success"} aria-live="polite">
         <span className={cn("size-1.5 rounded-full bg-current")} aria-hidden />
-        {nFlags ? `${nFlags} flag${nFlags === 1 ? "" : "s"}` : "Solved"}
-        <span className="font-mono tabular-nums">
-          {solver.ms} ms · {solver.result.stats.n_keys} keys
+        <span className="font-mono whitespace-nowrap tabular-nums">
+          Solved · {solver.ms} ms · {solver.result.stats.n_keys} keys{nFlags ? ` · ${nFlags} flag${nFlags === 1 ? "" : "s"}` : ""}
         </span>
       </ToneBadge>
     )

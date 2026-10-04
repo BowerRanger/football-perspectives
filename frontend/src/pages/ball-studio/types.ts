@@ -138,6 +138,8 @@ export interface GroupInfo {
 }
 
 export interface SceneShot extends GroupShot {
+  /** Shot frames whose image repeats the previous one (pulldown). */
+  repeat_frames?: number[]
   distortion: Vec2
   camera_centre: Vec3
   /** Shot-local frame index of row i. */
@@ -239,6 +241,7 @@ export interface SolvedSegment {
   rms_obs_px: number | null
   n_soft_obs: number
   max_speed_m_s: number | null
+  time_range_s?: Vec2
   status: Level
 }
 
@@ -315,6 +318,7 @@ export interface TriangulateResult {
   epipolar?: TriEpipolar[]
   flags: { level: "warn" | "error"; code: string; message: string }[]
   offsets_used?: Record<string, number>
+  observations_used?: { shot_id: string; shot_frame: number; uv: Vec2; repeat?: boolean }[]
 }
 
 // ---- Editor-local ---------------------------------------------------------

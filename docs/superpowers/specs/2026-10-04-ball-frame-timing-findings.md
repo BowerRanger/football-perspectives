@@ -55,6 +55,16 @@ commit 7168597): repeated frames are detected per video, keys/soft
 observations/projections use each view's true instant, and `/triangulate`
 warns when two views show instants > 0.3 frame apart.
 
+## The origi sync offset holds (fresh picks)
+
+Ball Studio's sync probe re-solves a *held* click at the other camera's
+neighbouring frames; on k440 it fell monotonically toward −140. Re-picking
+the ball fresh in origi02 frames 272–276 against exact origi01 frames
+(`sync_check.py`) shows the stored −142 is right: 1.4–2.6 px with the ball
+on the grass (z ≈ 0) at −142, 7–14 px and z off by 0.3–0.8 m one frame
+either side. A held click mostly measures camera motion, so the probe now
+says so and offers no verdict.
+
 ## Effect on the origi01 demo truth
 
 Same clicks, three solver/pick regimes (max soft-observation residual on

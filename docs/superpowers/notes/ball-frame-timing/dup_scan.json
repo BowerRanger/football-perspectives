@@ -1,0 +1,272 @@
+[
+ {
+  "dir": "output-shorts",
+  "shot": "gberch-2",
+  "fps": 30.0,
+  "frames": 181,
+  "dup": 29,
+  "dup_ratio": 0.16,
+  "spacing_mode": 6
+ },
+ {
+  "dir": "output-shorts",
+  "shot": "gberch",
+  "fps": 30.0,
+  "frames": 429,
+  "dup": 69,
+  "dup_ratio": 0.161,
+  "spacing_mode": 6
+ },
+ {
+  "dir": "output-origi-shorts",
+  "shot": "origi01",
+  "fps": 30.0,
+  "frames": 506,
+  "dup": 82,
+  "dup_ratio": 0.162,
+  "spacing_mode": 6
+ },
+ {
+  "dir": "output-origi-shorts",
+  "shot": "origi02",
+  "fps": 30.0,
+  "frames": 334,
+  "dup": 54,
+  "dup_ratio": 0.162,
+  "spacing_mode": 6
+ },
+ {
+  "dir": "output-kroupi-shorts",
+  "shot": "kroupi01",
+  "fps": 30.0,
+  "frames": 156,
+  "dup": 26,
+  "dup_ratio": 0.167,
+  "spacing_mode": 6
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s001",
+  "fps": 25.0,
+  "frames": 41,
+  "dup": 12,
+  "dup_ratio": 0.293,
+  "spacing_mode": 1
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s002",
+  "fps": 25.0,
+  "frames": 34,
+  "dup": 33,
+  "dup_ratio": 0.971,
+  "spacing_mode": 1
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s003",
+  "fps": 25.0,
+  "frames": 167,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s004",
+  "fps": 25.0,
+  "frames": 219,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s005",
+  "fps": 25.0,
+  "frames": 41,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s006",
+  "fps": 25.0,
+  "frames": 236,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s007",
+  "fps": 25.0,
+  "frames": 108,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s008",
+  "fps": 25.0,
+  "frames": 26,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s009",
+  "fps": 25.0,
+  "frames": 443,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s010",
+  "fps": 25.0,
+  "frames": 74,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s011",
+  "fps": 25.0,
+  "frames": 336,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s012",
+  "fps": 25.0,
+  "frames": 81,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s013",
+  "fps": 25.0,
+  "frames": 47,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s014",
+  "fps": 25.0,
+  "frames": 275,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s015",
+  "fps": 25.0,
+  "frames": 130,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s016",
+  "fps": 25.0,
+  "frames": 361,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s017",
+  "fps": 25.0,
+  "frames": 64,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s018",
+  "fps": 25.0,
+  "frames": 195,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s019",
+  "fps": 25.0,
+  "frames": 103,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s020",
+  "fps": 25.0,
+  "frames": 64,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s021",
+  "fps": 25.0,
+  "frames": 26,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s022",
+  "fps": 25.0,
+  "frames": 183,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s023",
+  "fps": 25.0,
+  "frames": 134,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s024",
+  "fps": 25.0,
+  "frames": 383,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ },
+ {
+  "dir": "output-saka-shorts",
+  "shot": "s025",
+  "fps": 25.0,
+  "frames": 185,
+  "dup": 0,
+  "dup_ratio": 0.0,
+  "spacing_mode": null
+ }
+]

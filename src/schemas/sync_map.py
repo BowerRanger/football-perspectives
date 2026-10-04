@@ -58,6 +58,15 @@ class Alignment:
     frame_offset: int
     method: str = _METHOD_MANUAL
     confidence: float = 1.0
+    # Replay playback speed relative to the reference: reference frames
+    # advanced per shot frame (1.0 = real time, 0.34 = slow motion). Files
+    # written before this field load as 1.0.
+    playback_rate: float = 1.0
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Alignment":
+        known = {f for f in cls.__dataclass_fields__}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 @dataclass
@@ -73,6 +82,21 @@ class GroupSync:
             if a.shot_id == shot_id:
                 return a.frame_offset
         return 0
+
+    def rate_for(self, shot_id: str) -> float:
+        for a in self.alignments:
+            if a.shot_id == shot_id:
+                return a.playback_rate
+        return 1.0
+
+    def ref_frame_of(self, shot_id: str, shot_frame: float) -> float:
+        """Reference-timeline frame shown at ``shot_frame`` of ``shot_id``:
+        ``rate * shot_frame - frame_offset`` (offset-only at rate 1.0)."""
+        return self.rate_for(shot_id) * shot_frame - self.offset_for(shot_id)
+
+    def shot_frame_of(self, shot_id: str, ref_frame: float) -> float:
+        """Inverse of ``ref_frame_of``: ``(ref_frame + frame_offset) / rate``."""
+        return (ref_frame + self.offset_for(shot_id)) / self.rate_for(shot_id)
 
     def with_alignment(self, alignment: Alignment) -> "GroupSync":
         """Return a new GroupSync with ``alignment`` upserted by shot_id."""
@@ -106,7 +130,7 @@ class SyncMap:
         if "groups" not in data:
             # v1 flat file → single ungrouped bucket.
             alignments = [
-                Alignment(**a) for a in data.get("alignments", [])
+                Alignment.from_dict(a) for a in data.get("alignments", [])
             ]
             return cls(groups=[GroupSync(
                 group_id="",
@@ -118,7 +142,7 @@ class SyncMap:
                 group_id=g["group_id"],
                 reference_shot=g.get("reference_shot", ""),
                 alignments=[
-                    Alignment(**a) for a in g.get("alignments", [])
+                    Alignment.from_dict(a) for a in g.get("alignments", [])
                 ],
             )
             for g in data.get("groups", [])

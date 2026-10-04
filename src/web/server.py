@@ -70,7 +70,7 @@ import numpy as np
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.pipeline.config import load_config
 from src.pipeline.runner import run_pipeline
@@ -1683,6 +1683,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         frame_offset: int
         method: str = "manual"
         confidence: float = 1.0
+        # None = keep the saved rate (older clients never send it).
+        playback_rate: float | None = Field(default=None, gt=0, le=20)
 
     class GroupSyncPayload(BaseModel):
         # One group's sync state per POST — the dashboard's editor is
@@ -1720,6 +1722,17 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         for s in manifest.shots:
             members.setdefault(s.group_id, []).append(s.id)
         return members
+
+    def _saved_rate(group_id: str, shot_id: str) -> float:
+        path = _sync_map_path()
+        if not path.exists():
+            return 1.0
+        try:
+            from src.schemas.sync_map import SyncMap
+            g = SyncMap.load(path).group(group_id)
+            return g.rate_for(shot_id) if g is not None else 1.0
+        except Exception:
+            return 1.0
 
     @app.get("/api/sync")
     def get_sync_map():
@@ -1832,6 +1845,10 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                 frame_offset=int(a.frame_offset),
                 method=method,
                 confidence=float(a.confidence),
+                playback_rate=(
+                    float(a.playback_rate) if a.playback_rate is not None
+                    else _saved_rate(payload.group_id, a.shot_id)
+                ),
             ))
         # Reference shot must be pinned to offset=0 so downstream
         # consumers can compute global frame indices unambiguously.

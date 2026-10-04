@@ -1,0 +1,9 @@
+club: Barcelona
+aliases: [FC Barcelona, Barca, Barça]
+kits:
+  # 2018-19 away: yellow (seen in the origi clip v Liverpool, Anfield).
+  "2018-19/away":
+    {shirt: "#f5e216", shorts: "#f5e216", socks: "#f5e216", boots: "#1c1c1c", sleeves: short}
+  # ter Stegen v Liverpool (origi01): black kit, long sleeves, pink/red trim.
+  "2018-19/gk":
+    {shirt: "#17171a", shorts: "#17171a", socks: "#17171a", boots: "#d8d84a", sleeves: long, gloves: "#e6e6e6", source: approx}

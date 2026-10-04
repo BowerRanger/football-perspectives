@@ -47,6 +47,11 @@ class Shot:
     group_id: str = ""
     source_start_s: float = -1.0
     source_end_s: float = -1.0
+    # Set by replay_sync/retime when a slow-motion clip was resampled to
+    # real time (``speed_factor = 1 / rate``); ``native_frames`` is the
+    # frame count of the preserved native clip in ``shots/native/``.
+    retimed: bool = False
+    native_frames: int = 0
 
 
 @dataclass

@@ -1,0 +1,11 @@
+club: Arsenal
+aliases: [Arsenal FC, Gunners]
+kits:
+  # Red body, WHITE sleeves, white shorts, red socks (saka clip, Emirates).
+  "2023-24/home":
+    shirt: "#ef0107"
+    sleeve_color: "#ffffff"
+    shorts: "#ffffff"
+    socks: "#ef0107"
+    boots: "#1c1c1c"
+    sleeves: short

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import stat
+import sys
 
 import pytest
 
@@ -37,10 +38,34 @@ def _cfg(**over):
     return cfg
 
 
+def _write_stub(stub, log):
+    """Fake Blender: logs argv (like ``echo "$@"``) and, like the real
+    script, writes each requested camera's mp4 (+ _9x16 when --vertical)."""
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "import sys, pathlib\n"
+        "a = sys.argv[1:]\n"
+        f"open({str(log)!r}, 'a').write(' '.join(a) + '\\n')\n"
+        "g = lambda k: a[a.index(k) + 1]\n"
+        "d = pathlib.Path(g('--output-dir')) / 'render' / (g('--shot') or 'clip')\n"
+        "d.mkdir(parents=True, exist_ok=True)\n"
+        "vo = '--vertical-only' in a\n"
+        "for c in g('--cameras').split(','):\n"
+        "    s = c.replace(':', '_')\n"
+        "    if not (vo and c != 'broadcast'):\n"
+        "        (d / (s + '.mp4')).write_bytes(b'x')\n"
+        "    if '--vertical' in a and c != 'broadcast':\n"
+        "        (d / (s + '_9x16.mp4')).write_bytes(b'x')\n"
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+
+
 @pytest.mark.unit
 def test_render_stage_registered():
     assert "render" in resolve_stages("all", None)
-    assert resolve_stages("all", None)[-1] == "render"
+    stages = resolve_stages("all", None)
+    assert stages[-3:] == ["export", "render", "shorts"]
+    assert stages[stages.index("ball") + 1] == "appearance"
     assert _stage_class("render") is RenderStage
 
 
@@ -96,7 +121,8 @@ def test_blender_args_shape(tmp_path):
     args = stage._blender_args("shot01")
     # [blender, --background, --python, <script>, --, --output-dir, ...]
     assert args[1] == "--background"
-    assert args[4] == "--"
+    assert args[6] == "--"
+    assert args[2:4] == ["--python-exit-code", "1"]
     assert "--shot" in args and args[args.index("--shot") + 1] == "shot01"
     assert "--cameras" in args
     assert args[args.index("--cameras") + 1] == "broadcast,drone"
@@ -121,12 +147,7 @@ def test_run_invokes_blender_stub_per_active_shot(tmp_path):
     # Fake blender: records argv, writes the expected mp4.
     stub = tmp_path / "fake_blender"
     log = tmp_path / "calls.jsonl"
-    stub.write_text(
-        "#!/bin/sh\n"
-        f"echo \"$@\" >> {log}\n"
-        # emulate the script writing its outputs
-        "exit 0\n"
-    )
+    _write_stub(stub, log)
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     (tmp_path / "shots").mkdir()
     ShotsManifest(
@@ -274,7 +295,7 @@ def test_run_writes_satisfied_virtual_cameras_and_filters_unsatisfied(tmp_path):
     _add_player_fixture(tmp_path)
     stub = tmp_path / "fake_blender"
     log = tmp_path / "calls.jsonl"
-    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    _write_stub(stub, log)
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     cfg = _cfg(blender_path=str(stub),
                cameras=["broadcast", "drone", "pov:P001", "pov:P999"])
@@ -492,7 +513,7 @@ def test_run_skips_fully_rendered_shot_and_renders_only_missing_shot(
     _two_shot_manifest(tmp_path)
     stub = tmp_path / "fake_blender"
     log = tmp_path / "calls.jsonl"
-    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    _write_stub(stub, log)
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     shot01_dir = tmp_path / "render" / "shot01"
     shot01_dir.mkdir(parents=True)
@@ -516,7 +537,7 @@ def test_run_invokes_stub_zero_times_when_all_shots_complete(tmp_path):
     _two_shot_manifest(tmp_path)
     stub = tmp_path / "fake_blender"
     log = tmp_path / "calls.jsonl"
-    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    _write_stub(stub, log)
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     for sid in ("shot01", "shot02"):
         d = tmp_path / "render" / sid
@@ -538,7 +559,7 @@ def test_run_renders_only_missing_camera_for_partial_shot(tmp_path):
     _add_player_fixture(tmp_path)  # so build_drone_track has a non-empty track
     stub = tmp_path / "fake_blender"
     log = tmp_path / "calls.jsonl"
-    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    _write_stub(stub, log)
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     shot_dir = tmp_path / "render" / "clip"
     shot_dir.mkdir(parents=True)
@@ -560,7 +581,7 @@ def test_run_uses_sidecar_cameras_end_to_end(tmp_path):
     _write_min_fixture(tmp_path)
     stub = tmp_path / "fake_blender"
     log = tmp_path / "calls.jsonl"
-    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    _write_stub(stub, log)
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     RenderSelection(shot_id="", cameras=("broadcast",), vertical_variant=True).save(
         tmp_path / "render" / "clip_render_selection.json"
@@ -586,7 +607,7 @@ def test_run_merges_timings_keeping_skipped_shots_old_entry(tmp_path):
     _two_shot_manifest(tmp_path)
     stub = tmp_path / "fake_blender"
     log = tmp_path / "calls.jsonl"
-    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    _write_stub(stub, log)
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     shot01_dir = tmp_path / "render" / "shot01"
     shot01_dir.mkdir(parents=True)
@@ -610,7 +631,7 @@ def test_run_malformed_existing_timings_file_still_succeeds(tmp_path, caplog):
     _write_min_fixture(tmp_path)
     stub = tmp_path / "fake_blender"
     log = tmp_path / "calls.jsonl"
-    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nexit 0\n")
+    _write_stub(stub, log)
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     render_dir = tmp_path / "render"
     render_dir.mkdir(parents=True)
@@ -622,3 +643,60 @@ def test_run_malformed_existing_timings_file_still_succeeds(tmp_path, caplog):
     timings = json.loads((render_dir / "render_timings.json").read_text())
     assert "clip" in timings
     assert any("timings" in r.message.lower() for r in caplog.records)
+
+
+# --- T9: preflight, landscape:false, output verification ------------------
+
+@pytest.mark.unit
+def test_blender_args_vertical_only_and_capsule_flags(tmp_path):
+    args = RenderStage(_cfg(landscape=False, allow_capsule_fallback=True),
+                       tmp_path)._blender_args("s1", cameras=["orbit"])
+    assert "--vertical-only" in args and "--vertical" in args
+    assert "--allow-capsule-fallback" in args
+    base = RenderStage(_cfg(), tmp_path)._blender_args("s1")
+    assert "--vertical-only" not in base and "--allow-capsule-fallback" not in base
+
+
+@pytest.mark.unit
+def test_style_json_uses_effective_kits(tmp_path):
+    cfg = _cfg()
+    cfg["appearance"] = {"kits": {"home": {"shirt": "#112233", "shorts": "#ffffff",
+                                           "socks": "#112233"}}}
+    args = RenderStage(cfg, tmp_path)._blender_args("s1")
+    style = json.loads(args[args.index("--style-json") + 1])
+    assert style["teams"]["defaults"]["home"]["shirt"] == "#112233"
+    assert "venue" not in style["stadium"]
+
+
+@pytest.mark.integration
+def test_missing_smpl_asset_raises_unless_fallback(tmp_path, monkeypatch):
+    import src.stages.render as rs
+    monkeypatch.setattr(rs, "_SMPL_ASSET", tmp_path / "nope.npz")
+    stub = tmp_path / "fb"
+    _write_stub(stub, tmp_path / "calls.jsonl")
+    with pytest.raises(RuntimeError, match="smpl_neutral"):
+        RenderStage(_cfg(blender_path=str(stub)), tmp_path).run()
+    RenderStage(_cfg(blender_path=str(stub), cameras=["broadcast"],
+                     vertical_variant=False,
+                     allow_capsule_fallback=True), tmp_path).run()
+
+
+@pytest.mark.unit
+def test_landscape_false_completeness_checks_vertical_only(tmp_path):
+    cfg = _cfg(cameras=["orbit"], landscape=False)
+    stage = RenderStage(cfg, tmp_path)
+    d = tmp_path / "render" / "clip"
+    d.mkdir(parents=True)
+    assert stage._missing_cameras("") == ["orbit"]
+    (d / "orbit_9x16.mp4").write_bytes(b"x")
+    assert stage._missing_cameras("") == []
+
+
+@pytest.mark.integration
+def test_run_raises_when_blender_exit_0_writes_nothing(tmp_path):
+    stub = tmp_path / "fb"
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    with pytest.raises(RuntimeError, match="missing/empty"):
+        RenderStage(_cfg(blender_path=str(stub), cameras=["broadcast"],
+                         vertical_variant=False), tmp_path).run()

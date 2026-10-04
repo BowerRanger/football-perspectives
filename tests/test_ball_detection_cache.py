@@ -206,7 +206,7 @@ def test_build_detector_fingerprint_wasb_includes_checkpoint_hash(tmp_path: Path
     fp1 = build_detector_fingerprint(cfg, inner)
     assert fp1["class"] == "_Counting"
     assert fp1["backend"] == "wasb"
-    assert fp1["checkpoint_path"] == str(ckpt.resolve())
+    assert "checkpoint_path" not in fp1  # path is not identity (symlink-safe)
     assert fp1["checkpoint_size"] == len(b"weights-v1")
     assert "checkpoint_sha256" in fp1
 
@@ -271,7 +271,7 @@ def test_wrap_if_enabled_default_is_false(tmp_path: Path):
 @pytest.mark.unit
 def test_wrap_if_enabled_true_wraps_and_uses_output_dir_relative_path(tmp_path: Path):
     inner = _Counting()
-    cfg = {"detection_cache": {"enabled": True, "path": "ball/detection_cache.json"}}
+    cfg = {"detection_cache": {"enabled": True, "force": True, "path": "ball/detection_cache.json"}}
     out = wrap_if_enabled(inner, cfg, tmp_path)
     assert isinstance(out, CachingBallDetector)
     assert out._path == tmp_path / "ball" / "detection_cache.json"
@@ -285,7 +285,7 @@ def test_wrap_if_enabled_true_wraps_and_uses_output_dir_relative_path(tmp_path: 
 @pytest.mark.unit
 def test_wrap_if_enabled_default_path_under_output_dir(tmp_path: Path):
     inner = _Counting()
-    cfg = {"detection_cache": {"enabled": True}}
+    cfg = {"detection_cache": {"enabled": True, "force": True}}
     out = wrap_if_enabled(inner, cfg, tmp_path)
     assert isinstance(out, CachingBallDetector)
     assert out._path == tmp_path / "ball" / "detection_cache.json"
@@ -295,6 +295,6 @@ def test_wrap_if_enabled_default_path_under_output_dir(tmp_path: Path):
 def test_wrap_if_enabled_absolute_path_not_rejoined(tmp_path: Path):
     inner = _Counting()
     abs_path = tmp_path / "elsewhere" / "cache.json"
-    cfg = {"detection_cache": {"enabled": True, "path": str(abs_path)}}
+    cfg = {"detection_cache": {"enabled": True, "force": True, "path": str(abs_path)}}
     out = wrap_if_enabled(inner, cfg, tmp_path / "output")
     assert out._path == abs_path

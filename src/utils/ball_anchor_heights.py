@@ -132,6 +132,8 @@ VALID_BONES: frozenset[str] = frozenset(BONE_TO_SMPL_INDEX)
 #  - crossbar: horizontal line between the posts at z = goal_height_m
 #  - back_net: vertical plane goal_depth_m behind the goal line
 #  - side_net: vertical plane through one post, extending back to back_net
+#  - mouth: the goal-line plane between the posts and under the crossbar --
+#    "the ball crossed the line here" (a line-cross marker, not a contact)
 VALID_GOAL_ELEMENTS: frozenset[str] = frozenset({
-    "post", "crossbar", "back_net", "side_net",
+    "post", "crossbar", "back_net", "side_net", "mouth",
 })

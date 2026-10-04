@@ -10,6 +10,11 @@ import random
 
 from src.utils.pitch import PITCH_LENGTH as L, PITCH_WIDTH as W
 from src.utils.render_look import hex_to_linear_rgba
+from src.utils.stadium_dressing import crowd_palette_for_stand, structural_tones
+
+
+DEFAULT_CROWD_COLORS = ("#283e50", "#b1b8af", "#a64039", "#ceac78", "#476780", "#d2c9b5")
+DEFAULT_BOARD_TEXT = "FOOTBALL / PERSPECTIVES"
 
 
 def build_stadium(bpy, style):
@@ -33,18 +38,32 @@ def build_stadium(bpy, style):
         batches[name] = [[], [], mat]
         return name
 
-    concrete = material("Stadium_Concrete", "#707e87")
-    steel = material("Stadium_Steel", "#263846")
+    # stand_tone seeds concrete/steel/tunnels/boards, all lifted to a minimum
+    # lightness (stadium_dressing.structural_tones) so low cameras don't see
+    # a black band where the toon ramp's shadow band hits dark fascia.
+    tones = structural_tones(cfg)
+    concrete = material("Stadium_Concrete", tones["concrete"])
+    steel = material("Stadium_Steel", tones["steel"])
     roof = material("Stadium_Roof", "#c5ced2")
     seat = material("Stadium_Seats", cfg.get("seat_color", "#294b65"))
     accent = material("Stadium_SeatAccent", cfg.get("accent_color", "#d6b66e"))
-    dark = material("Stadium_Tunnels", "#111d28")
-    board = material("Stadium_Boards", "#102d39")
+    dark = material("Stadium_Tunnels", tones["tunnels"])
+    board = material("Stadium_Boards", tones["board"])
+    board_ink = material("Stadium_BoardText", tones["board_text"], True)
     white = material("Stadium_White", "#e1e9e6", True)
     turf = material("Stadium_Runoff", "#355f43")
     ground = material("Stadium_Concourse", "#414e55")
-    crowd = [material(f"Stadium_Crowd_{i}", c) for i, c in enumerate(
-        ["#283e50", "#b1b8af", "#a64039", "#ceac78", "#476780", "#d2c9b5"])]
+    # crowd_colors: per-venue shirt palette (repeat a colour to weight it);
+    # the away_end stand gets its own palette (the away kit by default).
+    stand_names = ("North", "South", "East", "West")
+    palettes = {n: tuple(crowd_palette_for_stand(cfg, n) or DEFAULT_CROWD_COLORS)
+                for n in stand_names}
+    crowd_mats = {}
+    for palette in dict.fromkeys(palettes.values()):
+        crowd_mats[palette] = [
+            material(f"Stadium_Crowd_{len(crowd_mats)}_{i}", c)
+            for i, c in enumerate(palette)]
+    crowd_for = {n: crowd_mats[palettes[n]] for n in stand_names}
     skin = material("Stadium_CrowdSkin", "#b88667")
 
     # All cuboids for a material share one mesh; no thousands of Blender objects.
@@ -106,7 +125,7 @@ def build_stadium(bpy, style):
                 local(sm, u, v, z+0.22, (0.48,0.43,0.12))
                 local(sm, u, v+0.20, z+0.47, (0.48,0.09,0.50))
                 if rng.random() < density:
-                    local(rng.choice(crowd), u, v, z+0.57, (0.36,0.28,0.46))
+                    local(rng.choice(crowd_for[name]), u, v, z+0.57, (0.36,0.28,0.46))
                     local(skin, u, v, z+0.94, (0.20,0.20,0.23))
         local(dark, 0, 0.1, 1.55, (3.8,0.18,2.4))
         local(dark, 0, 11.3, 8.0, (3.8,0.18,2.4))
@@ -128,7 +147,7 @@ def build_stadium(bpy, style):
         local(board,0,-3.5,0.60,(length,0.16,1.15))
         for u in range(-int(length/2)+4,int(length/2)-3,9):
             data = bpy.data.curves.new(f"{name}_BoardText", "FONT")
-            data.body = "FOOTBALL / PERSPECTIVES"
+            data.body = cfg.get("board_text") or DEFAULT_BOARD_TEXT
             data.align_x = "CENTER"
             data.size = 0.29
             data.extrude = 0
@@ -136,7 +155,7 @@ def build_stadium(bpy, style):
             collection.objects.link(obj)
             obj.location = point(u,-3.60,0.51)
             obj.rotation_euler = (math.pi/2, 0, angle)
-            data.materials.append(batches[white][2])
+            data.materials.append(batches[board_ink][2])
             local(accent,u+4,-3.61,0.60,(0.12,0.02,0.8))
 
     # Dugouts sit outside the dolly path (y=-3), with an open pitch-facing side.

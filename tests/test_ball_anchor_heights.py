@@ -129,5 +129,5 @@ def test_valid_goal_elements():
     from src.utils.ball_anchor_heights import VALID_GOAL_ELEMENTS
 
     assert VALID_GOAL_ELEMENTS == frozenset({
-        "post", "crossbar", "back_net", "side_net",
+        "post", "crossbar", "back_net", "side_net", "mouth",
     })

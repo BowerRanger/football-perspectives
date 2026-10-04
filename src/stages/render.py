@@ -22,10 +22,14 @@ from src.schemas.shots import ShotsManifest
 from src.schemas.smpl_world import SmplWorldTrack
 from src.stages.export import _per_shot_smpl_tracks
 from src.utils import virtual_cameras as vcam
+from src.utils.render_look import smpl_asset_problem
+from src.utils.render_pass_runner import resolve_style_payload
 
 logger = logging.getLogger(__name__)
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "blender_render_scene.py"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SCRIPT = _REPO_ROOT / "scripts" / "blender_render_scene.py"
+_SMPL_ASSET = _REPO_ROOT / "data" / "models" / "smpl_neutral.npz"
 
 
 class RenderStage(BaseStage):
@@ -69,21 +73,27 @@ class RenderStage(BaseStage):
         w, h = cfg.get("resolution", [1920, 1080])
         blender = self._resolve_blender() or "blender"
         cam_list = cameras if cameras is not None else cfg.get("cameras", ["broadcast"])
+        landscape = bool(cfg.get("landscape", True))
         args = [
-            blender, "--background", "--python", str(_SCRIPT), "--",
+            blender, "--background", "--python-exit-code", "1",
+            "--python", str(_SCRIPT), "--",
             "--output-dir", str(self.output_dir),
             "--shot", shot_id,
             "--cameras", ",".join(cam_list),
             "--width", str(int(w)), "--height", str(int(h)),
             "--samples", str(int(cfg.get("samples", 16))),
             "--style-json", json.dumps(
-                {**cfg.get("style", {}), "teams": cfg.get("teams", {})}),
+                resolve_style_payload(self.output_dir, shot_id, self.config, None)),
         ]
         # A per-shot RenderSelection sidecar's vertical_variant (when not
         # None) overrides the config default — operator input always wins.
         vertical = cfg.get("vertical_variant") if vertical_override is None else vertical_override
-        if vertical:
+        if vertical or not landscape:
             args.append("--vertical")
+        if not landscape:
+            args.append("--vertical-only")
+        if cfg.get("allow_capsule_fallback"):
+            args.append("--allow-capsule-fallback")
         if cfg.get("aov_passes"):
             args.append("--aov")
         if cfg.get("save_blend"):
@@ -128,6 +138,14 @@ class RenderStage(BaseStage):
             chase_smooth_frames=int(raw.get("chase_smooth_frames", 9)),
             chase_min_speed_m_s=float(raw.get("chase_min_speed_m_s", 0.5)),
             dolly_fov_deg=float(raw.get("dolly_fov_deg", 30.0)),
+            eyes_fov_deg=float(raw.get("eyes_fov_deg", 70.0)),
+            eyes_up_m=float(raw.get("eyes_up_m", 0.10)),
+            eyes_forward_m=float(raw.get("eyes_forward_m", 0.18)),
+            eyes_smooth_frames=int(raw.get("eyes_smooth_frames", 5)),
+            focus=str(raw.get("focus", "centroid")),
+            focus_smooth_frames=int(raw.get("focus_smooth_frames", 9)),
+            orbit_start_frame=int(raw.get("orbit_start_frame", -1)),
+            orbit_end_frame=int(raw.get("orbit_end_frame", -1)),
             dolly_y_m=float(raw.get("dolly_y_m", -3.0)),
             dolly_height_m=float(raw.get("dolly_height_m", 1.0)),
             tactical_fov_deg=float(raw.get("tactical_fov_deg", 55.0)),
@@ -190,6 +208,8 @@ class RenderStage(BaseStage):
             return vcam.build_pov_track(track, cfg, image_size, fps, clip_id)
         if rig == "ots":
             return vcam.build_ots_track(track, ball_track, cfg, image_size, fps, clip_id)
+        if rig == "eyes":
+            return vcam.build_eyes_track(track, ball_track, cfg, image_size, fps, clip_id)
         logger.warning("render: unknown virtual camera rig %r in %r; skipping", rig, cam_id)
         return None
 
@@ -324,18 +344,22 @@ class RenderStage(BaseStage):
         cameras, vertical_override = self._resolve_camera_request(shot_id)
         if not cameras:
             return []
+        landscape = bool(self._render_cfg().get("landscape", True))
         vertical = (
             self._render_cfg().get("vertical_variant")
             if vertical_override is None else vertical_override
-        )
+        ) or not landscape
         shot_dir = self.output_dir / "render" / (shot_id or "clip")
         missing = []
         for cam in cameras:
             safe_id = cam.replace(":", "_")
-            expected = [shot_dir / f"{safe_id}.mp4"]
-            if vertical and cam != "broadcast":
-                expected.append(shot_dir / f"{safe_id}_9x16.mp4")
-            if not all(p.exists() for p in expected):
+            if not landscape and cam != "broadcast":
+                expected = [shot_dir / f"{safe_id}_9x16.mp4"]
+            else:
+                expected = [shot_dir / f"{safe_id}.mp4"]
+                if vertical and cam != "broadcast":
+                    expected.append(shot_dir / f"{safe_id}_9x16.mp4")
+            if not all(p.exists() and p.stat().st_size > 0 for p in expected):
                 missing.append(cam)
         return missing
 
@@ -349,7 +373,15 @@ class RenderStage(BaseStage):
                 "export.blender_path); skipping renders. Install Blender "
                 ">= 3.6 or set the config path.")
             return
+        problem = smpl_asset_problem(
+            {"v_template": 1, "faces": 1, "weights": 1, "joint_positions": 1}
+            if _SMPL_ASSET.exists() else None,
+            bool(self._render_cfg().get("allow_capsule_fallback")))
+        if problem:
+            raise RuntimeError(f"render: {problem} (set render.allow_capsule_fallback: "
+                               "true to accept capsule bodies)")
         timings: dict[str, float] = {}
+        failed: list[str] = []
         for shot_id in self._active_shot_ids():
             missing = self._missing_cameras(shot_id)
             if not missing:
@@ -372,6 +404,9 @@ class RenderStage(BaseStage):
             if result.returncode != 0:
                 logger.error("render: Blender failed for shot %s:\n%s",
                              shot_id, result.stderr[-4000:])
+            still_missing = self._missing_cameras(shot_id)
+            if still_missing and set(still_missing) & set(cameras):
+                failed.append(f"{shot_id or 'clip'}: {sorted(set(still_missing) & set(cameras))}")
         out = self.output_dir / "render"
         out.mkdir(parents=True, exist_ok=True)
         timings_path = out / "render_timings.json"
@@ -391,3 +426,7 @@ class RenderStage(BaseStage):
                     "starting fresh", exc)
         existing.update(timings)
         timings_path.write_text(json.dumps(existing, indent=2))
+        if failed:
+            raise RuntimeError(
+                "render: expected output missing/empty after Blender run for "
+                + "; ".join(failed))

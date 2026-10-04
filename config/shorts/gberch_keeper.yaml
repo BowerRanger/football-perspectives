@@ -1,0 +1,40 @@
+# Short 2 — "Would you save this?" (Jorgensen's eye-line, floodlit).
+size: [1080, 1920]
+fps: 30
+segments:
+  - src: output-shorts/render_experiments/s2_goalline/gberch/goal_left_9x16.mp4
+    first_frame: 300
+    from: 302
+    to: 338
+  - src: output-shorts/render_experiments/s2_eyes/gberch/eyes_P005_9x16.mp4
+    first_frame: 320
+    from: 330
+    to: 362
+    flash: true
+    label: "KEEPER CAM"
+    label_style: chip_dark
+  - src: output-shorts/render_experiments/s2_eyes_slow/gberch/eyes_P005_9x16.mp4
+    first_frame: 362
+    stretch: 4
+    from: 362
+    to: 380
+    hold_s: 1.4
+    label: "KEEPER CAM"
+    label_style: chip_dark
+  - src: output-shorts/render_experiments/s2_eyes_slow/gberch/eyes_P005_9x16.mp4
+    first_frame: 362
+    stretch: 4
+    from: 380
+    to: 393
+    label: "KEEPER CAM"
+    label_style: chip_dark
+  - src: output-shorts/render_experiments/s2_goal/gberch/goal_left_9x16.mp4
+    first_frame: 380
+    stretch: 2
+    from: 390
+    to: 420
+    hold_s: 1.4
+captions:
+  - {text: "WOULD YOU SAVE THIS?", style: title, start: 0}
+  - {text: "Which way do you dive?", style: sub, start: 4.55, end: 6.07}   # over the freeze (2.27 s + 2.4 s in)
+  - {text: "Save or goal? Comments", style: sub, start: -2.0}

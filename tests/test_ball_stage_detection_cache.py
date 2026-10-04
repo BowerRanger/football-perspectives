@@ -95,7 +95,7 @@ def test_cache_replays_stale_detections_bit_identical_across_runs(tmp_path: Path
     all_misses: list[tuple[float, float, float] | None] = [None] * n
 
     cfg = {"ball": {"detector": "fake",
-                    "detection_cache": {"enabled": True}}}
+                    "detection_cache": {"enabled": True, "force": True}}}
 
     stage1 = BallStage(config=cfg, output_dir=out,
                        ball_detector=FakeBallDetector(list(rolling)))

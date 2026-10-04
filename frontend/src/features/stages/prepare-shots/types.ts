@@ -15,6 +15,10 @@ export interface Shot {
   group_id: string
   source_start_s: number
   source_end_s: number
+  /** True once the clip was re-encoded to real time (native clip kept). */
+  retimed?: boolean
+  /** Frames in the native (pre-retime) clip; 0 when never retimed. */
+  native_frames?: number
 }
 
 export interface ShotGroup {
@@ -43,6 +47,8 @@ export interface SyncAlignment {
   frame_offset: number
   method: string
   confidence: number
+  /** Reference frames per shot frame (1 = real time, 0.34 = slow motion). */
+  playback_rate?: number
 }
 
 export interface GroupSync {
@@ -53,6 +59,46 @@ export interface GroupSync {
 
 export interface SyncMap {
   groups: GroupSync[]
+}
+
+export type ReplaySyncDecision =
+  | "applied"
+  | "applied_retimed"
+  | "kept_manual"
+  | "low_confidence"
+  | "ramp_not_applied"
+  | "no_camera"
+  | "no_tracks"
+
+export interface ReplaySyncEstimate {
+  rate: number
+  offset: number
+  confidence: number
+  cost_m?: number
+  coverage?: number
+  ramp?: boolean
+  rate_first?: number
+  rate_second?: number
+  /** Live frames the geometric match could use. */
+  live_window_frames?: number
+  /** Relative 1 sigma of the rate, e.g. 0.08 = +-8 %. */
+  rate_uncertainty?: number
+}
+
+export interface ReplaySyncMember {
+  shot_id: string
+  against?: string
+  estimate: ReplaySyncEstimate | null
+  decision: ReplaySyncDecision
+  reason: string
+  /** Rate is only as precise as a short live window allows: confirm with marked moments. */
+  approximate?: boolean
+}
+
+/** `GET /api/replay-sync` (shots/replay_sync.json). */
+export interface ReplaySyncReport {
+  version: number
+  groups: { group_id: string; reference_shot: string; members: ReplaySyncMember[] }[]
 }
 
 export interface ShotView extends Shot {

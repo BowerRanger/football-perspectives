@@ -12,6 +12,15 @@ pitch:
   goal_depth_m: 1.5
   corner_flag_height_m: 1.5
 
+# Stage freshness (src/pipeline/fingerprint.py, <out>/pipeline_state.json).
+# A completed stage whose config slice / input artefacts (incl. operator
+# files) changed since it last ran is re-run with a "[STALE]" line; code-only
+# drift warns and is re-run only by `recon.py run --stale`. Dirs with no
+# recorded state are "unknown", never stale. See `recon.py status`.
+pipeline:
+  freshness:
+    enabled: true
+
 prepare_shots:
   expected_format: mp4
   output_fps: null
@@ -486,6 +495,19 @@ camera:
       kp_threshold: 0.3434
       line_threshold: 0.7867
 
+# Replay playback speed + offset from players' pitch positions (needs tracks +
+# camera on both shots of a pair). Writes player_formation alignments with
+# playback_rate (manual ones are never touched) and retimes confidently slow
+# replays to real time (natives kept in shots/native/).
+replay_sync:
+  enabled: true
+  min_confidence: 0.5             # estimate confidence floor to apply
+  max_cost_m: 2.2                 # mean player-to-player distance ceiling (m)
+  auto_retime: true               # resample confident slow replays to real time
+  retime_tolerance: 0.08          # slow beyond this even at +2 sigma of the rate is retimed
+  retime_min_confidence: 0.6
+  approximate_uncertainty: 0.04   # rate 1-sigma above this -> "approximate: confirm with moments"
+
 hmr_world:
   # Force CPU on macOS: GVHMR's RoPE attention has a slice op that
   # trips an MPS assertion (dimension[1] (120) ... subRange) at exactly
@@ -643,11 +665,15 @@ ball:
   # re-running WASB inference. Cache key = frame content hash + a
   # detector fingerprint (checkpoint path/sha256/size, confidence,
   # input_size) so swapping the checkpoint or editing ball.wasb.* auto-
-  # invalidates stale entries. Default off: first-run behaviour is
-  # identical whether this is enabled or not. Cache files are gitignored
-  # — never committed, never treated as model weights.
+  # invalidates stale entries (the checkpoint PATH is not part of the
+  # fingerprint, so a worktree symlink or copied checkout still hits).
+  # ON by default (D4/G17: every anchor tweak used to cost a ~50 min WASB
+  # pass); only real WASB/YOLO detectors are cached -- injected fake/no-op
+  # detectors never read or write it. First-run output is identical with
+  # it on or off. Cache files are gitignored — never committed, never
+  # treated as model weights.
   detection_cache:
-    enabled: false
+    enabled: true
     # Relative paths resolve against the run's --output dir; an absolute
     # path is used as-is.
     path: ball/detection_cache.json
@@ -1174,6 +1200,16 @@ ball:
   # flight-heavy origi01/kroupi01 clips (real held-out p50 0.36 vs 0.56 m,
   # 2.97 vs 3.54 m) — see docs/superpowers/specs/2026-09-25-ball-hybrid-trajectory.md.
   trajectory: hybrid
+  # Goal classification (src/utils/ball_goal_constraint.find_goal_event). The
+  # goal path (line-cross knot, shot-span spin, net containment, goal_check,
+  # shorts auto-selection) runs ONLY for an actual goal: an operator
+  # goal_impact on `back_net` or `mouth`. post/crossbar/side_net alone, and
+  # auto goal_impact knots alone, are NOT goals. `outcome` overrides per shot:
+  #   {<shot_id>: goal}     force the goal path (e.g. a post hit that went in)
+  #   {<shot_id>: no_goal}  never use it (e.g. disallowed goal)
+  # Empty = infer from the anchors.
+  goal:
+    outcome: {}
   hybrid:
     cd: 0.25
     fit_cd: true
@@ -1240,6 +1276,34 @@ ball:
       min_obs: 8
       min_delta_bic: 6.0
       min_resid_gain: 0.10
+      # D6.3: bounded Magnus on SHOT spans only -- a flight span starting at
+      # a player_touch/kick tagged touch_type shot|volley (or carrying a
+      # spin preset) gets the spin refinement even with `enabled: false`
+      # above, fitted against all span evidence under a soft-L1 loss (the
+      # drag-only arc can't explain a curling shot, so the inlier gate
+      # collapses) and capped so the peak Magnus acceleration stays
+      # <= shot_max_accel_m_s2 at the span's launch speed.
+      shot_spans: true
+      shot_max_accel_m_s2: 10.0
+    # D6.1 goal-mouth constraint: with an operator goal_impact, the latest
+    # operator airborne anchor in the preceding `window_frames` whose ray hits
+    # the goal-line plane inside the mouth (+margins) becomes an in-memory
+    # line-cross knot (anchor file untouched); goal_check lands in the diag
+    # sidecar + quality report (src/utils/ball_goal_constraint.py).
+    goal:
+      enabled: true
+      window_frames: 24
+      mouth_margin_m: 0.6
+      bar_margin_m: 0.4
+    # D6.2 direction-consistency gate: drop runs (>= min_run frames) of
+    # detections that move AGAINST the fitted flight and sit > residual_px
+    # from it, then re-fit once (src/utils/ball_direction_gate.py).
+    direction_gate:
+      enabled: true
+      min_run: 2
+      min_px: 3.0
+      max_gap_frames: 3
+      residual_px: 15.0
     # Single-camera event-cue corroboration (src/utils/ball_cue_audio.py,
     # ball_cue_net.py, ball_cue_blur.py, ball_cue_fusion.py — IC-D).
     # Fused cue events (CueEvidence) ONLY relax the auto-event gate's
@@ -1640,6 +1704,30 @@ refined_poses:
     toe_roll_frames: 4
     min_toe_clearance_m: 0.06
 
+# Post-hoc kit / team evidence (stage runs after ball; writes SUGGESTIONS to
+# <out>/appearance/ only — operator players.json and kits_operator.json win).
+# Clip configs add `appearance.kits: {home|away|home_gk|away_gk|referee:
+# <library ref like liverpool/2025-26/home, or an inline KitSpec>}` and may add
+# `appearance.match: {home_team, away_team, date}` when the manifest has none.
+appearance:
+  enabled: true
+  sample_frames_per_shot: 16      # frames sampled per shot (evenly, >=3 players tracked)
+  min_keypoint_conf: 0.4          # COCO keypoint confidence for region polygons
+  white_balance:
+    enabled: true
+    target: "#f5f5f0"             # painted pitch lines
+    min_line_pixels: 40           # fewer line pixels -> identity gains
+    gain_clip: [0.8, 1.25]
+    exposure: false               # cast-only (luminance-preserving); the line level under-reads white
+  clustering:
+    keeper_third_m: 35.0          # keepers = colour outliers whose pitch x stays within this of a goal line
+    outlier_min_de: 18.0          # Lab distance floor to peel keepers/officials off the two teams
+    outlier_factor: 3.0           # ... or this many times the median in-team distance
+  library:
+    snap_de: 12.0                 # full-kit-vector CIEDE2000 accept radius (library-wide pool)
+    lightness_weight: 2.0         # kL: broadcast shading moves L more than hue
+                                  # pools named by clip kits / MatchInfo accept 2x (decisive pairings 4x), flagged
+
 export:
   gltf_enabled: true
   fbx_enabled: true
@@ -1697,6 +1785,8 @@ render:
   cameras: [broadcast, drone]
   resolution: [1920, 1080]
   vertical_variant: false     # additionally render 1080x1920 for non-broadcast cams
+  landscape: true             # false = 9:16 pass only for non-broadcast cams (--vertical-only)
+  allow_capsule_fallback: false  # true = accept capsule limbs when data/models/smpl_neutral.npz is missing
   samples: 16                 # EEVEE taa_render_samples
   style:
     palette:
@@ -1709,20 +1799,46 @@ render:
     ramp_steps: 3
     outline_width_m: 0.02
     grass_stripes: 10
+    # anatomical = skinning-weight garments (short sleeves, socks below the
+    # knee, boots, keeper gloves, hair); height_bands = legacy v1 bands.
+    body_zones: anatomical
     stadium:
       enabled: true
       roof: true
       crowd_density: 0.65   # 0 = empty seats, 1 = full; deterministic layout
-      seat_color: "#294b65"
-      accent_color: "#d6b66e"
+      # Venue dressing (seat_color, accent_color, stand_tone, board_*,
+      # crowd_colors, away_end) comes from config/stadiums.yaml via the clip's
+      # render.venue / AnchorSet.stadium / match venue
+      # (src/utils/stadium_dressing.py); `dressing_default` there holds the
+      # generic values. Set any of those keys here or in a clip config to
+      # override the venue.
   teams:
     defaults:
       home: {shirt: "#c0392b", shorts: "#ffffff", socks: "#c0392b"}
       away: {shirt: "#2980b9", shorts: "#2c3e50", socks: "#2980b9"}
-      home_gk: {shirt: "#f1c40f", shorts: "#2c3e50", socks: "#f1c40f"}
-      away_gk: {shirt: "#27ae60", shorts: "#2c3e50", socks: "#27ae60"}
+      # Optional per-role keys: boots (hex), gloves (hex; enables gloves),
+      # sleeves (short|long LENGTH), sleeve_color (hex; else sleeves inherit
+      # the shirt colour/pattern), collar (hex; else shirt), pattern:
+      # {type: solid|vertical_stripes|hoops, colors: [hex, hex], width_m: 0.07}
+      # (torso + sleeves; painted from rest-pose coords before the toon ramp).
+      # Per-player skin/hair live in players.json.
+      home_gk: {shirt: "#f1c40f", shorts: "#2c3e50", socks: "#f1c40f", sleeves: long, gloves: "#e8e8e8"}
+      away_gk: {shirt: "#27ae60", shorts: "#2c3e50", socks: "#27ae60", sleeves: long, gloves: "#e8e8e8"}
       referee: {shirt: "#222222", shorts: "#222222", socks: "#222222"}
       unknown: {shirt: "#888888", shorts: "#666666", socks: "#888888"}
     by_player: {}             # e.g. {P003: away} — overrides the derived kit role
   aov_passes: false
   save_blend: false
+
+# Vertical Shorts (src/stages/shorts.py): moments -> templates -> framing-checked
+# passes (cached under shorts/passes/<fingerprint>/) -> composed mp4 + sidecar.
+shorts:
+  enabled: true
+  shot: auto                  # auto = every active shot with a goal event (strike + impact)
+  templates: [matchday, keeper, comic]   # config/shorts/templates/<name>.yaml
+  quality: clean              # render_pass_runner.QUALITY_PRESETS key (draft|clean)
+  audio:
+    enabled: true             # crowd bed + strike thump + goal roar (shorts_audio DEFAULTS tunable here)
+  # Per-template caption override: string = replace the title text, list = full caption list.
+  # Unset = the template's own captions ("WHAT GOAL IS THIS?" matchday/comic, "WOULD YOU SAVE THIS?" keeper).
+  captions: {}

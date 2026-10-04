@@ -1,0 +1,30 @@
+# Short 1 — "What goal is this?" (matchday toon). scripts/compose_short.py EDL.
+# Clips: output-shorts/render_experiments/<id>/gberch/<camera>_9x16.mp4
+size: [1080, 1920]
+fps: 30
+segments:
+  - src: output-shorts/render_experiments/s1_drone/gberch/drone_9x16.mp4
+    first_frame: 200
+    from: 232
+    to: 343
+  - src: output-shorts/render_experiments/s1_chase/gberch/chase_9x16.mp4
+    first_frame: 330
+    from: 343
+    to: 396
+  - src: output-shorts/render_experiments/s1_orbit_slow/gberch/orbit_9x16.mp4
+    first_frame: 360
+    stretch: 4
+    from: 362
+    to: 380
+    flash: true
+    label: "REPLAY"
+  - src: output-shorts/render_experiments/s1_goal_slow/gberch/goal_left_9x16.mp4
+    first_frame: 356
+    stretch: 3
+    from: 374
+    to: 408
+    hold_s: 1.6
+    label: "REPLAY"
+captions:
+  - {text: "WHAT GOAL IS THIS?", style: title, start: 0}
+  - {text: "Drop your guess in the comments", style: sub, start: -2.2}

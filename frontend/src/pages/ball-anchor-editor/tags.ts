@@ -83,6 +83,7 @@ export const GOAL_ELEMENTS: { id: string; label: string }[] = [
   { id: "crossbar", label: "Crossbar" },
   { id: "back_net", label: "Back net" },
   { id: "side_net", label: "Side net" },
+  { id: "mouth", label: "Goal mouth / line cross" },
 ]
 
 export const TOUCH_TYPES: { id: string; label: string }[] = [

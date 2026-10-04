@@ -1,0 +1,34 @@
+# gberch clip overrides — Liverpool v Chelsea, Anfield (2025/26).
+# Merge over config/default.yaml with `--config config/clips/gberch.yaml`
+# (recon.py run / scripts/render_experiments.py).
+#
+# Kit colours now live in the kit library (config/kits/*.yaml) and are
+# referenced from `appearance.kits` below; the hand palette they replaced is
+# frozen in tests/fixtures/appearance/gberch_hand_palette.json (the
+# acceptance reference for the appearance stage). Hues were confirmed against footage with
+# scripts/sample_kit_colors.py (broadcast samples come out darker and
+# less saturated — shading + compression — so each value is snapped to
+# the club's brand colour rather than pasted raw):
+#   home  sampled shirt #833648 / shorts #761a35  -> Liverpool red, all red
+#   away  sampled shirt #34506c / shorts #124266 / socks #a7b8a0 -> Chelsea
+#         blue, blue shorts, white socks
+#   away_gk (Jorgensen) sampled #565857 all over -> charcoal, long sleeves,
+#         light gloves, white boots (close-up crop)
+#   referee sampled shirt #8c8543 / shorts #20211f -> yellow over black
+appearance:
+  kits:
+    home: liverpool/2025-26/home
+    away: chelsea/2025-26/home
+    away_gk: chelsea/2025-26/gk
+    referee: referees/yellow
+
+ball:
+  # Anchor iteration on this clip re-runs the ball stage repeatedly; keep
+  # WASB detections cached (default is off) so a re-run is minutes, not ~50.
+  detection_cache:
+    enabled: true
+
+render:
+  # Anfield dressing comes from the venue library (config/stadiums.yaml);
+  # it replaced the hand-set seat/crowd colours this file used to carry.
+  venue: anfield

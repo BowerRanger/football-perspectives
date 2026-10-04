@@ -1,0 +1,22 @@
+# kroupi clip overrides — Bournemouth v Man City, Vitality Stadium (2025/26).
+# Merge over config/default.yaml with `--config config/clips/kroupi.yaml`.
+#
+# Kits are library refs (config/kits/*.yaml). Bournemouth wear red/black
+# vertical stripes with black shorts; Man City the fluorescent yellow away
+# kit; the visible keeper (defending the far goal on kroupi01) wears teal-green.
+appearance:
+  kits:
+    home: bournemouth/2025-26/home
+    away: manchester_city/2025-26/away
+    away_gk: manchester_city/2025-26/gk
+    referee: referees/black
+  match:
+    home_team: Bournemouth
+    away_team: Manchester City
+
+ball:
+  detection_cache:
+    enabled: true
+
+render:
+  venue: vitality_stadium

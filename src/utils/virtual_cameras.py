@@ -149,6 +149,24 @@ class RigConfig:
     sideline_height_m: float = 14.0
     corner_fov_deg: float = 58.0
     corner_height_m: float = 10.0
+    # Eye-line cam (``eyes:<PID>``): a player's smoothed eye position
+    # (head joint + up/forward offsets, clear of the player's own head
+    # mesh) aimed at the smoothed ball — "what the keeper saw". Unlike
+    # ``pov`` (raw head facing) it keeps the ball in frame.
+    eyes_fov_deg: float = 70.0
+    eyes_up_m: float = 0.10
+    eyes_forward_m: float = 0.18
+    eyes_smooth_frames: int = 5
+    # Shot-planning knobs for the goal/orbit rigs (shorts editing):
+    # ``focus`` picks what they frame — "centroid" (all players + ball,
+    # the default), "ball", or a player id (e.g. "P006", the scorer) —
+    # smoothed over ``focus_smooth_frames``. ``orbit_start_frame``/
+    # ``orbit_end_frame`` confine the orbit sweep to a frame window (the
+    # angle holds at the ends outside it); -1 = the shot's first/last frame.
+    focus: str = "centroid"
+    focus_smooth_frames: int = 9
+    orbit_start_frame: int = -1
+    orbit_end_frame: int = -1
 
 
 def _head_pose_world(
@@ -287,6 +305,74 @@ def build_ots_track(
     return _make_track(clip_id, image_size, fps, K, per_frame)
 
 
+def _moving_average(arr: np.ndarray, window: int) -> np.ndarray:
+    """Centered, edge-padded moving average over axis 0 (same length)."""
+    arr = np.asarray(arr, dtype=np.float64)
+    win = max(1, int(window))
+    if win == 1 or len(arr) == 0:
+        return arr
+    pad = win // 2
+    padded = np.pad(arr, ((pad, pad), (0, 0)), mode="edge")
+    kernel = np.ones(win) / win
+    return np.stack(
+        [np.convolve(padded[:, k], kernel, mode="valid") for k in range(arr.shape[1])],
+        axis=1,
+    )[: len(arr)]
+
+
+def build_eyes_track(
+    track: "SmplWorldTrack",
+    ball_track: object,
+    cfg: RigConfig,
+    image_size: tuple[int, int],
+    fps: float,
+    clip_id: str,
+) -> CameraTrack:
+    """Eye-line camera: the player's (smoothed) eye position aimed at the
+    (smoothed) ball — e.g. ``eyes:<keeper>`` for a "would you save this?"
+    shot.
+
+    The eye point is the head joint lifted ``eyes_up_m`` and pushed
+    ``eyes_forward_m`` along the ground-projected facing so the near
+    clip never lands inside the player's own head/outline hull. The ball
+    target bridges short occlusions (``ball_target_max_occlusion_frames``)
+    then falls back to a point ahead of the player; both the eye path and
+    the target path are moving-averaged over ``eyes_smooth_frames`` so
+    GVHMR head jitter doesn't shake the frame.
+    """
+    K = intrinsics_from_fov(cfg.eyes_fov_deg, image_size)
+    ball_xyz = _ball_xyz_by_frame(ball_track)
+    frames = [int(f) for f in np.asarray(track.frames).tolist()]
+    if not frames:
+        return _make_track(clip_id, image_size, fps, K, [])
+    eyes, targets, confs = [], [], []
+    last_target: np.ndarray | None = None
+    since_ball = 0
+    for i, fr in enumerate(frames):
+        head_pos, head_R, ok = _head_pose_world(track, i)
+        facing = _normalize(head_R @ FACE_AXIS_CANONICAL)
+        facing_ground = _normalize(np.array([facing[0], facing[1], 0.0]))
+        eye = head_pos + cfg.eyes_up_m * WORLD_UP + cfg.eyes_forward_m * facing_ground
+        target = ball_xyz.get(fr)
+        if target is not None:
+            last_target, since_ball = target, 0
+        elif last_target is not None and since_ball < cfg.ball_target_max_occlusion_frames:
+            target = last_target
+            since_ball += 1
+        else:
+            target = eye + facing_ground * 10.0
+        eyes.append(eye)
+        targets.append(target)
+        confs.append(float(track.confidence[i]) * (1.0 if ok else 0.5))
+    eyes_s = _moving_average(np.asarray(eyes), cfg.eyes_smooth_frames)
+    targets_s = _moving_average(np.asarray(targets), cfg.eyes_smooth_frames)
+    per_frame: list[_FrameTuple] = []
+    for fr, eye, target, conf in zip(frames, eyes_s, targets_s, confs):
+        R, t = _look_at_safe(eye, target)
+        per_frame.append((fr, R, t, conf))
+    return _make_track(clip_id, image_size, fps, K, per_frame)
+
+
 def _smoothed_centroid(
     tracks: Sequence["SmplWorldTrack"],
     ball_track: object,
@@ -335,6 +421,49 @@ def _smoothed_centroid(
         axis=1,
     )[: len(all_frames)]
     return all_frames, smooth
+
+
+def _focus_path(
+    tracks: Sequence["SmplWorldTrack"],
+    ball_track: object,
+    cfg: RigConfig,
+) -> tuple[list[int], np.ndarray]:
+    """``(frames, smoothed_xyz)`` the goal/orbit rigs aim at, per
+    ``cfg.focus``: the action centroid (default), the ball (held across
+    gaps, leading gap back-filled with the first sighting; falls back to
+    the centroid when the ball is never seen), or one player's root."""
+    all_frames, centroid = _smoothed_centroid(tracks, ball_track, cfg.drone_smooth_frames)
+    focus = (cfg.focus or "centroid").strip()
+    if focus == "centroid" or not all_frames:
+        return all_frames, centroid
+    if focus == "ball":
+        ball_xyz = _ball_xyz_by_frame(ball_track) if ball_track is not None else {}
+        if not ball_xyz:
+            return all_frames, centroid
+        first = ball_xyz[min(ball_xyz)]
+        held, last = [], first
+        for f in all_frames:
+            last = ball_xyz.get(f, last)
+            held.append(last)
+        return all_frames, _moving_average(np.asarray(held), cfg.focus_smooth_frames)
+    player = next((t for t in tracks if t.player_id == focus), None)
+    if player is None:
+        raise ValueError(f"rig focus {focus!r}: no such player track")
+    idx = {int(f): i for i, f in enumerate(np.asarray(player.frames).tolist())}
+    raw, last = [], None
+    for k, f in enumerate(all_frames):
+        if f in idx:
+            last = np.asarray(player.root_t[idx[f]], dtype=np.float64)
+        raw.append(last if last is not None else centroid[k])
+    return all_frames, _moving_average(np.asarray(raw), cfg.focus_smooth_frames)
+
+
+def _orbit_fraction(frame: int, i: int, n: int, cfg: RigConfig, frames: list[int]) -> float:
+    start = cfg.orbit_start_frame if cfg.orbit_start_frame >= 0 else frames[0]
+    end = cfg.orbit_end_frame if cfg.orbit_end_frame >= 0 else frames[-1]
+    if end <= start:
+        return i / (n - 1) if n > 1 else 0.0
+    return min(1.0, max(0.0, (frame - start) / (end - start)))
 
 
 def build_drone_track(
@@ -389,7 +518,7 @@ def build_goal_track(
     if side not in ("left", "right"):
         raise ValueError(f"build_goal_track: side must be 'left' or 'right', got {side!r}")
     K = intrinsics_from_fov(cfg.goal_fov_deg, image_size)
-    all_frames, smooth = _smoothed_centroid(tracks, ball_track, cfg.drone_smooth_frames)
+    all_frames, smooth = _focus_path(tracks, ball_track, cfg)
     if not all_frames:
         return _make_track(clip_id, image_size, fps, K, [])
 
@@ -467,14 +596,14 @@ def build_orbit_track(
     looking at it.
     """
     K = intrinsics_from_fov(cfg.orbit_fov_deg, image_size)
-    all_frames, smooth = _smoothed_centroid(tracks, ball_track, cfg.drone_smooth_frames)
+    all_frames, smooth = _focus_path(tracks, ball_track, cfg)
     if not all_frames:
         return _make_track(clip_id, image_size, fps, K, [])
 
     n = len(all_frames)
     per_frame: list[_FrameTuple] = []
     for i, (f, target) in enumerate(zip(all_frames, smooth)):
-        frac = i / (n - 1) if n > 1 else 0.0
+        frac = _orbit_fraction(int(f), i, n, cfg, all_frames)
         angle = math.radians(-cfg.orbit_sweep_deg / 2.0 + cfg.orbit_sweep_deg * frac)
         centre = np.array([
             target[0] + cfg.orbit_radius_m * math.sin(angle),

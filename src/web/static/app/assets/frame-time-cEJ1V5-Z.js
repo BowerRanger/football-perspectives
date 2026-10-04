@@ -1,0 +1,1 @@
+function e(e,t){return(e+.5)/t}function t(e,t,n=1/0){let r=Math.floor(e*t+1e-6);return Math.max(0,Math.min(n,r))}export{e as n,t};

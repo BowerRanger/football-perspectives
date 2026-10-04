@@ -70,7 +70,7 @@ import numpy as np
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.pipeline.config import load_config
 from src.pipeline.runner import run_pipeline
@@ -91,11 +91,14 @@ STAGE_ORDER: list[str] = [
     "prepare_shots",
     "tracking",
     "camera",
+    "replay_sync",
     "hmr_world",
     "refined_poses",
     "ball",
+    "appearance",
     "export",
     "render",
+    "shorts",
 ]
 
 def _active_manifest_shot_ids(output_dir: Path) -> list[str]:
@@ -256,6 +259,22 @@ def _render_complete(output_dir: Path) -> bool:
     return RenderStage({}, output_dir).is_complete()
 
 
+def _shorts_complete(output_dir: Path) -> bool:
+    """Delegates to ``ShortsStage.is_complete`` (every goal shot has its
+    sidecar and template mp4s). Any import/read failure reads as not complete
+    so a broken sidecar never takes the dashboard's stage list down."""
+    try:
+        from src.stages.shorts import ShortsStage
+
+        stage = ShortsStage({}, output_dir)
+        # No goal shot means nothing was made; the stage's own check is
+        # vacuously true there, which would paint an unrun stage green.
+        return bool(stage._target_shots()) and stage.is_complete()
+    except Exception:
+        logger.exception("shorts completeness check failed")
+        return False
+
+
 # A valid output-directory basename: letters, digits, dash, underscore. No
 # path separators or dots, so it can never escape the parent directory.
 _OUTPUT_DIR_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -278,11 +297,14 @@ _STAGE_COMPLETE = {
     "prepare_shots": lambda d: (d / "shots" / "shots_manifest.json").exists(),
     "tracking": lambda d: any((d / "tracks").glob("*_tracks.json")),
     "camera": _camera_complete,
+    "replay_sync": lambda d: (d / "shots" / "replay_sync.json").exists(),
     "hmr_world": _hmr_world_complete,
     "ball": lambda d: (d / "ball" / "ball_track.json").exists(),
     "refined_poses": _refined_poses_complete,
+    "appearance": lambda d: (d / "appearance" / "kits.json").exists(),
     "export": lambda d: (d / "export" / "gltf" / "scene.glb").exists(),
     "render": _render_complete,
+    "shorts": _shorts_complete,
 }
 
 # Per-stage outputs that should be wiped on a "re-run" or "clear" action.
@@ -304,10 +326,17 @@ _STAGE_ARTIFACTS: dict[str, list[str]] = {
         "camera/camera_track.json",
         "camera/debug",
     ],
+    # Clearing only drops the report: retimed clips keep their natives in
+    # shots/native/ (restore via /api/shots/{id}/restore-native).
+    "replay_sync": ["shots/replay_sync.json"],
     "hmr_world": ["hmr_world"],
     "ball": ["ball/*_ball_track.json", "ball/ball_track.json"],
     "refined_poses": ["refined_poses"],
+    # appearance/kits_operator.json and shorts/*_operator.json are operator
+    # input and are deliberately not listed.
+    "appearance": ["appearance/kits.json", "appearance/players_suggested.json"],
     "export": ["export/gltf", "export/fbx", "export/ue_manifest.json"],
+    "shorts": ["shorts/*.mp4", "shorts/*.wav", "shorts/*_shorts.json"],
 }
 
 # Render writes per-shot videos under render/; it has no _STAGE_ARTIFACTS
@@ -1659,6 +1688,8 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         frame_offset: int
         method: str = "manual"
         confidence: float = 1.0
+        # None = keep the saved rate (older clients never send it).
+        playback_rate: float | None = Field(default=None, gt=0, le=20)
 
     class GroupSyncPayload(BaseModel):
         # One group's sync state per POST — the dashboard's editor is
@@ -1696,6 +1727,17 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         for s in manifest.shots:
             members.setdefault(s.group_id, []).append(s.id)
         return members
+
+    def _saved_rate(group_id: str, shot_id: str) -> float:
+        path = _sync_map_path()
+        if not path.exists():
+            return 1.0
+        try:
+            from src.schemas.sync_map import SyncMap
+            g = SyncMap.load(path).group(group_id)
+            return g.rate_for(shot_id) if g is not None else 1.0
+        except Exception:
+            return 1.0
 
     @app.get("/api/sync")
     def get_sync_map():
@@ -1808,6 +1850,10 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
                 frame_offset=int(a.frame_offset),
                 method=method,
                 confidence=float(a.confidence),
+                playback_rate=(
+                    float(a.playback_rate) if a.playback_rate is not None
+                    else _saved_rate(payload.group_id, a.shot_id)
+                ),
             ))
         # Reference shot must be pinned to offset=0 so downstream
         # consumers can compute global frame indices unambiguously.
@@ -2189,7 +2235,7 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
         player_id: str | None = None
         bone: str | None = None
         # Required only when state == "goal_impact"; one of
-        # "post" | "crossbar" | "back_net" | "side_net".
+        # "post" | "crossbar" | "back_net" | "side_net" | "mouth".
         goal_element: str | None = None
         # Optional on state == "player_touch"; "shot" | "volley" | None.
         # Selecting shot/volley enables the spin sub-tag below.
@@ -4067,6 +4113,19 @@ def create_app(output_dir: Path, config_path: Path | None = None) -> FastAPI:
 
     @app.get("/ball-anchor-editor", include_in_schema=False)
     def serve_ball_anchor_editor():
+        return _spa_shell()
+
+    # Ball Studio: multi-angle 3-D ball-truth authoring (see ball_studio.py).
+    from src.web.ball_studio import build_router as _ball_studio_router
+
+    app.include_router(_ball_studio_router(output_dir, config_path))
+
+    # Replay speed: operator moments, retime / restore-native, stage report.
+    from src.web.replay_sync import build_router as _replay_sync_router
+    app.include_router(_replay_sync_router(output_dir, _match_manifest_lock, config_path))
+
+    @app.get("/ball-studio", include_in_schema=False)
+    def serve_ball_studio():
         return _spa_shell()
 
     return app

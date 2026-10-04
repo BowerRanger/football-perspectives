@@ -38,6 +38,27 @@
 # match-to-match everywhere — all entries carry the league-default
 # 5.5 m along-touchline stripes; override per-clip in the anchor JSON.
 
+# ---------------------------------------------------------------------------
+# Venue dressing (render stage, scripts/blender_stadium.py). Each stadium MAY
+# carry a ``dressing`` block; ``dressing_default`` is the fallback + base every
+# venue block is layered over (src/utils/stadium_dressing.py resolves it;
+# explicit clip ``render.style.stadium`` keys win over both). Keys:
+#   seat_color / accent_color   seat shell and aisle-block colours
+#   stand_tone                  tier concrete mass; seeds steel + tunnels
+#   board_color / board_text / board_text_color   perimeter ad ribbon
+#   crowd_colors                shirt palette (repeat a colour to weight it)
+#   away_end: {stand, crowd_colors}   stand = North|South|East|West; crowd
+#                               colours default to the away kit's shirt
+# Structural tones are lifted to a minimum lightness at build time so the toon
+# ramp's shadow band cannot render a black band behind low cameras.
+dressing_default:
+  seat_color: "#294b65"
+  accent_color: "#d6b66e"
+  stand_tone: "#707e87"
+  board_color: "#2b4a58"
+  board_text: "FOOTBALL / PERSPECTIVES"
+  crowd_colors: ["#283e50", "#b1b8af", "#a64039", "#ceac78", "#476780", "#d2c9b5"]
+
 stadiums:
   default_premier_league:
     display_name: "Generic Premier League"
@@ -58,12 +79,23 @@ stadiums:
 
   emirates_stadium:
     display_name: "Emirates Stadium (Arsenal)"
+    aliases: ["emirates", "ashburton grove", "arsenal"]
     pitch_length_m: 105.0
     pitch_width_m: 68.0
     mowing:
       orientation: along_touchline
       stripe_width_m: 5.5
       origin_y_m: 0.0
+    # Sampled from the s009 (Arsenal v Coventry) frames: red-and-white
+    # seating bowl, red perimeter boards with white lettering.
+    dressing:
+      seat_color: "#b3151f"
+      accent_color: "#f1ece0"
+      stand_tone: "#8c9196"
+      board_color: "#c8101e"
+      board_text: "EMIRATES STADIUM"
+      crowd_colors: ["#d4202a", "#b3141f", "#e9e5dc", "#d4202a", "#2a2a2a",
+                     "#c9c4b8", "#d4202a", "#8f1a20"]
 
   villa_park:
     display_name: "Villa Park (Aston Villa)"
@@ -79,12 +111,23 @@ stadiums:
     # AFC Bournemouth's Dean Court has the smallest *capacity* in the
     # Premier League, but the playing surface itself is the full FIFA
     # reference 105 m x 68 m.
+    aliases: ["dean court", "vitality", "bournemouth"]
     pitch_length_m: 105.0
     pitch_width_m: 68.0
     mowing:
       orientation: along_touchline
       stripe_width_m: 5.5
       origin_y_m: 0.0
+    # Sampled from the kroupi01 frames: dark enclosed stands, mostly black
+    # and red shirts with grey/white mixed in, black perimeter boards.
+    dressing:
+      seat_color: "#26262c"
+      accent_color: "#c8102e"
+      stand_tone: "#6b6f74"
+      board_color: "#2b2b30"
+      board_text: "VITALITY STADIUM"
+      crowd_colors: ["#b3141f", "#1c1c1c", "#3a3a40", "#8f1a20", "#d8d4cc",
+                     "#1c1c1c", "#c8102e", "#2a2d4a"]
 
   gtech_community_stadium:
     display_name: "Gtech Community Stadium (Brentford)"
@@ -202,12 +245,26 @@ stadiums:
     # the camera-stage residuals are insensitive to length on left-half
     # broadcast angles. The length feeds the web pitch viewer and the
     # ball stage's flight-segment x-bounds.
+    aliases: ["liverpool"]
     pitch_length_m: 101.0
     pitch_width_m: 68.0
     mowing:
       orientation: along_touchline
       stripe_width_m: 5.5
       origin_y_m: 0.0
+    # Sampled from the gberch frames: red seats and a Kop/Main Stand crowd
+    # that is almost all red with white and dark mixed in; dark grey
+    # perimeter boards with white lettering. Away end = Chelsea's blue via
+    # the away kit (stand is a per-clip choice; East = the x=105 end).
+    dressing:
+      seat_color: "#8e1b22"
+      accent_color: "#e6e1d6"
+      stand_tone: "#8a8f92"
+      board_color: "#3a4047"
+      board_text: "THIS IS ANFIELD"
+      crowd_colors: ["#c8102e", "#b3141f", "#8f1a20", "#c8102e", "#e9e5dc",
+                     "#2a2a2a", "#c8102e", "#d6cdbd"]
+      away_end: {stand: East}
 
   etihad_stadium:
     display_name: "Etihad Stadium (Manchester City)"

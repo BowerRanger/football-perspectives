@@ -285,7 +285,8 @@ def gate_auto_events(
     # refinement on every candidate*span probe would multiply the gate's
     # cost for no accept/reject benefit, so it's always off here
     # regardless of the caller's own trajectory_cfg.
-    probe_cfg["spin"] = {**(probe_cfg.get("spin") or {}), "enabled": False}
+    probe_cfg["spin"] = {**(probe_cfg.get("spin") or {}), "enabled": False,
+                         "shot_spans": False}
 
     for cand in sorted(auto_hard, key=lambda k: k.frame):
         c = _consistency_px(ctx, cand, observations, g["consistency_window_frames"],

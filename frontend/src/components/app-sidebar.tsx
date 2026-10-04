@@ -1,5 +1,5 @@
 import { Link, useLocation, useSearchParams } from "react-router"
-import { BoxIcon, CircleDotIcon, CrosshairIcon, LoaderCircleIcon, TerminalIcon } from "lucide-react"
+import { BoxIcon, CircleDotIcon, CrosshairIcon, LoaderCircleIcon, OrbitIcon, TerminalIcon } from "lucide-react"
 
 import {
   Sidebar,
@@ -27,6 +27,7 @@ const EDITORS = [
   { to: "/anchor_editor", label: "Pitch anchors", icon: CrosshairIcon },
   { to: "/ball-anchor-editor", label: "Ball anchors", icon: CircleDotIcon },
   { to: "/viewer", label: "3D viewer", icon: BoxIcon },
+  { to: "/ball-studio", label: "Ball studio", icon: OrbitIcon },
 ] as const
 
 export function AppSidebar({ activeStage }: { activeStage: string | null }) {
@@ -89,7 +90,7 @@ export function AppSidebar({ activeStage }: { activeStage: string | null }) {
               {EDITORS.map((e) => (
                 <SidebarMenuItem key={e.to}>
                   <SidebarMenuButton asChild isActive={location.pathname === e.to} tooltip={e.label}>
-                    <Link to={shot ? `${e.to}?shot=${encodeURIComponent(shot)}` : e.to}>
+                    <Link to={shot && e.to !== "/ball-studio" ? `${e.to}?shot=${encodeURIComponent(shot)}` : e.to}>
                       <e.icon />
                       <span>{e.label}</span>
                     </Link>

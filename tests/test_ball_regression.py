@@ -121,3 +121,23 @@ def test_ball_stage_has_not_regressed(clip_id: str, tmp_path: Path):
     assert not failures, (
         f"ball stage regressed on {clip_id} ({summary}):\n  "
         + "\n  ".join(failures))
+
+
+@pytest.mark.regression
+def test_gberch_finish_held_out_line_cross():
+    """D6.5 held-out case: the decisive gberch shot must cross the goal line
+    within 0.3 m of the operator's frame-394 anchor ray ∩ x=0, with no hand
+    splice. Runs the shipped hybrid solver on the frozen fast fixture
+    (tests/fixtures/ball/gberch_finish), so no media is needed."""
+    from tests.test_ball_goal_constraint import FIXTURE, _run_finish
+
+    if not FIXTURE.exists():
+        pytest.skip("gberch_finish fixture missing")
+    d, ctx, _frames, diag = _run_finish()
+    anchor = next(a for a in d["manual_anchors"] if a["frame"] == 394)
+    C, ray = ctx.ray(394, tuple(anchor["image_xy"]))
+    operator_pt = C + (0.0 - C[0]) / ray[0] * ray
+    gc = diag["goal_check"]
+    assert gc["status"] == "ok", gc
+    got = np.array(gc["line_cross"]["xyz"])
+    assert np.linalg.norm(got - operator_pt) < d["expected"]["tol_m"], (got, operator_pt)

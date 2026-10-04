@@ -1,0 +1,28 @@
+{
+  "home": {
+    "shirt": "#c8102e",
+    "shorts": "#c8102e",
+    "socks": "#c8102e",
+    "boots": "#1c1c1c"
+  },
+  "away": {
+    "shirt": "#034694",
+    "shorts": "#034694",
+    "socks": "#f2f2f2",
+    "boots": "#1c1c1c"
+  },
+  "away_gk": {
+    "shirt": "#33373b",
+    "shorts": "#2a2d30",
+    "socks": "#2a2d30",
+    "boots": "#f0f0f0",
+    "sleeves": "long",
+    "gloves": "#e6e6e6"
+  },
+  "referee": {
+    "shirt": "#e8df3a",
+    "shorts": "#151515",
+    "socks": "#151515",
+    "boots": "#151515"
+  }
+}

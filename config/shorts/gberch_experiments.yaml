@@ -1,0 +1,136 @@
+# gberch YouTube Shorts — render passes (scripts/render_experiments.py).
+#
+#   .venv311/bin/python scripts/render_experiments.py --output output-shorts \
+#       --shot gberch --experiments config/shorts/gberch_experiments.yaml \
+#       --config config/clips/gberch.yaml --quality clean
+#
+# Goal timing (output-shorts ball track, hybrid): Gravenberch (P006)
+# strikes with his right foot at frame 371; the ball crosses the line
+# ~389 and hits the back netting ~400. Jorgensen (P005) is in goal.
+# Then config/shorts/gberch_*.yaml EDLs cut these into the three Shorts
+# (scripts/compose_short.py).
+
+_styles:
+  matchday: &matchday
+    post:
+      saturation: 1.12
+  floodlit: &floodlit
+    palette:
+      sky_top: "#070b16"
+      sky_bottom: "#1d2a44"
+    sun_energy: 2.2
+    world_strength: 0.35
+    lines_emission_strength: 2.5
+    post:
+      glare: 1.0
+      vignette: 0.45
+      saturation: 1.1
+  comic: &comic
+    # No posterize: it quantised Chelsea blue to black and blotched skin
+    # (kits must stay true). Comic = 2-band cel ramp + heavy ink + pop.
+    outline_width_m: 0.045
+    ramp_steps: 2
+    palette:
+      outline: "#0b0b0b"
+      sky_top: "#ffd34d"
+      sky_bottom: "#ffefb0"
+    post:
+      saturation: 1.3
+
+experiments:
+  # --- Short 1: "What goal is this?" — matchday toon -----------------------
+  - id: s1_drone
+    camera: drone
+    rig: {drone_height_m: 16.0, drone_back_m: 20.0, drone_fov_deg: 48.0, drone_smooth_frames: 31}
+    style: *matchday
+    style_name: matchday
+    frames: [200, 372]
+    vertical: true
+  - id: s1_chase
+    camera: chase
+    style: *matchday
+    style_name: matchday
+    frames: [330, 405]
+    vertical: true
+  - id: s1_goal_slow
+    camera: "goal:left"
+    rig: {goal_height_m: 2.0, goal_back_m: 7.0, goal_fov_deg: 38.0, focus: ball}
+    style: *matchday
+    style_name: matchday
+    frames: [356, 410]
+    time_stretch: 3
+    vertical: true
+  - id: s1_orbit_slow
+    camera: orbit
+    rig: {focus: P006, orbit_radius_m: 6.5, orbit_height_m: 1.9, orbit_fov_deg: 48.0,
+          orbit_sweep_deg: 150.0, orbit_start_frame: 360, orbit_end_frame: 380}
+    style: *matchday
+    style_name: matchday
+    frames: [360, 380]
+    time_stretch: 4
+    vertical: true
+
+  # --- Short 2: "Would you save this?" — keeper eye-line, floodlit ---------
+  - id: s2_goalline
+    camera: "goal:left"
+    rig: {goal_height_m: 1.7, goal_back_m: 4.5, goal_fov_deg: 50.0, focus: ball}
+    style: *floodlit
+    style_name: floodlit
+    frames: [300, 350]
+    vertical: true
+  - id: s2_eyes
+    camera: "eyes:P005"
+    rig: {eyes_fov_deg: 50.0}
+    style: *floodlit
+    style_name: floodlit
+    frames: [320, 399]
+    vertical: true
+  - id: s2_eyes_slow
+    camera: "eyes:P005"
+    rig: {eyes_fov_deg: 50.0}
+    style: *floodlit
+    style_name: floodlit
+    frames: [362, 399]
+    time_stretch: 4
+    vertical: true
+  - id: s2_goal
+    camera: "goal:left"
+    rig: {goal_height_m: 1.6, goal_back_m: 6.0, goal_fov_deg: 42.0, focus: ball}
+    style: *floodlit
+    style_name: floodlit
+    frames: [380, 428]
+    time_stretch: 2
+    vertical: true
+
+  # --- Short 3: "What goal is this?" — comic ---------------------------------
+  - id: s3_drone
+    camera: drone
+    rig: {drone_height_m: 16.0, drone_back_m: 20.0, drone_fov_deg: 48.0, drone_smooth_frames: 31}
+    style: *comic
+    style_name: comic
+    frames: [230, 345]
+    vertical: true
+  - id: s3_ots
+    camera: "ots:P006"
+    rig: {ots_back_m: 5.5, ots_up_m: 2.0, ots_right_m: 1.0, ots_fov_deg: 46.0}
+    style: *comic
+    style_name: comic
+    frames: [335, 378]
+    vertical: true
+  - id: s3_chase_slow
+    camera: chase
+    rig: {chase_back_m: 5.0, chase_height_m: 1.4}
+    style: *comic
+    style_name: comic
+    frames: [366, 404]
+    time_stretch: 3
+    vertical: true
+  - id: s3_net_orbit
+    camera: orbit
+    rig: {focus: ball, orbit_radius_m: 6.0, orbit_height_m: 1.6, orbit_fov_deg: 50.0,
+          orbit_sweep_deg: 120.0, orbit_start_frame: 384, orbit_end_frame: 410}
+    style: *comic
+    style_name: comic
+    frames: [384, 410]
+    time_stretch: 3
+    vertical: true

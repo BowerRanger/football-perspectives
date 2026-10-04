@@ -8,9 +8,12 @@ export const STAGE_PANELS: Record<StageName, React.LazyExoticComponent<React.Com
   prepare_shots: React.lazy(() => import("./prepare-shots")),
   tracking: React.lazy(() => import("./tracking")),
   camera: React.lazy(() => import("./camera")),
+  replay_sync: React.lazy(() => import("./replay-sync")),
   hmr_world: React.lazy(() => import("./hmr-world")),
   refined_poses: React.lazy(() => import("./refined-poses")),
   ball: React.lazy(() => import("./ball")),
+  appearance: React.lazy(() => import("./appearance")),
   export: React.lazy(() => import("./export")),
   render: React.lazy(() => import("./render")),
+  shorts: React.lazy(() => import("./shorts")),
 }

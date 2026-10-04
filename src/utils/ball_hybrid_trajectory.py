@@ -163,7 +163,20 @@ DEFAULT_CFG: dict[str, Any] = {
         "min_obs": 8,
         "min_delta_bic": 6.0,
         "min_resid_gain": 0.10,
+        # Bounded Magnus on SHOT spans only (design D6.3): a flight span
+        # whose start knot is a shot/volley touch (touch_type shot|volley
+        # or a spin preset on the anchor) gets the spin refinement even
+        # though global ``enabled`` stays off. The curl is capped so the
+        # peak Magnus acceleration stays <= shot_max_accel_m_s2 (~10 m/s^2,
+        # i.e. what the gberch instep curl measured at 8). Code default off
+        # (bare configs / bench unchanged); config/default.yaml turns it on.
+        "shot_spans": False,
+        "shot_max_accel_m_s2": 10.0,
+        "shot_start_frames": (),
     },
+    # D6 goal-mouth constraint + detector direction gate (run_trajectory).
+    "goal": {"enabled": True},
+    "direction_gate": {"enabled": True},
 }
 
 _GOAL_GEOMETRY = GoalGeometry.from_pitch_config({})
@@ -265,8 +278,11 @@ def resolve_knots(
                     t=ctx.per_frame_t[frame], distortion=ctx.distortion,
                     geometry=_GOAL_GEOMETRY,
                 )
+                # ``mouth`` marks the ball crossing the line, not a contact:
+                # a smooth hard knot ("line_cross"), not a velocity break.
                 by_frame.setdefault(frame, Knot(
-                    frame=frame, xyz=tuple(float(x) for x in xyz), kind=state,
+                    frame=frame, xyz=tuple(float(x) for x in xyz),
+                    kind="line_cross" if goal_element == "mouth" else state,
                     depth_hard=True, source=source, uv=image_xy))
                 continue
             except ValueError:
@@ -496,6 +512,22 @@ def _open_end_plausible(positions) -> bool:
     return True
 
 
+def _shot_spin_bounds(
+    bounds: tuple[float, float], a_xyz, b_xyz, duration_s: float, cd: float,
+    magnus_coeff: float, max_accel_m_s2: float,
+) -> tuple[float, float]:
+    """Clamp the spin box so the peak Magnus acceleration k*|omega x v|
+    stays <= ``max_accel_m_s2`` at the span's launch speed (a hard physical
+    envelope on a shot's curl, tighter than the global 10 rev/s box)."""
+    v0 = shoot_arc(a_xyz, 0.0, b_xyz, duration_s, cd=cd, magnus_coeff=magnus_coeff)
+    speed = float(np.linalg.norm(v0))
+    if speed < 1e-6 or magnus_coeff <= 0.0:
+        return bounds
+    cap = max_accel_m_s2 / (magnus_coeff * speed)
+    hi = min(abs(bounds[1]), cap)
+    return (-hi, hi)
+
+
 def solve_span(
     ctx: HybridShotCtx,
     a_knot: Knot,
@@ -678,9 +710,22 @@ def solve_span(
     spin_cfg = cfg.get("spin") or {}
     span_omega_world: tuple[float, float, float] | None = None
     span_omega_rad_s: float | None = None
-    if bool(spin_cfg.get("enabled", False)) and len(active_evid) >= int(
-            spin_cfg.get("min_obs", 8)):
-        obs_frames = np.array([f for f, _, _ in active_evid], dtype=float)
+    shot_span = (bool(spin_cfg.get("shot_spans", False))
+                 and a_knot.frame in set(spin_cfg.get("shot_start_frames") or ()))
+    spin_on = bool(spin_cfg.get("enabled", False)) or shot_span
+    spin_bounds = tuple(spin_cfg.get("bounds", DEFAULT_SPIN_BOUNDS))
+    if shot_span and not spin_cfg.get("enabled", False):
+        spin_bounds = _shot_spin_bounds(
+            spin_bounds, a_xyz, b_xyz, duration_s, cd, cfg["magnus_coeff"],
+            float(spin_cfg.get("shot_max_accel_m_s2", 10.0)))
+    # A shot span curls, so the drag-only arc above can't explain it and its
+    # robust inlier gate collapses -- fit the spin against ALL span evidence
+    # under a soft-L1 loss instead (design D6.3). Global spin keeps the
+    # validated inlier-set / plain-LS behaviour.
+    spin_evid = evid_all if shot_span else active_evid
+    spin_robust = float(cfg["inlier_px"]) if shot_span else None
+    if spin_on and len(spin_evid) >= int(spin_cfg.get("min_obs", 8)):
+        obs_frames = np.array([f for f, _, _ in spin_evid], dtype=float)
         # Absolute clip-time base throughout (obs_times/t_a/t_b all
         # frame/fps) — project_fn maps t_s straight to a frame via
         # round(t_s * fps), matching scripts/eval_ball_spin.py's
@@ -688,8 +733,8 @@ def solve_span(
         # span-relative base across these three is the KeyError IC-E hit
         # — never do that).
         obs_times = obs_frames / ctx.fps
-        obs_uv = np.array([uv for _, uv, _ in active_evid], dtype=float)
-        obs_conf = np.array([w for _, _, w in active_evid], dtype=float)
+        obs_uv = np.array([uv for _, uv, _ in spin_evid], dtype=float)
+        obs_conf = np.array([w for _, _, w in spin_evid], dtype=float)
         t_a = a_knot.frame / ctx.fps
         t_b = b_knot.frame / ctx.fps
 
@@ -699,11 +744,12 @@ def solve_span(
         try:
             spin_result = fit_span_spin(
                 a_xyz, t_a, b_xyz, t_b, obs_times, obs_uv, _spin_project_fn,
-                cd=cd, bounds=tuple(spin_cfg.get("bounds", DEFAULT_SPIN_BOUNDS)),
+                cd=cd, bounds=spin_bounds,
                 magnus_coeff=cfg["magnus_coeff"], obs_conf=obs_conf,
                 min_obs=int(spin_cfg.get("min_obs", 8)),
                 min_delta_bic=float(spin_cfg.get("min_delta_bic", 6.0)),
                 min_resid_gain=float(spin_cfg.get("min_resid_gain", 0.10)),
+                robust_scale_px=spin_robust,
             )
         except Exception:  # noqa: BLE001 — spin is best-effort enrichment
             spin_result = None
@@ -741,7 +787,13 @@ def solve_span(
         info["omega_world"] = span_omega_world
         info["rad_s"] = span_omega_rad_s
 
+    # A shot span whose bounded-curl fit was accepted is explained by one
+    # physical arc: a lone far-off detection (false track near the striker)
+    # must not split it, which would also strand the sub-spans from the
+    # spin refinement.
+    shot_spin_accepted = shot_span and span_omega_world is not None
     if (worst is not None
+            and not shot_spin_accepted
             and worst[2] > cfg["inlier_px"] * cfg["split_residual_factor"]
             and splits_used < cfg["max_splits_per_span"]):
         split_frame, split_uv, _err = worst
@@ -1108,6 +1160,7 @@ def run_trajectory(
     cfg: Mapping[str, Any] | None = None,
     gating_cfg: Mapping[str, Any] | None = None,
     player_context: Any = None,
+    goal_outcome: str | None = None,
 ) -> tuple[dict[int, dict], dict]:
     """Convenience one-call entry point: resolve manual ``anchors``/
     ``fixes`` into knots, gate ``auto_anchors`` through
@@ -1128,9 +1181,35 @@ def run_trajectory(
     """
     from src.utils.ball_hybrid_gating import gate_auto_events as _gate_auto_events
 
+    from src.utils.ball_direction_gate import filter_reversed_observations
+    from src.utils.ball_goal_constraint import (
+        GoalEvent, _goal_end_for_x, contain_in_net, goal_check,
+        infer_line_cross_knots, normalize_outcome)
+
     tcfg = full_cfg(cfg)
     hard, ray = resolve_knots(ctx, anchors, fixes, source="manual",
                                player_context=player_context)
+
+    # D6.1 -- goal-mouth constraint: an in-memory line-cross knot from the
+    # operator's airborne anchor nearest a goal_impact (anchor file untouched).
+    goal_cfg = tcfg.get("goal") or {}
+    goal_event = None
+    if goal_cfg.get("enabled", True):
+        extra, goal_event = infer_line_cross_knots(
+            ctx, anchors, goal_cfg, goal_outcome)
+        have = {k.frame for k in hard}
+        hard = sorted(list(hard) + [k for k in extra if k.frame not in have],
+                      key=lambda k: k.frame)
+
+    # D6.3 -- shot spans get a bounded Magnus refinement even with the
+    # global spin switch off: tag the start frames of shot/volley/spin touches.
+    # Only for shots that end in a goal event: on non-goal shot/volley spans
+    # (s013 gate, 2026-10-03) the unanchored Magnus fit doubled real p50.
+    spin_cfg = dict(tcfg.get("spin") or {})
+    if spin_cfg.get("shot_spans") and goal_event is not None:
+        starts = _shot_start_frames(list(anchors) + list(auto_anchors))
+        spin_cfg["shot_start_frames"] = tuple(sorted(starts))
+        tcfg = {**tcfg, "spin": spin_cfg}
 
     gate_result = _gate_auto_events(
         ctx, hard, ray, auto_anchors, observations,
@@ -1143,6 +1222,26 @@ def run_trajectory(
                       key=lambda k: k.frame)
 
     frames, diagnostics = finalize_track(ctx, all_hard, all_ray, observations, tcfg)
+
+    # D6.2 -- direction-consistency gate: drop detection runs that move
+    # against the fitted flight, then re-fit once without them.
+    dg_cfg = tcfg.get("direction_gate") or {}
+    dropped: list[int] = []
+    if dg_cfg.get("enabled", True) and frames:
+        def _fitted_uv(f: int):
+            e = frames.get(f)
+            if e is None or e["state"] != "flight" or not ctx.has_frame(f):
+                return None
+            return ctx.project(f, np.asarray(e["xyz"], dtype=float))
+        protect = {k.frame for k in all_hard} | {r.frame for r in all_ray}
+        kept, dropped = filter_reversed_observations(
+            observations, _fitted_uv, protect_frames=protect, cfg=dg_cfg)
+        if dropped:
+            observations = kept
+            frames, diagnostics = finalize_track(
+                ctx, all_hard, all_ray, observations, tcfg)
+    diagnostics["direction_gate"] = {"n_dropped": len(dropped),
+                                      "frames": sorted(dropped)}
     diagnostics["gate"] = {
         "n_candidates": gate_result.n_candidates,
         "n_accepted_hard": len(gate_result.accepted_hard),
@@ -1154,4 +1253,41 @@ def run_trajectory(
         "n_rejected_residual": gate_result.n_rejected_residual,
         "n_rejected_implausible_velocity": gate_result.n_rejected_implausible_velocity,
     }
+
+    if (goal_event is None and goal_cfg.get("enabled", True)
+            and normalize_outcome(goal_outcome) == "goal"):
+        # No operator goal_impact but the shot is explicitly a goal: an
+        # accepted AUTO goal_impact knot locates it (checked, no line-cross
+        # knot inferred). Auto knots never make a goal on their own.
+        auto_gi = [k for k in gate_result.accepted_hard if k.kind == "goal_impact"]
+        if auto_gi:
+            goal_event = GoalEvent(auto_gi[0].frame,
+                                   _goal_end_for_x(float(auto_gi[0].xyz[0])),
+                                   None, None)
+    gc = goal_check(frames, goal_event)
+    if gc is not None:
+        diagnostics["goal_check"] = gc
+        frames, n_net = contain_in_net(
+            frames, goal_event, gc,
+            protect_frames=[k.frame for k in all_hard] + [r.frame for r in all_ray])
+        gc["net_clamped_frames"] = n_net
     return frames, diagnostics
+
+
+def _shot_start_frames(anchors: Sequence[Any]) -> set[int]:
+    """Frames of touches that launch a shot: ``player_touch``/``kick``-like
+    anchors tagged ``touch_type`` shot|volley, or carrying a spin preset."""
+    out: set[int] = set()
+    for a in anchors:
+        if isinstance(a, Mapping):
+            frame, tt, spin = a.get("frame"), a.get("touch_type"), a.get("spin")
+            state = a.get("state")
+        else:
+            frame = getattr(a, "frame", None)
+            tt, spin = getattr(a, "touch_type", None), getattr(a, "spin", None)
+            state = getattr(a, "state", None)
+        if frame is None or state not in ("player_touch", "kick", "volley"):
+            continue
+        if tt in ("shot", "volley") or spin:
+            out.add(int(frame))
+    return out

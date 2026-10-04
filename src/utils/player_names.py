@@ -51,21 +51,12 @@ def load_player_names(output_dir: Path) -> dict[str, str]:
     return out
 
 
-def load_kit_roles(output_dir: Path) -> dict[str, str]:
-    """Load per-player kit-role overrides from ``output/players.json``.
+SUGGESTED_PLAYERS_REL = Path("appearance") / "players_suggested.json"
 
-    Only the object form carries a role::
 
-        {"P001": {"name": "Onana", "kit_role": "home_gk"}}
-
-    Returns ``{player_id: normalised_role}`` for entries with a valid
-    ``kit_role`` (see ``team_roles.normalise_role``); ids without an
-    override are simply absent so the caller falls back to the derived
-    role. Unknown role strings are dropped with a warning.
-    """
+def _kit_roles_from(path: Path) -> dict[str, str]:
     from src.utils.team_roles import normalise_role
 
-    path = output_dir / "players.json"
     if not path.exists():
         return {}
     try:
@@ -90,6 +81,73 @@ def load_kit_roles(output_dir: Path) -> dict[str, str]:
             )
             continue
         out[k] = role
+    return out
+
+
+def load_kit_roles(output_dir: Path) -> dict[str, str]:
+    """Load per-player kit-role overrides.
+
+    Operator roles come from ``output/players.json`` (object form)::
+
+        {"P001": {"name": "Onana", "kit_role": "home_gk"}}
+
+    Automatic suggestions from the appearance stage
+    (``output/appearance/players_suggested.json``, same keys) fill the
+    players the operator did not label; the operator always wins.
+
+    Returns ``{player_id: normalised_role}`` (see
+    ``team_roles.normalise_role``); ids with neither are absent so the
+    caller falls back to the derived role. Unknown role strings are
+    dropped with a warning.
+    """
+    output_dir = Path(output_dir)
+    suggested = _kit_roles_from(output_dir / SUGGESTED_PLAYERS_REL)
+    operator = _kit_roles_from(output_dir / "players.json")
+    return {**suggested, **operator}
+
+
+_HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_APPEARANCE_KEYS = ("skin", "hair")
+
+
+def load_player_appearance(output_dir: Path) -> dict[str, dict[str, str]]:
+    """Load per-player appearance colours from ``output/players.json``.
+
+    Object-form entries may carry ``skin``/``hair`` ``#RRGGBB`` values::
+
+        {"P006": {"name": "Gravenberch", "kit_role": "home",
+                  "skin": "#5b3a29", "hair": "#111111"}}
+
+    Consumed by the render stage's anatomical body zones. Returns only
+    valid hex values; invalid ones are dropped with a warning and the
+    renderer falls back to its default skin/hair tone.
+    """
+    path = output_dir / "players.json"
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        logger.warning("[player_names] %s is not valid JSON: %s", path, exc)
+        return {}
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for pid, entry in raw.items():
+        if not isinstance(entry, Mapping):
+            continue
+        look: dict[str, str] = {}
+        for key in _APPEARANCE_KEYS:
+            value = entry.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str) and _HEX_RE.match(value):
+                look[key] = value
+            else:
+                logger.warning("[player_names] %s: invalid %s %r for %s",
+                               path, key, value, pid)
+        if look:
+            out[pid] = look
     return out
 
 

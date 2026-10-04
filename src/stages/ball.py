@@ -701,6 +701,7 @@ def _run_hybrid_trajectory(
     world_by_frame: dict,
     state_by_frame: dict,
     clip_path: Path,
+    goal_outcome: "str | None" = None,
 ) -> tuple[dict, dict, dict, tuple[FlightSegment, ...]]:
     """Replace ``world_by_frame``/``state_by_frame`` with the hybrid
     trajectory layer's output where it has an answer (frames the hybrid
@@ -750,6 +751,7 @@ def _run_hybrid_trajectory(
         cfg=traj_cfg_overrides,
         gating_cfg=_hybrid_gating_cfg(hybrid_yaml_cfg.get("gating", {})),
         player_context=player_ctx,
+        goal_outcome=goal_outcome,
     )
 
     new_world = dict(world_by_frame)
@@ -764,6 +766,43 @@ def _run_hybrid_trajectory(
     diag["n_cues"] = len(cues)
     flight_segments = _hybrid_flight_segments(diag)
     return new_world, new_state, diag, flight_segments
+
+
+def _goal_check_for_shot(
+    artifacts: "_DetectArtifacts",
+    manual_by_frame: dict[int, BallAnchor],
+    world_by_frame: dict,
+    state_by_frame: dict,
+    hybrid_diag: "dict | None",
+    outcome: "str | None" = None,
+) -> "dict | None":
+    """``goal_check`` block for the diag sidecar (None without a goal event;
+    a non-goal shot -- woodwork/side-net only, or ``outcome == "no_goal"`` --
+    has none).
+    Works for both ``ball.trajectory`` modes; the line-cross knot provenance
+    is carried over from the hybrid layer when it inferred one."""
+    from src.utils.ball_goal_constraint import (
+        GoalEvent, find_goal_event, goal_check, normalize_outcome)
+
+    ctx = HybridShotCtx(
+        clip_id=artifacts.camera_clip_id, fps=artifacts.camera_fps,
+        image_size=artifacts.camera_image_size,
+        per_frame_K=artifacts.per_frame_K, per_frame_R=artifacts.per_frame_R,
+        per_frame_t=artifacts.per_frame_t, distortion=artifacts.distortion,
+    )
+    event = find_goal_event(ctx, list(manual_by_frame.values()), outcome)
+    prior = (hybrid_diag or {}).get("goal_check") if isinstance(hybrid_diag, dict) else None
+    if event is None and prior and normalize_outcome(outcome) != "no_goal":
+        event = GoalEvent(int(prior["goal_frame"]), float(prior["goal_end_x"]),
+                          None, prior.get("knot_source"))
+    if event is None:
+        return None
+    if prior and prior.get("knot_source") and not event.knot_source:
+        event = GoalEvent(event.frame, event.goal_end_x, event.element,
+                          prior["knot_source"])
+    frames = {f: {"xyz": w[0], "state": state_by_frame.get(f, "flight")}
+              for f, w in world_by_frame.items() if w is not None}
+    return goal_check(frames, event)
 
 
 def _veto_flight_obs(
@@ -2841,6 +2880,9 @@ class BallStage(BaseStage):
         # building / export schemas downstream are unchanged either way.
         hybrid_diag: dict | None = None
         effective_flight_segments = result.flight_segments
+        # Per-shot goal classification override (ball.goal.outcome[<shot>]).
+        from src.utils.ball_goal_constraint import outcome_for_shot
+        goal_outcome = outcome_for_shot(cfg, shot_id)
         if str(cfg.get("trajectory", "reference")) == "hybrid":
             try:
                 world_by_frame, state_by_frame, hybrid_diag, hybrid_flight_segments = (
@@ -2852,6 +2894,7 @@ class BallStage(BaseStage):
                         steps=steps, sources=sources, raw_confidences=raw_confidences,
                         world_by_frame=world_by_frame, state_by_frame=state_by_frame,
                         clip_path=self._clip_path_for_shot(shot_id),
+                        goal_outcome=goal_outcome,
                     )
                 )
                 # BallTrack.flight_segments / ball_orientation's Magnus spin
@@ -2903,6 +2946,23 @@ class BallStage(BaseStage):
         for fi, anc in anchor_by_frame.items():
             if anc.state == "off_screen_flight" and fi not in world_by_frame:
                 state_by_frame[fi] = "flight"
+
+        # D6 -- goal check on the FINAL dense track (after hybrid + C4
+        # ray-faithful snaps): where did the ball cross the goal line?
+        goal_check_diag = _goal_check_for_shot(
+            artifacts, manual_by_frame, world_by_frame, state_by_frame,
+            hybrid_diag, outcome=goal_outcome)
+        if goal_check_diag is not None and goal_check_diag["status"] != "ok":
+            logger.warning(
+                "ball stage: GOAL CHECK %s for shot %s -- goal event at frame "
+                "%s but the trajectory %s (line_cross=%s)",
+                goal_check_diag["status"], shot_id or "(legacy)",
+                goal_check_diag["goal_frame"],
+                {"misses_mouth": "misses the mouth",
+                 "over_crossbar": "is over the crossbar at the line",
+                 "no_line_cross": "never crosses the goal line"}.get(
+                    goal_check_diag["status"], "is inconsistent"),
+                goal_check_diag["line_cross"])
 
         # --- 6. Emit -----------------------------------------------------
         segment_by_frame: dict[int, int] = {}
@@ -3102,6 +3162,10 @@ class BallStage(BaseStage):
         diag["trajectory"] = str(cfg.get("trajectory", "reference"))
         if hybrid_diag is not None:
             diag["hybrid_trajectory"] = hybrid_diag
+        if goal_check_diag is not None:
+            diag["goal_check"] = goal_check_diag
+        diag["goal"] = {"is_goal": goal_check_diag is not None,
+                        "outcome": goal_outcome or "infer"}
 
         def _json_default(o: object):
             if isinstance(o, np.floating):

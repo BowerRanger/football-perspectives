@@ -5,6 +5,8 @@ import { Input } from "@/components/ui/input"
 import { Slider } from "@/components/ui/slider"
 import { cn } from "@/lib/utils"
 
+import { isCallToAction, type SpeedState } from "./replay-speed"
+import { SpeedBadge } from "./speed-badge"
 import type { AlignMethod } from "./sync-timeline"
 
 interface OffsetRowsProps {
@@ -16,6 +18,18 @@ interface OffsetRowsProps {
   maxFrames: number
   onSetOffset: (shotId: string, offset: number) => void
   onPick: (shotId: string) => void
+  speedStates?: Record<string, SpeedState>
+  /** Tooltip notes per shot (e.g. the automatic estimate behind a manual alignment). */
+  speedNotes?: Record<string, string>
+  /** Phone width: values shown, nothing editable. */
+  readOnly?: boolean
+  /** Opens the Match moments tray for a shot (the "no camera" call to action). */
+  onOpenMoments?: (shotId: string) => void
+  /** Shot whose offset is driven by unsaved marked pairs: its controls are disabled. */
+  lockedShot?: string | null
+  lockedReason?: string
+  /** Retime / Restore controls for a member row. */
+  renderActions?: (shotId: string) => React.ReactNode
 }
 
 /** Integer input that tolerates in-progress text ("-", "") without fighting the value. */
@@ -25,7 +39,9 @@ export function OffsetInput({
   id,
   label,
   className,
+  disabled,
 }: {
+  disabled?: boolean
   value: number
   onCommit: (v: number) => void
   id?: string
@@ -40,6 +56,7 @@ export function OffsetInput({
       type="number"
       step={1}
       inputMode="numeric"
+      disabled={disabled}
       aria-label={label}
       className={cn("h-8 w-24 tabular-nums", className)}
       value={draft}
@@ -73,6 +90,13 @@ export function SyncOffsetRows({
   maxFrames,
   onSetOffset,
   onPick,
+  speedStates,
+  speedNotes,
+  readOnly,
+  onOpenMoments,
+  lockedShot,
+  lockedReason,
+  renderActions,
 }: OffsetRowsProps) {
   const bound = Math.max(60, maxFrames + 120, ...shotIds.map((id) => Math.abs(offsets[id] ?? 0)))
   return (
@@ -95,14 +119,28 @@ export function SyncOffsetRows({
             >
               {id}
             </button>
-            {isRef ? <ToneBadge tone="info">Reference</ToneBadge> : <MethodBadge method={methods[id]} />}
+            {isRef ? (
+              <ToneBadge tone="info">Reference</ToneBadge>
+            ) : id === lockedShot ? (
+              <ToneBadge tone="warning">Unsaved pairs</ToneBadge>
+            ) : (
+              <MethodBadge method={methods[id]} />
+            )}
+            {!isRef && speedStates?.[id] ? (
+              <SpeedBadge
+                state={speedStates[id]}
+                note={speedNotes?.[id]}
+                onClick={isCallToAction(speedStates[id]) && !readOnly ? () => onOpenMoments?.(id) : undefined}
+              />
+            ) : null}
             <Slider
               className="min-w-40 flex-1"
               aria-label={`Offset for ${id}`}
               min={-bound}
               max={bound}
               step={1}
-              disabled={isRef}
+              disabled={isRef || readOnly || id === lockedShot}
+              title={id === lockedShot ? lockedReason : undefined}
               value={[off]}
               onValueChange={([v]) => onSetOffset(id, v)}
             />
@@ -110,8 +148,10 @@ export function SyncOffsetRows({
               label={`Offset frames for ${id}`}
               value={off}
               onCommit={(v) => onSetOffset(id, v)}
-              className={isRef ? "opacity-50" : undefined}
+              className={cn("border-input bg-background dark:bg-input/30", isRef && "opacity-50")}
+              disabled={isRef || readOnly || id === lockedShot}
             />
+            {!isRef && !readOnly ? renderActions?.(id) : null}
           </li>
         )
       })}

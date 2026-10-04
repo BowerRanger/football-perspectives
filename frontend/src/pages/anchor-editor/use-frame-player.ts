@@ -1,5 +1,7 @@
 import * as React from "react"
 
+import { frameAtTime, frameTime } from "@/lib/frame-time"
+
 export interface FramePlayer {
   frame: number
   playing: boolean
@@ -45,7 +47,7 @@ export function useFramePlayer(
       const clamped = Math.max(0, Math.min(totalRef.current - 1, Math.trunc(target)))
       commit(clamped)
       const video = videoRef.current
-      if (video && Number.isFinite(clamped)) video.currentTime = clamped / fpsRef.current
+      if (video && Number.isFinite(clamped)) video.currentTime = frameTime(clamped, fpsRef.current)
     },
     [commit, videoRef],
   )
@@ -78,7 +80,7 @@ export function useFramePlayer(
     const tick = () => {
       const video = videoRef.current
       if (!video || video.paused || video.ended) return
-      const fi = Math.max(0, Math.min(totalRef.current - 1, Math.round(video.currentTime * fpsRef.current)))
+      const fi = frameAtTime(video.currentTime, fpsRef.current, totalRef.current - 1)
       if (fi !== frameRef.current) commit(fi)
       raf = requestAnimationFrame(tick)
     }

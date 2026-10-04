@@ -1,8 +1,10 @@
 // Frame-accurate transport over a <video>: the frame index is always derived
-// from video.currentTime * fps, so clicks place anchors on the frame the
+// from video.currentTime (floor; seeks target the frame middle), so clicks place anchors on the frame the
 // operator is actually looking at.
 
 import * as React from "react"
+
+import { frameAtTime, frameTime } from "@/lib/frame-time"
 
 export interface FramePlayer {
   /** Callback ref — attach to the <video> element. */
@@ -36,15 +38,17 @@ export function useFramePlayer(onFrameChange?: (frame: number) => void): FramePl
   const cbRef = React.useRef(onFrameChange)
   cbRef.current = onFrameChange
 
+  const lastFrame = () => (totalRef.current > 0 ? totalRef.current - 1 : Number.POSITIVE_INFINITY)
+
   const currentFrame = React.useCallback(
-    () => (video ? Math.round(video.currentTime * fpsRef.current) : 0),
+    () => (video ? frameAtTime(video.currentTime, fpsRef.current, lastFrame()) : 0),
     [video],
   )
 
   React.useEffect(() => {
     if (!video) return
     let raf = 0
-    const sync = () => setFrame(Math.round(video.currentTime * fpsRef.current))
+    const sync = () => setFrame(frameAtTime(video.currentTime, fpsRef.current, lastFrame()))
     const loop = () => {
       sync()
       raf = requestAnimationFrame(loop)
@@ -99,7 +103,7 @@ export function useFramePlayer(onFrameChange?: (frame: number) => void): FramePl
       video.pause()
       const last = totalRef.current > 0 ? totalRef.current - 1 : Number.POSITIVE_INFINITY
       const clamped = Math.max(0, Math.min(last, Math.trunc(fi)))
-      video.currentTime = clamped / fpsRef.current
+      video.currentTime = frameTime(clamped, fpsRef.current)
       setFrame(clamped)
     },
     [video],

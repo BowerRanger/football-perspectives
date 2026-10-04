@@ -1,5 +1,6 @@
 import * as React from "react"
 
+import { frameTime } from "@/lib/frame-time"
 import { refToShot, shotVideoRange } from "./camera-model"
 import type { GroupShot } from "./types"
 
@@ -27,7 +28,7 @@ interface Options {
 }
 
 /** Seek target in the middle of the frame so rounding can never land on a neighbour (verified exact on h264 30 fps). */
-export const frameTime = (shotFrame: number, fps: number): number => (shotFrame + 0.5) / fps
+export { frameTime }
 
 /**
  * Owns the N <video> elements: maps the master reference frame to each

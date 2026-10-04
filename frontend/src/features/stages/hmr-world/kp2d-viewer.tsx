@@ -1,3 +1,4 @@
+import { frameAtTime, frameTime } from "@/lib/frame-time"
 import * as React from "react"
 
 import { Panel } from "@/components/panel"
@@ -40,7 +41,7 @@ export function Kp2dViewer({ shotId, players }: { shotId: string; players: reado
   const [playing, setPlaying] = React.useState(false)
   const byFrame = React.useMemo(() => indexByFrame(players), [players])
 
-  const currentFrame = React.useCallback(() => Math.round((videoRef.current?.currentTime ?? 0) * fps), [fps])
+  const currentFrame = React.useCallback(() => frameAtTime(videoRef.current?.currentTime ?? 0, fps), [fps])
 
   // rAF loop while playing keeps the overlay locked to the video clock.
   React.useEffect(() => {
@@ -69,7 +70,7 @@ export function Kp2dViewer({ shotId, players }: { shotId: string; players: reado
     const v = videoRef.current
     if (!v) return
     v.pause()
-    v.currentTime = Math.max(0, Math.min(v.duration || 0, f / fps))
+    v.currentTime = Math.max(0, Math.min(v.duration || 0, frameTime(f, fps)))
     setFrame(f)
   }
 

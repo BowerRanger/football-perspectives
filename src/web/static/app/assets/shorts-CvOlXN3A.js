@@ -1,1 +1,0 @@
-import{b as e}from"./panel-CJY8Z2-r.js";import{t}from"./status-card-_qv2K34N.js";var n=e();function r(){return(0,n.jsx)(t,{stage:`shorts`,outputs:`shorts/<shot>_*.mp4`,nextStep:`Cuts a vertical short for every goal shot that has a strike and an impact.`})}export{r as default};

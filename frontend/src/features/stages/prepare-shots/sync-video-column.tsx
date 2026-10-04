@@ -1,3 +1,4 @@
+import { frameAtTime } from "@/lib/frame-time"
 import * as React from "react"
 
 import { Label } from "@/components/ui/label"
@@ -81,7 +82,7 @@ export function SyncVideoColumn({
         />
       </div>
       <p className="text-xs text-muted-foreground tabular-nums">
-        Frame <span className="font-mono">{Math.round(time * fps)}</span> · {time.toFixed(2)}s
+        Frame <span className="font-mono">{frameAtTime(time, fps)}</span> · {time.toFixed(2)}s
       </p>
     </div>
   )

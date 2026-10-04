@@ -1,3 +1,4 @@
+import { frameAtTime, frameTime } from "@/lib/frame-time"
 import * as React from "react"
 import { ChevronLeftIcon, ChevronRightIcon, LockIcon, PauseIcon, PlayIcon, SaveIcon } from "lucide-react"
 import { toast } from "sonner"
@@ -80,7 +81,7 @@ export function SyncEditor({ group, onSaved }: EditorProps) {
     const av = actVideo.current
     if (!rv || !av) return
     const { referenceShot: r, activeShot: a, offsets: o } = latest.current
-    const target = Math.max(0, (rv.currentTime * fps(r) + (o[a] ?? 0)) / fps(a))
+    const target = Math.max(0, frameTime(frameAtTime(rv.currentTime, fps(r)) + (o[a] ?? 0), fps(a)))
     if (Math.abs(av.currentTime - target) > tolerance) {
       try {
         av.currentTime = target
@@ -143,8 +144,8 @@ export function SyncEditor({ group, onSaved }: EditorProps) {
     const rv = refVideo.current
     const av = actVideo.current
     if (!rv || !av) return
-    const refFrame = Math.round(rv.currentTime * fps(referenceShot))
-    const actFrame = Math.round(av.currentTime * fps(activeShot))
+    const refFrame = frameAtTime(rv.currentTime, fps(referenceShot))
+    const actFrame = frameAtTime(av.currentTime, fps(activeShot))
     setOffset(activeShot, actFrame - refFrame)
   }
 
@@ -152,7 +153,7 @@ export function SyncEditor({ group, onSaved }: EditorProps) {
     const rv = refVideo.current
     if (!rv) return
     try {
-      rv.currentTime = Math.max(0, globalFrame / fps(referenceShot))
+      rv.currentTime = Math.max(0, frameTime(globalFrame, fps(referenceShot)))
     } catch {
       /* not seekable yet */
     }

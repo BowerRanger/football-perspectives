@@ -1,3 +1,4 @@
+import { frameAtTime, frameTime } from "@/lib/frame-time"
 import * as React from "react"
 
 interface Options {
@@ -27,7 +28,7 @@ export function useTrajectoryPlayback({ min, max, fps, videoRef, videoReady }: O
     (fi: number) => {
       const v = videoRef.current
       if (!v || !videoReady) return
-      const target = fi / Math.max(1, fps)
+      const target = frameTime(fi, Math.max(1, fps))
       if (v.paused || Math.abs(v.currentTime - target) > 1.5 / fps) {
         try {
           v.currentTime = Math.max(0, Math.min(v.duration || target, target))
@@ -56,7 +57,7 @@ export function useTrajectoryPlayback({ min, max, fps, videoRef, videoReady }: O
     const tick = (ts: number) => {
       let next: number
       if (videoReady && v) {
-        next = Math.round(v.currentTime * fps)
+        next = frameAtTime(v.currentTime, fps)
         if (v.ended || next > max) {
           setFrame(Math.min(next, max))
           setPlaying(false)

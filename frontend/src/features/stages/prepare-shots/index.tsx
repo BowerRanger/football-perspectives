@@ -55,7 +55,12 @@ export default function PrepareShotsStage() {
           />
           <DroppedTray model={model} actions={actions} onOpen={(shot) => setPreview({ shot })} />
           <MultiShotStatus shotIds={model.activeIds} />
-          <GroupSync model={model} revision={data.revision} onSaved={() => void data.reloadSyncQuiet()} />
+          <GroupSync
+            model={model}
+            revision={data.revision}
+            onSaved={() => void data.reloadSyncQuiet()}
+            onReload={data.reload}
+          />
         </>
       ) : !data.error ? (
         <PanelEmpty

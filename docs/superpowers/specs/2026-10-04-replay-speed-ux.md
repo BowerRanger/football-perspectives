@@ -317,3 +317,19 @@ dark.
 7. Documenter: add to DESIGN.md "Group sync speed": speed badge states table, moments tray (place-then-commit reuse),
    slow-block hatch, confirm copy conventions. Update `frontend/README.md` if a convention is added.
 8. Record AFTER captures and the reviewer verdict by appending an "After" section to this file.
+
+## 11. After (build record)
+
+Built against backend `cb01040`. Captures in `docs/superpowers/specs/assets/replay-speed/` (1440 dark and light, 390 dark; states: slow, ramp, no camera, unmeasured, match moments with 1 pending, 2 and 3 pairs, ramp pairs, saved manual, retime confirm, retimed, restore confirm, restored). Captured on a scratch copy of the highlights reel (g06, g11); the reel directory itself was never written.
+
+Deviations from the direction above (all deliberate, found while building):
+
+- **Playback rate is 1 / rate, not rate.** The doc said the member plays at `playbackRate = rate`. That is backwards: a 0.34x replay covers 0.34 live frames per replay frame, so to stay in step with the live clip it must play at 2.94x. `Fit` sets the member's `playbackRate = 1 / rate` (clamped to the browser's 0.0625 to 16); `1x` plays both raw. Verified on g06 s019 (0.49): in Fit the member tracks `(ref - 47) / 0.49` to within about 0.2 frames.
+- **Lock offset stays enabled at any rate** and solves `rate * member_frame - ref_frame`, instead of being disabled (audit A5). Fewer disabled controls; the offset field still means `frame_offset` of the sync map.
+- **Low-confidence playback uses the saved alignment rate**, not the unapplied estimate.
+- **`Backspace` removes the last committed pair** (pair rows are not focusable).
+- **Wording:** an operator-set rate reads "set by you" (the sync map cannot tell hand-typed rates from marked pairs); an unsaved fit reads "your pairs, not saved". An auto alignment with no measurement reads "speed not measured" (new state `unmeasured`), because the reel's older `motion_profile` alignments carry no rate. The offset in the moments strip is shown as the `frame_offset` sign (-127.4) so it matches the offset field.
+- **Retime availability:** blocked while a job runs, while offsets are unsaved ("Save the group first.") and while pairs are unsaved ("Save or clear the marked pairs first."). The post-save toast offers "Retime to real time" with an Undo toast after it.
+- Added the `replay_sync` stage to `lib/stages.ts` and a status-card panel; the stage deps are tracking and camera.
+
+Not done: server-side progress for retime (a loading toast only); piecewise retiming of ramps; the finish review (left to the coordinator), DESIGN.md update (documenter, after the review).

@@ -5,6 +5,7 @@ export type StageName =
   | "prepare_shots"
   | "tracking"
   | "camera"
+  | "replay_sync"
   | "hmr_world"
   | "refined_poses"
   | "ball"
@@ -30,6 +31,7 @@ export const STAGE_LABELS: Record<StageName, string> = {
   prepare_shots: "Prepare Shots",
   tracking: "Tracking",
   camera: "Camera Tracking",
+  replay_sync: "Replay Sync",
   hmr_world: "HMR World",
   refined_poses: "Refined Poses",
   ball: "Ball",
@@ -43,6 +45,7 @@ export const STAGE_DESCRIPTIONS: Record<StageName, string> = {
   prepare_shots: "Split, classify, group and sync the input into shots.",
   tracking: "Detect and track players and the ball per shot.",
   camera: "Solve the broadcast camera from pitch anchors, then propagate.",
+  replay_sync: "Measure each replay's playback speed from the players on the pitch; retime slow motion to real time.",
   hmr_world: "GVHMR body pose per player, foot-anchored to the pitch.",
   refined_poses: "Cross-shot fusion, cleanup, foot-lock and physics takeover.",
   ball: "Physically solved 3D ball trajectory from detections and anchors.",
@@ -57,6 +60,7 @@ export const STAGE_DEPS: Record<StageName, StageName[]> = {
   prepare_shots: [],
   tracking: ["prepare_shots"],
   camera: ["prepare_shots"],
+  replay_sync: ["tracking", "camera"],
   hmr_world: ["tracking", "camera"],
   refined_poses: ["hmr_world"],
   ball: ["camera", "refined_poses"],

@@ -23,6 +23,9 @@ Project-scoped subagents live in `.claude/agents/` (prefixed `fp-` to avoid coll
 | `fp-ue5` | Specialist IC — UE5 editor Python, unreal-mcp bridge, crash recovery |
 | `fp-qa` | QA/eval IC — runs tests/evals, reports evidence, APPROVED/REJECTED verdict; never edits code |
 
+## Cross-project knowledge
+Knowledge that applies across Joe's projects lives in the private OKF bundle at `~/workplace/knowledge` ([BowerRanger/knowledge](https://github.com/BowerRanger/knowledge)). Read its `index.md` before Python/PyTorch/OpenCV, Blender, Unreal, web dashboard (shadcn) or UX-critique work; `/python/`, `/data/`, `/blender/`, `/unreal/`, `/web/` and `/ux/` hold facts first learned here. Project-only facts stay in this repo. Add new cross-project facts there by following its `README.md` (ask Joe first; no pull requests).
+
 ## Commands
 
 ```bash

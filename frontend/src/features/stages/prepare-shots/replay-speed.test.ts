@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   deriveSpeedState,
+  isCallToAction,
   fitMoments,
   pairIssues,
   refFrameForShot,
@@ -144,6 +145,19 @@ describe("deriveSpeedState", () => {
     })
     expect(retimed.kind).toBe("retimed")
     expect(retimed.text).toBe("retimed to real time (was 0.34×)")
+  })
+
+  it("approximate slow rate is a call to action and says so", () => {
+    const st = deriveSpeedState({
+      isReference: false,
+      shot,
+      alignment: { method: "player_formation", confidence: 0.81, playback_rate: 0.34 },
+      member: { shot_id: "s043", estimate: { rate: 0.34, confidence: 0.81, rate_uncertainty: 0.08 }, decision: "applied", reason: "", approximate: true } as never,
+      detecting: false,
+    })
+    expect(st.kind).toBe("approximate")
+    expect(st.text).toBe("≈0.34× slow motion · ±8 % · confirm with moments")
+    expect(isCallToAction(st)).toBe(true)
   })
 
   it("unmeasured vs detecting", () => {

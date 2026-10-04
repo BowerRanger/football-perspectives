@@ -8,6 +8,7 @@ import {
   RulerIcon,
   TrendingUpIcon,
   TurtleIcon,
+  WavesIcon,
   VideoOffIcon,
   type LucideIcon,
 } from "lucide-react"
@@ -30,6 +31,7 @@ const ICONS: Record<SpeedKind, LucideIcon> = {
   "low-confidence": CircleHelpIcon,
   manual: HandIcon,
   retimed: HistoryIcon,
+  approximate: WavesIcon,
 }
 
 interface SpeedBadgeProps {

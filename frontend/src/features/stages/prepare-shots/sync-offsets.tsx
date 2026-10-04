@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input"
 import { Slider } from "@/components/ui/slider"
 import { cn } from "@/lib/utils"
 
-import type { SpeedState } from "./replay-speed"
+import { isCallToAction, type SpeedState } from "./replay-speed"
 import { SpeedBadge } from "./speed-badge"
 import type { AlignMethod } from "./sync-timeline"
 
@@ -119,7 +119,7 @@ export function SyncOffsetRows({
               <SpeedBadge
                 state={speedStates[id]}
                 note={speedNotes?.[id]}
-                onClick={speedStates[id].kind === "no-camera" && !readOnly ? () => onOpenMoments?.(id) : undefined}
+                onClick={isCallToAction(speedStates[id]) && !readOnly ? () => onOpenMoments?.(id) : undefined}
               />
             ) : null}
             <Slider

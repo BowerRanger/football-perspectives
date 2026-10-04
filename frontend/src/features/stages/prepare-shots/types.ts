@@ -79,6 +79,10 @@ export interface ReplaySyncEstimate {
   ramp?: boolean
   rate_first?: number
   rate_second?: number
+  /** Live frames the geometric match could use. */
+  live_window_frames?: number
+  /** Relative 1 sigma of the rate, e.g. 0.08 = +-8 %. */
+  rate_uncertainty?: number
 }
 
 export interface ReplaySyncMember {
@@ -87,6 +91,8 @@ export interface ReplaySyncMember {
   estimate: ReplaySyncEstimate | null
   decision: ReplaySyncDecision
   reason: string
+  /** Rate is only as precise as a short live window allows: confirm with marked moments. */
+  approximate?: boolean
 }
 
 /** `GET /api/replay-sync` (shots/replay_sync.json). */

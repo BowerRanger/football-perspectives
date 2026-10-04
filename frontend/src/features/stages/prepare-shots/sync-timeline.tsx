@@ -22,6 +22,8 @@ interface TimelineProps {
   methods: Record<string, AlignMethod>
   /** Shots whose speed ramps (drawn with a notch; the rate is not applied). */
   rampShots?: string[]
+  /** Shots whose rate is approximate (label shows ≈). */
+  approxShots?: string[]
   /** Match-moments pairs for the active shot, drawn as connectors. */
   pairs?: MomentPair[]
   /** The active shot's offset and rate are an unsaved preview (dashed outline). */
@@ -246,7 +248,8 @@ export function SyncTimeline(props: TimelineProps) {
             const m = isRef ? undefined : methods[id]
             const low = !!m && m.method !== "manual" && m.confidence < 0.5
             const span = `${Math.round(start)}–${Math.round(start + len)}`
-            const rateNote = isRef || isRealTime(rate) ? "" : ` · ${rate.toFixed(2)}×`
+            const approx = !isRef && (props.approxShots ?? []).includes(id)
+            const rateNote = isRef || isRealTime(rate) ? "" : ` · ${approx ? "≈" : ""}${rate.toFixed(2)}×`
             const label = isRef
               ? `${id} (ref, frames 0–${native})`
               : `${id}${rateNote} · global ${span}${methodNote(m)}${preview ? " · unsaved" : ""}`
@@ -258,7 +261,7 @@ export function SyncTimeline(props: TimelineProps) {
                 aria-label={label}
                 aria-pressed={id === activeShot}
                 data-timeline-block={id}
-                title={`${id}\nclip frames: ${native}\nrate: ${rate.toFixed(3)}× (covers ${len.toFixed(0)} live frames)\nfps: ${(fpsByShot[id] ?? 25).toFixed(2)}\noffset: ${off}\nglobal range: ${span}`}
+                title={`${id}\nclip frames: ${native}\nrate: ${approx ? "≈" : ""}${rate.toFixed(3)}× (covers ${len.toFixed(0)} live frames)\nfps: ${(fpsByShot[id] ?? 25).toFixed(2)}\noffset: ${off}\nglobal range: ${span}`}
                 className={cn(
                   "absolute overflow-hidden rounded border px-1.5 py-1 text-xs font-medium text-ellipsis whitespace-nowrap text-white outline-none focus-visible:ring-2 focus-visible:ring-ring",
                   isRef ? "cursor-pointer border-info bg-info/80" : "cursor-grab border-white/20 active:cursor-grabbing",

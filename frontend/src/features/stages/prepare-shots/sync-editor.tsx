@@ -28,6 +28,7 @@ import { MomentsTray } from "./moments-tray"
 import {
   deriveSpeedState,
   fmtRate,
+  isCallToAction,
   REAL_TIME_TOLERANCE,
   refFrameForShot,
   shotFrameForRef,
@@ -438,6 +439,7 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
   }, [group.members, methods, replaySync])
 
   const rampShots = ids.filter((id) => speedStates[id]?.kind === "ramp")
+  const approxShots = ids.filter((id) => speedStates[id]?.kind === "approximate")
   const clipVersion = (id: string) => {
     const s = group.members.find((m) => m.id === id)
     return s ? `${s.retimed ? 1 : 0}-${s.native_frames ?? 0}` : ""
@@ -491,7 +493,7 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
               <SpeedBadge
                 state={activeSpeed}
                 note={speedNotes[activeShot]}
-                onClick={activeSpeed.kind === "no-camera" && !isMobile ? () => setTrayOpen(true) : undefined}
+                onClick={isCallToAction(activeSpeed) && !isMobile ? () => setTrayOpen(true) : undefined}
               />
             ) : undefined
           }
@@ -607,6 +609,7 @@ export function SyncEditor({ group, onSaved, onReload, replaySync }: EditorProps
         rates={effRates}
         methods={effMethods}
         rampShots={rampShots}
+        approxShots={approxShots}
         pairs={moments.pairs}
         previewActive={!!preview}
         readOnly={isMobile}

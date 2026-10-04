@@ -107,6 +107,8 @@ export function residualTone(frames: number): "success" | "warning" | "destructi
   return frames <= 3 ? "success" : frames <= 8 ? "warning" : "destructive"
 }
 
+export const isCallToAction = (s: Pick<SpeedState, "kind">) => s.kind === "no-camera" || s.kind === "approximate"
+
 export function isRealTime(rate: number): boolean {
   return Math.abs(rate - 1) <= REAL_TIME_TOLERANCE
 }
@@ -129,6 +131,7 @@ export type SpeedKind =
   | "low-confidence"
   | "manual"
   | "retimed"
+  | "approximate"
 
 export type SpeedTone = "success" | "warning" | "info" | "muted"
 
@@ -236,6 +239,20 @@ export function deriveSpeedState({ isReference, shot, alignment, member, detecti
           detail: "The match is weak. Confirm it by marking moments.",
           rate,
           retimeBlocked: "Confidence is below 60 %: confirm by marking moments first.",
+        })
+      }
+      if (member?.approximate && !isRealTime(rate)) {
+        const sigma = est?.rate_uncertainty
+        const pm = sigma != null ? ` · ±${Math.round(sigma * 100)} %` : ""
+        return base({
+          kind: "approximate",
+          tone: "warning",
+          text: `≈${fmtRate(rate)} ${rate > 1 ? "faster than live" : "slow motion"}${pm} · confirm with moments`,
+          detail:
+            member.reason ||
+            "The rate is only as precise as the short live window allows. Mark matching moments to confirm it.",
+          rate,
+          canRetime: rate < 1,
         })
       }
       if (isRealTime(rate)) {

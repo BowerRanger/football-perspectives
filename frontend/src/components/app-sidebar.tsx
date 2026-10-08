@@ -41,8 +41,9 @@ export function AppSidebar({ activeStage }: { activeStage: string | null }) {
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader>
-        <div className="flex items-center gap-2 px-2 pt-1 pb-2 group-data-[collapsible=icon]:hidden">
-          <span className="text-sm font-semibold tracking-tight">Football Perspectives</span>
+        <div className="flex items-center justify-between gap-2 pl-2 pt-1 pb-2 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:pl-0">
+          <span className="text-sm font-semibold tracking-tight group-data-[collapsible=icon]:hidden">Football Perspectives</span>
+          <ThemeToggle />
         </div>
         <OutputDirSwitcher />
       </SidebarHeader>
@@ -112,10 +113,6 @@ export function AppSidebar({ activeStage }: { activeStage: string | null }) {
               </SidebarMenuButton>
             </SidebarMenuItem>
           ) : null}
-          <SidebarMenuItem className="flex items-center justify-between gap-2 px-1 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0">
-            <span className="text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">Theme</span>
-            <ThemeToggle />
-          </SidebarMenuItem>
         </SidebarMenu>
       </SidebarFooter>
       <SidebarRail />
